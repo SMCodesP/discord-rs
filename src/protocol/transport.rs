@@ -1,0 +1,167 @@
+use crate::domain::{
+    Activity, Channel, Guild, Message, PresenceStatus, User, VoiceParticipant, VoiceState,
+};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
+/// Representation of user guild folders from Discord Gateway user settings
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GuildFolder {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub color: Option<u32>,
+    pub guild_ids: Vec<String>,
+}
+
+/// Discord user relationship (Friend, Blocked, Incoming/Outgoing Friend Request)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct Relationship {
+    pub id: String,
+    pub rel_type: u32,
+    pub username: String,
+    pub global_name: Option<String>,
+    pub avatar: Option<String>,
+}
+
+/// High-level real-time transport events emitted by the Discord Gateway or Mock provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransportEvent {
+    /// Dispatched after successful Gateway handshake and READY payload parsing.
+    Ready {
+        user: User,
+        guilds: Vec<Guild>,
+        guild_folders: Vec<GuildFolder>,
+    },
+    /// A new chat message was posted.
+    MessageCreate(Message),
+    /// A chat message was edited.
+    MessageUpdate(Message),
+    /// A chat message was deleted.
+    MessageDelete {
+        channel_id: String,
+        message_id: String,
+    },
+    /// A reaction emoji was added to a message.
+    ReactionAdd {
+        channel_id: String,
+        message_id: String,
+        user_id: String,
+        emoji: String,
+    },
+    /// A reaction emoji was removed from a message.
+    ReactionRemove {
+        channel_id: String,
+        message_id: String,
+        user_id: String,
+        emoji: String,
+    },
+    /// Presence status or activity for a user changed.
+    PresenceUpdate {
+        user_id: String,
+        status: PresenceStatus,
+        activity: Option<Activity>,
+    },
+    /// Voice state for a user changed (e.g. joined/left voice channel, mute, deaf).
+    VoiceStateUpdate(VoiceState),
+    /// Participant status updated in an active voice room.
+    VoiceParticipantUpdate(VoiceParticipant),
+    /// A user started typing in a channel.
+    TypingStart {
+        channel_id: String,
+        user_id: String,
+        timestamp: u64,
+    },
+    /// A new channel was created.
+    ChannelCreate(Channel),
+    /// A new guild was joined or became available.
+    GuildCreate(Guild),
+    /// Transport successfully connected.
+    Connected,
+    /// Transport disconnected or lost connection.
+    Disconnected(String),
+    /// Channels updated for a specific guild (lazy loading / on-demand fetch)
+    GuildChannelsUpdated {
+        guild_id: String,
+        channels: Vec<Channel>,
+    },
+    /// Direct Message (DM) channels updated for current user
+    DmChannelsUpdated(Vec<Channel>),
+    /// Direct Message (DM) channel created or opened in real-time
+    DmChannelCreated(Channel),
+    /// Direct Message (DM) channel successfully resolved from temporary ID to live Discord channel
+    DmChannelResolved {
+        temp_id: String,
+        channel: Channel,
+    },
+    /// User relationships / friends list updated
+    RelationshipsUpdated(Vec<Relationship>),
+    /// Batch message history loaded for a channel (avoids flooding individual MessageCreate events)
+    ChannelMessagesLoaded {
+        channel_id: String,
+        messages: Vec<Message>,
+    },
+}
+
+/// Asynchronous transport abstraction for Discord communication.
+///
+/// Enables seamless switching between deterministic mock providers for testing/UI prototyping
+/// and live Discord API (REST v10 + Gateway v10 WebSocket) clients.
+#[async_trait]
+pub trait DiscordTransport: Send + Sync {
+    /// Establish gateway connection and start background event loops.
+    async fn connect(&self) -> anyhow::Result<()>;
+
+    /// Gracefully disconnect and cancel background tasks.
+    async fn disconnect(&self) -> anyhow::Result<()>;
+
+    /// Retrieve the current authenticated user identity (@me).
+    async fn get_current_user(&self) -> anyhow::Result<User>;
+
+    /// Fetch all available guilds / servers for the authenticated identity.
+    async fn list_guilds(&self) -> anyhow::Result<Vec<Guild>>;
+
+    /// Retrieve detailed guild information by guild ID.
+    async fn get_guild(&self, guild_id: &str) -> anyhow::Result<Option<Guild>>;
+
+    /// List all channels within a guild.
+    async fn list_channels(&self, guild_id: &str) -> anyhow::Result<Vec<Channel>>;
+
+    /// List all direct message (DM) channels for the authenticated user (/users/@me/channels).
+    async fn list_dm_channels(&self) -> anyhow::Result<Vec<Channel>>;
+
+    /// Create or retrieve an existing direct message channel with a user (/users/@me/channels).
+    async fn create_or_get_dm_channel(&self, recipient_id: &str) -> anyhow::Result<Channel> {
+        let _ = recipient_id;
+        anyhow::bail!("create_or_get_dm_channel not supported on this transport");
+    }
+
+    /// List all user relationships (friends, incoming/outgoing requests, blocked) (/users/@me/relationships).
+    async fn list_relationships(&self) -> anyhow::Result<Vec<Relationship>> {
+        Ok(Vec::new())
+    }
+
+    /// Retrieve the most recent messages for a channel.
+    async fn get_messages(&self, channel_id: &str, limit: usize) -> anyhow::Result<Vec<Message>>;
+
+    /// Post a new chat message to a text channel.
+    async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message>;
+
+    /// Add an emoji reaction to a message.
+    async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Remove an emoji reaction from a message.
+    async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Subscribe to real-time events emitted by the transport.
+    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TransportEvent>;
+}

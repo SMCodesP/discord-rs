@@ -1,0 +1,989 @@
+//! Discord RS - Cozy Message List History
+//! Implements canonical Discord Cozy style message history:
+//! - 5-minute author grouping window
+//! - User avatars (with initials fallback or image URL)
+//! - Role-colored usernames and BOT badges
+//! - Timestamps and date separators ("Hoje", "Ontem", "22 de Setembro de 2026")
+//! - Floating hover action bar (Reply, React, More)
+//! - Attachments & rich embed rendering
+//! - Embedded reactions bar
+
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use gpui::*;
+use std::sync::Arc;
+
+use crate::chat::markdown::render_markdown;
+use crate::chat::reactions::{render_reaction_bar, AddReactionCallback, ReactionActionCallback};
+use crate::domain::message::{Attachment, Embed, Message};
+use crate::tokens::colors::*;
+use crate::tokens::spacing::*;
+use crate::tokens::typography::*;
+
+// ============================================================================
+// Callback Type Aliases
+// ============================================================================
+
+pub type MessageActionCallback = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
+
+// ============================================================================
+// Date & Time Formatting Helpers (pt-BR Friendly)
+// ============================================================================
+
+/// Returns month name in Portuguese.
+fn pt_month_name(month: u32) -> &'static str {
+    match month {
+        1 => "Janeiro",
+        2 => "Fevereiro",
+        3 => "Março",
+        4 => "Abril",
+        5 => "Maio",
+        6 => "Junho",
+        7 => "Julho",
+        8 => "Agosto",
+        9 => "Setembro",
+        10 => "Outubro",
+        11 => "Novembro",
+        12 => "Dezembro",
+        _ => "",
+    }
+}
+
+/// Formats a date for the central date divider.
+pub fn format_date_separator(date: NaiveDate) -> String {
+    let today = Utc::now().date_naive();
+    let diff = today.signed_duration_since(date).num_days();
+
+    if diff == 0 {
+        "Hoje".to_string()
+    } else if diff == 1 {
+        "Ontem".to_string()
+    } else {
+        format!("{} de {} de {}", date.day(), pt_month_name(date.month()), date.year())
+    }
+}
+
+/// Formats message timestamp: "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 14:32".
+pub fn format_message_timestamp(dt: DateTime<Utc>) -> String {
+    let today = Utc::now().date_naive();
+    let msg_date = dt.date_naive();
+    let diff = today.signed_duration_since(msg_date).num_days();
+    let time_str = dt.format("%H:%M").to_string();
+
+    if diff == 0 {
+        format!("Hoje às {}", time_str)
+    } else if diff == 1 {
+        format!("Ontem às {}", time_str)
+    } else {
+        format!("{} às {}", dt.format("%d/%m/%Y"), time_str)
+    }
+}
+
+/// Formats a file size in bytes to a human-readable string.
+fn format_file_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Derives a consistent avatar background color from a username string.
+fn avatar_color_for_name(name: &str) -> u32 {
+    let mut hash: u32 = 0;
+    for b in name.bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    const AVATAR_PALETTE: [u32; 6] = [
+        0x5865F2, // Blurple
+        0x57F287, // Green
+        0xFEE75C, // Yellow
+        0xEB459E, // Fuchsia
+        0xED4245, // Red
+        0x00A8FC, // Cyan
+    ];
+    AVATAR_PALETTE[(hash as usize) % AVATAR_PALETTE.len()]
+}
+
+// ============================================================================
+// Date Separator Component
+// ============================================================================
+
+/// Renders a horizontal divider with a centered date pill.
+pub fn render_date_separator_element(date: NaiveDate) -> Div {
+    let date_text = format_date_separator(date);
+
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .my(space_4())
+        .child(
+            // Horizontal line
+            div()
+                .absolute()
+                .w_full()
+                .h_px()
+                .bg(rgb(0x3f4147)),
+        )
+        .child(
+            // Centered date pill
+            div()
+                .relative()
+                .bg(bg_chat())
+                .px(space_3())
+                .py(space_1())
+                .rounded(radius_pill())
+                .text_size(font_size_xs())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(text_muted())
+                .child(date_text),
+        )
+}
+
+// ============================================================================
+// Hover Action Bar Component
+// ============================================================================
+
+/// Renders the floating action bar displayed on message hover (React, Reply, More).
+pub fn render_hover_action_bar(
+    message_id: &str,
+    on_react: Option<MessageActionCallback>,
+    on_reply: Option<MessageActionCallback>,
+) -> Div {
+    let msg_id_react = message_id.to_string();
+    let msg_id_reply = message_id.to_string();
+
+    let mut react_btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.0))
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).text_color(text_titles()))
+        .text_color(text_muted())
+        .child(
+            div()
+                .text_size(px(14.0))
+                .child("☺"),
+        );
+
+    if let Some(handler) = on_react {
+        react_btn = react_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            handler(&msg_id_react, window, cx);
+        });
+    }
+
+    let mut reply_btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.0))
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).text_color(text_titles()))
+        .text_color(text_muted())
+        .child(
+            div()
+                .text_size(px(14.0))
+                .child("↩"),
+        );
+
+    if let Some(handler) = on_reply {
+        reply_btn = reply_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            handler(&msg_id_reply, window, cx);
+        });
+    }
+
+    let more_btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(28.0))
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).text_color(text_titles()))
+        .text_color(text_muted())
+        .child(
+            div()
+                .text_size(px(14.0))
+                .child("•••"),
+        );
+
+    div()
+        .absolute()
+        .top(px(4.0))
+        .right(space_8())
+        .bg(rgb(0x313338))
+        .border_1()
+        .border_color(rgb(0x232428))
+        .rounded(px(6.0))
+        .shadow_md()
+        .p(px(2.0))
+        .flex()
+        .flex_row()
+        .gap(px(2.0))
+        .items_center()
+        .invisible()
+        .group_hover("message-row", |s| s.visible())
+        .child(react_btn)
+        .child(reply_btn)
+        .child(more_btn)
+}
+
+// ============================================================================
+// Avatar Component
+// ============================================================================
+
+/// Renders a Cozy user avatar (40x40 circle) with initials or image URL.
+pub fn render_avatar(name: &str, avatar_url: Option<&str>) -> Div {
+    let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+    let color = avatar_color_for_name(name);
+
+    if let Some(url) = avatar_url {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            return div()
+                .size(avatar_md())
+                .rounded_full()
+                .overflow_hidden()
+                .flex_shrink_0()
+                .cursor_pointer()
+                .child(img(url.to_string()).size_full());
+        }
+    }
+
+    div()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(avatar_md())
+            .rounded_full()
+            .bg(rgb(color))
+            .flex_shrink_0()
+            .cursor_pointer()
+            .child(
+                div()
+                    .font_weight(WEIGHT_BOLD)
+                    .text_color(rgb(HEX_WHITE))
+                    .text_size(font_size_md())
+                    .child(initial),
+            )
+}
+
+// ============================================================================
+// Attachment & Embed Renderers
+// ============================================================================
+
+/// Renders message attachments (images or files).
+pub fn render_attachments(attachments: &[Attachment]) -> Div {
+    if attachments.is_empty() {
+        return div();
+    }
+
+    let mut container = div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .my(space_2());
+
+    for att in attachments {
+        if att.is_image() {
+            // Image attachment preview container
+            container = container.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .max_w(px(400.0))
+                    .bg(rgb(HEX_BG_CHANNELS))
+                    .border_1()
+                    .border_color(rgb(HEX_BG_SERVER))
+                    .rounded(radius_md())
+                    .p(space_2())
+                    .gap(space_1())
+                    .child(
+                        div()
+                            .h(px(200.0))
+                            .w_full()
+                            .bg(rgb(HEX_BG_USER_BAR))
+                            .rounded(radius_sm())
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(text_muted())
+                            .text_size(font_size_sm())
+                            .child(format!("🖼️ {}", att.filename)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .justify_between()
+                            .text_size(font_size_xs())
+                            .text_color(text_muted())
+                            .child(att.filename.clone())
+                            .child(format_file_size(att.size)),
+                    ),
+            );
+        } else {
+            // General file attachment card
+            container = container.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(space_3())
+                    .max_w(px(400.0))
+                    .p(space_3())
+                    .bg(rgb(HEX_BG_CHANNELS))
+                    .border_1()
+                    .border_color(rgb(HEX_BG_SERVER))
+                    .rounded(radius_md())
+                    .child(
+                        div()
+                            .text_size(px(24.0))
+                            .child("📄"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(font_size_sm())
+                                    .font_weight(WEIGHT_MEDIUM)
+                                    .text_color(text_titles())
+                                    .child(att.filename.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(font_size_xs())
+                                    .text_color(text_muted())
+                                    .child(format_file_size(att.size)),
+                            ),
+                    ),
+            );
+        }
+    }
+
+    container
+}
+
+/// Renders a highlighted sticker card in chat history.
+pub fn render_sticker_card(sticker_name: &str) -> Div {
+    div()
+        .my(space_2())
+        .p(space_3())
+        .max_w(px(220.0))
+        .bg(rgb(0x232428))
+        .border_2()
+        .border_color(rgb(HEX_BLURPLE))
+        .rounded(radius_lg())
+        .shadow_md()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(space_2())
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).border_color(rgb(HEX_WHITE)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(110.0))
+                .rounded(radius_md())
+                .bg(rgb(0x2b2d31))
+                .child(
+                    div()
+                        .text_size(px(60.0))
+                        .child("🏷️"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .bg(blurple())
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(radius_xs())
+                        .text_size(px(10.0))
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(rgb(HEX_WHITE))
+                        .child("FIGURINHA"),
+                )
+                .child(
+                    div()
+                        .text_size(font_size_sm())
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_titles())
+                        .child(sticker_name.to_string()),
+                ),
+        )
+}
+
+/// Renders Discord rich embeds.
+pub fn render_embeds(embeds: &[Embed]) -> Div {
+    if embeds.is_empty() {
+        return div();
+    }
+
+    let mut container = div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .my(space_2());
+
+    for embed in embeds {
+        let stripe_color = embed.color.unwrap_or(HEX_BLURPLE);
+
+        let mut embed_card = div()
+            .flex()
+            .flex_col()
+            .max_w(px(520.0))
+            .bg(rgb(HEX_BG_CHANNELS))
+            .border_l_4()
+            .border_color(rgb(stripe_color))
+            .rounded(radius_sm())
+            .p(space_4())
+            .gap(space_2());
+
+        // Embed Author
+        if let Some(author) = &embed.author {
+            embed_card = embed_card.child(
+                div()
+                    .text_size(font_size_xs())
+                    .font_weight(WEIGHT_MEDIUM)
+                    .text_color(text_muted())
+                    .child(author.name.clone()),
+            );
+        }
+
+        // Embed Title
+        if let Some(title) = &embed.title {
+            embed_card = embed_card.child(
+                div()
+                    .text_size(font_size_base())
+                    .font_weight(WEIGHT_BOLD)
+                    .text_color(blurple())
+                    .child(title.clone()),
+            );
+        }
+
+        // Embed Description
+        if let Some(desc) = &embed.description {
+            embed_card = embed_card.child(render_markdown(desc));
+        }
+
+        // Embed Fields
+        if !embed.fields.is_empty() {
+            let mut fields_row = div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(space_4())
+                .my(space_1());
+
+            for field in &embed.fields {
+                let w = if field.inline { px(150.0) } else { px(480.0) };
+                fields_row = fields_row.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w(w)
+                        .child(
+                            div()
+                                .text_size(font_size_xs())
+                                .font_weight(WEIGHT_BOLD)
+                                .text_color(text_muted())
+                                .child(field.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(font_size_sm())
+                                .text_color(text_primary())
+                                .child(field.value.clone()),
+                        ),
+                );
+            }
+            embed_card = embed_card.child(fields_row);
+        }
+
+        // Embed Footer
+        if let Some(footer) = &embed.footer {
+            embed_card = embed_card.child(
+                div()
+                    .text_size(font_size_xxs())
+                    .text_color(text_muted())
+                    .child(footer.text.clone()),
+            );
+        }
+
+        container = container.child(embed_card);
+    }
+
+    container
+}
+
+// ============================================================================
+// Single Message Row (Full & Grouped)
+// ============================================================================
+
+/// Configuration for rendering a message row.
+pub struct MessageRowConfig {
+    pub is_grouped: bool,
+    pub role_color: Option<u32>,
+    pub on_react: Option<MessageActionCallback>,
+    pub on_reply: Option<MessageActionCallback>,
+    pub on_reaction_click: Option<ReactionActionCallback>,
+    pub on_add_reaction: Option<AddReactionCallback>,
+}
+
+/// Renders an individual message item in Cozy format.
+pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
+    let author_name = message.author.display_name().to_string();
+    let name_color = if message.is_pending {
+        text_muted()
+    } else {
+        config.role_color.map(rgb).unwrap_or_else(text_titles)
+    };
+
+    let mut row = div()
+        .group("message-row")
+        .relative()
+        .flex()
+        .flex_row()
+        .w_full()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .max_w_full()
+        .overflow_hidden()
+        .px(space_8())
+        .py(if config.is_grouped { px(2.0) } else { space_1() })
+        .hover(|s| s.bg(bg_chat_hover()))
+        .rounded(radius_xs());
+
+    if message.is_pending {
+        row = row.opacity(0.5).text_color(text_muted());
+    }
+
+    // 1. Left Gutter (Avatar or hover timestamp - Cozy 48px spacing)
+    let left_gutter = if config.is_grouped {
+        // Grouped mode: gutter displays timestamp only on hover
+        let time_hh_mm = message.timestamp.format("%H:%M").to_string();
+        div()
+            .w(px(48.0))
+            .flex()
+            .justify_end()
+            .items_baseline()
+            .pt(px(2.0))
+            .flex_shrink_0()
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(text_muted())
+                    .invisible()
+                    .group_hover("message-row", |s| s.visible())
+                    .child(time_hh_mm),
+            )
+    } else {
+        // Full mode: displays avatar
+        div()
+            .w(px(48.0))
+            .flex_shrink_0()
+            .pt(px(2.0))
+            .child(render_avatar(&author_name, message.author.avatar_url().as_deref()))
+    };
+
+    // 2. Right Content Area
+    let mut content_area = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .pl(space_4());
+
+    if message.is_pending {
+        content_area = content_area.text_color(text_muted());
+    }
+
+    if !config.is_grouped {
+        // Author header row (Username, BOT tag, Timestamp)
+        let mut header_row = div()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .gap(space_2())
+            .child(
+                div()
+                    .font_weight(WEIGHT_MEDIUM)
+                    .text_size(font_size_base())
+                    .text_color(name_color)
+                    .cursor_pointer()
+                    .hover(|s| s.border_b_1().border_color(name_color))
+                    .child(author_name),
+            );
+
+        if message.author.bot {
+            header_row = header_row.child(
+                div()
+                    .bg(blurple())
+                    .rounded(radius_xs())
+                    .px(px(4.0))
+                    .py(px(1.0))
+                    .text_size(px(10.0))
+                    .font_weight(WEIGHT_BOLD)
+                    .text_color(rgb(HEX_WHITE))
+                    .child("BOT"),
+            );
+        }
+
+        header_row = header_row.child(
+            div()
+                .text_size(font_size_xs())
+                .text_color(text_muted())
+                .child(format_message_timestamp(message.timestamp)),
+        );
+
+        if message.edited_timestamp.is_some() {
+            header_row = header_row.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(text_muted())
+                    .child("(editado)"),
+            );
+        }
+
+        content_area = content_area.child(header_row);
+    }
+
+    // Sticker or Markdown Message Content
+    if message.is_sticker() {
+        let sticker_name = message.sticker_name().unwrap_or_else(|| "Figurinha".to_string());
+        content_area = content_area.child(render_sticker_card(&sticker_name));
+    } else {
+        content_area = content_area.child(render_markdown(&message.content));
+    }
+
+    // Attachments
+    if !message.attachments.is_empty() {
+        content_area = content_area.child(render_attachments(&message.attachments));
+    }
+
+    // Embeds
+    if !message.embeds.is_empty() {
+        content_area = content_area.child(render_embeds(&message.embeds));
+    }
+
+    // Reactions
+    if !message.reactions.is_empty() {
+        content_area = content_area.child(render_reaction_bar(
+            &message.reactions,
+            &message.id,
+            config.on_reaction_click,
+            config.on_add_reaction,
+        ));
+    }
+
+    // Floating action bar
+    let mut row = row.child(left_gutter).child(content_area);
+
+    if !message.is_pending {
+        let action_bar = render_hover_action_bar(&message.id, config.on_react, config.on_reply);
+        row = row.child(action_bar);
+    }
+
+    row
+}
+
+// ============================================================================
+// Message List Container (Cozy Layout with 5-Minute Window & Date Dividers)
+// ============================================================================
+
+/// Determines if two consecutive messages should be grouped in Cozy mode (within 5 minutes by same author).
+pub fn should_group_messages(prev: &Message, current: &Message) -> bool {
+    prev.author.id == current.author.id
+        && (current.timestamp - prev.timestamp).num_seconds().abs() < 300
+        && current.timestamp.date_naive() == prev.timestamp.date_naive()
+}
+
+/// Flattened item representation for virtualized chat streams
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatListItem {
+    /// Initial channel welcome banner
+    WelcomeHeader,
+    /// Date divider between chat message days
+    DateSeparator(NaiveDate),
+    /// Message item holding the index into the channel's messages slice
+    Message {
+        message_idx: usize,
+        is_grouped: bool,
+    },
+    /// Bottom anchor spacer
+    BottomSpacer,
+}
+
+/// Builds the flattened, virtualizable list of chat items in O(N) time with zero message cloning.
+pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
+    let mut items = Vec::with_capacity(messages.len() + 8);
+    items.push(ChatListItem::WelcomeHeader);
+    let mut last_date: Option<NaiveDate> = None;
+    let mut prev_message: Option<&Message> = None;
+
+    for (idx, msg) in messages.iter().enumerate() {
+        let msg_date = msg.timestamp.date_naive();
+
+        // 1. Date Divider if date has changed
+        if last_date.map_or(true, |d| d != msg_date) {
+            items.push(ChatListItem::DateSeparator(msg_date));
+            last_date = Some(msg_date);
+            prev_message = None; // Reset grouping across dates
+        }
+
+        // 2. Check 5-minute Cozy grouping
+        let is_grouped = prev_message.map_or(false, |prev| should_group_messages(prev, msg));
+        items.push(ChatListItem::Message {
+            message_idx: idx,
+            is_grouped,
+        });
+
+        prev_message = Some(msg);
+    }
+
+    items.push(ChatListItem::BottomSpacer);
+    items
+}
+
+/// Renders the channel welcome banner displayed at the beginning of chat history.
+pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .px(space_8())
+        .pt(space_8())
+        .pb(space_4())
+        .child(
+            div()
+                .size(px(64.0))
+                .rounded_full()
+                .bg(rgb(0x3f4248))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(HEX_WHITE))
+                .text_size(px(36.0))
+                .font_weight(WEIGHT_BOLD)
+                .child("#"),
+        )
+        .child(
+            div()
+                .text_color(text_titles())
+                .font_weight(WEIGHT_BOLD)
+                .text_size(font_size_2xl())
+                .child(format!("Bem-vindo(a) a #{}!", channel_name)),
+        )
+        .child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_sm())
+                .child(channel_topic.to_string()),
+        )
+}
+
+/// Renders a complete message history stream with 5-minute Cozy grouping and date separators.
+/// Uses a bounded dynamic buffer window (latest 60 messages) if called on large datasets
+/// without gpui::list virtualization, preventing layout and frame-rate bottlenecks.
+pub fn render_message_list(
+    messages: &[Message],
+    on_react: Option<MessageActionCallback>,
+    on_reply: Option<MessageActionCallback>,
+    on_reaction_click: Option<ReactionActionCallback>,
+    on_add_reaction: Option<AddReactionCallback>,
+) -> Div {
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w(px(0.0))
+        .min_h(px(0.0))
+        .max_w_full()
+        .overflow_hidden()
+        .py(space_4());
+
+    // When called directly without gpui::list, use a bounded dynamic buffer (latest 60 messages)
+    let (rendered_messages, is_truncated) = if messages.len() > 60 {
+        (&messages[messages.len() - 60..], true)
+    } else {
+        (messages, false)
+    };
+
+    if is_truncated {
+        list = list.child(
+            div()
+                .w_full()
+                .py(space_2())
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px(space_3())
+                        .py(space_1())
+                        .rounded(radius_pill())
+                        .bg(rgb(HEX_BG_CHANNELS))
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child(format!("Exibindo últimas 60 de {} mensagens", messages.len())),
+                ),
+        );
+    }
+
+    let mut prev_message: Option<&Message> = None;
+    let mut last_date: Option<NaiveDate> = None;
+
+    for msg in rendered_messages {
+        let msg_date = msg.timestamp.date_naive();
+
+        // 1. Date Divider if date has changed
+        if last_date.map_or(true, |d| d != msg_date) {
+            list = list.child(render_date_separator_element(msg_date));
+            last_date = Some(msg_date);
+            prev_message = None; // Reset grouping across dates
+        }
+
+        // 2. Check 5-minute Cozy grouping
+        let is_grouped = prev_message.map_or(false, |prev| should_group_messages(prev, msg));
+
+        list = list.child(render_message_row(
+            msg,
+            MessageRowConfig {
+                is_grouped,
+                role_color: None,
+                on_react: on_react.clone(),
+                on_reply: on_reply.clone(),
+                on_reaction_click: on_reaction_click.clone(),
+                on_add_reaction: on_add_reaction.clone(),
+            },
+        ));
+
+        prev_message = Some(msg);
+    }
+
+    list
+}
+
+// ============================================================================
+// GPUI View Component for Message List
+// ============================================================================
+
+/// GPUI View component wrapping a message list.
+pub struct MessageListView {
+    pub messages: Vec<Message>,
+}
+
+impl MessageListView {
+    pub fn new(messages: Vec<Message>) -> Self {
+        Self { messages }
+    }
+}
+
+impl Render for MessageListView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(bg_chat())
+            .overflow_hidden()
+            .child(render_message_list(
+                &self.messages,
+                None,
+                None,
+                None,
+                None,
+            ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::message::Author;
+
+    #[::core::prelude::v1::test]
+    fn test_5min_grouping_logic() {
+        let author = Author::new("1001", "Alice");
+        let t0 = Utc::now();
+        let t1 = t0 + chrono::Duration::seconds(120); // 2 minutes later
+        let t2 = t0 + chrono::Duration::seconds(400); // 6.6 minutes later
+
+        let msg1 = Message::new("1", "c1", author.clone(), "Hello").with_timestamp(t0);
+        let msg2 = Message::new("2", "c1", author.clone(), "World").with_timestamp(t1);
+        let msg3 = Message::new("3", "c1", author.clone(), "After 6min").with_timestamp(t2);
+
+        // msg1 and msg2 should be grouped (within 5 minutes by same author)
+        assert!(should_group_messages(&msg1, &msg2));
+
+        // msg1 and msg3 should NOT be grouped (> 5 minutes)
+        assert!(!should_group_messages(&msg1, &msg3));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_build_chat_list_items_virtualization() {
+        let author = Author::new("1001", "Bob");
+        let t0 = Utc::now();
+        let mut messages = Vec::new();
+
+        for i in 0..100 {
+            let msg = Message::new(
+                format!("msg-{}", i),
+                "chan-1",
+                author.clone(),
+                format!("Mensagem de teste {}", i),
+            )
+            .with_timestamp(t0 + chrono::Duration::seconds(i as i64 * 10));
+            messages.push(msg);
+        }
+
+        let items = build_chat_list_items(&messages);
+        // Should have WelcomeHeader + DateSeparator + 100 Messages + BottomSpacer = 103 items
+        assert_eq!(items.len(), 103);
+        assert!(matches!(items[0], ChatListItem::WelcomeHeader));
+        assert!(matches!(items[1], ChatListItem::DateSeparator(_)));
+        assert!(matches!(items[102], ChatListItem::BottomSpacer));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_markdown_ast_cache_reuse() {
+        let text = "Olá **GPUI**! Este texto tem *formatação* e `código`.";
+        crate::chat::markdown::prewarm_markdown_cache(text);
+
+        // Verify that the AST is now present in the cache
+        let in_cache = {
+            let cache = crate::chat::markdown::MARKDOWN_AST_CACHE.lock().unwrap();
+            cache.contains_key(text)
+        };
+        assert!(in_cache, "MARKDOWN_AST_CACHE should contain prewarmed markdown text");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_sticker_message_rendering_detection() {
+        let author = Author::new("1001", "Alice");
+        let msg = Message::new("s1", "c1", author.clone(), ":sticker[Wumpus Wave]:");
+        assert!(msg.is_sticker());
+        assert_eq!(msg.sticker_name(), Some("Wumpus Wave".to_string()));
+
+        let normal_msg = Message::new("m1", "c1", author, "Olá mundo");
+        assert!(!normal_msg.is_sticker());
+        assert_eq!(normal_msg.sticker_name(), None);
+    }
+}
