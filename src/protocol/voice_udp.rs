@@ -219,9 +219,13 @@ impl VoiceUdpSocket {
     /// Fase 1: Conecta ao endpoint UDP informado no payload `Ready` (Opcode 2).
     pub async fn connect(ip: &str, port: u16, ssrc: u32) -> Result<Self> {
         let addr_str = format!("{}:{}", ip, port);
-        let remote_addr: SocketAddr = addr_str
-            .parse()
-            .map_err(|e| anyhow!("Endereço de voz inválido '{addr_str}': {e}"))?;
+        let remote_addr: SocketAddr = match addr_str.parse() {
+            Ok(addr) => addr,
+            Err(_) => match tokio::net::lookup_host(&addr_str).await?.next() {
+                Some(addr) => addr,
+                None => bail!("Falha ao resolver endereço de voz '{addr_str}'"),
+            },
+        };
 
         let bind_addr = if remote_addr.is_ipv6() {
             "[::]:0"

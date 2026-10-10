@@ -14,6 +14,7 @@ pub mod transport;
 pub mod voice_crypto;
 pub mod voice_udp;
 pub mod voice_gateway;
+pub mod voice_session;
 
 pub use auth::{AuthToken, TokenStorage, TokenType};
 pub use bridge::ProtocolBridge;
@@ -34,6 +35,11 @@ pub use voice_gateway::{
     describe_voice_close_code, SessionDescription, VoiceCloseDecision, VoiceGateway,
     VoiceGatewayConfig, VoiceGatewayEvent, VoiceReady, VoiceServerData,
     FALLBACK_ENCRYPTION_MODE, PREFERRED_ENCRYPTION_MODE,
+};
+pub use voice_session::{
+    AudioBridge, AudioBridgeCommand, FrameCipher, MainSignalingChannel, PassthroughFrameCipher,
+    VoiceGatewayFactory, VoiceGatewayTransport, VoiceSession, VoiceSessionConfig,
+    VoiceSessionState,
 };
 
 
