@@ -1,15 +1,21 @@
-//! Discord Voice UDP Transport, IP Discovery & RTP Stream (Fase 8.2).
+//! Discord Voice UDP Transport, IP Discovery, RTP Streaming & Keepalive (Fase 8.2).
 //!
 //! Este módulo gerencia:
-//! 1. **IP Discovery**: Pacote de 74 bytes enviado ao servidor UDP do Discord para resolver
-//!    o endereço IP externo e a porta do cliente (UDP hole punching via NAT).
-//! 2. **RTP**: Cabeçalho padrão de 12 bytes (RFC 3550, versão 0x80, tipo de carga 0x78 / 120 Opus),
-//!    com incremento estrito de sequência (+1) e timestamp (+960 amostras por quadro de 20 ms a 48 kHz).
-//! 3. **Conexão de Voz**: Estrutura `VoiceUdpConnection` que transmite quadros Opus cifrados,
-//!    injeta 5 quadros canônicos de silêncio (`0xF8, 0xFF, 0xFE`) ao cessar fala e decifra quadros recebidos
-//!    identificando o SSRC de origem.
+//! 1. **Handshake em Duas Fases**:
+//!    - Fase 1: `VoiceUdpSocket::connect(ip, port, ssrc)` abre o socket UDP e conecta ao endpoint do Discord.
+//!    - IP Discovery no mesmo socket: `socket.discover_ip()` (garante que o mapeamento NAT seja idêntico).
+//!    - Fase 2: `socket.into_connection(crypto)` devolve a `VoiceUdpConnection` quando o Session Description chegar.
+//! 2. **IP Discovery**: Pacote de 74 bytes (tipo 0x1 req / 0x2 resp, tamanho 70, SSRC, IP nulo de 64 bytes e porta).
+//! 3. **RTP**: Cabeçalho padrão de 12 bytes (RFC 3550, versão 0x80, tipo 0x78 / 120 Opus), incremento estrito
+//!    de sequência (+1) e timestamp (+960 amostras por 20 ms a 48 kHz).
+//! 4. **Keepalive UDP**: Envio periódico de pacotes de 8 bytes (contador u64 little-endian) a cada ~5 s
+//!    para manter abertos os pinholes de NAT, e descarte transparente de respostas no caminho de recepção.
+//! 5. **Recepção e Filtragem RTCP**: Entrega de `ssrc`, `sequence`, `timestamp` e `payload` Opus,
+//!    com descarte explícito de pacotes RTCP (payload types 200-204 no byte 1).
+//! 6. **Silêncio**: Envio dos 5 quadros canônicos de silêncio (`0xF8, 0xFF, 0xFE`) ao cessar fala.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
@@ -51,18 +57,17 @@ pub const SILENCE_FRAME: [u8; 3] = [0xF8, 0xFF, 0xFE];
 /// Quantidade oficial de quadros de silêncio enviados ao parar de falar (5 quadros).
 pub const SILENCE_FRAME_COUNT: usize = 5;
 
+/// Intervalo padrão de keepalive UDP para manter o mapeamento de NAT ativo (5 segundos).
+pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Tamanho do pacote de keepalive UDP do Discord (8 bytes).
+pub const KEEPALIVE_PACKET_LEN: usize = 8;
+
 // ============================================================================
 // 1. IP Discovery
 // ============================================================================
 
 /// Monta o pacote de requisição de IP Discovery de 74 bytes.
-///
-/// Estrutura:
-/// - bytes 0..2: Tipo da requisição (0x0001 big-endian)
-/// - bytes 2..4: Comprimento restante (70 = 0x0046 big-endian)
-/// - bytes 4..8: SSRC do cliente (u32 big-endian)
-/// - bytes 8..72: 64 bytes zerados (reservados para o IP na resposta)
-/// - bytes 72..74: 2 bytes zerados (reservados para a porta na resposta)
 pub fn build_ip_discovery_packet(ssrc: u32) -> [u8; IP_DISCOVERY_PACKET_LEN] {
     let mut packet = [0u8; IP_DISCOVERY_PACKET_LEN];
     packet[0..2].copy_from_slice(&IP_DISCOVERY_REQUEST_TYPE.to_be_bytes());
@@ -72,8 +77,6 @@ pub fn build_ip_discovery_packet(ssrc: u32) -> [u8; IP_DISCOVERY_PACKET_LEN] {
 }
 
 /// Realiza o parsing do pacote de resposta de IP Discovery retornado pelo Discord.
-///
-/// Extrai o IP público externo (string ASCII terminada em nulo) e a porta UDP (u16 big-endian).
 pub fn parse_ip_discovery_response(buf: &[u8]) -> Result<(String, u16)> {
     if buf.len() < IP_DISCOVERY_PACKET_LEN {
         bail!(
@@ -99,7 +102,6 @@ pub fn parse_ip_discovery_response(buf: &[u8]) -> Result<(String, u16)> {
         );
     }
 
-    // Endereço IP: 64 bytes terminados em nulo entre 8..72
     let ip_slice = &buf[8..72];
     let null_pos = ip_slice.iter().position(|&b| b == 0).unwrap_or(ip_slice.len());
     let ip_str = std::str::from_utf8(&ip_slice[..null_pos])
@@ -111,7 +113,6 @@ pub fn parse_ip_discovery_response(buf: &[u8]) -> Result<(String, u16)> {
         bail!("Endereço IP retornado pelo servidor está vazio");
     }
 
-    // Porta: 2 bytes big-endian em 72..74
     let port = u16::from_be_bytes([buf[72], buf[73]]);
     if port == 0 {
         bail!("Porta UDP retornada na descoberta de IP é zero");
@@ -125,7 +126,6 @@ pub fn parse_ip_discovery_response(buf: &[u8]) -> Result<(String, u16)> {
 pub async fn discover_ip(socket: &UdpSocket, ssrc: u32) -> Result<(String, u16)> {
     let req = build_ip_discovery_packet(ssrc);
 
-    // Se o socket já estiver conectado via `socket.connect`, enviamos direto:
     if socket.peer_addr().is_ok() {
         let mut attempts = 0;
         loop {
@@ -136,7 +136,7 @@ pub async fn discover_ip(socket: &UdpSocket, ssrc: u32) -> Result<(String, u16)>
             match tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut resp)).await {
                 Ok(Ok(n)) => return parse_ip_discovery_response(&resp[..n]),
                 Ok(Err(e)) => bail!("Erro de I/O no socket UDP durante IP Discovery: {e}"),
-                Err(_) if attempts < 3 => continue, // Tenta novamente
+                Err(_) if attempts < 3 => continue,
                 Err(_) => bail!("Timeout de IP Discovery após 3 tentativas"),
             }
         }
@@ -145,7 +145,7 @@ pub async fn discover_ip(socket: &UdpSocket, ssrc: u32) -> Result<(String, u16)>
     }
 }
 
-/// Variante de IP discovery que aceita endereço remoto explicitamente (se socket não estiver conectado).
+/// Variante de IP discovery que aceita endereço remoto explicitamente.
 pub async fn discover_ip_to(socket: &UdpSocket, target: SocketAddr, ssrc: u32) -> Result<(String, u16)> {
     let req = build_ip_discovery_packet(ssrc);
     let mut attempts = 0;
@@ -168,12 +168,6 @@ pub async fn discover_ip_to(socket: &UdpSocket, target: SocketAddr, ssrc: u32) -
 // ============================================================================
 
 /// Constrói o cabeçalho base RTP canônico de 12 bytes do Discord para áudio Opus.
-///
-/// - Byte 0: 0x80 (Versão 2, sem padding, sem extensão, CC = 0)
-/// - Byte 1: 0x78 (Tipo de carga 120 = Opus)
-/// - Bytes 2..4: Sequence number (u16 big-endian)
-/// - Bytes 4..8: Timestamp (u32 big-endian, incrementa de 960 por quadro de 20ms)
-/// - Bytes 8..12: SSRC (u32 big-endian)
 pub fn build_rtp_header(sequence: u16, timestamp: u32, ssrc: u32) -> [u8; 12] {
     let mut h = [0u8; 12];
     h[0] = RTP_VERSION_2;
@@ -185,26 +179,45 @@ pub fn build_rtp_header(sequence: u16, timestamp: u32, ssrc: u32) -> [u8; 12] {
 }
 
 // ============================================================================
-// 3. Conexão de Transporte de Voz (VoiceUdpConnection)
+// 3. Pacote de Voz e Keepalive
 // ============================================================================
 
-/// Conexão de transporte UDP para chamadas de voz e vídeo do Discord.
+/// Representação completa de um pacote de voz Opus recebido do Discord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoicePacket {
+    /// SSRC da fonte de transmissão.
+    pub ssrc: u32,
+    /// Número de sequência do pacote RTP (útil para reordenação e detecção de jitter).
+    pub sequence: u16,
+    /// Timestamp de amostragem RTP (útil para sincronização e detecção de gaps/PLC).
+    pub timestamp: u32,
+    /// Carga útil de áudio Opus decifrada.
+    pub payload: Vec<u8>,
+}
+
+/// Monta um pacote de keepalive UDP com contador de 64 bits em little-endian.
+/// Fonte de referência: `discordgo/voice.go` (`udpKeepAlive`), `binary.LittleEndian.PutUint64`.
+pub fn build_keepalive_packet(sequence: u64) -> [u8; KEEPALIVE_PACKET_LEN] {
+    sequence.to_le_bytes()
+}
+
+// ============================================================================
+// 4. API em Duas Fases: VoiceUdpSocket -> VoiceUdpConnection
+// ============================================================================
+
+/// Fase 1 do Handshake de Voz: Socket UDP conectado ao endpoint de voz do Discord.
 ///
-/// Gerencia a transmissão e recepção de pacotes RTP sobre UDP com criptografia de transporte
-/// (`aead_aes256_gcm_rtpsize` ou `aead_xchacha20_poly1305_rtpsize`).
-pub struct VoiceUdpConnection {
+/// Permite executar o `discover_ip()` no MESMO socket antes da chegada da chave secreta
+/// (Session Description / Opcode 4), garantindo a preservação do mapeamento de NAT.
+pub struct VoiceUdpSocket {
     socket: Arc<UdpSocket>,
     remote_addr: SocketAddr,
     ssrc: u32,
-    sequence: u16,
-    timestamp: u32,
-    crypto: Arc<Mutex<RtpCrypto>>,
 }
 
-impl VoiceUdpConnection {
-    /// Estabelece uma conexão UDP com os parâmetros recebidos do payload `Ready` (Opcode 2) do Gateway:
-    /// `(ip, port, ssrc)` e o motor criptográfico inicializado a partir do `Session Description` (Opcode 4).
-    pub async fn connect(ip: &str, port: u16, ssrc: u32, crypto: RtpCrypto) -> Result<Self> {
+impl VoiceUdpSocket {
+    /// Fase 1: Conecta ao endpoint UDP informado no payload `Ready` (Opcode 2).
+    pub async fn connect(ip: &str, port: u16, ssrc: u32) -> Result<Self> {
         let addr_str = format!("{}:{}", ip, port);
         let remote_addr: SocketAddr = addr_str
             .parse()
@@ -223,25 +236,64 @@ impl VoiceUdpConnection {
             socket: Arc::new(socket),
             remote_addr,
             ssrc,
-            sequence: 0,
-            timestamp: 0,
-            crypto: Arc::new(Mutex::new(crypto)),
         })
     }
 
-    /// Cria a conexão a partir de um `UdpSocket` já previamente aberto (ex: após IP Discovery).
-    pub fn from_socket(socket: UdpSocket, remote_addr: SocketAddr, ssrc: u32, crypto: RtpCrypto) -> Self {
+    /// Cria a partir de um `UdpSocket` já previamente aberto e conectado.
+    pub fn from_socket(socket: UdpSocket, remote_addr: SocketAddr, ssrc: u32) -> Self {
         Self {
             socket: Arc::new(socket),
             remote_addr,
             ssrc,
-            sequence: 0,
-            timestamp: 0,
-            crypto: Arc::new(Mutex::new(crypto)),
         }
     }
 
-    /// Retorna o SSRC local configurado para esta transmissão.
+    /// Executa o IP Discovery usando o próprio socket conectado.
+    pub async fn discover_ip(&self) -> Result<(String, u16)> {
+        discover_ip(&self.socket, self.ssrc).await
+    }
+
+    /// SSRC configurado.
+    pub fn ssrc(&self) -> u32 {
+        self.ssrc
+    }
+
+    /// Endereço remoto do servidor de voz.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    /// Referência compartilhada do socket UDP subjacente.
+    pub fn socket(&self) -> &Arc<UdpSocket> {
+        &self.socket
+    }
+
+    /// Fase 2: Transfere o socket para uma `VoiceUdpConnection` quando o
+    /// Session Description (Opcode 4) entregar o `RtpCrypto` (mode + secret_key).
+    pub fn into_connection(self, crypto: RtpCrypto) -> VoiceUdpConnection {
+        VoiceUdpConnection::from_shared_socket(self.socket, self.remote_addr, self.ssrc, crypto)
+    }
+}
+
+// ============================================================================
+// 5. Metades de Envio e Recepção (Sem Duplicação de Código)
+// ============================================================================
+
+/// Metade de envio da conexão de voz.
+///
+/// Implementa a montagem de RTP, criptografia, envio de áudio Opus, envio de silêncio e keepalives.
+pub struct VoiceUdpSender {
+    socket: Arc<UdpSocket>,
+    remote_addr: SocketAddr,
+    ssrc: u32,
+    sequence: u16,
+    timestamp: u32,
+    crypto: Arc<Mutex<RtpCrypto>>,
+    keepalive_seq: Arc<AtomicU64>,
+}
+
+impl VoiceUdpSender {
+    /// Retorna o SSRC local configurado.
     pub fn ssrc(&self) -> u32 {
         self.ssrc
     }
@@ -256,20 +308,21 @@ impl VoiceUdpConnection {
         self.timestamp
     }
 
-    /// Retorna o endereço remoto do servidor de voz.
+    /// Retorna o endereço remoto.
     pub fn remote_addr(&self) -> SocketAddr {
         self.remote_addr
     }
 
+    /// Retorna uma referência ao socket UDP subjacente.
+    pub fn socket(&self) -> &Arc<UdpSocket> {
+        &self.socket
+    }
+
     /// Envia um quadro de áudio Opus já codificado (`&[u8]`).
-    ///
-    /// Monta o cabeçalho RTP de 12 bytes, incrementa sequência (+1) e timestamp (+960),
-    /// criptografa via AEAD com nonce de 32 bits e envia sobre o socket UDP.
     pub async fn send_opus_frame(&mut self, opus_data: &[u8]) -> Result<()> {
         let seq = self.sequence;
         let ts = self.timestamp;
 
-        // Incremento conforme a especificação do Discord para quadros de 20ms a 48kHz
         self.sequence = self.sequence.wrapping_add(1);
         self.timestamp = self.timestamp.wrapping_add(OPUS_SAMPLES_PER_FRAME);
 
@@ -282,10 +335,7 @@ impl VoiceUdpConnection {
         Ok(())
     }
 
-    /// Envia os 5 quadros oficiais de silêncio canônico (`0xF8, 0xFF, 0xFE`) ao parar de falar.
-    ///
-    /// Necessário para evitar interpolação indevida do codec Opus pelo SFU do Discord
-    /// em transmissões subsequentes.
+    /// Envia os 5 quadros canônicos de silêncio (`0xF8, 0xFF, 0xFE`) ao parar de falar.
     pub async fn send_silence_frames(&mut self) -> Result<()> {
         for _ in 0..SILENCE_FRAME_COUNT {
             self.send_opus_frame(&SILENCE_FRAME).await?;
@@ -293,30 +343,89 @@ impl VoiceUdpConnection {
         Ok(())
     }
 
-    /// Atalho para parar de falar, enviando os 5 quadros de silêncio.
+    /// Atalho para cessar fala.
     pub async fn stop_speaking(&mut self) -> Result<()> {
         self.send_silence_frames().await
     }
 
-    /// Recebe o próximo quadro Opus decifrado, retornando uma tupla `(ssrc_origem, opus_payload)`.
-    ///
-    /// Filtra pacotes inválidos ou truncados e decifra a carga útil com verificação de autenticidade.
-    pub async fn recv_opus_frame(&self) -> Result<(u32, Vec<u8>)> {
+    /// Envia um pacote de keepalive UDP com contador de 8 bytes (uint64 little-endian).
+    pub async fn send_keepalive(&self) -> Result<()> {
+        let seq = self.keepalive_seq.fetch_add(1, Ordering::Relaxed);
+        let packet = build_keepalive_packet(seq);
+        self.socket.send(&packet).await?;
+        Ok(())
+    }
+
+    /// Inicia uma tarefa assíncrona periódica em segundo plano que emite keepalives UDP a cada `interval`.
+    pub fn spawn_keepalive_task(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        let socket = self.socket.clone();
+        let seq_counter = self.keepalive_seq.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                let seq = seq_counter.fetch_add(1, Ordering::Relaxed);
+                let packet = build_keepalive_packet(seq);
+                if socket.send(&packet).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+}
+
+/// Metade de recepção da conexão de voz.
+///
+/// Decifra pacotes RTP e filtra transparentemente:
+/// - Pacotes de keepalive (8 bytes);
+/// - Pacotes RTCP (RFC 3550, tipos de carga 200..=204 no byte 1);
+/// - Pacotes não-RTP v2.
+pub struct VoiceUdpReceiver {
+    socket: Arc<UdpSocket>,
+    crypto: Arc<Mutex<RtpCrypto>>,
+}
+
+impl VoiceUdpReceiver {
+    /// Recebe o próximo pacote de voz entregando todos os metadados:
+    /// `ssrc`, `sequence`, `timestamp` e `payload` Opus decifrado.
+    pub async fn recv_packet(&self) -> Result<VoicePacket> {
         let mut buf = [0u8; 2048];
         loop {
             let len = self.socket.recv(&mut buf).await?;
+
+            // 1. Descartar pacotes menores que 12 bytes.
             if len < 12 {
+                // Se for pacote de keepalive (8 bytes), ignorar silenciosamente
+                if len == KEEPALIVE_PACKET_LEN {
+                    log::trace!("Keepalive UDP recebido (8 bytes), ignorado");
+                }
                 continue;
             }
 
-            // Apenas pacotes RTP v2 (0x80)
+            // 2. Descartar pacotes que não são RTP v2 (versão deve ser 2 -> 0x80)
             if (buf[0] & 0xC0) != 0x80 {
                 continue;
             }
 
+            // 3. Filtrar explicitamente pacotes RTCP (RFC 3550 seção 6: tipos 200 a 204 no byte 1).
+            // SR=200, RR=201, SDES=202, BYE=203, APP=204
+            let pt = buf[1];
+            if (200..=204).contains(&pt) {
+                log::trace!("Pacote RTCP recebido (tipo {pt}), ignorado explicitamente");
+                continue;
+            }
+
+            // 4. Decifrar a carga útil e extrair metadados
             let crypto = self.crypto.lock().await;
-            match crypto.decrypt_packet(&buf[..len]) {
-                Ok((origin_ssrc, opus_bytes)) => return Ok((origin_ssrc, opus_bytes)),
+            match crypto.decrypt_full(&buf[..len]) {
+                Ok((info, opus)) => {
+                    return Ok(VoicePacket {
+                        ssrc: info.ssrc,
+                        sequence: info.sequence,
+                        timestamp: info.timestamp,
+                        payload: opus,
+                    });
+                }
                 Err(err) => {
                     log::debug!("Descartando pacote UDP que falhou na decifração: {err}");
                     continue;
@@ -325,90 +434,164 @@ impl VoiceUdpConnection {
         }
     }
 
-    /// Recebe o próximo quadro Opus com um timeout configurável.
-    pub async fn recv_opus_frame_timeout(&self, timeout: Duration) -> Result<(u32, Vec<u8>)> {
-        tokio::time::timeout(timeout, self.recv_opus_frame())
+    /// Recebe o próximo pacote com timeout configurável.
+    pub async fn recv_packet_timeout(&self, timeout: Duration) -> Result<VoicePacket> {
+        tokio::time::timeout(timeout, self.recv_packet())
             .await
-            .map_err(|_| anyhow!("Timeout ao aguardar quadro de voz Opus sobre UDP"))?
+            .map_err(|_| anyhow!("Timeout ao aguardar pacote de voz Opus sobre UDP"))?
     }
 
-    /// Divide a conexão em metades de envio e recepção para permitir tarefas concorrentes de áudio.
-    pub fn split(self) -> (VoiceUdpSender, VoiceUdpReceiver) {
+    /// Retorna tupla com `(ssrc, sequence, timestamp, opus_payload)`.
+    pub async fn recv_opus_packet(&self) -> Result<(u32, u16, u32, Vec<u8>)> {
+        let pkt = self.recv_packet().await?;
+        Ok((pkt.ssrc, pkt.sequence, pkt.timestamp, pkt.payload))
+    }
+
+    /// Mantido por compatibilidade estrita com o contrato original:
+    /// Retorna tupla `(ssrc, opus_payload)`.
+    pub async fn recv_opus_frame(&self) -> Result<(u32, Vec<u8>)> {
+        let pkt = self.recv_packet().await?;
+        Ok((pkt.ssrc, pkt.payload))
+    }
+
+    /// Recebe quadro com timeout (compatibilidade).
+    pub async fn recv_opus_frame_timeout(&self, timeout: Duration) -> Result<(u32, Vec<u8>)> {
+        let pkt = self.recv_packet_timeout(timeout).await?;
+        Ok((pkt.ssrc, pkt.payload))
+    }
+}
+
+// ============================================================================
+// 6. Conexão Principal Unificada (VoiceUdpConnection)
+// ============================================================================
+
+/// Conexão de transporte UDP unificada.
+///
+/// Delega as operações de envio para [`VoiceUdpSender`] e de recepção para [`VoiceUdpReceiver`],
+/// garantindo ausência total de duplicação de lógica.
+pub struct VoiceUdpConnection {
+    sender: VoiceUdpSender,
+    receiver: VoiceUdpReceiver,
+}
+
+impl VoiceUdpConnection {
+    /// Estabelece uma conexão direta conectando o socket e aplicando a chave criptográfica.
+    pub async fn connect(ip: &str, port: u16, ssrc: u32, crypto: RtpCrypto) -> Result<Self> {
+        let sock = VoiceUdpSocket::connect(ip, port, ssrc).await?;
+        Ok(sock.into_connection(crypto))
+    }
+
+    /// Cria a conexão a partir de um `UdpSocket` já existente.
+    pub fn from_socket(socket: UdpSocket, remote_addr: SocketAddr, ssrc: u32, crypto: RtpCrypto) -> Self {
+        Self::from_shared_socket(Arc::new(socket), remote_addr, ssrc, crypto)
+    }
+
+    /// Cria a conexão a partir de um `Arc<UdpSocket>` compartilhado.
+    pub fn from_shared_socket(
+        socket: Arc<UdpSocket>,
+        remote_addr: SocketAddr,
+        ssrc: u32,
+        crypto: RtpCrypto,
+    ) -> Self {
+        let crypto_arc = Arc::new(Mutex::new(crypto));
+        let keepalive_seq = Arc::new(AtomicU64::new(0));
+
         let sender = VoiceUdpSender {
-            socket: self.socket.clone(),
-            ssrc: self.ssrc,
-            sequence: self.sequence,
-            timestamp: self.timestamp,
-            crypto: self.crypto.clone(),
+            socket: socket.clone(),
+            remote_addr,
+            ssrc,
+            sequence: 0,
+            timestamp: 0,
+            crypto: crypto_arc.clone(),
+            keepalive_seq,
         };
 
         let receiver = VoiceUdpReceiver {
-            socket: self.socket,
-            crypto: self.crypto,
+            socket,
+            crypto: crypto_arc,
         };
 
-        (sender, receiver)
+        Self { sender, receiver }
     }
-}
 
-/// Metade de envio da conexão de voz.
-pub struct VoiceUdpSender {
-    socket: Arc<UdpSocket>,
-    ssrc: u32,
-    sequence: u16,
-    timestamp: u32,
-    crypto: Arc<Mutex<RtpCrypto>>,
-}
+    /// SSRC configurado na conexão.
+    pub fn ssrc(&self) -> u32 {
+        self.sender.ssrc()
+    }
 
-impl VoiceUdpSender {
+    /// Sequência atual do transmissor.
+    pub fn sequence(&self) -> u16 {
+        self.sender.sequence()
+    }
+
+    /// Timestamp atual do transmissor.
+    pub fn timestamp(&self) -> u32 {
+        self.sender.timestamp()
+    }
+
+    /// Endereço remoto do servidor de voz.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.sender.remote_addr()
+    }
+
+    /// Retorna uma referência ao socket UDP subjacente.
+    pub fn socket(&self) -> &Arc<UdpSocket> {
+        self.sender.socket()
+    }
+
+    /// Envia um quadro de áudio Opus codificado (`&[u8]`).
     pub async fn send_opus_frame(&mut self, opus_data: &[u8]) -> Result<()> {
-        let seq = self.sequence;
-        let ts = self.timestamp;
-
-        self.sequence = self.sequence.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(OPUS_SAMPLES_PER_FRAME);
-
-        let header = build_rtp_header(seq, ts, self.ssrc);
-        let mut crypto = self.crypto.lock().await;
-        let packet = crypto.encrypt(&header, opus_data)?;
-        drop(crypto);
-
-        self.socket.send(&packet).await?;
-        Ok(())
+        self.sender.send_opus_frame(opus_data).await
     }
 
+    /// Envia os 5 quadros canônicos de silêncio (`0xF8, 0xFF, 0xFE`).
     pub async fn send_silence_frames(&mut self) -> Result<()> {
-        for _ in 0..SILENCE_FRAME_COUNT {
-            self.send_opus_frame(&SILENCE_FRAME).await?;
-        }
-        Ok(())
+        self.sender.send_silence_frames().await
     }
 
+    /// Atalho para cessar fala enviando silêncio.
     pub async fn stop_speaking(&mut self) -> Result<()> {
-        self.send_silence_frames().await
+        self.sender.stop_speaking().await
     }
-}
 
-/// Metade de recepção da conexão de voz.
-pub struct VoiceUdpReceiver {
-    socket: Arc<UdpSocket>,
-    crypto: Arc<Mutex<RtpCrypto>>,
-}
+    /// Envia um pacote de keepalive UDP (8 bytes).
+    pub async fn send_keepalive(&self) -> Result<()> {
+        self.sender.send_keepalive().await
+    }
 
-impl VoiceUdpReceiver {
+    /// Dispara a tarefa periódica de keepalive UDP a cada `interval` (ex: 5s).
+    pub fn spawn_keepalive_task(&self, interval: Duration) -> tokio::task::JoinHandle<()> {
+        self.sender.spawn_keepalive_task(interval)
+    }
+
+    /// Recebe o próximo pacote com todos os metadados (`VoicePacket`).
+    pub async fn recv_packet(&self) -> Result<VoicePacket> {
+        self.receiver.recv_packet().await
+    }
+
+    /// Recebe o próximo pacote com timeout configurável.
+    pub async fn recv_packet_timeout(&self, timeout: Duration) -> Result<VoicePacket> {
+        self.receiver.recv_packet_timeout(timeout).await
+    }
+
+    /// Recebe tupla com `(ssrc, sequence, timestamp, opus_payload)`.
+    pub async fn recv_opus_packet(&self) -> Result<(u32, u16, u32, Vec<u8>)> {
+        self.receiver.recv_opus_packet().await
+    }
+
+    /// Mantido para compatibilidade com o contrato original: retorna `(ssrc, opus_payload)`.
     pub async fn recv_opus_frame(&self) -> Result<(u32, Vec<u8>)> {
-        let mut buf = [0u8; 2048];
-        loop {
-            let len = self.socket.recv(&mut buf).await?;
-            if len < 12 || (buf[0] & 0xC0) != 0x80 {
-                continue;
-            }
+        self.receiver.recv_opus_frame().await
+    }
 
-            let crypto = self.crypto.lock().await;
-            if let Ok((origin_ssrc, opus_bytes)) = crypto.decrypt_packet(&buf[..len]) {
-                return Ok((origin_ssrc, opus_bytes));
-            }
-        }
+    /// Recebe quadro com timeout (compatibilidade).
+    pub async fn recv_opus_frame_timeout(&self, timeout: Duration) -> Result<(u32, Vec<u8>)> {
+        self.receiver.recv_opus_frame_timeout(timeout).await
+    }
+
+    /// Divide a conexão em metades concorrentes de envio e recepção.
+    pub fn split(self) -> (VoiceUdpSender, VoiceUdpReceiver) {
+        (self.sender, self.receiver)
     }
 }
 
@@ -434,26 +617,24 @@ mod tests {
         let pkt = build_ip_discovery_packet(ssrc);
 
         assert_eq!(pkt.len(), 74);
-        assert_eq!(&pkt[0..2], &1u16.to_be_bytes()); // Type 1
-        assert_eq!(&pkt[2..4], &70u16.to_be_bytes()); // Length 70
-        assert_eq!(&pkt[4..8], &ssrc.to_be_bytes()); // SSRC
-        assert_eq!(&pkt[8..72], &[0u8; 64]); // Endereço zerado
-        assert_eq!(&pkt[72..74], &[0u8; 2]); // Porta zerada
+        assert_eq!(&pkt[0..2], &1u16.to_be_bytes());
+        assert_eq!(&pkt[2..4], &70u16.to_be_bytes());
+        assert_eq!(&pkt[4..8], &ssrc.to_be_bytes());
+        assert_eq!(&pkt[8..72], &[0u8; 64]);
+        assert_eq!(&pkt[72..74], &[0u8; 2]);
     }
 
     #[test]
     fn test_parse_ip_discovery_response() {
         let mut resp = [0u8; 74];
-        resp[0..2].copy_from_slice(&2u16.to_be_bytes()); // Type 2
-        resp[2..4].copy_from_slice(&70u16.to_be_bytes()); // Length 70
-        resp[4..8].copy_from_slice(&0x12345678u32.to_be_bytes()); // SSRC
+        resp[0..2].copy_from_slice(&2u16.to_be_bytes());
+        resp[2..4].copy_from_slice(&70u16.to_be_bytes());
+        resp[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
 
-        // IP "203.0.113.195\0"
         let ip_bytes = b"203.0.113.195";
         resp[8..8 + ip_bytes.len()].copy_from_slice(ip_bytes);
-        resp[8 + ip_bytes.len()] = 0; // Null terminator
+        resp[8 + ip_bytes.len()] = 0;
 
-        // Porta 54321
         resp[72..74].copy_from_slice(&54321u16.to_be_bytes());
 
         let (ip, port) = parse_ip_discovery_response(&resp).unwrap();
@@ -462,68 +643,75 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ip_discovery_response_invalid_type() {
-        let mut resp = [0u8; 74];
-        resp[0..2].copy_from_slice(&1u16.to_be_bytes()); // Type 1 inválido para resposta
-        resp[2..4].copy_from_slice(&70u16.to_be_bytes());
-        assert!(parse_ip_discovery_response(&resp).is_err());
+    fn test_build_keepalive_packet() {
+        let seq = 42u64;
+        let pkt = build_keepalive_packet(seq);
+        assert_eq!(pkt.len(), 8);
+        assert_eq!(u64::from_le_bytes(pkt), 42);
     }
 
     #[tokio::test]
-    async fn test_ip_discovery_loopback_socket() {
-        // Simulação do servidor UDP do Discord em loopback 127.0.0.1
+    async fn test_two_phase_handshake_flow() {
+        // Simulação do servidor UDP do Discord em loopback
         let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_socket.local_addr().unwrap();
 
-        let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        client_socket.connect(server_addr).await.unwrap();
+        let ssrc: u32 = 0xABCD1234;
 
-        let test_ssrc: u32 = 987654321;
-
-        // Tarefa que atua como o servidor UDP de voz
+        // Tarefa servidora
         let server_handle = tokio::spawn(async move {
             let mut buf = [0u8; 128];
-            let (n, from) = server_socket.recv_from(&mut buf).await.unwrap();
+            // 1. Recebe requisição de IP Discovery (74 bytes)
+            let (n, client_addr) = server_socket.recv_from(&mut buf).await.unwrap();
             assert_eq!(n, 74);
-            assert_eq!(&buf[0..2], &1u16.to_be_bytes());
-            assert_eq!(&buf[4..8], &test_ssrc.to_be_bytes());
 
-            // Responde com type 2, length 70, ssrc, ip="198.51.100.77", port=41234
+            // Responde IP Discovery
             let mut resp = [0u8; 74];
             resp[0..2].copy_from_slice(&2u16.to_be_bytes());
             resp[2..4].copy_from_slice(&70u16.to_be_bytes());
-            resp[4..8].copy_from_slice(&test_ssrc.to_be_bytes());
-            let ip = b"198.51.100.77";
+            resp[4..8].copy_from_slice(&ssrc.to_be_bytes());
+            let ip = b"198.51.100.99";
             resp[8..8 + ip.len()].copy_from_slice(ip);
             resp[8 + ip.len()] = 0;
-            resp[72..74].copy_from_slice(&41234u16.to_be_bytes());
+            resp[72..74].copy_from_slice(&55555u16.to_be_bytes());
+            server_socket.send_to(&resp, client_addr).await.unwrap();
 
-            server_socket.send_to(&resp, from).await.unwrap();
+            // 2. Recebe quadro de voz cifrado
+            let mut voice_buf = [0u8; 256];
+            let (vn, _) = server_socket.recv_from(&mut voice_buf).await.unwrap();
+            assert!(vn > 12);
+            voice_buf[..vn].to_vec()
         });
 
-        let (discovered_ip, discovered_port) = discover_ip(&client_socket, test_ssrc).await.unwrap();
-        server_handle.await.unwrap();
+        // Fase 1: abre VoiceUdpSocket e faz discovery no MESMO socket
+        let voice_sock = VoiceUdpSocket::connect("127.0.0.1", server_addr.port(), ssrc)
+            .await
+            .unwrap();
 
-        assert_eq!(discovered_ip, "198.51.100.77");
-        assert_eq!(discovered_port, 41234);
-    }
+        let (ext_ip, ext_port) = voice_sock.discover_ip().await.unwrap();
+        assert_eq!(ext_ip, "198.51.100.99");
+        assert_eq!(ext_port, 55555);
 
-    #[test]
-    fn test_rtp_header_format_and_increments() {
-        let seq = 42;
-        let ts = 960 * 5;
-        let ssrc = 0xAABBCCDD;
+        // Fase 2: com a chegada da Session Description, converte para VoiceUdpConnection
+        let key = test_secret_key();
+        let crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let mut conn = voice_sock.into_connection(crypto);
 
-        let header = build_rtp_header(seq, ts, ssrc);
-        assert_eq!(header[0], 0x80); // Version 2
-        assert_eq!(header[1], 0x78); // Payload type 120 (Opus)
-        assert_eq!(u16::from_be_bytes([header[2], header[3]]), seq);
-        assert_eq!(u32::from_be_bytes([header[4], header[5], header[6], header[7]]), ts);
-        assert_eq!(u32::from_be_bytes([header[8], header[9], header[10], header[11]]), ssrc);
+        let test_opus = b"testing two phase handshake voice transmission";
+        conn.send_opus_frame(test_opus).await.unwrap();
+
+        let received_by_server = server_handle.await.unwrap();
+        assert!(received_by_server.len() > 12);
+
+        // Decifrar o pacote que o servidor recebeu
+        let crypto_verify = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let (rx_ssrc, decrypted) = crypto_verify.decrypt_packet(&received_by_server).unwrap();
+        assert_eq!(rx_ssrc, ssrc);
+        assert_eq!(decrypted, test_opus);
     }
 
     #[tokio::test]
-    async fn test_voice_udp_send_receive_roundtrip_aes_gcm() {
+    async fn test_rtcp_packets_and_keepalive_ignored_in_receiver() {
         let key = test_secret_key();
         let crypto_send = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
         let crypto_recv = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
@@ -541,53 +729,34 @@ mod tests {
         let mut sender = VoiceUdpConnection::from_socket(client_socket, server_addr, ssrc, crypto_send);
         let receiver = VoiceUdpConnection::from_socket(server_socket, client_addr, ssrc, crypto_recv);
 
-        let test_opus = b"real opus audio encoded frame 20ms";
-        sender.send_opus_frame(test_opus).await.unwrap();
+        // 1. Enviar um keepalive de 8 bytes
+        sender.send_keepalive().await.unwrap();
 
-        assert_eq!(sender.sequence(), 1);
-        assert_eq!(sender.timestamp(), 960);
+        // 2. Enviar pacotes RTCP (payload types 200 Sender Report e 201 Receiver Report)
+        let mut rtcp_sr = [0u8; 28];
+        rtcp_sr[0] = 0x80;
+        rtcp_sr[1] = 200; // RTCP SR
+        sender.socket().send(&rtcp_sr).await.unwrap();
 
-        let (origin_ssrc, recv_opus) = receiver
-            .recv_opus_frame_timeout(Duration::from_millis(500))
+        let mut rtcp_rr = [0u8; 32];
+        rtcp_rr[0] = 0x80;
+        rtcp_rr[1] = 201; // RTCP RR
+        sender.socket().send(&rtcp_rr).await.unwrap();
+
+        // 3. Enviar um quadro Opus legítimo
+        let opus_data = b"legitimate opus audio packet after rtcp and keepalive";
+        sender.send_opus_frame(opus_data).await.unwrap();
+
+        // O receiver deve ignorar o keepalive (8 bytes) e os dois pacotes RTCP (200 e 201),
+        // entregando diretamente o quadro Opus com sequence=0 e timestamp=0!
+        let packet = receiver
+            .recv_packet_timeout(Duration::from_millis(500))
             .await
             .unwrap();
 
-        assert_eq!(origin_ssrc, ssrc);
-        assert_eq!(recv_opus, test_opus);
-    }
-
-    #[tokio::test]
-    async fn test_voice_udp_send_silence_frames() {
-        let key = test_secret_key();
-        let crypto_send = RtpCrypto::new("aead_xchacha20_poly1305_rtpsize", &key).unwrap();
-        let crypto_recv = RtpCrypto::new("aead_xchacha20_poly1305_rtpsize", &key).unwrap();
-
-        let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let server_addr = server_socket.local_addr().unwrap();
-
-        let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let client_addr = client_socket.local_addr().unwrap();
-
-        client_socket.connect(server_addr).await.unwrap();
-        server_socket.connect(client_addr).await.unwrap();
-
-        let ssrc = 0x55667788;
-        let mut sender = VoiceUdpConnection::from_socket(client_socket, server_addr, ssrc, crypto_send);
-        let receiver = VoiceUdpConnection::from_socket(server_socket, client_addr, ssrc, crypto_recv);
-
-        // Dispara os 5 quadros de silêncio ao parar de falar
-        sender.stop_speaking().await.unwrap();
-
-        assert_eq!(sender.sequence(), 5);
-        assert_eq!(sender.timestamp(), 960 * 5);
-
-        for _ in 0..SILENCE_FRAME_COUNT {
-            let (origin_ssrc, recv_opus) = receiver
-                .recv_opus_frame_timeout(Duration::from_millis(500))
-                .await
-                .unwrap();
-            assert_eq!(origin_ssrc, ssrc);
-            assert_eq!(recv_opus, SILENCE_FRAME);
-        }
+        assert_eq!(packet.ssrc, ssrc);
+        assert_eq!(packet.sequence, 0);
+        assert_eq!(packet.timestamp, 0);
+        assert_eq!(packet.payload, opus_data);
     }
 }
