@@ -132,3 +132,71 @@ fn test_presence_transition_to_offline_clears_active_subtitle_state() {
     assert_eq!(p2.status, PresenceStatus::Offline);
     assert_eq!(p2.custom_status, None);
 }
+
+#[test]
+fn test_unknown_presence_defaults_to_offline_and_updates() {
+    use discord_rs::protocol::transport::Relationship;
+
+    let mut state = AppState::new();
+    let friend_id = "user-bob-999".to_string();
+
+    // Iniciar relacionamentos sem evento prévio de presença para este usuário
+    state.handle_transport_event(TransportEvent::RelationshipsUpdated(vec![
+        Relationship {
+            id: friend_id.clone(),
+            rel_type: 1, // Friend
+            username: "bob_dev".to_string(),
+            global_name: Some("Bob".to_string()),
+            avatar: None,
+        }
+    ]));
+
+    // Deve iniciar OFFLINE (não Online)
+    let friend = state.friends.iter().find(|f| f.id == friend_id).expect("friend should exist");
+    assert_eq!(friend.presence, discord_rs::app::state::PresenceStatus::Offline);
+    assert_eq!(friend.custom_status, None);
+
+    // Ao chegar PRESENCE_UPDATE, atualiza para status real Online
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: friend_id.clone(),
+        status: PresenceStatus::Online,
+        activity: None,
+        custom_status: Some(CustomStatus::from_text("Disponível")),
+    });
+
+    let friend_after = state.friends.iter().find(|f| f.id == friend_id).unwrap();
+    assert_eq!(friend_after.presence, discord_rs::app::state::PresenceStatus::Online);
+    assert_eq!(friend_after.custom_status.as_deref(), Some("Disponível"));
+}
+
+#[test]
+fn test_clearing_custom_status_removes_from_friend_and_presence() {
+    let mut state = AppState::new();
+    let friend_id = "user-alice-111".to_string();
+
+    // 1. Friend tem status customizado ativo
+    state.update_user_presence(
+        friend_id.clone(),
+        PresenceStatus::Online,
+        None,
+        Some(CustomStatus::from_text("Trabalhando remotamente")),
+    );
+
+    let p = state.get_user_presence(&friend_id).unwrap();
+    assert_eq!(p.custom_status.as_ref().unwrap().text.as_deref(), Some("Trabalhando remotamente"));
+
+    // 2. Recebe presença sem custom status (None)
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: friend_id.clone(),
+        status: PresenceStatus::Online,
+        activity: None,
+        custom_status: None,
+    });
+
+    let p_cleared = state.get_user_presence(&friend_id).unwrap();
+    assert_eq!(p_cleared.custom_status, None);
+
+    if let Some(friend) = state.friends.iter().find(|f| f.id == friend_id) {
+        assert_eq!(friend.custom_status, None);
+    }
+}

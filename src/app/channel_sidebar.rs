@@ -321,15 +321,15 @@ impl Render for ChannelSidebar {
                                             .or_else(|| recipient_friend.map(|f| crate::domain::user::PresenceStatus::from(f.presence)))
                                             .unwrap_or(PresenceStatus::Offline);
 
-                                        let custom_status = presence_info
-                                            .and_then(|p| p.custom_status.clone())
-                                            .or_else(|| {
-                                                recipient_friend.and_then(|f| {
-                                                    f.custom_status
-                                                        .as_ref()
-                                                        .map(|text| crate::domain::user::CustomStatus::from_text(text.clone()))
-                                                })
-                                            });
+                                        let custom_status = if let Some(p) = presence_info {
+                                            p.custom_status.clone()
+                                        } else {
+                                            recipient_friend.and_then(|f| {
+                                                f.custom_status
+                                                    .as_ref()
+                                                    .map(|text| crate::domain::user::CustomStatus::from_text(text.clone()))
+                                            })
+                                        };
 
                                         let game_activity = presence_info
                                             .and_then(|p| p.activity.as_ref())

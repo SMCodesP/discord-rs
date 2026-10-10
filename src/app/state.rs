@@ -2571,7 +2571,7 @@ impl AppState {
                                 .presences_by_user
                                 .get(&r.id)
                                 .map(|p| PresenceStatus::from(p.status))
-                                .unwrap_or(PresenceStatus::Online),
+                                .unwrap_or(PresenceStatus::Offline),
                             custom_status: self
                                 .presences_by_user
                                 .get(&r.id)
@@ -2620,29 +2620,19 @@ impl AppState {
         // 1. Atualizar amigo na lista de amigos se existir
         if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
             friend.presence = app_status;
-            if let Some(ref cs) = custom_status {
-                if let Some(ref text) = cs.text {
-                    friend.custom_status = Some(text.clone());
-                }
-            }
+            friend.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
         }
 
         // 2. Se for o usuário autenticado, atualizar perfil atual
         if self.current_user.id == user_id {
             self.current_user.presence = app_status;
-            if let Some(ref cs) = custom_status {
-                if let Some(ref text) = cs.text {
-                    self.current_user.custom_status = Some(text.clone());
-                }
-            }
+            self.current_user.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
         }
 
         // 3. Atualizar membros na lista de membros se presente
         if let Some(member) = self.members.iter_mut().find(|m| m.id == user_id) {
             member.presence = app_status;
-            if let Some(ref act) = activity {
-                member.activity = Some(act.name.clone());
-            }
+            member.activity = activity.as_ref().map(|act| act.name.clone());
         }
     }
 
