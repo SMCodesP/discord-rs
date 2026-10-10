@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use crate::domain::channel::ChannelType;
+use crate::domain::voice::VoiceState;
 use crate::domain::message::{Attachment, Author, Message, Reaction};
 use crate::domain::settings::{
     AccountConnection, AccessibilitySettings, AuthorizedApp, FamilyCenterLink,
@@ -130,6 +131,8 @@ pub struct ChannelItemState {
     pub recipient_ids: Vec<String>,
     #[serde(default)]
     pub recipient_names: Vec<String>,
+    #[serde(default)]
+    pub user_limit: Option<u32>,
 }
 
 /// Category grouping in channel sidebar
@@ -448,6 +451,8 @@ pub struct AppState {
     pub message_display_mode: MessageDisplayMode,
     pub accessibility_settings: AccessibilitySettings,
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
+    /// Active voice states by voice channel ID
+    pub voice_states_by_channel: HashMap<String, Vec<VoiceState>>,
 }
 
 fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
@@ -619,6 +624,7 @@ fn organize_channels_into_categories(
             is_group_dm: c.channel_type == ChannelType::GroupDm,
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),
+            user_limit: c.user_limit,
         }
     };
 
@@ -693,6 +699,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-announcements".into(),
@@ -707,6 +714,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -727,6 +735,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-help".into(),
@@ -741,6 +750,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-showcase".into(),
@@ -755,6 +765,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -775,6 +786,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-voice-pair".into(),
@@ -789,6 +801,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -850,6 +863,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-gpui-showcase".into(),
@@ -864,6 +878,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -883,6 +898,7 @@ impl AppState {
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     }],
                 },
             ],
@@ -1219,6 +1235,7 @@ impl AppState {
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
+            voice_states_by_channel: HashMap::new(),
         };
         state.sync_guild_media();
         state
@@ -1766,6 +1783,56 @@ impl AppState {
         self.active_voice_call = None;
     }
 
+    /// Updates or removes a voice state across all channels
+    pub fn update_voice_state(&mut self, mut state: VoiceState) {
+        let user_id = state.user_id.clone();
+        // Resolução de nome de exibição e avatar a partir dos caches locais se não vierem no voice state
+        if state.user_name.is_none() {
+            if user_id == self.current_user.id {
+                state.user_name = Some(self.current_user.display_name.clone());
+                if state.avatar_url.is_none() {
+                    state.avatar_url = self.current_user.avatar_url.clone();
+                }
+            } else if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
+                state.user_name = Some(m.name.clone());
+            } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
+                state.user_name = Some(f.display_name.clone());
+                if state.avatar_url.is_none() {
+                    state.avatar_url = f.avatar_url.clone();
+                }
+            }
+        }
+
+        // Remove the user from any channel they were previously in
+        for states in self.voice_states_by_channel.values_mut() {
+            states.retain(|s| s.user_id != user_id);
+        }
+        // If channel_id == Some(cid), add or update in cid
+        if let Some(ref cid) = state.channel_id {
+            let entry = self.voice_states_by_channel.entry(cid.clone()).or_default();
+            if let Some(existing) = entry.iter_mut().find(|s| s.user_id == user_id) {
+                *existing = state;
+            } else {
+                entry.push(state);
+            }
+        }
+    }
+
+    /// Returns the slice of active voice states connected to a specific channel
+    pub fn voice_states_for_channel(&self, channel_id: &str) -> &[VoiceState] {
+        self.voice_states_by_channel
+            .get(channel_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Populates multiple voice states from a guild initial snapshot
+    pub fn populate_guild_voice_states(&mut self, states: Vec<VoiceState>) {
+        for state in states {
+            self.update_voice_state(state);
+        }
+    }
+
     /// Toggles self mute
     pub fn toggle_mute(&mut self) {
         if let Some(ref tel) = self.telemetry {
@@ -2244,6 +2311,9 @@ impl AppState {
                 self.auth_error = Some(reason.clone());
                 self.connection_status = format!("Desconectado: {}", reason);
             }
+            TransportEvent::VoiceStateUpdate(state) => {
+                self.update_voice_state(state);
+            }
             TransportEvent::GuildChannelsUpdated { guild_id, channels } => {
                 let categories = organize_channels_into_categories(&guild_id, channels);
 
@@ -2359,6 +2429,7 @@ impl AppState {
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
+                            user_limit: None,
                         }
                     })
                     .collect();
@@ -2430,6 +2501,7 @@ impl AppState {
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
+                            user_limit: None,
                         },
                     );
                 }
@@ -2482,6 +2554,7 @@ impl AppState {
                             is_group_dm: is_group,
                             recipient_ids: channel.recipient_ids.clone(),
                             recipient_names: channel.recipient_names.clone(),
+                            user_limit: None,
                         },
                     );
                 }
@@ -3006,6 +3079,7 @@ impl AppState {
             is_group_dm: false,
             recipient_ids: vec![user_id.to_string()],
             recipient_names: vec![username.to_string()],
+            user_limit: None,
         };
 
         self.dm_channels.insert(0, item);
@@ -3057,6 +3131,7 @@ impl AppState {
             is_group_dm: true,
             recipient_ids,
             recipient_names,
+            user_limit: None,
         };
 
         self.dm_channels.insert(0, item);

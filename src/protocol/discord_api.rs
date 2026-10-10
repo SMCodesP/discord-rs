@@ -1384,6 +1384,27 @@ async fn handle_dispatch(
             if !pinned_dms.is_empty() {
                 let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
             }
+
+            // Popula voice_states iniciais a partir do snapshot do READY
+            if let Some(raw_guilds) = data.get("guilds").and_then(|v| v.as_array()) {
+                for g in raw_guilds {
+                    let g_id = g.get("id").and_then(|v| v.as_str());
+                    if let Some(raw_states) = g.get("voice_states").and_then(|v| v.as_array()) {
+                        for vs_val in raw_states {
+                            if let Some(state) = parse_voice_state_from_json(vs_val, g_id) {
+                                let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                for vs_val in raw_states {
+                    if let Some(state) = parse_voice_state_from_json(vs_val, None) {
+                        let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                    }
+                }
+            }
         }
         "CHANNEL_CREATE" => {
             if let Some(ch) = parse_channel_from_json(&data, None) {
@@ -1424,6 +1445,45 @@ async fn handle_dispatch(
                 }
                 if let Some(raw_stickers) = data.get("stickers").and_then(|v| v.as_array()) {
                     guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                }
+
+                // Popula voice_states a partir do snapshot inicial de GUILD_CREATE
+                if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+                    if let Some(raw_members) = data.get("members").and_then(|v| v.as_array()) {
+                        for m in raw_members {
+                            if let Some(user) = m.get("user") {
+                                if let Some(uid) = user.get("id").and_then(|v| v.as_str()) {
+                                    let name = m.get("nick").and_then(|v| v.as_str())
+                                        .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                                        .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                                        .map(ToString::to_string);
+                                    let avatar = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                                        if hash.starts_with("http") {
+                                            hash.to_string()
+                                        } else {
+                                            format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, hash)
+                                        }
+                                    });
+                                    guild_members.insert(uid.to_string(), (name, avatar));
+                                }
+                            }
+                        }
+                    }
+
+                    for vs_val in raw_states {
+                        if let Some(mut state) = parse_voice_state_from_json(vs_val, Some(id)) {
+                            if state.user_name.is_none() {
+                                if let Some((name, avatar)) = guild_members.get(&state.user_id) {
+                                    state.user_name = name.clone();
+                                    if state.avatar_url.is_none() {
+                                        state.avatar_url = avatar.clone();
+                                    }
+                                }
+                            }
+                            let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                        }
+                    }
                 }
 
                 let _ = event_tx.send(TransportEvent::GuildCreate(guild));
@@ -1533,23 +1593,13 @@ async fn handle_dispatch(
             }
         }
         "VOICE_STATE_UPDATE" => {
-            if let Some(user_id) = data.get("user_id").and_then(|v| v.as_str()) {
-                let session_id_str = data.get("session_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if let Some(state) = parse_voice_state_from_json(&data, None) {
                 {
                     let my_id = current_user_id.read().await;
-                    if my_id.as_deref() == Some(user_id) && !session_id_str.is_empty() {
-                        *last_voice_session_id.write().await = Some(session_id_str.clone());
+                    if my_id.as_deref() == Some(state.user_id.as_str()) && !state.session_id.is_empty() {
+                        *last_voice_session_id.write().await = Some(state.session_id.clone());
                     }
                 }
-
-                let mut state = VoiceState::new(user_id, "");
-                state.guild_id = data.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                state.channel_id = data.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                state.session_id = session_id_str;
-                state.mute = data.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.deaf = data.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.self_mute = data.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.self_deaf = data.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
             }
@@ -1612,6 +1662,49 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
     Some(user)
 }
 
+pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<VoiceState> {
+    let user_id = val.get("user_id")?.as_str()?;
+    let session_id = val.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+    let mut state = VoiceState::new(user_id, session_id);
+    state.guild_id = val.get("guild_id").and_then(|v| v.as_str()).or(default_guild_id).map(ToString::to_string);
+    state.channel_id = val.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    state.mute = val.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.deaf = val.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_mute = val.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_deaf = val.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_video = val.get("self_video").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_stream = val.get("self_stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.suppress = val.get("suppress").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if let Some(member) = val.get("member") {
+        if let Some(user) = member.get("user") {
+            state.user_name = member.get("nick").and_then(|v| v.as_str())
+                .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                .map(ToString::to_string);
+            state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                if hash.starts_with("http") {
+                    hash.to_string()
+                } else {
+                    format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+                }
+            });
+        }
+    } else if let Some(user) = val.get("user") {
+        state.user_name = user.get("global_name").and_then(|v| v.as_str())
+            .or_else(|| user.get("username").and_then(|v| v.as_str()))
+            .map(ToString::to_string);
+        state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+            if hash.starts_with("http") {
+                hash.to_string()
+            } else {
+                format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+            }
+        });
+    }
+    Some(state)
+}
+
 fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<Channel> {
     let id = val.get("id")?.as_str()?;
     let raw_type = val.get("type")?.as_u64()?;
@@ -1655,6 +1748,7 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
     ch.topic = val.get("topic").and_then(|v| v.as_str()).map(ToString::to_string);
     ch.position = val.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     ch.last_message_id = val.get("last_message_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    ch.user_limit = val.get("user_limit").and_then(|v| v.as_u64()).map(|l| l as u32);
     ch.is_pinned = val
         .get("is_pinned")
         .and_then(|v| v.as_bool())

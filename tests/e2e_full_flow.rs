@@ -52,6 +52,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                     is_group_dm: false,
                     recipient_ids: Vec::new(),
                     recipient_names: Vec::new(),
+                    user_limit: None,
                 }],
             },
             CategoryItemState {
@@ -71,6 +72,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     },
                     ChannelItemState {
                         id: format!("chan-{}-dev", id),
@@ -85,6 +87,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     },
                 ],
             },

@@ -1,6 +1,11 @@
 use gpui::*;
 use crate::tokens::icons::*;
-use super::state::{ActiveModal, AppState, FriendsTab};
+use super::state::{ActiveModal, AppState, ChannelKind, FriendsTab};
+
+#[inline]
+fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
+    icon_headphones_off(size, color)
+}
 
 /// Channel sidebar (240px wide) containing:
 /// - Server header
@@ -703,6 +708,54 @@ impl Render for ChannelSidebar {
                                             let mention_count = channel.mention_count;
                                             let entity = app_entity.clone();
 
+                                            let is_voice = ch_kind == ChannelKind::Voice;
+                                            let voice_states = if is_voice {
+                                                state.voice_states_for_channel(&ch_id)
+                                            } else {
+                                                &[]
+                                            };
+
+                                            let capacity_badge = if is_voice {
+                                                let count = voice_states.len();
+                                                let limit = channel.user_limit.unwrap_or(0);
+                                                if limit > 0 {
+                                                    let is_full = count >= limit as usize;
+                                                    Some(
+                                                        div()
+                                                            .h(px(18.0))
+                                                            .px(px(6.0))
+                                                            .rounded(px(9.0))
+                                                            .bg(if is_full { rgb(0xda373c) } else { rgb(0x232428) })
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(11.0))
+                                                            .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                                            .text_color(if is_full { rgb(0xffffff) } else { rgb(0x949ba4) })
+                                                            .child(format!("{}/{}", count, limit)),
+                                                    )
+                                                } else if count > 0 {
+                                                    Some(
+                                                        div()
+                                                            .h(px(18.0))
+                                                            .px(px(6.0))
+                                                            .rounded(px(9.0))
+                                                            .bg(rgb(0x232428))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(11.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(rgb(0x949ba4))
+                                                            .child(count.to_string()),
+                                                    )
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+
                                             category_elements.push(
                                                 div()
                                                     .h(px(34.0))
@@ -765,26 +818,157 @@ impl Render for ChannelSidebar {
                                                                     .child(ch_name),
                                                             ),
                                                     )
-                                                    .children(if mention_count > 0 {
-                                                        Some(
-                                                            div()
-                                                                .min_w(px(16.0))
-                                                                .h(px(16.0))
-                                                                .px(px(4.0))
-                                                                .rounded_full()
-                                                                .bg(rgb(0xf23f43))
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .text_color(rgb(0xffffff))
-                                                                .text_size(px(10.0))
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .child(mention_count.to_string()),
-                                                        )
-                                                    } else {
-                                                        None
-                                                    }),
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap(px(4.0))
+                                                            .children(capacity_badge)
+                                                            .children(if mention_count > 0 {
+                                                                Some(
+                                                                    div()
+                                                                        .min_w(px(16.0))
+                                                                        .h(px(16.0))
+                                                                        .px(px(4.0))
+                                                                        .rounded_full()
+                                                                        .bg(rgb(0xf23f43))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .text_color(rgb(0xffffff))
+                                                                        .text_size(px(10.0))
+                                                                        .font_weight(FontWeight::BOLD)
+                                                                        .child(mention_count.to_string()),
+                                                                )
+                                                            } else {
+                                                                None
+                                                            })
+                                                    ),
                                             );
+
+                                            // Membros conectados abaixo do canal de voz
+                                            if is_voice && !voice_states.is_empty() {
+                                                for vs in voice_states {
+                                                    let vs_uid = vs.user_id.clone();
+                                                    let display_name = if let Some(ref name) = vs.user_name {
+                                                        name.clone()
+                                                    } else if vs_uid == current_user.id {
+                                                        current_user.display_name.clone()
+                                                    } else if let Some(m) = state.members.iter().find(|m| m.id == vs_uid) {
+                                                        m.name.clone()
+                                                    } else if let Some(f) = state.friends.iter().find(|f| f.id == vs_uid) {
+                                                        f.display_name.clone()
+                                                    } else {
+                                                        String::new()
+                                                    };
+
+                                                    let avatar_url = vs.avatar_url.clone().or_else(|| {
+                                                        if vs_uid == current_user.id {
+                                                             current_user.avatar_url.clone()
+                                                        } else {
+                                                             state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
+                                                        }
+                                                    });
+
+                                                    let initial = display_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+
+                                                    let is_speaking = vs.is_speaking;
+                                                    let is_muted = vs.is_muted();
+                                                    let is_deafened = vs.is_deafened();
+                                                    let is_streaming = vs.self_stream;
+
+                                                    category_elements.push(
+                                                        div()
+                                                            .h(px(28.0))
+                                                            .pl(px(32.0))
+                                                            .pr(px(8.0))
+                                                            .rounded(px(4.0))
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .cursor_pointer()
+                                                            .hover(|s| s.bg(rgb(0x35373c)))
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .gap(px(8.0))
+                                                                    .overflow_hidden()
+                                                                    // Mini-avatar 20x20 com anel verde se estiver falando
+                                                                    .child(
+                                                                        div()
+                                                                            .size(px(20.0))
+                                                                            .rounded_full()
+                                                                            .overflow_hidden()
+                                                                            .flex_shrink_0()
+                                                                            .border(if is_speaking { px(2.0) } else { px(0.0) })
+                                                                            .border_color(rgb(0x23a55a))
+                                                                            .child(if let Some(ref url) = avatar_url {
+                                                                                img(url.clone()).size_full().rounded_full().into_any_element()
+                                                                            } else {
+                                                                                div()
+                                                                                    .size_full()
+                                                                                    .rounded_full()
+                                                                                    .bg(rgb(0x5865f2))
+                                                                                    .flex()
+                                                                                    .items_center()
+                                                                                    .justify_center()
+                                                                                    .text_color(rgb(0xffffff))
+                                                                                    .text_size(px(10.0))
+                                                                                    .font_weight(FontWeight::BOLD)
+                                                                                    .child(initial)
+                                                                                    .into_any_element()
+                                                                            })
+                                                                    )
+                                                                    // Nome do usuário conectado
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(13.0))
+                                                                            .font_weight(FontWeight::MEDIUM)
+                                                                            .text_color(rgb(0x949ba4))
+                                                                            .overflow_hidden()
+                                                                            .child(display_name)
+                                                                    )
+                                                            )
+                                                            // Ícones de mudo, deafen e badge "AO VIVO"
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .gap(px(4.0))
+                                                                    .children(if is_streaming {
+                                                                        Some(
+                                                                            div()
+                                                                                .px(px(4.0))
+                                                                                .py(px(1.0))
+                                                                                .rounded(px(3.0))
+                                                                                .bg(rgb(0xf23f43))
+                                                                                .text_color(rgb(0xffffff))
+                                                                                .text_size(px(9.0))
+                                                                                .font_weight(FontWeight::BOLD)
+                                                                                .child("AO VIVO")
+                                                                        )
+                                                                    } else {
+                                                                        None
+                                                                    })
+                                                                    .children(if is_muted {
+                                                                        Some(icon_mic_off(px(14.0), rgb(0xf23f43)))
+                                                                    } else {
+                                                                        None
+                                                                    })
+                                                                    .children(if is_deafened {
+                                                                        Some(icon_speaker_off(px(14.0), rgb(0xf23f43)))
+                                                                    } else {
+                                                                        None
+                                                                    })
+                                                            )
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                 }
