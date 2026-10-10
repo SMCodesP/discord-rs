@@ -10,7 +10,7 @@ pub use frame::{
     yuyv_to_rgba, PixelFormat, VideoFrame,
 };
 pub use screen::{
-    detect_session, detect_session_from_env, PortalScreencastInfo, ScreenCaptureConfig,
-    ScreenCaptureManager, ScreenCaptureMode, ScreenSession, ScreenSourceType, SessionType,
-    X11ScreenInfo,
+    detect_session, detect_session_from_env, resolve_capture_mode, PortalScreencastInfo,
+    ScreenCaptureConfig, ScreenCaptureManager, ScreenCaptureMode, ScreenSession, ScreenSourceType,
+    SessionType, X11ScreenInfo,
 };

@@ -13,6 +13,8 @@ pub enum CaptureError {
     X11Error(String),
     ConversionError(String),
     SessionUnavailable(String),
+    WaylandCaptureUnavailable(String),
+    PipeWireError(String),
     Io(std::io::Error),
     Other(String),
 }
@@ -33,6 +35,8 @@ impl fmt::Display for CaptureError {
             CaptureError::X11Error(msg) => write!(f, "X11 screencast error: {}", msg),
             CaptureError::ConversionError(msg) => write!(f, "Pixel format conversion error: {}", msg),
             CaptureError::SessionUnavailable(msg) => write!(f, "Session unavailable: {}", msg),
+            CaptureError::WaylandCaptureUnavailable(msg) => write!(f, "Wayland capture unavailable: {}", msg),
+            CaptureError::PipeWireError(msg) => write!(f, "PipeWire screencast error: {}", msg),
             CaptureError::Io(err) => write!(f, "IO error: {}", err),
             CaptureError::Other(msg) => write!(f, "Capture error: {}", msg),
         }

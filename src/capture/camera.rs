@@ -223,35 +223,91 @@ impl CameraSession {
     /// Dynamically switches to a different camera device or configuration during an active session.
     /// The existing `mpsc::Receiver` channel remains valid and will receive frames from the new source.
     pub fn switch_camera(&mut self, new_config: CameraCaptureConfig) -> Result<(), CaptureError> {
-        // 1. Stop current capture thread
-        self.stop_signal.store(true, Ordering::SeqCst);
-        if let Ok(mut handle_guard) = self.worker_handle.lock() {
-            if let Some(handle) = handle_guard.take() {
-                let _ = handle.join();
+        if new_config.device_id != self.current_config.device_id {
+            // Case 1: Switching to a different device.
+            // Prepare and spawn the new worker FIRST before stopping the old one.
+            let new_stop_signal = Arc::new(AtomicBool::new(false));
+            let new_is_running = Arc::new(AtomicBool::new(false));
+
+            let handle = spawn_capture_worker(
+                new_config.clone(),
+                Arc::clone(&new_stop_signal),
+                Arc::clone(&new_is_running),
+                self.frame_tx.clone(),
+            )?; // If this fails, the current active camera remains running undisturbed!
+
+            // New camera successfully opened: stop and join old worker
+            self.stop_signal.store(true, Ordering::SeqCst);
+            if let Ok(mut handle_guard) = self.worker_handle.lock() {
+                if let Some(old_handle) = handle_guard.take() {
+                    let _ = old_handle.join();
+                }
+                *handle_guard = Some(handle);
+            }
+
+            self.stop_signal = new_stop_signal;
+            self.is_running = new_is_running;
+            self.current_config = new_config;
+            Ok(())
+        } else {
+            // Case 2: Same device (format/fps reconfiguration).
+            // V4L2 requires stopping active stream before re-negotiating buffers.
+            let old_config = self.current_config.clone();
+
+            // Stop old worker
+            self.stop_signal.store(true, Ordering::SeqCst);
+            let mut old_handle_opt = None;
+            if let Ok(mut handle_guard) = self.worker_handle.lock() {
+                old_handle_opt = handle_guard.take();
+            }
+            if let Some(old_handle) = old_handle_opt {
+                let _ = old_handle.join();
+            }
+
+            let new_stop_signal = Arc::new(AtomicBool::new(false));
+            let new_is_running = Arc::new(AtomicBool::new(false));
+
+            match spawn_capture_worker(
+                new_config.clone(),
+                Arc::clone(&new_stop_signal),
+                Arc::clone(&new_is_running),
+                self.frame_tx.clone(),
+            ) {
+                Ok(new_handle) => {
+                    self.stop_signal = new_stop_signal;
+                    self.is_running = new_is_running;
+                    self.current_config = new_config;
+                    if let Ok(mut handle_guard) = self.worker_handle.lock() {
+                        *handle_guard = Some(new_handle);
+                    }
+                    Ok(())
+                }
+                Err(err) => {
+                    // Restore previous configuration so the session does not die
+                    log::warn!(
+                        "Failed to reconfigure camera on {}: {}. Restoring previous config.",
+                        new_config.device_id,
+                        err
+                    );
+                    let restore_stop = Arc::new(AtomicBool::new(false));
+                    let restore_running = Arc::new(AtomicBool::new(false));
+                    if let Ok(restore_handle) = spawn_capture_worker(
+                        old_config.clone(),
+                        Arc::clone(&restore_stop),
+                        Arc::clone(&restore_running),
+                        self.frame_tx.clone(),
+                    ) {
+                        self.stop_signal = restore_stop;
+                        self.is_running = restore_running;
+                        self.current_config = old_config;
+                        if let Ok(mut handle_guard) = self.worker_handle.lock() {
+                            *handle_guard = Some(restore_handle);
+                        }
+                    }
+                    Err(err)
+                }
             }
         }
-
-        // 2. Prepare new stop & running signals
-        let new_stop_signal = Arc::new(AtomicBool::new(false));
-        let new_is_running = Arc::new(AtomicBool::new(false));
-
-        // 3. Spawn new capture worker using the SAME frame sender
-        let handle = spawn_capture_worker(
-            new_config.clone(),
-            Arc::clone(&new_stop_signal),
-            Arc::clone(&new_is_running),
-            self.frame_tx.clone(),
-        )?;
-
-        // 4. Update session state
-        self.stop_signal = new_stop_signal;
-        self.is_running = new_is_running;
-        self.current_config = new_config;
-        if let Ok(mut handle_guard) = self.worker_handle.lock() {
-            *handle_guard = Some(handle);
-        }
-
-        Ok(())
     }
 
     /// Changes format or framerate without switching the device.
@@ -395,8 +451,14 @@ fn spawn_capture_worker(
                             sequence,
                         };
                         sequence += 1;
-                        if frame_tx.blocking_send(frame).is_err() {
-                            break;
+                        match frame_tx.try_send(frame) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                log::trace!("Camera frame dropped: consumer queue full");
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
