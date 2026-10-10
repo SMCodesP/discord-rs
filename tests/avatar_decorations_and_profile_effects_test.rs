@@ -3,7 +3,8 @@
 use discord_rs::components::avatar::{Avatar, AvatarSize};
 use discord_rs::components::member_item::MemberItem;
 use discord_rs::components::profile_effect::{
-    render_profile_effect, ProfileEffect, ProfileEffectData, ProfileEffectTheme,
+    render_profile_effect, render_profile_effect_for_user, ProfileEffectCatalog,
+    ProfileEffectConfig, ProfileEffectLayer, UserProfileEffect,
 };
 use discord_rs::domain::user::{AvatarDecorationData, PresenceStatus, User};
 use gpui::px;
@@ -120,59 +121,99 @@ fn test_member_item_repasses_avatar_decoration() {
 }
 
 #[test]
-fn test_profile_effect_model_and_themes() {
-    // 1. Deserialization of realistic Discord profile effect JSON
-    let effect_json = r#"{
-        "id": "1144002621008298034",
-        "sku_id": "1144002621008298033",
-        "expires_at": 1750000000
-    }"#;
-    let effect: ProfileEffectData = serde_json::from_str(effect_json).expect("Must parse profile effect");
-    assert_eq!(effect.id, "1144002621008298034");
-    assert_eq!(effect.sku_id.as_deref(), Some("1144002621008298033"));
-    assert_eq!(effect.expires_at, Some(1750000000));
-    assert_eq!(effect.theme(), ProfileEffectTheme::Sakura);
-    assert_eq!(effect.theme().title(), "Sakura Blossoms");
+fn test_user_profile_effect_and_catalog_parsing() {
+    // 1. User profile effect reference
+    let upe_json = r#"{"sku_id":"1271175049168031815","expires_at":1750000000}"#;
+    let upe: UserProfileEffect = serde_json::from_str(upe_json).expect("Must parse UserProfileEffect");
+    assert_eq!(upe.sku_id.as_deref(), Some("1271175049168031815"));
+    assert_eq!(upe.expires_at, Some(1750000000));
 
-    // 2. Preset theme resolution
-    let cyber_effect = ProfileEffectData::new("cyber_neo_grid");
-    assert_eq!(cyber_effect.theme(), ProfileEffectTheme::Cyberpunk);
-    assert!(!cyber_effect.theme().gradient_stops().is_empty());
+    // 2. Real collectible category JSON with profile effects (type 1)
+    let categories_json = serde_json::json!([
+        {
+            "name": "Halloween",
+            "products": [
+                {
+                    "sku_id": "prod_1",
+                    "items": [
+                        {
+                            "sku_id": "1271175049168031815",
+                            "title": "Spooky Cauldron",
+                            "type": 1,
+                            "effects": [
+                                {
+                                    "src": "https://cdn.discordapp.com/media/v1/collectibles-shop/layer1.png",
+                                    "loop": true,
+                                    "duration": 5000,
+                                    "start": 0,
+                                    "loopDelay": 1000,
+                                    "zIndex": 10
+                                },
+                                {
+                                    "src": "https://cdn.discordapp.com/media/v1/collectibles-shop/layer2.png",
+                                    "loop": false,
+                                    "duration": 3000,
+                                    "start": 500,
+                                    "loopDelay": 0,
+                                    "zIndex": 20
+                                }
+                            ]
+                        },
+                        {
+                            "sku_id": "item_avatar_decor",
+                            "type": 0
+                        }
+                    ]
+                }
+            ]
+        }
+    ]);
 
-    let fire_effect = ProfileEffectData::new("ember_flame_burst");
-    assert_eq!(fire_effect.theme(), ProfileEffectTheme::Fire);
-
-    let frost_effect = ProfileEffectData::new("winter_snow_crystals");
-    assert_eq!(frost_effect.theme(), ProfileEffectTheme::Frost);
-
-    let ocean_effect = ProfileEffectData::new("deep_sea_abyss");
-    assert_eq!(ocean_effect.theme(), ProfileEffectTheme::DeepSea);
-
-    let arcade_effect = ProfileEffectData::new("arcade_retro_pixels");
-    assert_eq!(arcade_effect.theme(), ProfileEffectTheme::RetroArcade);
-
-    let cauldron_effect = ProfileEffectData::new("spooky_witch_cauldron");
-    assert_eq!(cauldron_effect.theme(), ProfileEffectTheme::Cauldron);
-
-    let celestial_effect = ProfileEffectData::new("cosmic_galaxy_stardust");
-    assert_eq!(celestial_effect.theme(), ProfileEffectTheme::Celestial);
-
-    let custom_effect = ProfileEffectData::new("unknown_effect_custom_999");
-    assert!(matches!(custom_effect.theme(), ProfileEffectTheme::Custom(_)));
+    let catalog = ProfileEffectCatalog::from_categories_json(&categories_json);
+    let effect = catalog.get("1271175049168031815").expect("Effect must be loaded in catalog");
+    assert_eq!(effect.title.as_deref(), Some("Spooky Cauldron"));
+    assert_eq!(effect.effects.len(), 2);
+    assert_eq!(effect.effects[0].z_index, 10);
+    assert!(effect.effects[0].is_looping);
+    assert_eq!(effect.effects[1].z_index, 20);
+    assert!(!effect.effects[1].is_looping);
 }
 
 #[test]
-fn test_profile_effect_component_and_render_function() {
-    let effect = ProfileEffectData::with_sku("sakura_blossoms", "sku_sakura_1");
+fn test_profile_effect_render_fallback_zero_mocks() {
+    let catalog = ProfileEffectCatalog::new();
 
-    // Test render_profile_effect helper function
-    let rendered = render_profile_effect(&effect, px(105.0), Some(px(300.0)));
-    let _ = rendered;
+    // 1. Unknown SKU -> renders empty div
+    let unknown_effect = UserProfileEffect::new("unknown_sku_123");
+    let rendered_unknown = render_profile_effect_for_user(Some(&unknown_effect), &catalog, px(105.0), Some(px(300.0)));
+    let _ = rendered_unknown;
 
-    // Test ProfileEffect IntoElement component builder
-    let component = ProfileEffect::new(effect)
-        .height(px(140.0))
-        .width(px(340.0))
-        .show_particles(true);
-    let _ = component;
+    // 2. None user effect -> renders empty div
+    let rendered_none = render_profile_effect_for_user(None, &catalog, px(105.0), None);
+    let _ = rendered_none;
+
+    // 3. Known config with layers -> renders properly
+    let config = ProfileEffectConfig {
+        sku_id: "test_sku".to_string(),
+        title: Some("Test Effect".to_string()),
+        description: None,
+        accessibility_label: None,
+        reduced_motion_src: None,
+        thumbnail_preview_src: None,
+        effects: vec![
+            ProfileEffectLayer {
+                src: "https://cdn.discordapp.com/test.png".to_string(),
+                is_looping: true,
+                duration: 4000,
+                start: 0,
+                loop_delay: 0,
+                z_index: 1,
+                randomized_sources: vec![],
+            }
+        ],
+        animation_type: Some(1),
+        effect_type: Some(1),
+    };
+    let rendered_config = render_profile_effect(Some(&config), px(120.0), Some(px(300.0)));
+    let _ = rendered_config;
 }

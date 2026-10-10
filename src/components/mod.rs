@@ -21,7 +21,10 @@ pub use channel_item::ChannelItem;
 pub use guild_item::GuildItem;
 pub use member_item::MemberItem;
 pub use modal::Modal;
-pub use profile_effect::{render_profile_effect, ProfileEffect, ProfileEffectData, ProfileEffectTheme};
+pub use profile_effect::{
+    render_profile_effect, render_profile_effect_for_user, ProfileEffectCatalog,
+    ProfileEffectConfig, ProfileEffectLayer, ProfileEffectLayerSource, UserProfileEffect,
+};
 pub use text_input::{
     TextInput, TextInputActionCallback, TextInputChangeCallback, TextInputMaskCallback,
 };

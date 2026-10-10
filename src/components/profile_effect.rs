@@ -1,245 +1,190 @@
 //! Discord RS - Profile Effect Component
-//! Thematic visual effects (gradients, particle overlays, and ambient glows)
-//! rendered on user profile banners and popouts.
+//! Renders Discord profile effects using real catalog effect layer definitions.
 //!
-//! # Technical Parity & GPUI Limitations
-//! In the official Discord web/desktop client, profile effects are powered by Lottie JSON,
-//! APNG or WebGL canvas shaders. Because GPUI does not feature a WebGL runtime, this component
-//! renders high-fidelity multi-stop linear gradient backdrops, atmospheric ambient glow layers,
-//! and thematic particle overlays (e.g. cherry blossom petals, embers, cyber nodes, frost crystals)
-//! using native GPUI elements. This achieves authentic visual aesthetic parity with zero overhead.
+//! # Architecture & Parity
+//! Discord profile effects are defined in the collectibles catalog (`/collectibles-categories/v2`
+//! or `/collectibles-shop`), where each collectible with `type: 1` defines a list of visual
+//! layers (`effects`). Each layer contains a PNG or animated APNG URL (`src`), loop settings,
+//! duration, and stacking z-index.
+//!
+//! The user profile object carries `user_profile.profile_effect` with the effect's `sku_id`.
+//! If the effect is unknown or not in the catalog, this component renders nothing (empty Div).
+//! Real animated APNG layers are rendered with native GPUI `img(url)`.
 
 use gpui::prelude::*;
 use gpui::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Canonical profile effect payload received in user profiles or collectibles inventory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileEffectData {
-    /// Snowflake identifier or preset name of the profile effect.
-    pub id: String,
-    /// Store SKU snowflake identifier, if applicable.
-    #[serde(default)]
+/// Reference to an equipped profile effect on a user profile (`user_profile.profile_effect`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UserProfileEffect {
+    /// SKU Snowflake identifier of the collectible effect.
+    #[serde(default, alias = "id", alias = "skuId")]
     pub sku_id: Option<String>,
-    /// Optional expiration timestamp (Unix seconds) for seasonal / nitro-trial items.
-    #[serde(default)]
+    /// Optional expiration timestamp (Unix seconds) for seasonal or trial effects.
+    #[serde(default, alias = "expiresAt")]
     pub expires_at: Option<u64>,
 }
 
-impl ProfileEffectData {
-    /// Creates a new profile effect with the given ID.
-    pub fn new(id: impl Into<String>) -> Self {
+impl UserProfileEffect {
+    pub fn new(sku_id: impl Into<String>) -> Self {
         Self {
-            id: id.into(),
-            sku_id: None,
-            expires_at: None,
-        }
-    }
-
-    /// Creates a profile effect with an explicit SKU ID.
-    pub fn with_sku(id: impl Into<String>, sku_id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
             sku_id: Some(sku_id.into()),
             expires_at: None,
         }
     }
-
-    /// Maps this effect's identifier to a recognized Discord visual theme.
-    pub fn theme(&self) -> ProfileEffectTheme {
-        ProfileEffectTheme::from_effect_id(&self.id)
-    }
 }
 
-/// Thematic visual style mapped from Discord profile effects.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProfileEffectTheme {
-    /// Falling sakura petals with rose-pink glow
-    Sakura,
-    /// Neon cyan and laser violet cyber grid
-    Cyberpunk,
-    /// Arcane purple and cosmic shimmering glow
-    Mystic,
-    /// Warm crimson, burning orange, and rising embers
-    Fire,
-    /// Frost crystals, icy blue, and winter sparkle
-    Frost,
-    /// Aquamarine oceanic hues and rising bubble highlights
-    DeepSea,
-    /// 8-bit arcade magenta, pixel grid, and neon sparks
-    RetroArcade,
-    /// Autumn golden-amber, bronze, and falling leaves
-    Autumn,
-    /// Poison-emerald green and bubbling mystical mist
-    Cauldron,
-    /// Midnight galaxy, cosmic violet, and stardust
-    Celestial,
-    /// Generic or unknown effect with deterministic theme derived from ID
-    Custom(String),
+/// An alternate randomized image source for an effect layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileEffectLayerSource {
+    pub src: String,
 }
 
-impl ProfileEffectTheme {
-    /// Resolves an effect ID into a known preset theme.
-    pub fn from_effect_id(id: &str) -> Self {
-        let lower = id.to_lowercase();
-        if lower.contains("sakura") || lower.contains("blossom") || lower.contains("cherry") || id == "1144002621008298034" {
-            Self::Sakura
-        } else if lower.contains("cyber") || lower.contains("matrix") || lower.contains("neon") {
-            Self::Cyberpunk
-        } else if lower.contains("mystic") || lower.contains("magic") || lower.contains("arcane") {
-            Self::Mystic
-        } else if lower.contains("fire") || lower.contains("flame") || lower.contains("ember") {
-            Self::Fire
-        } else if lower.contains("frost") || lower.contains("ice") || lower.contains("snow") || lower.contains("winter") {
-            Self::Frost
-        } else if lower.contains("sea") || lower.contains("ocean") || lower.contains("hydro") || lower.contains("water") {
-            Self::DeepSea
-        } else if lower.contains("arcade") || lower.contains("retro") || lower.contains("8bit") || lower.contains("pixel") {
-            Self::RetroArcade
-        } else if lower.contains("autumn") || lower.contains("fall") || lower.contains("leaves") {
-            Self::Autumn
-        } else if lower.contains("cauldron") || lower.contains("witch") || lower.contains("spooky") {
-            Self::Cauldron
-        } else if lower.contains("celestial") || lower.contains("galaxy") || lower.contains("star") || lower.contains("cosmic") {
-            Self::Celestial
-        } else {
-            Self::Custom(id.to_string())
-        }
-    }
-
-    /// Display title for the effect theme.
-    pub fn title(&self) -> &'static str {
-        match self {
-            Self::Sakura => "Sakura Blossoms",
-            Self::Cyberpunk => "Cyberpunk Neo",
-            Self::Mystic => "Mystic Arcane",
-            Self::Fire => "Fiery Embers",
-            Self::Frost => "Winter Frost",
-            Self::DeepSea => "Ocean Depths",
-            Self::RetroArcade => "Retro 8-Bit",
-            Self::Autumn => "Autumn Leaves",
-            Self::Cauldron => "Witch's Cauldron",
-            Self::Celestial => "Cosmic Stardust",
-            Self::Custom(_) => "Profile Effect",
-        }
-    }
-
-    /// Hex color stops for the background gradient.
-    pub fn gradient_stops(&self) -> &'static [u32] {
-        match self {
-            Self::Sakura => &[0x4a154b, 0x6e2558, 0x933566, 0xb84573, 0xdd5581, 0xff7096],
-            Self::Cyberpunk => &[0x0d1b2a, 0x1b263b, 0x415a77, 0x0077b6, 0x00b4d8, 0x90e0ef],
-            Self::Mystic => &[0x10002b, 0x240046, 0x3c096c, 0x5a189a, 0x7b2cbf, 0x9d4edd],
-            Self::Fire => &[0x370617, 0x6a040f, 0x9d0208, 0xd00000, 0xdc2f02, 0xe85d04],
-            Self::Frost => &[0x03045e, 0x023e8a, 0x0077b6, 0x0096c7, 0x00b4d8, 0x48cae4],
-            Self::DeepSea => &[0x012a4a, 0x013a63, 0x01497c, 0x2a6f97, 0x2c7da0, 0x468faf],
-            Self::RetroArcade => &[0x2b0938, 0x4e125c, 0x7b1fa2, 0xaa00ff, 0xd500f9, 0xff4081],
-            Self::Autumn => &[0x281105, 0x441c09, 0x692d0d, 0x8f4316, 0xb55a1f, 0xdc7629],
-            Self::Cauldron => &[0x0b2914, 0x134623, 0x1d6634, 0x278746, 0x33aa5a, 0x40cd6e],
-            Self::Celestial => &[0x08071a, 0x120e36, 0x221a5c, 0x382a85, 0x543fae, 0x7558d4],
-            Self::Custom(_) => &[0x1e1f22, 0x2b2d31, 0x383a40, 0x4e5058, 0x5c5e66, 0x6d6f78],
-        }
-    }
-
-    /// Primary accent / atmospheric glow color.
-    pub fn glow_color(&self) -> Rgba {
-        match self {
-            Self::Sakura => rgba(0xff709666),
-            Self::Cyberpunk => rgba(0x00b4d866),
-            Self::Mystic => rgba(0x9d4edd66),
-            Self::Fire => rgba(0xe85d0466),
-            Self::Frost => rgba(0x48cae466),
-            Self::DeepSea => rgba(0x468faf66),
-            Self::RetroArcade => rgba(0xff408166),
-            Self::Autumn => rgba(0xdc762966),
-            Self::Cauldron => rgba(0x40cd6e66),
-            Self::Celestial => rgba(0x7558d466),
-            Self::Custom(_) => rgba(0x5865f244),
-        }
-    }
-
-    /// Particle foreground color.
-    pub fn particle_color(&self) -> Rgba {
-        match self {
-            Self::Sakura => rgba(0xffb3c6aa),
-            Self::Cyberpunk => rgba(0xa0f0ffcc),
-            Self::Mystic => rgba(0xe0aaffcc),
-            Self::Fire => rgba(0xffba08dd),
-            Self::Frost => rgba(0xade8f4ee),
-            Self::DeepSea => rgba(0x90e0efaa),
-            Self::RetroArcade => rgba(0xff80abdd),
-            Self::Autumn => rgba(0xf4a261cc),
-            Self::Cauldron => rgba(0x80ed99cc),
-            Self::Celestial => rgba(0xe2e0ffcc),
-            Self::Custom(_) => rgba(0xffffff88),
-        }
-    }
+/// A visual image layer of a Discord profile effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileEffectLayer {
+    /// CDN image asset URL (PNG / animated APNG).
+    pub src: String,
+    /// Whether this layer loops continuously.
+    #[serde(default, rename = "loop")]
+    pub is_looping: bool,
+    /// Duration of the layer animation in milliseconds.
+    #[serde(default)]
+    pub duration: u64,
+    /// Start delay of the layer animation in milliseconds.
+    #[serde(default)]
+    pub start: u64,
+    /// Delay between animation loops in milliseconds.
+    #[serde(default, alias = "loopDelay")]
+    pub loop_delay: u64,
+    /// Z-index stacking order of the layer.
+    #[serde(default, alias = "zIndex")]
+    pub z_index: i32,
+    /// Optional alternate sources for randomized variants.
+    #[serde(default, alias = "randomizedSources")]
+    pub randomized_sources: Vec<ProfileEffectLayerSource>,
 }
 
-/// Standalone GPUI component for rendering a Discord profile effect overlay.
-pub struct ProfileEffect {
-    data: ProfileEffectData,
-    height: Pixels,
-    width: Option<Pixels>,
-    show_particles: bool,
+/// A full profile effect definition from the Discord collectibles catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileEffectConfig {
+    /// Store SKU snowflake identifier.
+    #[serde(alias = "skuId")]
+    pub sku_id: String,
+    /// Name/title of the profile effect.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Description of the effect.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Accessibility screen reader label.
+    #[serde(default, alias = "accessibilityLabel")]
+    pub accessibility_label: Option<String>,
+    /// Static preview asset URL for reduced motion.
+    #[serde(default, alias = "reducedMotionSrc")]
+    pub reduced_motion_src: Option<String>,
+    /// Thumbnail preview image URL.
+    #[serde(default, alias = "thumbnailPreviewSrc")]
+    pub thumbnail_preview_src: Option<String>,
+    /// Layer definitions comprising the animated effect.
+    #[serde(default)]
+    pub effects: Vec<ProfileEffectLayer>,
+    /// Animation type code.
+    #[serde(default, alias = "animationType")]
+    pub animation_type: Option<u32>,
+    /// Collectible type (1 = profile effect).
+    #[serde(default, rename = "type")]
+    pub effect_type: Option<u32>,
 }
 
-impl ProfileEffect {
-    /// Creates a new `ProfileEffect` component.
-    pub fn new(data: ProfileEffectData) -> Self {
+/// In-memory catalog of profile effect configurations indexed by `sku_id`.
+#[derive(Debug, Clone, Default)]
+pub struct ProfileEffectCatalog {
+    pub effects_by_sku: HashMap<String, ProfileEffectConfig>,
+}
+
+impl ProfileEffectCatalog {
+    pub fn new() -> Self {
         Self {
-            data,
-            height: px(105.0),
-            width: None,
-            show_particles: true,
+            effects_by_sku: HashMap::new(),
         }
     }
 
-    /// Sets explicit banner height.
-    pub fn height(mut self, height: Pixels) -> Self {
-        self.height = height;
-        self
+    pub fn insert(&mut self, config: ProfileEffectConfig) {
+        self.effects_by_sku.insert(config.sku_id.clone(), config);
     }
 
-    /// Sets explicit banner width.
-    pub fn width(mut self, width: Pixels) -> Self {
-        self.width = Some(width);
-        self
+    pub fn get(&self, sku_id: &str) -> Option<&ProfileEffectConfig> {
+        self.effects_by_sku.get(sku_id)
     }
 
-    /// Toggles particle effect overlay.
-    pub fn show_particles(mut self, show: bool) -> Self {
-        self.show_particles = show;
-        self
+    /// Parses all profile effects (`type == 1`) from the raw JSON array returned by
+    /// `GET /api/v9/collectibles-categories/v2` or `GET /api/v9/collectibles-shop`.
+    pub fn from_categories_json(categories_val: &serde_json::Value) -> Self {
+        let mut catalog = Self::new();
+        if let Some(categories) = categories_val.as_array() {
+            for cat in categories {
+                if let Some(products) = cat.get("products").and_then(|p| p.as_array()) {
+                    for prod in products {
+                        if let Some(items) = prod.get("items").and_then(|i| i.as_array()) {
+                            for item in items {
+                                if item.get("type").and_then(|t| t.as_u64()) == Some(1) {
+                                    if let Ok(config) = serde_json::from_value::<ProfileEffectConfig>(item.clone()) {
+                                        catalog.insert(config);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catalog
     }
 }
 
-impl IntoElement for ProfileEffect {
-    type Element = Div;
-
-    fn into_element(self) -> Self::Element {
-        render_profile_effect(&self.data, self.height, self.width)
-    }
-}
-
-/// Renders a profile effect as a composable GPUI `Div` element.
+/// Renders a real Discord profile effect from its catalog configuration.
 ///
-/// Can be embedded directly inside the banner of `UserProfilePopout` or other profile views.
+/// Overlays the actual image layers defined in the JSON catalog using GPUI's native
+/// `img(url)` element (which natively plays animated APNGs).
+///
+/// If the configuration is None, unknown, or has no valid layers, returns an empty Div.
 pub fn render_profile_effect(
-    effect: &ProfileEffectData,
+    config: Option<&ProfileEffectConfig>,
     banner_height: Pixels,
     banner_width: Option<Pixels>,
 ) -> Div {
-    let theme = effect.theme();
-    let stops = theme.gradient_stops();
-    let glow = theme.glow_color();
-    let particle_col = theme.particle_color();
+    let Some(config) = config else {
+        return div();
+    };
+
+    if config.effects.is_empty() {
+        if let Some(ref thumb) = config.thumbnail_preview_src {
+            let mut root = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .h(banner_height)
+                .overflow_hidden()
+                .child(img(thumb.clone()).size_full());
+            if let Some(w) = banner_width {
+                root = root.w(w);
+            } else {
+                root = root.w_full();
+            }
+            return root;
+        }
+        return div();
+    }
 
     let mut root = div()
-        .relative()
+        .absolute()
+        .top_0()
+        .left_0()
         .h(banner_height)
-        .overflow_hidden()
-        .rounded_t_md();
+        .overflow_hidden();
 
     if let Some(w) = banner_width {
         root = root.w(w);
@@ -247,91 +192,41 @@ pub fn render_profile_effect(
         root = root.w_full();
     }
 
-    // 1. Multi-stop smooth linear gradient background band
-    let gradient_layer = div()
-        .absolute()
-        .size_full()
-        .flex()
-        .flex_row()
-        .children(stops.iter().map(|&c| {
-            div()
-                .flex_1()
-                .h_full()
-                .bg(rgb(c))
-        }));
+    // Sort layers by z_index ascending so higher z-index layers render on top
+    let mut sorted_layers = config.effects.clone();
+    sorted_layers.sort_by_key(|layer| layer.z_index);
 
-    // 2. Ambient top/center atmospheric glow
-    let ambient_glow = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .bg(glow);
+    for layer in sorted_layers {
+        if layer.src.is_empty() {
+            continue;
+        }
+        let layer_el = div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(
+                img(layer.src.clone())
+                    .size_full()
+            );
+        root = root.child(layer_el);
+    }
 
-    // 3. Shimmer border highlight across top edge
-    let top_shimmer = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .right_0()
-        .h(px(2.0))
-        .bg(particle_col);
+    root
+}
 
-    // 4. Atmospheric themed floating particles
-    // Deterministic positioning across the banner width
-    let particles_layer = div()
-        .absolute()
-        .size_full()
-        .child(
-            div()
-                .absolute()
-                .top(px(12.0))
-                .left(px(18.0))
-                .size(px(6.0))
-                .rounded_full()
-                .bg(particle_col),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px(34.0))
-                .left(px(64.0))
-                .size(px(4.0))
-                .rounded_full()
-                .bg(particle_col),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px(18.0))
-                .left(px(140.0))
-                .size(px(7.0))
-                .rounded_full()
-                .bg(particle_col),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px(52.0))
-                .left(px(210.0))
-                .size(px(5.0))
-                .rounded_full()
-                .bg(particle_col),
-        )
-        .child(
-            div()
-                .absolute()
-                .top(px(28.0))
-                .left(px(270.0))
-                .size(px(6.0))
-                .rounded_full()
-                .bg(particle_col),
-        );
+/// Helper that looks up the effect in the catalog and renders it.
+pub fn render_profile_effect_for_user(
+    user_effect: Option<&UserProfileEffect>,
+    catalog: &ProfileEffectCatalog,
+    banner_height: Pixels,
+    banner_width: Option<Pixels>,
+) -> Div {
+    let config = user_effect
+        .and_then(|ue| ue.sku_id.as_deref())
+        .and_then(|sku| catalog.get(sku));
 
-    root.child(gradient_layer)
-        .child(ambient_glow)
-        .child(top_shimmer)
-        .child(particles_layer)
+    render_profile_effect(config, banner_height, banner_width)
 }
 
 #[cfg(test)]
@@ -339,50 +234,84 @@ mod tests {
     use super::*;
 
     #[::core::prelude::v1::test]
-    fn test_profile_effect_data_serde() {
-        let json_str = r#"{"id":"1144002621008298034","sku_id":"sku_sakura_01","expires_at":1700000000}"#;
-        let data: ProfileEffectData = serde_json::from_str(json_str).unwrap();
+    fn test_user_profile_effect_serde() {
+        // Real user profile JSON snippet
+        let json_str = r#"{"sku_id":"1271175049168031815","expires_at":null}"#;
+        let upe: UserProfileEffect = serde_json::from_str(json_str).unwrap();
+        assert_eq!(upe.sku_id.as_deref(), Some("1271175049168031815"));
+        assert_eq!(upe.expires_at, None);
 
-        assert_eq!(data.id, "1144002621008298034");
-        assert_eq!(data.sku_id.as_deref(), Some("sku_sakura_01"));
-        assert_eq!(data.expires_at, Some(1700000000));
-        assert_eq!(data.theme(), ProfileEffectTheme::Sakura);
+        // Alias skuId
+        let json_camel = r#"{"skuId":"999","expiresAt":1800000000}"#;
+        let upe_camel: UserProfileEffect = serde_json::from_str(json_camel).unwrap();
+        assert_eq!(upe_camel.sku_id.as_deref(), Some("999"));
+        assert_eq!(upe_camel.expires_at, Some(1800000000));
     }
 
     #[::core::prelude::v1::test]
-    fn test_profile_effect_theme_mapping() {
-        assert_eq!(
-            ProfileEffectTheme::from_effect_id("sakura_petals"),
-            ProfileEffectTheme::Sakura
-        );
-        assert_eq!(
-            ProfileEffectTheme::from_effect_id("cyber_matrix"),
-            ProfileEffectTheme::Cyberpunk
-        );
-        assert_eq!(
-            ProfileEffectTheme::from_effect_id("fire_embers"),
-            ProfileEffectTheme::Fire
-        );
-        assert_eq!(
-            ProfileEffectTheme::from_effect_id("winter_frost"),
-            ProfileEffectTheme::Frost
-        );
-        assert_eq!(
-            ProfileEffectTheme::from_effect_id("witch_cauldron"),
-            ProfileEffectTheme::Cauldron
-        );
+    fn test_profile_effect_config_real_discord_payload() {
+        // Real Discord payload captured from network
+        let real_json = r#"{
+            "skuId": "1551709318724849664",
+            "title": "Lottie's Cauldron",
+            "description": "Show this effect when others view your profile.",
+            "accessibilityLabel": "A witch casts a spell into a cauldron",
+            "reducedMotionSrc": "https://cdn.discordapp.com/media/v1/collectibles-shop/b7e0110143f9022379069cad2e9a87394f89fc22b85a63792711151071717c95",
+            "thumbnailPreviewSrc": "https://cdn.discordapp.com/media/v1/collectibles-shop/1f8b62514a782fe4d54fdd7fe1dbb6b6bf070716eaf8e41b332dba41ae00598f",
+            "effects": [
+                {
+                    "src": "https://cdn.discordapp.com/media/v1/collectibles-shop/5c8afd0840307d8903249d27c1255b2d892785a71bf4fe9ab5d08000949f190a",
+                    "loop": true,
+                    "duration": 4980,
+                    "start": 7211,
+                    "loopDelay": 2124,
+                    "zIndex": 100,
+                    "randomizedSources": []
+                },
+                {
+                    "src": "https://cdn.discordapp.com/media/v1/collectibles-shop/43c477e789ef0df0d29e3ba3a5aa99ae411ac05f78b82e1a8d023498d058bd0f",
+                    "loop": false,
+                    "duration": 4980,
+                    "start": 0,
+                    "loopDelay": 0,
+                    "zIndex": 110,
+                    "randomizedSources": [
+                        {"src": "https://cdn.discordapp.com/media/v1/collectibles-shop/43c477e789ef0df0d29e3ba3a5aa99ae411ac05f78b82e1a8d023498d058bd0f"}
+                    ]
+                }
+            ],
+            "animationType": 2,
+            "type": 1
+        }"#;
+
+        let config: ProfileEffectConfig = serde_json::from_str(real_json).unwrap();
+        assert_eq!(config.sku_id, "1551709318724849664");
+        assert_eq!(config.title.as_deref(), Some("Lottie's Cauldron"));
+        assert_eq!(config.effects.len(), 2);
+        assert!(config.effects[0].is_looping);
+        assert_eq!(config.effects[0].duration, 4980);
+        assert_eq!(config.effects[0].z_index, 100);
+        assert!(!config.effects[1].is_looping);
+        assert_eq!(config.effects[1].z_index, 110);
+        assert_eq!(config.effects[1].randomized_sources.len(), 1);
     }
 
     #[::core::prelude::v1::test]
-    fn test_profile_effect_builder() {
-        let data = ProfileEffectData::new("cyber_neo");
-        let effect = ProfileEffect::new(data)
-            .height(px(120.0))
-            .width(px(300.0))
-            .show_particles(true);
+    fn test_catalog_population_and_empty_fallback() {
+        let mut catalog = ProfileEffectCatalog::new();
+        assert!(catalog.get("non_existent").is_none());
 
-        assert_eq!(effect.height, px(120.0));
-        assert_eq!(effect.width, Some(px(300.0)));
-        assert!(effect.show_particles);
+        // Unknown effect renders nothing
+        let rendered_unknown = render_profile_effect_for_user(
+            Some(&UserProfileEffect::new("unknown_sku")),
+            &catalog,
+            px(105.0),
+            None,
+        );
+        let _ = rendered_unknown;
+
+        // No effect renders nothing
+        let rendered_none = render_profile_effect_for_user(None, &catalog, px(105.0), None);
+        let _ = rendered_none;
     }
 }

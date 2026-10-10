@@ -534,6 +534,15 @@ impl DiscordApiClient {
         Ok(sounds)
     }
 
+    /// Fetches the profile effects collectibles catalog (/collectibles-categories/v2)
+    pub async fn get_profile_effects_catalog(&self) -> Result<crate::components::ProfileEffectCatalog> {
+        let path = "/collectibles-categories/v2?include_bundles=true&variants_return_style=2";
+        let req = self.auth_request(reqwest::Method::GET, path);
+        let resp = self.send_request(path, req).await?;
+        let raw_json: serde_json::Value = resp.json().await?;
+        Ok(crate::components::ProfileEffectCatalog::from_categories_json(&raw_json))
+    }
+
     /// Sends a sticker message to a text channel (/channels/{channel_id}/messages)
     pub async fn send_sticker_message(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
