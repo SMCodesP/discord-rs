@@ -14,6 +14,6 @@ pub use profile::{
     ProfileTab, UserProfileData,
 };
 pub use settings::*;
-pub use user::{Activity, ActivityType, AvatarDecorationData, PresenceStatus, User};
+pub use user::{Activity, ActivityType, AvatarDecorationData, CustomStatus, CustomStatusEmoji, Presence, PresenceStatus, User};
 pub use voice::{VoiceParticipant, VoiceState};
 

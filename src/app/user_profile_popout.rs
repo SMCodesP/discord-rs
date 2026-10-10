@@ -25,7 +25,7 @@ use crate::components::profile_effect::{
     render_profile_effect_for_user, ProfileEffectCatalog, UserProfileEffect,
 };
 use crate::components::TextInput;
-use crate::domain::user::PresenceStatus;
+use crate::domain::user::{ActivityType, CustomStatus, Presence, PresenceStatus};
 pub use crate::domain::profile::{
     snowflake_to_datetime, ConnectedAccount, MutualGuild, ProfileBadge, ProfilePopoutState,
     ProfileTab, UserProfileData,
@@ -77,6 +77,7 @@ pub fn render_user_profile_popout(
     app_entity: Entity<crate::app::state::AppState>,
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
+    presence: Option<&Presence>,
 ) -> impl IntoElement {
     let entity_close = app_entity.clone();
     let entity_key = app_entity.clone();
@@ -104,7 +105,7 @@ pub fn render_user_profile_popout(
                 cx.notify();
             });
         })
-        .child(render_profile_card(app_entity, popout, catalog))
+        .child(render_profile_card(app_entity, popout, catalog, presence))
 }
 
 /// Renders the 300px Popout Card container
@@ -112,6 +113,7 @@ fn render_profile_card(
     app_entity: Entity<crate::app::state::AppState>,
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
+    presence: Option<&Presence>,
 ) -> impl IntoElement {
     let entity_card = app_entity.clone();
     let entity_close_btn = app_entity.clone();
@@ -223,8 +225,9 @@ fn render_profile_card(
         .map(|u| u.username.clone())
         .unwrap_or_else(|| popout.user_id.clone());
 
-    let presence_status = avatar_user
-        .map(|u| u.presence)
+    let presence_status = presence
+        .map(|p| p.status)
+        .or_else(|| avatar_user.map(|u| u.presence))
         .unwrap_or(PresenceStatus::Offline);
 
     let avatar_initial = display_name
@@ -385,8 +388,53 @@ fn render_profile_card(
 
     body = body.child(user_tag_row);
 
-    // Custom Status (if active on user)
-    if let Some(ref act) = avatar_user.and_then(|u| u.activity.as_ref()) {
+    // Custom Status (from live presence or fallback)
+    let custom_status: Option<CustomStatus> = presence
+        .and_then(|p| p.custom_status.clone())
+        .or_else(|| {
+            avatar_user.and_then(|u| u.activity.as_ref()).and_then(|act| {
+                act.state.as_ref().map(|s| CustomStatus::from_text(s))
+            })
+        });
+
+    if let Some(cs) = custom_status {
+        let emoji_el: Option<AnyElement> = if let Some(ref em) = cs.emoji {
+            if let Some(url) = em.image_url() {
+                Some(img(url).size(px(16.0)).into_any_element())
+            } else if !em.name.is_empty() {
+                Some(div().text_size(px(14.0)).child(em.name.clone()).into_any_element())
+            } else {
+                Some(div().text_size(px(14.0)).child("💬").into_any_element())
+            }
+        } else {
+            Some(div().text_size(px(14.0)).child("💬").into_any_element())
+        };
+
+        if cs.text.is_some() || cs.emoji.is_some() {
+            body = body.child(
+                div()
+                    .p(px(8.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(0x35373c))
+                    .bg(rgb(0x1e1f22))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .children(emoji_el)
+                    .children(cs.text.as_ref().map(|t| {
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(0xdbdee1))
+                            .child(t.clone())
+                    })),
+            );
+        }
+    } else if let Some(ref act) = presence
+        .and_then(|p| p.activity.as_ref())
+        .or_else(|| avatar_user.and_then(|u| u.activity.as_ref()))
+    {
         if let Some(ref state_text) = act.state {
             body = body.child(
                 div()
@@ -412,6 +460,52 @@ fn render_profile_card(
                     ),
             );
         }
+    }
+
+    // Live Game Activity (Rich Presence) if present
+    let game_activity = presence
+        .and_then(|p| p.activity.as_ref())
+        .or_else(|| avatar_user.and_then(|u| u.activity.as_ref()))
+        .filter(|a| a.activity_type == ActivityType::Playing || (!a.name.is_empty() && a.name != "Custom Status"));
+
+    if let Some(game) = game_activity {
+        body = body.child(
+            div()
+                .p(px(8.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(0x35373c))
+                .bg(rgb(0x1e1f22))
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0x23a55a))
+                        .child("JOGANDO"),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(0xffffff))
+                        .child(game.name.clone()),
+                )
+                .children(game.details.as_ref().map(|d| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xdbdee1))
+                        .child(d.clone())
+                }))
+                .children(game.state.as_ref().map(|s| {
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0x949ba4))
+                        .child(s.clone())
+                })),
+        );
     }
 
     // Divider

@@ -167,6 +167,9 @@ pub struct Channel {
     /// List of recipient display names / usernames for DM / group DM channels.
     #[serde(default)]
     pub recipient_names: Vec<String>,
+    /// User limit for voice channels (0 or None means unlimited).
+    #[serde(default)]
+    pub user_limit: Option<u32>,
 }
 
 impl Channel {
@@ -185,6 +188,7 @@ impl Channel {
             is_pinned: false,
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),
+            user_limit: None,
         }
     }
 
@@ -226,6 +230,11 @@ impl Channel {
 
     pub fn with_recipient_ids(mut self, ids: Vec<String>) -> Self {
         self.recipient_ids = ids;
+        self
+    }
+
+    pub fn with_user_limit(mut self, limit: Option<u32>) -> Self {
+        self.user_limit = limit;
         self
     }
 

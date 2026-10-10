@@ -359,3 +359,38 @@ fn test_profile_popout_quick_direct_message_send() {
     let msgs = state.messages_by_channel.get(selected_cid).expect("messages exist");
     assert_eq!(msgs.last().unwrap().content, "Olá, vamos programar em Rust?");
 }
+
+#[test]
+fn test_profile_popout_live_presence_integration() {
+    let mut state = AppState::new();
+
+    let user_id = "user-presence-live-test";
+    let cs = discord_rs::domain::user::CustomStatus::new(
+        Some("Estudando Rust no discord-rs".to_string()),
+        Some(discord_rs::domain::user::CustomStatusEmoji::unicode("🦀")),
+    );
+    let game = discord_rs::domain::user::Activity::playing("Zed");
+
+    // Gateway sends live presence update
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: user_id.to_string(),
+        status: discord_rs::domain::user::PresenceStatus::DoNotDisturb,
+        activity: Some(game.clone()),
+        custom_status: Some(cs.clone()),
+    });
+
+    // Verify presence is stored in state.presences_by_user
+    let live_presence = state.get_user_presence(user_id).expect("presence exists in state");
+    assert_eq!(live_presence.status, discord_rs::domain::user::PresenceStatus::DoNotDisturb);
+    assert_eq!(live_presence.custom_status, Some(cs));
+    assert_eq!(live_presence.activity, Some(game));
+
+    // Open profile
+    state.open_user_profile(user_id);
+    let popout = state.profile_popout.as_ref().unwrap();
+    assert_eq!(popout.user_id, user_id);
+
+    // Live presence is resolved for this user from state
+    let resolved_p = state.get_user_presence(&popout.user_id);
+    assert_eq!(resolved_p.unwrap().status, discord_rs::domain::user::PresenceStatus::DoNotDisturb);
+}

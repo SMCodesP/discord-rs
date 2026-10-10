@@ -261,13 +261,19 @@ impl Render for RootView {
                 let entity = app_entity.clone();
                 let popout_state = popout.clone();
                 let catalog = state.profile_effects_catalog.clone();
+                let presence = state.presences_by_user.get(&popout.user_id).cloned();
                 Some(
                     div()
                         .absolute()
                         .top_0()
                         .left_0()
                         .size_full()
-                        .child(crate::app::user_profile_popout::render_user_profile_popout(entity, &popout_state, &catalog)),
+                        .child(crate::app::user_profile_popout::render_user_profile_popout(
+                            entity,
+                            &popout_state,
+                            &catalog,
+                            presence.as_ref(),
+                        )),
                 )
             } else {
                 None

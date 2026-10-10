@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use crate::domain::channel::ChannelType;
+use crate::domain::voice::VoiceState;
 use crate::domain::message::{Attachment, Author, Message, Reaction};
 use crate::domain::settings::{
     AccountConnection, AccessibilitySettings, AuthorizedApp, FamilyCenterLink,
@@ -35,6 +36,28 @@ impl PresenceStatus {
             Self::Idle => 0xf0b232,
             Self::DoNotDisturb => 0xf23f43,
             Self::Offline => 0x80848e,
+        }
+    }
+}
+
+impl From<crate::domain::user::PresenceStatus> for PresenceStatus {
+    fn from(s: crate::domain::user::PresenceStatus) -> Self {
+        match s {
+            crate::domain::user::PresenceStatus::Online => Self::Online,
+            crate::domain::user::PresenceStatus::Idle => Self::Idle,
+            crate::domain::user::PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+            crate::domain::user::PresenceStatus::Offline => Self::Offline,
+        }
+    }
+}
+
+impl From<PresenceStatus> for crate::domain::user::PresenceStatus {
+    fn from(s: PresenceStatus) -> Self {
+        match s {
+            PresenceStatus::Online => Self::Online,
+            PresenceStatus::Idle => Self::Idle,
+            PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+            PresenceStatus::Offline => Self::Offline,
         }
     }
 }
@@ -130,6 +153,8 @@ pub struct ChannelItemState {
     pub recipient_ids: Vec<String>,
     #[serde(default)]
     pub recipient_names: Vec<String>,
+    #[serde(default)]
+    pub user_limit: Option<u32>,
 }
 
 /// Category grouping in channel sidebar
@@ -434,6 +459,8 @@ pub struct AppState {
     pub message_requests: Vec<MessageRequestItem>,
     /// Rich Presence activities in Active Now panel
     pub active_now_items: Vec<ActiveNowItem>,
+    /// Real-time user presences indexed by user Snowflake ID
+    pub presences_by_user: HashMap<String, crate::domain::user::Presence>,
     /// Telemetry & Parity monitoring handle
     pub telemetry: Option<crate::telemetry::TelemetryHandle>,
 
@@ -452,6 +479,8 @@ pub struct AppState {
     pub profile_popout: Option<crate::domain::profile::ProfilePopoutState>,
     /// Collectibles profile effects catalog
     pub profile_effects_catalog: crate::components::ProfileEffectCatalog,
+    /// Active voice states by voice channel ID
+    pub voice_states_by_channel: HashMap<String, Vec<VoiceState>>,
 }
 
 pub struct AppStateGlobal(pub gpui::Entity<AppState>);
@@ -626,6 +655,7 @@ fn organize_channels_into_categories(
             is_group_dm: c.channel_type == ChannelType::GroupDm,
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),
+            user_limit: c.user_limit,
         }
     };
 
@@ -700,6 +730,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-announcements".into(),
@@ -714,6 +745,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -734,6 +766,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-help".into(),
@@ -748,6 +781,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-showcase".into(),
@@ -762,6 +796,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -782,6 +817,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-voice-pair".into(),
@@ -796,6 +832,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -857,6 +894,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-gpui-showcase".into(),
@@ -871,6 +909,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -890,6 +929,7 @@ impl AppState {
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     }],
                 },
             ],
@@ -1066,6 +1106,7 @@ impl AppState {
             auth_error: None,
             is_connecting,
             dm_channels: Vec::new(),
+            presences_by_user: HashMap::new(),
             pinned_dms: Vec::new(),
             pinned_dms_path: None,
             guild_folders,
@@ -1228,6 +1269,7 @@ impl AppState {
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
             profile_popout: None,
             profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
+            voice_states_by_channel: HashMap::new(),
         };
         state.sync_guild_media();
         state
@@ -1993,6 +2035,56 @@ impl AppState {
         self.active_voice_call = None;
     }
 
+    /// Updates or removes a voice state across all channels
+    pub fn update_voice_state(&mut self, mut state: VoiceState) {
+        let user_id = state.user_id.clone();
+        // Resolução de nome de exibição e avatar a partir dos caches locais se não vierem no voice state
+        if state.user_name.is_none() {
+            if user_id == self.current_user.id {
+                state.user_name = Some(self.current_user.display_name.clone());
+                if state.avatar_url.is_none() {
+                    state.avatar_url = self.current_user.avatar_url.clone();
+                }
+            } else if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
+                state.user_name = Some(m.name.clone());
+            } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
+                state.user_name = Some(f.display_name.clone());
+                if state.avatar_url.is_none() {
+                    state.avatar_url = f.avatar_url.clone();
+                }
+            }
+        }
+
+        // Remove the user from any channel they were previously in
+        for states in self.voice_states_by_channel.values_mut() {
+            states.retain(|s| s.user_id != user_id);
+        }
+        // If channel_id == Some(cid), add or update in cid
+        if let Some(ref cid) = state.channel_id {
+            let entry = self.voice_states_by_channel.entry(cid.clone()).or_default();
+            if let Some(existing) = entry.iter_mut().find(|s| s.user_id == user_id) {
+                *existing = state;
+            } else {
+                entry.push(state);
+            }
+        }
+    }
+
+    /// Returns the slice of active voice states connected to a specific channel
+    pub fn voice_states_for_channel(&self, channel_id: &str) -> &[VoiceState] {
+        self.voice_states_by_channel
+            .get(channel_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Populates multiple voice states from a guild initial snapshot
+    pub fn populate_guild_voice_states(&mut self, states: Vec<VoiceState>) {
+        for state in states {
+            self.update_voice_state(state);
+        }
+    }
+
     /// Toggles self mute
     pub fn toggle_mute(&mut self) {
         if let Some(ref tel) = self.telemetry {
@@ -2471,6 +2563,9 @@ impl AppState {
                 self.auth_error = Some(reason.clone());
                 self.connection_status = format!("Desconectado: {}", reason);
             }
+            TransportEvent::VoiceStateUpdate(state) => {
+                self.update_voice_state(state);
+            }
             TransportEvent::GuildChannelsUpdated { guild_id, channels } => {
                 let categories = organize_channels_into_categories(&guild_id, channels);
 
@@ -2586,6 +2681,7 @@ impl AppState {
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
+                            user_limit: None,
                         }
                     })
                     .collect();
@@ -2657,6 +2753,7 @@ impl AppState {
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
+                            user_limit: None,
                         },
                     );
                 }
@@ -2709,6 +2806,7 @@ impl AppState {
                             is_group_dm: is_group,
                             recipient_ids: channel.recipient_ids.clone(),
                             recipient_names: channel.recipient_names.clone(),
+                            user_limit: None,
                         },
                     );
                 }
@@ -2775,12 +2873,28 @@ impl AppState {
                                 }
                             }),
                             avatar_text,
-                            presence: PresenceStatus::Online,
-                            custom_status: None,
+                            presence: self
+                                .presences_by_user
+                                .get(&r.id)
+                                .map(|p| PresenceStatus::from(p.status))
+                                .unwrap_or(PresenceStatus::Offline),
+                            custom_status: self
+                                .presences_by_user
+                                .get(&r.id)
+                                .and_then(|p| p.custom_status.as_ref())
+                                .and_then(|cs| cs.text.clone()),
                             relationship_type: r.rel_type,
                         }
                     })
                     .collect();
+            }
+            TransportEvent::PresenceUpdate {
+                user_id,
+                status,
+                activity,
+                custom_status,
+            } => {
+                self.update_user_presence(user_id, status, activity, custom_status);
             }
             TransportEvent::PinnedDmsUpdated(pinned) => {
                 self.pinned_dms = pinned;
@@ -2799,6 +2913,48 @@ impl AppState {
                 self.set_profile_popout_error(&user_id, error);
             }
             _ => {}
+        }
+    }
+
+    /// Returns the cached presence for a given user ID
+    pub fn get_user_presence(&self, user_id: &str) -> Option<&crate::domain::user::Presence> {
+        self.presences_by_user.get(user_id)
+    }
+
+    /// Updates or inserts a user's real-time presence, propagating to friends and members
+    pub fn update_user_presence(
+        &mut self,
+        user_id: String,
+        status: crate::domain::user::PresenceStatus,
+        activity: Option<crate::domain::user::Activity>,
+        custom_status: Option<crate::domain::user::CustomStatus>,
+    ) {
+        let entry = self
+            .presences_by_user
+            .entry(user_id.clone())
+            .or_insert_with(|| crate::domain::user::Presence::new(&user_id, status));
+        entry.status = status;
+        entry.activity = activity.clone();
+        entry.custom_status = custom_status.clone();
+
+        let app_status: PresenceStatus = status.into();
+
+        // 1. Atualizar amigo na lista de amigos se existir
+        if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
+            friend.presence = app_status;
+            friend.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
+        }
+
+        // 2. Se for o usuário autenticado, atualizar perfil atual
+        if self.current_user.id == user_id {
+            self.current_user.presence = app_status;
+            self.current_user.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
+        }
+
+        // 3. Atualizar membros na lista de membros se presente
+        if let Some(member) = self.members.iter_mut().find(|m| m.id == user_id) {
+            member.presence = app_status;
+            member.activity = activity.as_ref().map(|act| act.name.clone());
         }
     }
 
@@ -3239,6 +3395,7 @@ impl AppState {
             is_group_dm: false,
             recipient_ids: vec![user_id.to_string()],
             recipient_names: vec![username.to_string()],
+            user_limit: None,
         };
 
         self.dm_channels.insert(0, item);
@@ -3290,6 +3447,7 @@ impl AppState {
             is_group_dm: true,
             recipient_ids,
             recipient_names,
+            user_limit: None,
         };
 
         self.dm_channels.insert(0, item);
