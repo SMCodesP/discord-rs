@@ -205,14 +205,26 @@ async fn test_send_friend_request_no_fake_line_and_result_handling() {
     );
     assert!(!state.is_sending_friend_request);
 
-    // 2. Sending friend request sets is_sending_friend_request without fake line
+    // 2. Disconnected check (client_manager is None)
+    state.send_friend_request("valid_user#1234");
+    assert!(!state.is_sending_friend_request);
+    assert_eq!(
+        state.add_friend_feedback,
+        Some((false, "Não conectado ao Discord.".into()))
+    );
+
+    // 3. Connect client_manager (mock)
+    let (cm, _rx) = discord_rs::protocol::ClientManager::new_mock();
+    state.client_manager = Some(cm);
+
+    // 4. Sending friend request sets is_sending_friend_request without fake line
     state.send_friend_request("valid_user#1234");
     assert!(state.is_sending_friend_request);
     assert!(state.add_friend_feedback.is_none());
     // Crucial check: zero fake lines inserted in friends
     assert_eq!(state.friends.len(), 0);
 
-    // 3. Simulating error from API/Provider
+    // 5. Simulating error from API/Provider
     state.handle_transport_event(TransportEvent::FriendRequestResult {
         username: "valid_user".into(),
         success: false,
@@ -225,7 +237,7 @@ async fn test_send_friend_request_no_fake_line_and_result_handling() {
     );
     assert_eq!(state.friends.len(), 0);
 
-    // 4. Simulating success from API/Provider
+    // 6. Simulating success from API/Provider
     state.is_sending_friend_request = true;
     state.handle_transport_event(TransportEvent::FriendRequestResult {
         username: "valid_user".into(),
@@ -249,10 +261,13 @@ async fn test_send_friend_request_no_fake_line_and_result_handling() {
     assert_eq!(state.friends[0].id, "real-snowflake-12345");
 }
 
-#[test]
-fn test_pending_relationship_actions_state() {
+#[tokio::test]
+async fn test_pending_relationship_actions_state() {
     let mut state = AppState::new();
     state.friends.clear();
+
+    let (cm, _rx) = discord_rs::protocol::ClientManager::new_mock();
+    state.client_manager = Some(cm);
 
     state.friends.push(FriendItemState {
         id: "target-user".into(),

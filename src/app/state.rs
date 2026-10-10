@@ -1314,6 +1314,15 @@ impl AppState {
             return;
         }
 
+        let cm = match self.client_manager.as_ref() {
+            Some(cm) => cm.clone(),
+            None => {
+                self.is_sending_friend_request = false;
+                self.add_friend_feedback = Some((false, "Não conectado ao Discord.".to_string()));
+                return;
+            }
+        };
+
         let (uname, disc) = match trimmed.split_once('#') {
             Some((u, d)) => (u.trim().to_string(), Some(d.trim().to_string())),
             None => (trimmed.to_string(), None),
@@ -1322,67 +1331,72 @@ impl AppState {
         self.is_sending_friend_request = true;
         self.add_friend_feedback = None;
 
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
-            let u = uname;
-            let d = disc;
-            tokio::spawn(async move {
-                match cm.send_friend_request(&u, d.as_deref()).await {
-                    Ok(()) => {
-                        cm.emit_event(crate::protocol::TransportEvent::FriendRequestResult {
-                            username: u.clone(),
-                            success: true,
-                            message: format!("Solicitação de amizade enviada para {}!", u),
-                        });
-                    }
-                    Err(e) => {
-                        cm.emit_event(crate::protocol::TransportEvent::FriendRequestResult {
-                            username: u,
-                            success: false,
-                            message: e.to_string(),
-                        });
-                    }
+        let u = uname;
+        let d = disc;
+        tokio::spawn(async move {
+            match cm.send_friend_request(&u, d.as_deref()).await {
+                Ok(()) => {
+                    cm.emit_event(crate::protocol::TransportEvent::FriendRequestResult {
+                        username: u.clone(),
+                        success: true,
+                        message: format!("Solicitação de amizade enviada para {}!", u),
+                    });
                 }
-            });
-        }
+                Err(e) => {
+                    cm.emit_event(crate::protocol::TransportEvent::FriendRequestResult {
+                        username: u,
+                        success: false,
+                        message: e.to_string(),
+                    });
+                }
+            }
+        });
     }
 
     /// Accepts an incoming friend request (delegated to ClientManager)
     pub fn accept_friend_request(&mut self, user_id: &str) {
-        self.pending_relationship_actions.insert(user_id.to_string());
+        let cm = match self.client_manager.as_ref() {
+            Some(cm) => cm.clone(),
+            None => {
+                log::warn!("Não conectado ao Discord: impossível aceitar pedido de amizade para {}", user_id);
+                return;
+            }
+        };
 
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
-            let uid = user_id.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = cm.accept_friend_request(&uid).await {
-                    log::warn!("Falha ao aceitar pedido de amizade: {:?}", e);
-                    cm.emit_event(crate::protocol::TransportEvent::RelationshipActionFailed {
-                        id: uid,
-                        error: e.to_string(),
-                    });
-                }
-            });
-        }
+        self.pending_relationship_actions.insert(user_id.to_string());
+        let uid = user_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = cm.accept_friend_request(&uid).await {
+                log::warn!("Falha ao aceitar pedido de amizade: {:?}", e);
+                cm.emit_event(crate::protocol::TransportEvent::RelationshipActionFailed {
+                    id: uid,
+                    error: e.to_string(),
+                });
+            }
+        });
     }
 
     /// Removes, declines, cancels or unblocks a relationship (delegated to ClientManager)
     pub fn remove_relationship(&mut self, user_id: &str) {
-        self.pending_relationship_actions.insert(user_id.to_string());
+        let cm = match self.client_manager.as_ref() {
+            Some(cm) => cm.clone(),
+            None => {
+                log::warn!("Não conectado ao Discord: impossível remover relacionamento para {}", user_id);
+                return;
+            }
+        };
 
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
-            let uid = user_id.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = cm.remove_relationship(&uid).await {
-                    log::warn!("Falha ao remover relacionamento: {:?}", e);
-                    cm.emit_event(crate::protocol::TransportEvent::RelationshipActionFailed {
-                        id: uid,
-                        error: e.to_string(),
-                    });
-                }
-            });
-        }
+        self.pending_relationship_actions.insert(user_id.to_string());
+        let uid = user_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = cm.remove_relationship(&uid).await {
+                log::warn!("Falha ao remover relacionamento: {:?}", e);
+                cm.emit_event(crate::protocol::TransportEvent::RelationshipActionFailed {
+                    id: uid,
+                    error: e.to_string(),
+                });
+            }
+        });
     }
 
     /// Updates or removes an Active Now item when friend presence or activity changes
@@ -2803,7 +2817,6 @@ impl AppState {
                 }
             }
             TransportEvent::RelationshipsUpdated(relationships) => {
-                let old_friends = std::mem::take(&mut self.friends);
                 self.friends = relationships
                     .into_iter()
                     .map(|r| {
@@ -2814,10 +2827,15 @@ impl AppState {
                             .unwrap_or('?')
                             .to_uppercase()
                             .to_string();
-                        let (existing_presence, existing_status) = old_friends
-                            .iter()
-                            .find(|f| f.id == r.id)
-                            .map(|f| (f.presence, f.custom_status.clone()))
+                        let (presence, custom_status) = self
+                            .presences_by_user
+                            .get(&r.id)
+                            .map(|p| {
+                                (
+                                    PresenceStatus::from(p.status),
+                                    p.custom_status.as_ref().and_then(|cs| cs.text.clone()),
+                                )
+                            })
                             .unwrap_or((PresenceStatus::Offline, None));
                         FriendItemState {
                             id: r.id.clone(),
@@ -2831,17 +2849,8 @@ impl AppState {
                                 }
                             }),
                             avatar_text,
-                            presence: self
-                                .presences_by_user
-                                .get(&r.id)
-                                .map(|p| PresenceStatus::from(p.status))
-                                .unwrap_or(existing_presence),
-                            custom_status: self
-                                .presences_by_user
-                                .get(&r.id)
-                                .and_then(|p| p.custom_status.as_ref())
-                                .and_then(|cs| cs.text.clone())
-                                .or(existing_status),
+                            presence,
+                            custom_status,
                             relationship_type: r.rel_type,
                         }
                     })
@@ -2864,11 +2873,24 @@ impl AppState {
                     }
                 });
 
+                let (presence, custom_status) = self
+                    .presences_by_user
+                    .get(&r.id)
+                    .map(|p| {
+                        (
+                            PresenceStatus::from(p.status),
+                            p.custom_status.as_ref().and_then(|cs| cs.text.clone()),
+                        )
+                    })
+                    .unwrap_or((PresenceStatus::Offline, None));
+
                 if let Some(existing) = self.friends.iter_mut().find(|f| f.id == r.id) {
                     existing.username = r.username;
                     existing.display_name = display_name;
                     existing.avatar_url = avatar_url;
                     existing.avatar_text = avatar_text;
+                    existing.presence = presence;
+                    existing.custom_status = custom_status;
                     existing.relationship_type = r.rel_type;
                 } else {
                     self.friends.push(FriendItemState {
@@ -2877,8 +2899,8 @@ impl AppState {
                         display_name,
                         avatar_url,
                         avatar_text,
-                        presence: PresenceStatus::Offline,
-                        custom_status: None,
+                        presence,
+                        custom_status,
                         relationship_type: r.rel_type,
                     });
                 }
