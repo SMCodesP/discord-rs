@@ -1,39 +1,116 @@
 use std::collections::VecDeque;
 
-/// Resamples interleaved PCM audio from `in_rate` to `out_rate` using linear interpolation.
-pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32, channels: usize) -> Vec<f32> {
-    if in_rate == out_rate || input.is_empty() || channels == 0 {
-        return input.to_vec();
-    }
+/// Stateful linear resampler that maintains phase and fractional position across chunks.
+/// Eliminates phase discontinuities, sample drift, and clicks at callback chunk boundaries.
+#[derive(Debug, Clone)]
+pub struct LinearResampler {
+    in_rate: u32,
+    out_rate: u32,
+    channels: usize,
+    phase: f64,
+    buffer: VecDeque<f32>,
+}
 
-    let in_frames = input.len() / channels;
-    if in_frames == 0 {
-        return Vec::new();
-    }
-
-    let out_frames = ((in_frames as u64 * out_rate as u64 + (in_rate as u64 / 2)) / in_rate as u64) as usize;
-    if out_frames == 0 {
-        return Vec::new();
-    }
-
-    let ratio = in_rate as f64 / out_rate as f64;
-    let mut output = Vec::with_capacity(out_frames * channels);
-
-    for frame_idx in 0..out_frames {
-        let src_pos = frame_idx as f64 * ratio;
-        let idx0 = src_pos.floor() as usize;
-        let frac = (src_pos - idx0 as f64) as f32;
-        let idx1 = (idx0 + 1).min(in_frames.saturating_sub(1));
-
-        for ch in 0..channels {
-            let s0 = input[idx0 * channels + ch];
-            let s1 = input[idx1 * channels + ch];
-            let interpolated = s0 * (1.0 - frac) + s1 * frac;
-            output.push(interpolated);
+impl LinearResampler {
+    pub fn new(in_rate: u32, out_rate: u32, channels: usize) -> Self {
+        Self {
+            in_rate,
+            out_rate,
+            channels,
+            phase: 0.0,
+            buffer: VecDeque::with_capacity(channels * 2048),
         }
     }
 
-    output
+    /// Resamples an incoming chunk of interleaved PCM audio.
+    /// Preserves fractional phase and sample continuity from previous chunks.
+    pub fn resample(&mut self, input: &[f32]) -> Vec<f32> {
+        if self.in_rate == self.out_rate || self.channels == 0 {
+            return input.to_vec();
+        }
+
+        self.buffer.extend(input.iter().copied());
+
+        let available_frames = self.buffer.len() / self.channels;
+        if available_frames < 2 {
+            return Vec::new();
+        }
+
+        let ratio = self.in_rate as f64 / self.out_rate as f64;
+        let mut output = Vec::new();
+
+        while (self.phase.floor() as usize + 1) < (self.buffer.len() / self.channels) {
+            let idx0 = self.phase.floor() as usize;
+            let frac = (self.phase - idx0 as f64) as f32;
+            let idx1 = idx0 + 1;
+
+            let base0 = idx0 * self.channels;
+            let base1 = idx1 * self.channels;
+
+            for ch in 0..self.channels {
+                let s0 = self.buffer[base0 + ch];
+                let s1 = self.buffer[base1 + ch];
+                let interpolated = s0 * (1.0 - frac) + s1 * frac;
+                output.push(interpolated);
+            }
+
+            self.phase += ratio;
+        }
+
+        let consumed_frames = self.phase.floor() as usize;
+        if consumed_frames > 0 {
+            let drain_samples = consumed_frames * self.channels;
+            self.buffer.drain(0..drain_samples);
+            self.phase -= consumed_frames as f64;
+        }
+
+        output
+    }
+
+    /// Flushes any remaining samples in the resampler buffer (if available).
+    pub fn flush(&mut self) -> Vec<f32> {
+        let available_frames = self.buffer.len() / self.channels;
+        if available_frames < 2 || self.channels == 0 {
+            self.reset();
+            return Vec::new();
+        }
+
+        let ratio = self.in_rate as f64 / self.out_rate as f64;
+        let mut output = Vec::new();
+
+        while (self.phase.floor() as usize + 1) < available_frames {
+            let idx0 = self.phase.floor() as usize;
+            let frac = (self.phase - idx0 as f64) as f32;
+            let idx1 = idx0 + 1;
+
+            let base0 = idx0 * self.channels;
+            let base1 = idx1 * self.channels;
+
+            for ch in 0..self.channels {
+                let s0 = self.buffer[base0 + ch];
+                let s1 = self.buffer[base1 + ch];
+                output.push(s0 * (1.0 - frac) + s1 * frac);
+            }
+
+            self.phase += ratio;
+        }
+
+        self.reset();
+        output
+    }
+
+    pub fn reset(&mut self) {
+        self.phase = 0.0;
+        self.buffer.clear();
+    }
+}
+
+/// Convenience function for one-shot batch resampling.
+pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32, channels: usize) -> Vec<f32> {
+    let mut resampler = LinearResampler::new(in_rate, out_rate, channels);
+    let mut out = resampler.resample(input);
+    out.extend(resampler.flush());
+    out
 }
 
 /// Converts arbitrary channel count audio to stereo (2 channels).

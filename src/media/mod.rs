@@ -1,10 +1,12 @@
 pub mod audio;
+pub mod capture;
 pub mod codec;
 pub mod devices;
 pub mod mixer;
 pub mod resample;
 
 pub use audio::*;
+pub use capture::*;
 pub use codec::*;
 pub use devices::*;
 pub use mixer::*;
