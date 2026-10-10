@@ -7,6 +7,8 @@ use super::error::CaptureError;
 pub enum PixelFormat {
     Rgba8,
     Bgra8,
+    Rgbx8,
+    Bgrx8,
     Rgb8,
     Bgr8,
     Yuyv,
@@ -18,7 +20,9 @@ pub enum PixelFormat {
 impl PixelFormat {
     pub fn bytes_per_pixel(&self) -> Option<usize> {
         match self {
-            PixelFormat::Rgba8 | PixelFormat::Bgra8 => Some(4),
+            PixelFormat::Rgba8 | PixelFormat::Bgra8 | PixelFormat::Rgbx8 | PixelFormat::Bgrx8 => {
+                Some(4)
+            }
             PixelFormat::Rgb8 | PixelFormat::Bgr8 => Some(3),
             PixelFormat::Yuyv => Some(2),
             PixelFormat::Nv12 | PixelFormat::I420 => None,
@@ -30,6 +34,8 @@ impl PixelFormat {
         match fourcc {
             b"RGBA" | b"RGB4" => Some(PixelFormat::Rgba8),
             b"BGRA" | b"BGR4" => Some(PixelFormat::Bgra8),
+            b"RGBX" => Some(PixelFormat::Rgbx8),
+            b"BGRX" => Some(PixelFormat::Bgrx8),
             b"RGB3" | b"RGBP" => Some(PixelFormat::Rgb8),
             b"BGR3" => Some(PixelFormat::Bgr8),
             b"YUYV" | b"YUY2" => Some(PixelFormat::Yuyv),
@@ -44,6 +50,8 @@ impl PixelFormat {
         match self {
             PixelFormat::Rgba8 => Some(*b"RGBA"),
             PixelFormat::Bgra8 => Some(*b"BGRA"),
+            PixelFormat::Rgbx8 => Some(*b"RGBX"),
+            PixelFormat::Bgrx8 => Some(*b"BGRX"),
             PixelFormat::Rgb8 => Some(*b"RGB3"),
             PixelFormat::Bgr8 => Some(*b"BGR3"),
             PixelFormat::Yuyv => Some(*b"YUYV"),
@@ -89,6 +97,28 @@ impl VideoFrame {
             PixelFormat::Rgba8 => Ok(self.clone()),
             PixelFormat::Bgra8 => {
                 let converted = bgra_to_rgba(&self.data, self.width, self.height)?;
+                Ok(VideoFrame {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::Rgba8,
+                    data: converted,
+                    timestamp: self.timestamp,
+                    sequence: self.sequence,
+                })
+            }
+            PixelFormat::Rgbx8 => {
+                let converted = rgbx_to_rgba(&self.data, self.width, self.height)?;
+                Ok(VideoFrame {
+                    width: self.width,
+                    height: self.height,
+                    format: PixelFormat::Rgba8,
+                    data: converted,
+                    timestamp: self.timestamp,
+                    sequence: self.sequence,
+                })
+            }
+            PixelFormat::Bgrx8 => {
+                let converted = bgrx_to_rgba(&self.data, self.width, self.height)?;
                 Ok(VideoFrame {
                     width: self.width,
                     height: self.height,
@@ -250,6 +280,64 @@ pub fn bgra_to_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Cap
         dst[1] = src[1]; // G
         dst[2] = src[0]; // B
         dst[3] = src[3]; // A
+    }
+
+    Ok(output)
+}
+
+/// Converts RGBx8 bytes (4 bytes per pixel, 4th is padding) to RGBA8, forcing alpha to 255.
+pub fn rgbx_to_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CaptureError> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| CaptureError::ConversionError("Dimensions overflow".into()))?;
+
+    if data.len() < expected_len {
+        return Err(CaptureError::ConversionError(format!(
+            "Insufficient RGBx data: expected at least {} bytes, got {}",
+            expected_len,
+            data.len()
+        )));
+    }
+
+    let mut output = vec![0u8; expected_len];
+    for (src, dst) in data[..expected_len]
+        .chunks_exact(4)
+        .zip(output.chunks_exact_mut(4))
+    {
+        dst[0] = src[0]; // R
+        dst[1] = src[1]; // G
+        dst[2] = src[2]; // B
+        dst[3] = 255;    // A: explicitly force 255 (padding byte discarded)
+    }
+
+    Ok(output)
+}
+
+/// Converts BGRx8 bytes (4 bytes per pixel, 4th is padding) to RGBA8, forcing alpha to 255.
+pub fn bgrx_to_rgba(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, CaptureError> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| CaptureError::ConversionError("Dimensions overflow".into()))?;
+
+    if data.len() < expected_len {
+        return Err(CaptureError::ConversionError(format!(
+            "Insufficient BGRx data: expected at least {} bytes, got {}",
+            expected_len,
+            data.len()
+        )));
+    }
+
+    let mut output = vec![0u8; expected_len];
+    for (src, dst) in data[..expected_len]
+        .chunks_exact(4)
+        .zip(output.chunks_exact_mut(4))
+    {
+        dst[0] = src[2]; // R
+        dst[1] = src[1]; // G
+        dst[2] = src[0]; // B
+        dst[3] = 255;    // A: explicitly force 255 (garbage/padding byte discarded)
     }
 
     Ok(output)
@@ -550,5 +638,34 @@ mod tests {
         assert_eq!(&data[0..4], &[0, 0, 255, 255]);
         // Pixel 1 BGRA [0, 255, 0, 255] -> RGBA [0, 255, 0, 255]
         assert_eq!(&data[4..8], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn test_rgbx_and_bgrx_to_rgba_conversion_forces_alpha_255() {
+        // RGBx: [R, G, B, X] where X is garbage/padding (e.g. 0, 42)
+        let rgbx_data = vec![
+            10, 20, 30, 0,   // pixel 0 with X = 0
+            40, 50, 60, 42,  // pixel 1 with X = 42
+        ];
+        let rgba_from_rgbx = rgbx_to_rgba(&rgbx_data, 2, 1).unwrap();
+        assert_eq!(rgba_from_rgbx, vec![
+            10, 20, 30, 255,
+            40, 50, 60, 255,
+        ]);
+
+        // BGRx: [B, G, R, X] where X is garbage/padding (e.g. 0, 99)
+        let bgrx_data = vec![
+            30, 20, 10, 0,   // pixel 0 with X = 0 -> RGBA [10, 20, 30, 255]
+            60, 50, 40, 99,  // pixel 1 with X = 99 -> RGBA [40, 50, 60, 255]
+        ];
+        let rgba_from_bgrx = bgrx_to_rgba(&bgrx_data, 2, 1).unwrap();
+        assert_eq!(rgba_from_bgrx, vec![
+            10, 20, 30, 255,
+            40, 50, 60, 255,
+        ]);
+
+        // Verify insufficient data error
+        assert!(rgbx_to_rgba(&rgbx_data[..7], 2, 1).is_err());
+        assert!(bgrx_to_rgba(&bgrx_data[..7], 2, 1).is_err());
     }
 }

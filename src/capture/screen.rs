@@ -119,6 +119,90 @@ impl Default for ScreenCaptureConfig {
     }
 }
 
+/// Pure function to extract and compact a PipeWire frame buffer.
+/// Validates negotiated dimensions, maps SPA video formats to PixelFormat (handling RGBx/BGRx 4-byte padding),
+/// and strips line stride padding line-by-line if stride > width * bpp.
+pub fn extract_pipewire_frame(
+    raw_slice: &[u8],
+    width: u32,
+    height: u32,
+    spa_fmt: spa::param::video::VideoFormat,
+    stride: usize,
+    timestamp: Duration,
+    sequence: u64,
+) -> Result<VideoFrame, CaptureError> {
+    if width == 0 || height == 0 {
+        return Err(CaptureError::ConversionError(
+            "Frame width or height is zero (dimensions not yet negotiated)".into(),
+        ));
+    }
+
+    let format = match spa_fmt {
+        spa::param::video::VideoFormat::RGBx => PixelFormat::Rgbx8,
+        spa::param::video::VideoFormat::BGRx => PixelFormat::Bgrx8,
+        spa::param::video::VideoFormat::RGBA => PixelFormat::Rgba8,
+        spa::param::video::VideoFormat::BGRA => PixelFormat::Bgra8,
+        spa::param::video::VideoFormat::RGB => PixelFormat::Rgb8,
+        spa::param::video::VideoFormat::BGR => PixelFormat::Bgr8,
+        spa::param::video::VideoFormat::YUY2 => PixelFormat::Yuyv,
+        spa::param::video::VideoFormat::NV12 => PixelFormat::Nv12,
+        spa::param::video::VideoFormat::I420 => PixelFormat::I420,
+        other => {
+            return Err(CaptureError::ConversionError(format!(
+                "Unsupported or unnegotiated SPA video format: {:?}",
+                other
+            )));
+        }
+    };
+
+    let bpp = format.bytes_per_pixel().ok_or_else(|| {
+        CaptureError::ConversionError(format!(
+            "Unsupported format for row stride extraction: {:?}",
+            format
+        ))
+    })?;
+
+    let row_bytes = (width as usize)
+        .checked_mul(bpp)
+        .ok_or_else(|| CaptureError::ConversionError("Row bytes dimension overflow".into()))?;
+
+    let effective_stride = if stride >= row_bytes { stride } else { row_bytes };
+    let required_len = (height as usize - 1)
+        .checked_mul(effective_stride)
+        .and_then(|base| base.checked_add(row_bytes))
+        .ok_or_else(|| CaptureError::ConversionError("Frame size overflow".into()))?;
+
+    if raw_slice.len() < required_len {
+        return Err(CaptureError::ConversionError(format!(
+            "Insufficient raw buffer: expected at least {} bytes for stride {}, got {}",
+            required_len, effective_stride, raw_slice.len()
+        )));
+    }
+
+    let compact_data = if effective_stride == row_bytes {
+        let total_bytes = row_bytes * (height as usize);
+        raw_slice[..total_bytes].to_vec()
+    } else {
+        let total_bytes = row_bytes * (height as usize);
+        let mut compact = Vec::with_capacity(total_bytes);
+        for y in 0..(height as usize) {
+            let row_start = y * effective_stride;
+            let row_end = row_start + row_bytes;
+            compact.extend_from_slice(&raw_slice[row_start..row_end]);
+        }
+        compact
+    };
+
+    Ok(VideoFrame {
+        width,
+        height,
+        format,
+        data: compact_data,
+        timestamp,
+        sequence,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct X11ScreenInfo {
     pub index: usize,
@@ -457,56 +541,45 @@ impl ScreenSession {
                                 let chunk = data.chunk();
                                 let size = chunk.size() as usize;
                                 let offset = chunk.offset() as usize;
+                                let stride = chunk.stride() as usize;
 
                                 if size > 0 {
                                     if let Some(bytes) = data.data() {
                                         if offset + size <= bytes.len() {
-                                            let frame_data = bytes[offset..offset + size].to_vec();
+                                            let raw_slice = &bytes[offset..offset + size];
                                             let rect = user_data.format.size();
                                             let width = rect.width;
                                             let height = rect.height;
                                             let spa_fmt = user_data.format.format();
-                                            let format = if spa_fmt == spa::param::video::VideoFormat::RGBA {
-                                                PixelFormat::Rgba8
-                                            } else if spa_fmt == spa::param::video::VideoFormat::BGRA
-                                                || spa_fmt == spa::param::video::VideoFormat::BGRx
-                                            {
-                                                PixelFormat::Bgra8
-                                            } else if spa_fmt == spa::param::video::VideoFormat::RGBx
-                                                || spa_fmt == spa::param::video::VideoFormat::RGB
-                                            {
-                                                PixelFormat::Rgb8
-                                            } else if spa_fmt == spa::param::video::VideoFormat::BGR {
-                                                PixelFormat::Bgr8
-                                            } else if spa_fmt == spa::param::video::VideoFormat::YUY2 {
-                                                PixelFormat::Yuyv
-                                            } else if spa_fmt == spa::param::video::VideoFormat::NV12 {
-                                                PixelFormat::Nv12
-                                            } else if spa_fmt == spa::param::video::VideoFormat::I420 {
-                                                PixelFormat::I420
-                                            } else {
-                                                PixelFormat::Bgra8
-                                            };
 
-                                            let frame = VideoFrame {
-                                                width: if width > 0 { width } else { 1920 },
-                                                height: if height > 0 { height } else { 1080 },
-                                                format,
-                                                data: frame_data,
-                                                timestamp: user_data.start_time.elapsed(),
-                                                sequence: user_data.sequence,
-                                            };
-                                            user_data.sequence += 1;
-
-                                            match user_data.frame_tx.try_send(frame) {
-                                                Ok(()) => {}
-                                                Err(mpsc::error::TrySendError::Full(_)) => {
-                                                    log::trace!(
-                                                        "Wayland PipeWire frame dropped (slow consumer)"
-                                                    );
+                                            match extract_pipewire_frame(
+                                                raw_slice,
+                                                width,
+                                                height,
+                                                spa_fmt,
+                                                stride,
+                                                user_data.start_time.elapsed(),
+                                                user_data.sequence,
+                                            ) {
+                                                Ok(frame) => {
+                                                    user_data.sequence += 1;
+                                                    match user_data.frame_tx.try_send(frame) {
+                                                        Ok(()) => {}
+                                                        Err(mpsc::error::TrySendError::Full(_)) => {
+                                                            log::trace!(
+                                                                "Wayland PipeWire frame dropped (slow consumer)"
+                                                            );
+                                                        }
+                                                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                            return;
+                                                        }
+                                                    }
                                                 }
-                                                Err(mpsc::error::TrySendError::Closed(_)) => {
-                                                    return;
+                                                Err(e) => {
+                                                    log::debug!(
+                                                        "Dropping unnegotiated/invalid PipeWire frame: {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -527,7 +600,68 @@ impl ScreenSession {
                     }
                 };
 
-                let mut params = [];
+                let choice = spa::utils::Choice(
+                    spa::utils::ChoiceFlags::empty(),
+                    spa::utils::ChoiceEnum::Enum {
+                        default: spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_BGRx),
+                        alternatives: vec![
+                            spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_BGRx),
+                            spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_RGBx),
+                            spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_BGRA),
+                            spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_RGBA),
+                            spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_BGR),
+                            spa::utils::Id(spa::sys::SPA_VIDEO_FORMAT_RGB),
+                        ],
+                    },
+                );
+
+                let obj = spa::pod::Object {
+                    type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+                    id: spa::param::ParamType::EnumFormat.as_raw(),
+                    properties: vec![
+                        spa::pod::Property {
+                            key: spa::sys::SPA_FORMAT_mediaType,
+                            flags: spa::pod::PropertyFlags::empty(),
+                            value: spa::pod::Value::Id(spa::utils::Id(spa::sys::SPA_MEDIA_TYPE_video)),
+                        },
+                        spa::pod::Property {
+                            key: spa::sys::SPA_FORMAT_mediaSubtype,
+                            flags: spa::pod::PropertyFlags::empty(),
+                            value: spa::pod::Value::Id(spa::utils::Id(spa::sys::SPA_MEDIA_SUBTYPE_raw)),
+                        },
+                        spa::pod::Property {
+                            key: spa::sys::SPA_FORMAT_VIDEO_format,
+                            flags: spa::pod::PropertyFlags::empty(),
+                            value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(choice)),
+                        },
+                    ],
+                };
+
+                let values: Vec<u8> = match spa::pod::serialize::PodSerializer::serialize(
+                    std::io::Cursor::new(Vec::new()),
+                    &spa::pod::Value::Object(obj),
+                ) {
+                    Ok((cursor, _)) => cursor.into_inner(),
+                    Err(e) => {
+                        let _ = init_tx.send(Err(CaptureError::WaylandCaptureUnavailable(format!(
+                            "Failed to serialize format pod: {:?}",
+                            e
+                        ))));
+                        return;
+                    }
+                };
+
+                let pod = match spa::pod::Pod::from_bytes(&values) {
+                    Some(p) => p,
+                    None => {
+                        let _ = init_tx.send(Err(CaptureError::WaylandCaptureUnavailable(
+                            "Failed to construct format Pod from serialized bytes".into(),
+                        )));
+                        return;
+                    }
+                };
+
+                let mut params = [pod];
                 if let Err(e) = stream.connect(
                     spa::utils::Direction::Input,
                     Some(node_id),

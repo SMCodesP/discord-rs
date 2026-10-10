@@ -1,9 +1,10 @@
 use std::time::Duration;
 use discord_rs::capture::{
-    bgra_to_rgba, bgr_to_rgba, detect_session, detect_session_from_env, i420_to_rgba,
-    nv12_to_rgba, rgb_to_rgba, yuyv_to_rgba, CameraCaptureConfig, CameraManager,
-    CaptureError, PixelFormat, ScreenCaptureConfig, ScreenCaptureManager, ScreenCaptureMode,
-    ScreenSourceType, SessionType, VideoFrame,
+    bgr_to_rgba, bgra_to_rgba, bgrx_to_rgba, detect_session, detect_session_from_env,
+    extract_pipewire_frame, i420_to_rgba, nv12_to_rgba, rgb_to_rgba, rgbx_to_rgba,
+    yuyv_to_rgba, CameraCaptureConfig, CameraManager, CaptureError, PixelFormat,
+    ScreenCaptureConfig, ScreenCaptureManager, ScreenCaptureMode, ScreenSourceType,
+    SessionType, VideoFrame,
 };
 
 #[test]
@@ -246,4 +247,142 @@ fn test_switch_camera_validates_destination_first() {
     let result = CameraManager::start_session(fake_config);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_rgbx_and_bgrx_conversion_suite() {
+    // RGBx: 4 bytes per pixel, 4th byte is padding and MUST NOT be inherited as alpha. Alpha is forced to 255.
+    let rgbx_data = vec![
+        100, 150, 200, 0,   // pixel 0: R=100, G=150, B=200, X=0
+        50, 75, 125, 128,   // pixel 1: R=50, G=75, B=125, X=128
+    ];
+    let rgba_from_rgbx = rgbx_to_rgba(&rgbx_data, 2, 1).expect("RGBx to RGBA failed");
+    assert_eq!(rgba_from_rgbx, vec![
+        100, 150, 200, 255, // Alpha forced to 255
+        50, 75, 125, 255,   // Alpha forced to 255
+    ]);
+
+    // BGRx: 4 bytes per pixel [B, G, R, X], 4th byte is padding.
+    let bgrx_data = vec![
+        200, 150, 100, 0,   // pixel 0: B=200, G=150, R=100, X=0 -> RGBA [100, 150, 200, 255]
+        125, 75, 50, 99,    // pixel 1: B=125, G=75, R=50, X=99  -> RGBA [50, 75, 125, 255]
+    ];
+    let rgba_from_bgrx = bgrx_to_rgba(&bgrx_data, 2, 1).expect("BGRx to RGBA failed");
+    assert_eq!(rgba_from_bgrx, vec![
+        100, 150, 200, 255, // Alpha forced to 255
+        50, 75, 125, 255,   // Alpha forced to 255
+    ]);
+
+    // Test through VideoFrame::to_rgba8()
+    let frame_rgbx = VideoFrame::new(
+        2, 1, PixelFormat::Rgbx8, rgbx_data, Duration::from_millis(16), 1,
+    );
+    assert_eq!(frame_rgbx.to_rgba8().unwrap().data, rgba_from_rgbx);
+
+    let frame_bgrx = VideoFrame::new(
+        2, 1, PixelFormat::Bgrx8, bgrx_data, Duration::from_millis(16), 2,
+    );
+    assert_eq!(frame_bgrx.to_rgba8().unwrap().data, rgba_from_bgrx);
+}
+
+#[test]
+fn test_extract_pipewire_frame_with_row_stride_padding() {
+    use pipewire::spa::param::video::VideoFormat;
+
+    // Simulate 2x2 image with BGRx format (4 bytes per pixel).
+    // Row bytes = width (2) * 4 = 8 bytes.
+    // Stride with memory alignment = 16 bytes (8 bytes pixel data + 8 bytes padding).
+    let mut raw_buffer = Vec::new();
+
+    // Row 0: 2 pixels [B, G, R, X] + 8 padding bytes
+    let row0_pixels = [
+        10, 20, 30, 0,   // pixel (0, 0)
+        40, 50, 60, 0,   // pixel (1, 0)
+    ];
+    let row0_padding = [0xEE; 8];
+    raw_buffer.extend_from_slice(&row0_pixels);
+    raw_buffer.extend_from_slice(&row0_padding);
+
+    // Row 1: 2 pixels [B, G, R, X] + 8 padding bytes
+    let row1_pixels = [
+        70, 80, 90, 0,   // pixel (0, 1)
+        100, 110, 120, 0, // pixel (1, 1)
+    ];
+    let row1_padding = [0xEE; 8];
+    raw_buffer.extend_from_slice(&row1_pixels);
+    raw_buffer.extend_from_slice(&row1_padding);
+
+    assert_eq!(raw_buffer.len(), 32);
+
+    // Extract frame with stride = 16
+    let frame = extract_pipewire_frame(
+        &raw_buffer,
+        2,
+        2,
+        VideoFormat::BGRx,
+        16, // stride > row_bytes (16 > 8)
+        Duration::from_millis(33),
+        10,
+    )
+    .expect("extract_pipewire_frame should succeed and strip stride padding");
+
+    assert_eq!(frame.width, 2);
+    assert_eq!(frame.height, 2);
+    assert_eq!(frame.format, PixelFormat::Bgrx8);
+    // Compact data should be exactly 2 * 2 * 4 = 16 bytes (padding stripped)
+    assert_eq!(frame.data.len(), 16);
+    assert_eq!(&frame.data[0..8], &row0_pixels);
+    assert_eq!(&frame.data[8..16], &row1_pixels);
+
+    // Ensure conversion to RGBA works properly on compact frame
+    let rgba = frame.to_rgba8().expect("RGBA conversion of compact frame failed");
+    assert_eq!(rgba.data.len(), 16);
+    // Pixel (0, 0): BGRx [10, 20, 30, 0] -> RGBA [30, 20, 10, 255]
+    assert_eq!(&rgba.data[0..4], &[30, 20, 10, 255]);
+    // Pixel (1, 0): BGRx [40, 50, 60, 0] -> RGBA [60, 50, 40, 255]
+    assert_eq!(&rgba.data[4..8], &[60, 50, 40, 255]);
+}
+
+#[test]
+fn test_extract_pipewire_frame_drops_unnegotiated_format_or_zero_dimensions() {
+    use pipewire::spa::param::video::VideoFormat;
+
+    let dummy_buffer = vec![0u8; 1024];
+
+    // 1. Zero width must error out without guessing 1920
+    let res_zero_w = extract_pipewire_frame(
+        &dummy_buffer,
+        0,
+        1080,
+        VideoFormat::BGRx,
+        0,
+        Duration::from_millis(0),
+        0,
+    );
+    assert!(res_zero_w.is_err(), "Must reject zero width");
+
+    // 2. Zero height must error out without guessing 1080
+    let res_zero_h = extract_pipewire_frame(
+        &dummy_buffer,
+        1920,
+        0,
+        VideoFormat::BGRx,
+        0,
+        Duration::from_millis(0),
+        0,
+    );
+    assert!(res_zero_h.is_err(), "Must reject zero height");
+
+    // 3. Unknown SPA format must error out without guessing Bgra8
+    let res_unknown_fmt = extract_pipewire_frame(
+        &dummy_buffer,
+        1920,
+        1080,
+        VideoFormat::Unknown,
+        1920 * 4,
+        Duration::from_millis(0),
+        0,
+    );
+    assert!(res_unknown_fmt.is_err(), "Must reject VideoFormat::Unknown");
+}
+
 

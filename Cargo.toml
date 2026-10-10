@@ -24,7 +24,7 @@ hex = "0.4"
 v4l = "0.14"
 ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 x11rb = { version = "0.13", features = ["shm"] }
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 pipewire = "0.10"
 libc = "0.2"
 
