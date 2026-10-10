@@ -27,9 +27,11 @@ pub fn render_friends_hub(
     let header = render_header(entity.clone(), state);
     container = container.child(header);
 
-    // 2. Main Body: Split between Left (Friends List or Message Requests) and Right (Active Now 360px)
+    // 2. Main Body: Split between Left (Friends List, Add Friend, or Message Requests) and Right (Active Now 360px)
     let left_column = if state.friends_tab == FriendsTab::MessageRequests {
         render_message_requests_view(entity.clone(), state)
+    } else if state.friends_tab == FriendsTab::AddFriend {
+        render_add_friend_view(entity.clone(), state)
     } else {
         render_friends_list_view(entity.clone(), state)
     };
@@ -54,6 +56,7 @@ fn render_header(
     state: &AppState,
 ) -> Div {
     let pending_req_count = state.message_requests.iter().filter(|r| !r.is_spam).count();
+    let pending_friends_count = state.friends.iter().filter(|f| f.relationship_type == 3).count();
 
     div()
         .w_full()
@@ -282,6 +285,9 @@ fn render_header(
                                 .when(!is_selected, |d| d.text_color(rgb(0xdbdee1)).hover(|s| s.bg(rgb(0x35373c)).text_color(rgb(0xffffff))))
                                 .text_size(font_size_sm())
                                 .font_weight(FontWeight::MEDIUM)
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
                                 .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
                                     entity.update(cx, |s, cx| {
                                         s.select_friends_tab(FriendsTab::Pending);
@@ -289,6 +295,20 @@ fn render_header(
                                     });
                                 })
                                 .child("Pendente")
+                                .children(if pending_friends_count > 0 {
+                                    Some(
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.0))
+                                            .rounded_full()
+                                            .bg(rgb(0xda373c))
+                                            .text_size(px(11.0))
+                                            .text_color(rgb(0xffffff))
+                                            .child(pending_friends_count.to_string())
+                                    )
+                                } else {
+                                    None
+                                })
                         },
                         // Bloqueado
                         {
@@ -354,14 +374,15 @@ fn render_header(
                         },
                         // Adicionar amigo (Botão Verde Destacado #248046)
                         {
+                            let is_selected = state.friends_tab == FriendsTab::AddFriend;
                             let entity = entity.clone();
                             div()
                                 .id("btn-add-friend")
                                 .px(px(8.0))
                                 .py(px(2.0))
                                 .rounded(radius_xs())
-                                .bg(rgb(0x248046))
-                                .text_color(rgb(0xffffff))
+                                .when(is_selected, |d| d.bg(rgb(0x1a6334)).text_color(rgb(0x23a55a)))
+                                .when(!is_selected, |d| d.bg(rgb(0x248046)).text_color(rgb(0xffffff)))
                                 .text_size(font_size_sm())
                                 .font_weight(FontWeight::MEDIUM)
                                 .cursor_pointer()
@@ -375,7 +396,7 @@ fn render_header(
                                 .flex()
                                 .items_center()
                                 .gap(px(4.0))
-                                .child(icon_plus(px(14.0), rgb(0xffffff)))
+                                .child(icon_plus(px(14.0), if is_selected { rgb(0x23a55a) } else { rgb(0xffffff) }))
                                 .child("Adicionar amigo")
                         },
                     ]
@@ -716,12 +737,13 @@ fn render_friends_list_view(
         channel_id: String,
         presence_color: u32,
         presence_status: PresenceStatus,
+        relationship_type: u32,
     }
 
     let mut friends: Vec<FriendItem> = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // 1. Add from state.friends
+    // 1. Add from state.friends (real Discord relationships)
     for f in &state.friends {
         let lower = f.username.to_lowercase();
         if seen_names.insert(lower.clone()) {
@@ -776,18 +798,15 @@ fn render_friends_list_view(
                 channel_id: dm_id,
                 presence_color: color,
                 presence_status: f.presence,
+                relationship_type: f.relationship_type,
             });
         }
     }
 
-    // 2. Add from members (apenas em modo de demonstração offline sem conexão ativa)
-    if !state.is_connected_to_gateway && state.auth_token.is_none() {
+    // 2. Add from members (only in offline / demo mode when friends list is empty)
+    if !state.is_connected_to_gateway && state.auth_token.is_none() && state.friends.is_empty() {
         for m in &state.members {
-            if m.is_bot
-                || m.id == state.current_user.id
-                || m.id == "user-ferris"
-                || m.name.eq_ignore_ascii_case("ferris")
-            {
+            if m.is_bot || m.id == state.current_user.id {
                 continue;
             }
             let lower = m.name.to_lowercase();
@@ -831,56 +850,68 @@ fn render_friends_list_view(
                     channel_id: dm_id,
                     presence_color: color,
                     presence_status: m.presence,
+                    relationship_type: 1,
                 });
             }
         }
     }
 
-    // 3. Add from dm_channels
-    for dm in &state.dm_channels {
-        if dm.id == "dm-ferris"
-            || dm.id == "dm-group-gpui"
-            || dm.name.eq_ignore_ascii_case("ferris")
-            || dm.recipient_ids.iter().any(|r| r == "user-ferris")
-        {
-            continue;
-        }
-        let lower = dm.name.to_lowercase();
-        if seen_names.insert(lower.clone()) {
-            let dm_uid = dm.recipient_ids.first().cloned().unwrap_or_default();
-            friends.push(FriendItem {
-                user_id: dm_uid,
-                display_name: dm.name.clone(),
-                username: format!("@{}", lower.replace(' ', "_")),
-                avatar_text: dm.name.chars().next().unwrap_or('?').to_uppercase().to_string(),
-                avatar_url: dm.icon_url.clone(),
-                status: dm.topic.clone().unwrap_or_else(|| "Disponível".into()),
-                channel_id: dm.id.clone(),
-                presence_color: 0x23a55a,
-                presence_status: PresenceStatus::Online,
-            });
+    // 3. Add from dm_channels (only in offline / demo mode when friends list is empty)
+    if !state.is_connected_to_gateway && state.auth_token.is_none() && state.friends.is_empty() {
+        for dm in &state.dm_channels {
+            if dm.id == "dm-group-gpui" {
+                continue;
+            }
+            let lower = dm.name.to_lowercase();
+            if seen_names.insert(lower.clone()) {
+                let dm_uid = dm.recipient_ids.first().cloned().unwrap_or_default();
+                friends.push(FriendItem {
+                    user_id: dm_uid,
+                    display_name: dm.name.clone(),
+                    username: format!("@{}", lower.replace(' ', "_")),
+                    avatar_text: dm.name.chars().next().unwrap_or('?').to_uppercase().to_string(),
+                    avatar_url: dm.icon_url.clone(),
+                    status: dm.topic.clone().unwrap_or_else(|| "Disponível".into()),
+                    channel_id: dm.id.clone(),
+                    presence_color: 0x23a55a,
+                    presence_status: PresenceStatus::Online,
+                    relationship_type: 1,
+                });
+            }
         }
     }
 
-    // Filter based on active friends_tab
+    // Filter based on active friends_tab:
+    // - Online: type 1 (mutual friend) with presence != Offline
+    // - All: type 1 (mutual friend)
+    // - Pending: type 3 (incoming) or type 4 (outgoing)
+    // - Blocked: type 2 (blocked)
     let filtered: Vec<FriendItem> = match state.friends_tab {
         FriendsTab::Online => friends
             .into_iter()
-            .filter(|f| f.presence_status != PresenceStatus::Offline)
+            .filter(|f| f.relationship_type == 1 && f.presence_status != PresenceStatus::Offline)
             .collect(),
-        FriendsTab::All => friends,
-        FriendsTab::Pending => Vec::new(),
-        FriendsTab::Blocked => Vec::new(),
-        FriendsTab::AddFriend => Vec::new(),
-        FriendsTab::MessageRequests => Vec::new(),
+        FriendsTab::All => friends
+            .into_iter()
+            .filter(|f| f.relationship_type == 1)
+            .collect(),
+        FriendsTab::Pending => friends
+            .into_iter()
+            .filter(|f| f.relationship_type == 3 || f.relationship_type == 4)
+            .collect(),
+        FriendsTab::Blocked => friends
+            .into_iter()
+            .filter(|f| f.relationship_type == 2)
+            .collect(),
+        _ => Vec::new(),
     };
 
     let is_empty = filtered.is_empty();
     let count_text = match state.friends_tab {
         FriendsTab::Online => format!("DISPONÍVEL — {}", filtered.len()),
         FriendsTab::All => format!("TODOS OS AMIGOS — {}", filtered.len()),
-        FriendsTab::Pending => "PENDENTES — 0".to_string(),
-        FriendsTab::Blocked => "BLOQUEADOS — 0".to_string(),
+        FriendsTab::Pending => format!("PENDENTE — {}", filtered.len()),
+        FriendsTab::Blocked => format!("BLOQUEADOS — {}", filtered.len()),
         _ => format!("AMIGOS — {}", filtered.len()),
     };
 
@@ -906,15 +937,13 @@ fn render_friends_list_view(
 
     for (idx, friend) in filtered.into_iter().enumerate() {
         let entity_click = entity.clone();
-        let entity_btn = entity.clone();
         let target_cid = friend.channel_id.clone();
-        let btn_cid = friend.channel_id.clone();
         let click_uid = friend.user_id.clone();
         let click_uname = friend.display_name.clone();
-        let btn_uid = friend.user_id.clone();
-        let btn_uname = friend.display_name.clone();
+        let friend_uid = friend.user_id.clone();
+        let rel_type = friend.relationship_type;
 
-        let friend_row = div()
+        let mut friend_row = div()
             .id(SharedString::from(format!("friend-row-{}", idx)))
             .w_full()
             .h(px(61.0))
@@ -925,115 +954,169 @@ fn render_friends_list_view(
             .justify_between()
             .border_t_1()
             .border_color(rgb(0x35373c))
-            .rounded(radius_md())
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x35373c)))
-            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                let uid = click_uid.clone();
-                let uname = click_uname.clone();
-                let cid = target_cid.clone();
-                entity_click.update(cx, |state, cx| {
-                    if !uid.is_empty() {
-                        state.open_dm_with_user(&uid, &uname);
-                    } else {
-                        state.select_channel(cid);
-                    }
-                    cx.notify();
+            .rounded(radius_md());
+
+        if rel_type == 1 {
+            friend_row = friend_row
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x35373c)))
+                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                    let uid = click_uid.clone();
+                    let uname = click_uname.clone();
+                    let cid = target_cid.clone();
+                    entity_click.update(cx, |state, cx| {
+                        if !uid.is_empty() {
+                            state.open_dm_with_user(&uid, &uname);
+                        } else {
+                            state.select_channel(cid);
+                        }
+                        cx.notify();
+                    });
                 });
-            })
-            // Left: Avatar + Details
-            .child(
+        }
+
+        // Subtitle status text depending on relationship type
+        let status_text = match rel_type {
+            3 => "Solicitação de amizade recebida".to_string(),
+            4 => "Solicitação de amizade enviada".to_string(),
+            2 => "Bloqueado".to_string(),
+            _ => friend.status.clone(),
+        };
+
+        let is_action_pending = state.pending_relationship_actions.contains(&friend_uid);
+
+        // Right actions depending on relationship type
+        let right_actions = match rel_type {
+            3 => {
+                // Incoming request: Accept (green check) & Decline (red close)
+                let entity_accept = entity.clone();
+                let entity_decline = entity.clone();
+                let uid_accept = friend_uid.clone();
+                let uid_decline = friend_uid.clone();
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(12.0))
-                    // Avatar Container with Status Dot
+                    .gap(px(8.0))
                     .child(
                         div()
-                            .relative()
-                            .child(if let Some(ref url) = friend.avatar_url {
-                                if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
-                                    div()
-                                        .size(px(36.0))
-                                        .rounded_full()
-                                        .overflow_hidden()
-                                        .flex_shrink_0()
-                                        .child(img(url.clone()).size_full().rounded_full())
-                                } else {
-                                    div()
-                                        .size(px(36.0))
-                                        .rounded_full()
-                                        .bg(blurple())
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(rgb(HEX_WHITE))
-                                        .font_weight(WEIGHT_BOLD)
-                                        .text_size(font_size_md())
-                                        .child(friend.avatar_text.clone())
-                                }
-                            } else {
-                                div()
-                                    .size(px(36.0))
-                                    .rounded_full()
-                                    .bg(blurple())
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgb(HEX_WHITE))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_size(font_size_md())
-                                    .child(friend.avatar_text)
+                            .id(SharedString::from(format!("btn-accept-{}", idx)))
+                            .size(px(36.0))
+                            .rounded_full()
+                            .bg(rgb(0x2b2d31))
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0x23a55a)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_accept.clone();
+                                        entity_accept.update(cx, |s, cx| {
+                                            s.accept_friend_request(&uid);
+                                            cx.notify();
+                                        });
+                                    })
                             })
-                            .child(
-                                div()
-                                    .absolute()
-                                    .bottom(px(0.0))
-                                    .right(px(0.0))
-                                    .size(px(10.0))
-                                    .rounded_full()
-                                    .bg(rgb(friend.presence_color))
-                                    .border_2()
-                                    .border_color(rgb(0x313338)),
-                            ),
+                            .when(is_action_pending, |d| d.opacity(0.4))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon_check(px(18.0), rgb(0x23a55a))),
                     )
-                    // Names & Status
                     .child(
                         div()
+                            .id(SharedString::from(format!("btn-decline-{}", idx)))
+                            .size(px(36.0))
+                            .rounded_full()
+                            .bg(rgb(0x2b2d31))
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_decline.clone();
+                                        entity_decline.update(cx, |s, cx| {
+                                            s.remove_relationship(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
                             .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_baseline()
-                                    .gap(px(6.0))
-                                    .child(
-                                        div()
-                                            .font_weight(WEIGHT_SEMIBOLD)
-                                            .text_size(font_size_base())
-                                            .text_color(rgb(HEX_WHITE))
-                                            .child(friend.display_name),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .text_color(rgb(0x80848e))
-                                            .child(friend.username),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(font_size_xs())
-                                    .text_color(rgb(0x80848e))
-                                    .child(friend.status),
-                            ),
-                    ),
-            )
-            // Right: DM Button & Options
-            .child(
+                            .items_center()
+                            .justify_center()
+                            .child(icon_close(px(18.0), rgb(0xda373c))),
+                    )
+            }
+            4 => {
+                // Outgoing request: Cancel button
+                let entity_cancel = entity.clone();
+                let uid_cancel = friend_uid.clone();
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("btn-cancel-{}", idx)))
+                            .size(px(36.0))
+                            .rounded_full()
+                            .bg(rgb(0x2b2d31))
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_cancel.clone();
+                                        entity_cancel.update(cx, |s, cx| {
+                                            s.remove_relationship(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon_close(px(18.0), rgb(0x80848e))),
+                    )
+            }
+            2 => {
+                // Blocked user: Unblock button
+                let entity_unblock = entity.clone();
+                let uid_unblock = friend_uid.clone();
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("btn-unblock-{}", idx)))
+                            .px(px(14.0))
+                            .py(px(6.0))
+                            .rounded(radius_xs())
+                            .bg(rgb(0x2b2d31))
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_unblock.clone();
+                                        entity_unblock.update(cx, |s, cx| {
+                                            s.remove_relationship(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0xdbdee1))
+                            .child("Desbloquear"),
+                    )
+            }
+            _ => {
+                // Mutual Friend: DM button and More options
+                let entity_btn = entity.clone();
+                let btn_uid = friend_uid.clone();
+                let btn_uname = friend.display_name.clone();
+                let btn_cid = friend.channel_id.clone();
                 div()
                     .flex()
                     .flex_row()
@@ -1080,10 +1163,110 @@ fn render_friends_list_view(
                             .text_size(px(16.0))
                             .cursor_pointer()
                             .child("⋮"),
-                    ),
-            );
+                    )
+            }
+        };
 
-        list_container = list_container.child(friend_row);
+        let row_content = friend_row
+            // Left: Avatar + Details
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(12.0))
+                    // Avatar Container with Status Dot (for friends)
+                    .child(
+                        div()
+                            .relative()
+                            .child(if let Some(ref url) = friend.avatar_url {
+                                if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
+                                    div()
+                                        .size(px(36.0))
+                                        .rounded_full()
+                                        .overflow_hidden()
+                                        .flex_shrink_0()
+                                        .child(img(url.clone()).size_full().rounded_full())
+                                } else {
+                                    div()
+                                        .size(px(36.0))
+                                        .rounded_full()
+                                        .bg(blurple())
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(rgb(HEX_WHITE))
+                                        .font_weight(WEIGHT_BOLD)
+                                        .text_size(font_size_md())
+                                        .child(friend.avatar_text.clone())
+                                }
+                            } else {
+                                div()
+                                    .size(px(36.0))
+                                    .rounded_full()
+                                    .bg(blurple())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(HEX_WHITE))
+                                    .font_weight(WEIGHT_BOLD)
+                                    .text_size(font_size_md())
+                                    .child(friend.avatar_text)
+                            })
+                            .children(if rel_type == 1 {
+                                Some(
+                                    div()
+                                        .absolute()
+                                        .bottom(px(0.0))
+                                        .right(px(0.0))
+                                        .size(px(10.0))
+                                        .rounded_full()
+                                        .bg(rgb(friend.presence_color))
+                                        .border_2()
+                                        .border_color(rgb(0x313338)),
+                                )
+                            } else {
+                                None
+                            }),
+                    )
+                    // Names & Status
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_baseline()
+                                    .gap(px(6.0))
+                                    .child(
+                                        div()
+                                            .font_weight(WEIGHT_SEMIBOLD)
+                                            .text_size(font_size_base())
+                                            .text_color(rgb(HEX_WHITE))
+                                            .child(friend.display_name),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(0x80848e))
+                                            .child(friend.username),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(font_size_xs())
+                                    .text_color(if rel_type == 2 { rgb(0xda373c) } else { rgb(0x80848e) })
+                                    .child(status_text),
+                            ),
+                    ),
+            )
+            // Right: Actions
+            .child(right_actions);
+
+        list_container = list_container.child(row_content);
     }
 
     div()
@@ -1116,6 +1299,34 @@ fn render_friends_list_view(
                 ),
         )
         .child(if is_empty {
+            let (empty_icon, empty_title, empty_desc) = match state.friends_tab {
+                FriendsTab::Online => (
+                    icon_friends(px(48.0), rgb(0x80848e)),
+                    "Ninguém está disponível para jogar com você.",
+                    "Quando seus amigos ficarem online, eles aparecerão aqui.",
+                ),
+                FriendsTab::All => (
+                    icon_friends(px(48.0), rgb(0x80848e)),
+                    "O Wumpus está esperando por amigos.",
+                    "Você não tem nenhum amigo adicionado ainda. Use o botão Adicionar amigo para começar!",
+                ),
+                FriendsTab::Pending => (
+                    icon_inbox(px(48.0), rgb(0x80848e)),
+                    "Não há solicitações de amizade pendentes.",
+                    "Aqui você verá as solicitações de amizade recebidas e enviadas.",
+                ),
+                FriendsTab::Blocked => (
+                    icon_close(px(48.0), rgb(0x80848e)),
+                    "Você não bloqueou ninguém.",
+                    "Pessoas que você bloquear aparecerão aqui para fácil gerenciamento.",
+                ),
+                _ => (
+                    icon_friends(px(48.0), rgb(0x80848e)),
+                    "Nenhum amigo encontrado ou lista vazia",
+                    "Quando você adicionar amigos ou receber mensagens diretas, eles aparecerão aqui.",
+                ),
+            };
+
             div()
                 .flex_1()
                 .size_full()
@@ -1133,25 +1344,199 @@ fn render_friends_list_view(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon_friends(px(40.0), rgb(0x80848e))),
+                        .child(empty_icon),
                 )
                 .child(
                     div()
                         .font_weight(FontWeight::BOLD)
                         .text_size(font_size_lg())
                         .text_color(rgb(0xffffff))
-                        .child("Nenhum amigo encontrado ou lista vazia"),
+                        .child(empty_title),
                 )
                 .child(
                     div()
                         .text_size(font_size_sm())
                         .text_color(rgb(0x80848e))
-                        .child("Quando você adicionar amigos ou receber mensagens diretas, eles aparecerão aqui."),
+                        .child(empty_desc),
                 )
                 .into_any_element()
         } else {
             list_container.into_any_element()
         })
+}
+
+/// Renders the Add Friend ("Adicionar amigo") tab view
+pub fn render_add_friend_view(
+    entity: Entity<AppState>,
+    state: &AppState,
+) -> Div {
+    let entity_send = entity.clone();
+    let current_input = state.add_friend_input.clone();
+    let input_for_send = current_input.clone();
+    let feedback = state.add_friend_feedback.clone();
+    let is_sending = state.is_sending_friend_request;
+    let can_send = !is_sending && !input_for_send.trim().is_empty();
+
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .px(px(32.0))
+        .py(px(24.0))
+        .gap(px(16.0))
+        .overflow_hidden()
+        // Header
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(16.0))
+                        .text_color(rgb(0xffffff))
+                        .child("ADICIONAR AMIGO"),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0x80848e))
+                        .child("Você pode adicionar amigos usando o nome de usuário do Discord."),
+                ),
+        )
+        // Input Card
+        .child(
+            div()
+                .w_full()
+                .h(px(52.0))
+                .bg(rgb(0x1e1f22))
+                .border_1()
+                .border_color(rgb(0x383a40))
+                .rounded(px(8.0))
+                .px(px(12.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .child(
+                            if current_input.is_empty() {
+                                div()
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(0x80848e))
+                                    .child("Insira um nome de usuário")
+                            } else {
+                                div()
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(0xffffff))
+                                    .child(current_input.clone())
+                            }
+                        ),
+                )
+                .child(
+                    div()
+                        .id("btn-send-friend-request")
+                        .px(px(16.0))
+                        .py(px(8.0))
+                        .rounded(px(4.0))
+                        .when(can_send, |d| {
+                            d.bg(rgb(0x5865f2))
+                                .hover(|s| s.bg(rgb(0x4752c4)))
+                                .cursor_pointer()
+                                .text_color(rgb(0xffffff))
+                                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                    let target = input_for_send.clone();
+                                    entity_send.update(cx, |s, cx| {
+                                        s.send_friend_request(&target);
+                                        cx.notify();
+                                    });
+                                })
+                        })
+                        .when(!can_send, |d| {
+                            d.bg(rgb(0x3c4270))
+                                .opacity(0.6)
+                                .text_color(rgb(0x949ba4))
+                        })
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(if is_sending { "Enviando..." } else { "Enviar pedido de amizade" }),
+                ),
+        )
+        // Feedback message (if any)
+        .children(if let Some((ok, msg)) = feedback {
+            Some(
+                div()
+                    .text_size(px(13.0))
+                    .text_color(if ok { rgb(0x23a55a) } else { rgb(0xda373c) })
+                    .child(msg),
+            )
+        } else {
+            None
+        })
+        // Separator
+        .child(
+            div()
+                .w_full()
+                .h(px(1.0))
+                .bg(rgb(0x383a40))
+                .my(px(16.0)),
+        )
+        // "Outras formas de adicionar amigos" section
+        .child(
+            div()
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(14.0))
+                .text_color(rgb(0x80848e))
+                .child("OUTRAS FORMAS DE ADICIONAR AMIGOS"),
+        )
+        .child(
+            div()
+                .w_full()
+                .h(px(60.0))
+                .p(px(12.0))
+                .rounded(px(8.0))
+                .bg(rgb(0x2b2d31))
+                .border_1()
+                .border_color(rgb(0x383a40))
+                .hover(|s| s.bg(rgb(0x35373c)).cursor_pointer())
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .size(px(36.0))
+                                .rounded_full()
+                                .bg(rgb(0x23a55a))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon_compass(px(20.0), rgb(0xffffff))),
+                        )
+                        .child(
+                            div()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_size(px(14.0))
+                                .text_color(rgb(0xffffff))
+                                .child("Descobrir servidores públicos"),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(16.0))
+                        .text_color(rgb(0x80848e))
+                        .child("›"),
+                ),
+        )
 }
 
 /// Renders the Active Now ("Ativo agora") right sidebar
