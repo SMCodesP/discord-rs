@@ -272,77 +272,114 @@ impl RenderOnce for Avatar {
         if let Some(presence) = self.status {
             let dot_size = self.size.status_size();
             let border_width = self.size.cutout_border();
-
-            let (dot_color, is_dnd, is_idle, is_offline) = match presence {
-                PresenceStatus::Online => (status_online(), false, false, false),
-                PresenceStatus::Idle => (status_idle(), false, true, false),
-                PresenceStatus::DoNotDisturb => (status_dnd(), true, false, false),
-                PresenceStatus::Offline => (status_offline(), false, false, true),
-            };
-
-            let mut status_indicator = div()
-                .absolute()
-                .bottom(px(-1.0))
-                .right(px(-1.0))
-                .w(dot_size + border_width * 2.0)
-                .h(dot_size + border_width * 2.0)
-                .rounded_full()
-                .bg(cutout_bg)
-                .flex()
-                .items_center()
-                .justify_center();
-
-            let mut inner_dot = div()
-                .w(dot_size)
-                .h(dot_size)
-                .rounded_full()
-                .bg(dot_color)
-                .flex()
-                .items_center()
-                .justify_center();
-
-            if is_dnd {
-                // White horizontal bar inside red circle
-                let bar_width = dot_size * 0.6;
-                let bar_height = px(2.0);
-                inner_dot = inner_dot.child(
-                    div()
-                        .w(bar_width)
-                        .h(bar_height)
-                        .bg(white())
-                        .rounded_xs(),
-                );
-            } else if is_offline {
-                // Dark hollow circle inside grey ring
-                let inner_hole = dot_size * 0.45;
-                inner_dot = inner_dot.child(
-                    div()
-                        .w(inner_hole)
-                        .h(inner_hole)
-                        .bg(cutout_bg)
-                        .rounded_full(),
-                );
-            } else if is_idle {
-                // Crescent cutout for idle
-                let crescent_hole = dot_size * 0.45;
-                inner_dot = inner_dot.child(
-                    div()
-                        .absolute()
-                        .top(px(0.0))
-                        .left(px(0.0))
-                        .w(crescent_hole)
-                        .h(crescent_hole)
-                        .bg(cutout_bg)
-                        .rounded_full(),
-                );
-            }
-
-            status_indicator = status_indicator.child(inner_dot);
-            container = container.child(status_indicator);
+            container = container.child(render_status_indicator(
+                presence,
+                dot_size,
+                border_width,
+                cutout_bg,
+            ));
         }
 
         container
     }
+}
+
+fn render_status_indicator(
+    presence: PresenceStatus,
+    dot_size: Pixels,
+    border_width: Pixels,
+    cutout_bg: Rgba,
+) -> AnyElement {
+    let (dot_color, is_dnd, is_idle, is_offline) = match presence {
+        PresenceStatus::Online => (status_online(), false, false, false),
+        PresenceStatus::Idle => (status_idle(), false, true, false),
+        PresenceStatus::DoNotDisturb => (status_dnd(), true, false, false),
+        PresenceStatus::Offline => (status_offline(), false, false, true),
+    };
+
+    let inner_dot: AnyElement = if is_dnd {
+        let bar_width = dot_size * 0.6;
+        let bar_height = px(2.0);
+        div()
+            .w(dot_size)
+            .h(dot_size)
+            .rounded_full()
+            .bg(dot_color)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(bar_width)
+                    .h(bar_height)
+                    .bg(white())
+                    .rounded_xs(),
+            )
+            .into_any_element()
+    } else if is_offline {
+        let inner_hole = dot_size * 0.5;
+        div()
+            .w(dot_size)
+            .h(dot_size)
+            .rounded_full()
+            .bg(dot_color)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .w(inner_hole)
+                    .h(inner_hole)
+                    .bg(cutout_bg)
+                    .rounded_full(),
+            )
+            .into_any_element()
+    } else if is_idle {
+        let crescent_hole = dot_size * 0.65;
+        let offset = dot_size * 0.2;
+        div()
+            .w(dot_size)
+            .h(dot_size)
+            .rounded_full()
+            .bg(dot_color)
+            .flex()
+            .items_center()
+            .justify_center()
+            .relative()
+            .overflow_hidden()
+            .child(
+                div()
+                    .absolute()
+                    .top(-offset)
+                    .left(-offset)
+                    .w(crescent_hole)
+                    .h(crescent_hole)
+                    .bg(cutout_bg)
+                    .rounded_full(),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .w(dot_size)
+            .h(dot_size)
+            .rounded_full()
+            .bg(dot_color)
+            .into_any_element()
+    };
+
+    div()
+        .absolute()
+        .bottom(px(-2.0))
+        .right(px(-2.0))
+        .w(dot_size + border_width * 2.0)
+        .h(dot_size + border_width * 2.0)
+        .rounded_full()
+        .bg(cutout_bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(inner_dot)
+        .into_any_element()
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use crate::domain::{
-    Attachment, Author, Channel, ChannelType, Embed, EmbedField, Guild, Message, MessageStickerItem,
-    Reaction, Role, User, VoiceState, AvatarDecorationData,
+    Activity, ActivityType, Attachment, Author, AvatarDecorationData, Channel, ChannelType,
+    CustomStatus, CustomStatusEmoji, Embed, EmbedField, Guild, Message, MessageStickerItem,
+    PresenceStatus, Reaction, Role, User, VoiceState,
 };
 use crate::protocol::auth::{AuthToken, TokenType};
 use crate::protocol::cache_engine::DiscordCacheEngine;
@@ -1381,6 +1382,15 @@ async fn handle_dispatch(
                 guild_folders,
             });
 
+            // Extrair presenças iniciais de amigos/contatos do payload READY
+            if let Some(raw_presences) = data.get("presences").and_then(|v| v.as_array()) {
+                for p in raw_presences {
+                    if let Some(evt) = parse_presence_from_json(p) {
+                        let _ = event_tx.send(evt);
+                    }
+                }
+            }
+
             if !pinned_dms.is_empty() {
                 let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
             }
@@ -1636,6 +1646,11 @@ async fn handle_dispatch(
                     user_id: user_id.to_string(),
                     timestamp,
                 });
+            }
+        }
+        "PRESENCE_UPDATE" => {
+            if let Some(evt) = parse_presence_from_json(&data) {
+                let _ = event_tx.send(evt);
             }
         }
         _ => {}
@@ -2038,4 +2053,164 @@ fn urlencoding_encode(s: &str) -> String {
         }
     }
     encoded
+}
+
+pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<TransportEvent> {
+    let user_id = val
+        .get("user")
+        .and_then(|u| {
+            if let Some(id) = u.get("id").and_then(|v| v.as_str()) {
+                Some(id.to_string())
+            } else if let Some(s) = u.as_str() {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| val.get("user_id").and_then(|v| v.as_str()).map(ToString::to_string))?;
+
+    let status_str = val.get("status").and_then(|v| v.as_str()).unwrap_or("offline");
+    let status = match status_str.to_lowercase().as_str() {
+        "online" => PresenceStatus::Online,
+        "idle" => PresenceStatus::Idle,
+        "dnd" => PresenceStatus::DoNotDisturb,
+        _ => PresenceStatus::Offline,
+    };
+
+    let mut primary_activity: Option<Activity> = None;
+    let mut custom_status: Option<CustomStatus> = None;
+
+    if let Some(activities) = val.get("activities").and_then(|v| v.as_array()) {
+        for act in activities {
+            let type_num = act.get("type").and_then(|v| v.as_u64());
+            let name = act.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Discord Activity Type 4 is Custom Status
+            let is_custom = type_num == Some(4) || name.eq_ignore_ascii_case("Custom Status");
+            if is_custom {
+                let state_text = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                let emoji = act.get("emoji").and_then(|e| {
+                    let emoji_name = e.get("name").and_then(|v| v.as_str())?;
+                    let emoji_id = e.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let animated = e.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
+                    Some(CustomStatusEmoji {
+                        name: emoji_name.to_string(),
+                        id: emoji_id,
+                        animated,
+                    })
+                });
+
+                if state_text.is_some() || emoji.is_some() {
+                    custom_status = Some(CustomStatus {
+                        text: state_text,
+                        emoji,
+                    });
+                }
+            } else if primary_activity.is_none() {
+                let act_type = match type_num {
+                    Some(0) => ActivityType::Playing,
+                    Some(1) => ActivityType::Streaming,
+                    Some(2) => ActivityType::Listening,
+                    Some(3) => ActivityType::Watching,
+                    Some(5) => ActivityType::Competing,
+                    _ => ActivityType::Playing,
+                };
+                let mut activity = Activity::new(name, act_type);
+                activity.details = act.get("details").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.state = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.created_at = act.get("created_at").and_then(|v| v.as_i64());
+                primary_activity = Some(activity);
+            }
+        }
+    }
+
+    Some(TransportEvent::PresenceUpdate {
+        user_id,
+        status,
+        activity: primary_activity,
+        custom_status,
+    })
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_presence_update_with_custom_status() {
+        let json = serde_json::json!({
+            "user": { "id": "1428172947486543894" },
+            "status": "online",
+            "activities": [
+                {
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": "I found her... ( A )",
+                    "emoji": {
+                        "name": "🌸",
+                        "id": null,
+                        "animated": false
+                    }
+                },
+                {
+                    "name": "VALORANT",
+                    "type": 0
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "1428172947486543894");
+                assert_eq!(status, PresenceStatus::Online);
+                let cs = custom_status.expect("custom status should be present");
+                assert_eq!(cs.text, Some("I found her... ( A )".to_string()));
+                assert_eq!(cs.emoji.unwrap().name, "🌸");
+                let act = activity.expect("activity should be present");
+                assert_eq!(act.name, "VALORANT");
+            }
+            _ => panic!("Expected PresenceUpdate event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_presence_custom_emoji_and_idle() {
+        let json = serde_json::json!({
+            "user_id": "999888777",
+            "status": "idle",
+            "activities": [
+                {
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": "Studying",
+                    "emoji": {
+                        "name": "pepe_study",
+                        "id": "12345678",
+                        "animated": true
+                    }
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "999888777");
+                assert_eq!(status, PresenceStatus::Idle);
+                assert!(activity.is_none());
+                let cs = custom_status.unwrap();
+                assert_eq!(cs.text, Some("Studying".to_string()));
+                let emoji = cs.emoji.unwrap();
+                assert_eq!(emoji.name, "pepe_study");
+                assert_eq!(emoji.id, Some("12345678".to_string()));
+                assert!(emoji.animated);
+                assert_eq!(
+                    emoji.image_url(),
+                    Some("https://cdn.discordapp.com/emojis/12345678.gif?size=48".to_string())
+                );
+            }
+            _ => panic!("Expected PresenceUpdate"),
+        }
+    }
 }

@@ -95,6 +95,9 @@ pub struct Activity {
     pub state: Option<String>,
     /// Unix timestamp of when the activity started.
     pub created_at: Option<i64>,
+    /// Optional emoji for custom status.
+    #[serde(default)]
+    pub emoji: Option<CustomStatusEmoji>,
 }
 
 impl Activity {
@@ -105,6 +108,7 @@ impl Activity {
             details: None,
             state: None,
             created_at: None,
+            emoji: None,
         }
     }
 
@@ -120,7 +124,115 @@ impl Activity {
             state: Some(text),
             details: None,
             created_at: None,
+            emoji: None,
         }
+    }
+
+    pub fn custom_with_emoji(text: Option<String>, emoji: Option<CustomStatusEmoji>) -> Self {
+        Self {
+            name: "Custom Status".to_string(),
+            activity_type: ActivityType::Custom,
+            state: text,
+            details: None,
+            created_at: None,
+            emoji,
+        }
+    }
+}
+
+/// Custom emoji or unicode emoji for user custom status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CustomStatusEmoji {
+    /// Name of the emoji (or unicode character if native unicode emoji).
+    pub name: String,
+    /// Snowflake ID if custom guild emoji, None if native unicode emoji.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Whether the emoji is animated.
+    #[serde(default)]
+    pub animated: bool,
+}
+
+impl CustomStatusEmoji {
+    pub fn unicode(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            id: None,
+            animated: false,
+        }
+    }
+
+    pub fn custom(id: impl Into<String>, name: impl Into<String>, animated: bool) -> Self {
+        Self {
+            id: Some(id.into()),
+            name: name.into(),
+            animated,
+        }
+    }
+
+    /// CDN URL if custom emoji, or None if unicode.
+    pub fn image_url(&self) -> Option<String> {
+        self.id.as_ref().map(|id| {
+            let ext = if self.animated { "gif" } else { "png" };
+            format!("https://cdn.discordapp.com/emojis/{}.{}?size=48", id, ext)
+        })
+    }
+}
+
+/// Custom status phrase and optional emoji.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CustomStatus {
+    /// Custom status phrase/text.
+    pub text: Option<String>,
+    /// Optional emoji (unicode or custom Discord emoji).
+    pub emoji: Option<CustomStatusEmoji>,
+}
+
+impl CustomStatus {
+    pub fn new(text: Option<String>, emoji: Option<CustomStatusEmoji>) -> Self {
+        Self { text, emoji }
+    }
+
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            emoji: None,
+        }
+    }
+
+    pub fn with_emoji(mut self, emoji: CustomStatusEmoji) -> Self {
+        self.emoji = Some(emoji);
+        self
+    }
+}
+
+/// Real-time presence information for a user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Presence {
+    pub user_id: String,
+    pub status: PresenceStatus,
+    pub activity: Option<Activity>,
+    pub custom_status: Option<CustomStatus>,
+}
+
+impl Presence {
+    pub fn new(user_id: impl Into<String>, status: PresenceStatus) -> Self {
+        Self {
+            user_id: user_id.into(),
+            status,
+            activity: None,
+            custom_status: None,
+        }
+    }
+
+    pub fn with_custom_status(mut self, custom_status: CustomStatus) -> Self {
+        self.custom_status = Some(custom_status);
+        self
+    }
+
+    pub fn with_activity(mut self, activity: Activity) -> Self {
+        self.activity = Some(activity);
+        self
     }
 }
 
@@ -186,6 +298,9 @@ pub struct User {
     pub presence: PresenceStatus,
     /// Active Rich Presence or custom status activity.
     pub activity: Option<Activity>,
+    /// Custom status phrase and emoji.
+    #[serde(default)]
+    pub custom_status: Option<CustomStatus>,
     /// Active avatar decoration equipped by the user.
     #[serde(default)]
     pub avatar_decoration_data: Option<AvatarDecorationData>,
@@ -202,6 +317,7 @@ impl User {
             bot: false,
             presence: PresenceStatus::Offline,
             activity: None,
+            custom_status: None,
             avatar_decoration_data: None,
         }
     }
@@ -284,5 +400,30 @@ mod tests {
             user_decor.avatar_decoration_url().unwrap(),
             "https://cdn.discordapp.com/avatar-decoration-presets/a_fire_ring.png?size=96&passthrough=true"
         );
+    }
+    #[test]
+    fn test_custom_status_and_emoji_models() {
+        let unicode_emoji = CustomStatusEmoji::unicode("🦀");
+        assert_eq!(unicode_emoji.name, "🦀");
+        assert_eq!(unicode_emoji.id, None);
+        assert_eq!(unicode_emoji.image_url(), None);
+
+        let custom_emoji = CustomStatusEmoji::custom("123456789", "ferris", false);
+        assert_eq!(custom_emoji.id, Some("123456789".to_string()));
+        assert_eq!(
+            custom_emoji.image_url(),
+            Some("https://cdn.discordapp.com/emojis/123456789.png?size=48".to_string())
+        );
+
+        let cs = CustomStatus::from_text("Coding in Rust").with_emoji(unicode_emoji);
+        assert_eq!(cs.text, Some("Coding in Rust".to_string()));
+        assert_eq!(cs.emoji.as_ref().unwrap().name, "🦀");
+
+        let presence = Presence::new("user-1", PresenceStatus::Online)
+            .with_custom_status(cs.clone())
+            .with_activity(Activity::playing("Rust"));
+        assert_eq!(presence.status, PresenceStatus::Online);
+        assert_eq!(presence.custom_status, Some(cs));
+        assert_eq!(presence.activity.unwrap().name, "Rust");
     }
 }

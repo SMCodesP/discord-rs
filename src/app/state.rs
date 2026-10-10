@@ -40,6 +40,28 @@ impl PresenceStatus {
     }
 }
 
+impl From<crate::domain::user::PresenceStatus> for PresenceStatus {
+    fn from(s: crate::domain::user::PresenceStatus) -> Self {
+        match s {
+            crate::domain::user::PresenceStatus::Online => Self::Online,
+            crate::domain::user::PresenceStatus::Idle => Self::Idle,
+            crate::domain::user::PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+            crate::domain::user::PresenceStatus::Offline => Self::Offline,
+        }
+    }
+}
+
+impl From<PresenceStatus> for crate::domain::user::PresenceStatus {
+    fn from(s: PresenceStatus) -> Self {
+        match s {
+            PresenceStatus::Online => Self::Online,
+            PresenceStatus::Idle => Self::Idle,
+            PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+            PresenceStatus::Offline => Self::Offline,
+        }
+    }
+}
+
 /// Active modal dialogs in the application
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveModal {
@@ -437,6 +459,8 @@ pub struct AppState {
     pub message_requests: Vec<MessageRequestItem>,
     /// Rich Presence activities in Active Now panel
     pub active_now_items: Vec<ActiveNowItem>,
+    /// Real-time user presences indexed by user Snowflake ID
+    pub presences_by_user: HashMap<String, crate::domain::user::Presence>,
     /// Telemetry & Parity monitoring handle
     pub telemetry: Option<crate::telemetry::TelemetryHandle>,
 
@@ -1075,6 +1099,7 @@ impl AppState {
             auth_error: None,
             is_connecting,
             dm_channels: Vec::new(),
+            presences_by_user: HashMap::new(),
             pinned_dms: Vec::new(),
             pinned_dms_path: None,
             guild_folders,
@@ -2621,12 +2646,28 @@ impl AppState {
                                 }
                             }),
                             avatar_text,
-                            presence: PresenceStatus::Online,
-                            custom_status: None,
+                            presence: self
+                                .presences_by_user
+                                .get(&r.id)
+                                .map(|p| PresenceStatus::from(p.status))
+                                .unwrap_or(PresenceStatus::Offline),
+                            custom_status: self
+                                .presences_by_user
+                                .get(&r.id)
+                                .and_then(|p| p.custom_status.as_ref())
+                                .and_then(|cs| cs.text.clone()),
                             relationship_type: r.rel_type,
                         }
                     })
                     .collect();
+            }
+            TransportEvent::PresenceUpdate {
+                user_id,
+                status,
+                activity,
+                custom_status,
+            } => {
+                self.update_user_presence(user_id, status, activity, custom_status);
             }
             TransportEvent::PinnedDmsUpdated(pinned) => {
                 self.pinned_dms = pinned;
@@ -2639,6 +2680,48 @@ impl AppState {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Returns the cached presence for a given user ID
+    pub fn get_user_presence(&self, user_id: &str) -> Option<&crate::domain::user::Presence> {
+        self.presences_by_user.get(user_id)
+    }
+
+    /// Updates or inserts a user's real-time presence, propagating to friends and members
+    pub fn update_user_presence(
+        &mut self,
+        user_id: String,
+        status: crate::domain::user::PresenceStatus,
+        activity: Option<crate::domain::user::Activity>,
+        custom_status: Option<crate::domain::user::CustomStatus>,
+    ) {
+        let entry = self
+            .presences_by_user
+            .entry(user_id.clone())
+            .or_insert_with(|| crate::domain::user::Presence::new(&user_id, status));
+        entry.status = status;
+        entry.activity = activity.clone();
+        entry.custom_status = custom_status.clone();
+
+        let app_status: PresenceStatus = status.into();
+
+        // 1. Atualizar amigo na lista de amigos se existir
+        if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
+            friend.presence = app_status;
+            friend.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
+        }
+
+        // 2. Se for o usuário autenticado, atualizar perfil atual
+        if self.current_user.id == user_id {
+            self.current_user.presence = app_status;
+            self.current_user.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
+        }
+
+        // 3. Atualizar membros na lista de membros se presente
+        if let Some(member) = self.members.iter_mut().find(|m| m.id == user_id) {
+            member.presence = app_status;
+            member.activity = activity.as_ref().map(|act| act.name.clone());
         }
     }
 
