@@ -13,6 +13,11 @@ use std::time::Duration;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, WebSocketConfig};
+use crate::protocol::voice_dave::{
+    parse_server_binary_message, DaveAnnounceCommitTransitionPayload, DaveExecuteTransitionPayload,
+    DaveOpcode, DavePrepareEpochPayload, DavePrepareTransitionPayload, VoiceDaveSession,
+    SUPPORTED_DAVE_PROTOCOL_VERSION,
+};
 
 /// Preferred voice encryption mode for Discord voice connections.
 pub const PREFERRED_ENCRYPTION_MODE: &str = "aead_aes256_gcm_rtpsize";
@@ -23,8 +28,8 @@ pub const FALLBACK_ENCRYPTION_MODE: &str = "aead_xchacha20_poly1305_rtpsize";
 /// Default Voice Gateway version.
 pub const VOICE_GATEWAY_VERSION: u32 = 8;
 
-/// Default DAVE protocol version requested when client does not support MLS E2EE.
-pub const DEFAULT_MAX_DAVE_PROTOCOL_VERSION: u32 = 0;
+/// Default DAVE protocol version requested in Identify payload (Version 1 per DAVE spec).
+pub const DEFAULT_MAX_DAVE_PROTOCOL_VERSION: u32 = SUPPORTED_DAVE_PROTOCOL_VERSION as u32;
 
 // ============================================================================
 // DAVE PROTOCOL ARCHITECTURAL DOCUMENTATION
@@ -96,6 +101,9 @@ pub struct SessionDescription {
     pub mode: String,
     /// 32-byte secret key for RTP encryption/decryption.
     pub secret_key: Vec<u8>,
+    /// Negotiated DAVE protocol version (e.g. Some(1) or None).
+    #[serde(default)]
+    pub dave_protocol_version: Option<u32>,
 }
 
 /// Voice server connection metadata received from main Discord Gateway (VOICE_SERVER_UPDATE).
@@ -386,6 +394,7 @@ pub enum VoiceConnectionState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum VoiceGatewayAction {
     SendMessage(String),
+    SendBinaryMessage(Vec<u8>),
     StartHeartbeat { interval_ms: u64 },
     ReadyReceived(VoiceReady),
     SessionDescriptionReceived(SessionDescription),
@@ -396,7 +405,7 @@ pub enum VoiceGatewayAction {
 }
 
 /// Pure state machine governing the Voice Gateway v8 lifecycle without I/O.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct VoiceGatewayStateMachine {
     state: VoiceConnectionState,
     config: VoiceGatewayConfig,
@@ -404,11 +413,14 @@ pub struct VoiceGatewayStateMachine {
     heartbeat_interval_ms: Option<u64>,
     ready_data: Option<VoiceReady>,
     session_description: Option<SessionDescription>,
+    pub dave_session: VoiceDaveSession,
 }
 
 impl VoiceGatewayStateMachine {
     /// Creates a new state machine in `Disconnected` state.
     pub fn new(config: VoiceGatewayConfig) -> Self {
+        let user_id = config.user_id.parse::<u64>().unwrap_or(0);
+        let channel_id = config.server_id.parse::<u64>().unwrap_or(0);
         Self {
             state: VoiceConnectionState::Disconnected,
             config,
@@ -416,6 +428,7 @@ impl VoiceGatewayStateMachine {
             heartbeat_interval_ms: None,
             ready_data: None,
             session_description: None,
+            dave_session: VoiceDaveSession::new(user_id, channel_id),
         }
     }
 
@@ -457,6 +470,16 @@ impl VoiceGatewayStateMachine {
     /// Updates configuration (e.g. on new token or session).
     pub fn update_config(&mut self, config: VoiceGatewayConfig) {
         self.config = config;
+    }
+
+    /// Reference to inner DAVE session state and media cryptor.
+    pub fn dave_session(&self) -> &VoiceDaveSession {
+        &self.dave_session
+    }
+
+    /// Mutable reference to inner DAVE session state and media cryptor.
+    pub fn dave_session_mut(&mut self) -> &mut VoiceDaveSession {
+        &mut self.dave_session
     }
 
     /// Transitions to `WaitingForHello` when the WebSocket connection begins.
@@ -630,7 +653,13 @@ impl VoiceGatewayStateMachine {
                 let desc = SessionDescription {
                     mode: session.mode,
                     secret_key: session.secret_key,
+                    dave_protocol_version: session.dave_protocol_version,
                 };
+                if let Some(v) = session.dave_protocol_version {
+                    if let Err(e) = self.dave_session.init_session(v as u16) {
+                        log::warn!("Failed to initialize DAVE session for version {}: {}", v, e);
+                    }
+                }
                 self.session_description = Some(desc.clone());
                 self.state = VoiceConnectionState::Connected(desc.clone());
                 actions.push(VoiceGatewayAction::SessionDescriptionReceived(desc));
@@ -639,6 +668,11 @@ impl VoiceGatewayStateMachine {
                 let data = payload.d.context("Missing Speaking data payload")?;
                 let speaking: SpeakingPayload = serde_json::from_value(data)
                     .context("Failed to deserialize Speaking payload")?;
+                if let Some(ref uid_str) = speaking.user_id {
+                    if let Ok(uid) = uid_str.parse::<u64>() {
+                        self.dave_session.register_ssrc_user_mapping(speaking.ssrc, uid);
+                    }
+                }
                 actions.push(VoiceGatewayAction::SpeakingUpdate(speaking));
             }
             Some(VoiceOpcode::HeartbeatAck) => {
@@ -654,7 +688,104 @@ impl VoiceGatewayStateMachine {
                 actions.push(VoiceGatewayAction::Resumed);
             }
             _ => {
-                // Ignore unknown or unhandled opcodes gracefully
+                if let Some(dave_op) = DaveOpcode::from_u8(payload.op) {
+                    match dave_op {
+                        DaveOpcode::PrepareTransition => {
+                            if let Some(data) = payload.d {
+                                let prep: DavePrepareTransitionPayload = serde_json::from_value(data)
+                                    .context("Failed to deserialize DavePrepareTransition payload")?;
+                                let ready = self.dave_session.handle_prepare_transition(prep.transition_id, prep.protocol_version);
+                                let ready_payload = VoiceGatewayPayload {
+                                    op: DaveOpcode::TransitionReady as u8,
+                                    d: Some(ready),
+                                    seq: None,
+                                };
+                                actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&ready_payload)?));
+                            }
+                        }
+                        DaveOpcode::ExecuteTransition => {
+                            if let Some(data) = payload.d {
+                                let exec: DaveExecuteTransitionPayload = serde_json::from_value(data)
+                                    .context("Failed to deserialize DaveExecuteTransition payload")?;
+                                self.dave_session.handle_execute_transition(exec.transition_id)?;
+                            }
+                        }
+                        DaveOpcode::PrepareEpoch => {
+                            if let Some(data) = payload.d {
+                                let epoch: DavePrepareEpochPayload = serde_json::from_value(data)
+                                    .context("Failed to deserialize DavePrepareEpoch payload")?;
+                                self.dave_session.handle_prepare_epoch(epoch.epoch, epoch.protocol_version);
+                            }
+                        }
+                        DaveOpcode::MlsAnnounceCommitTransition => {
+                            if let Some(data) = payload.d {
+                                let announce: DaveAnnounceCommitTransitionPayload = serde_json::from_value(data)
+                                    .context("Failed to deserialize DaveAnnounceCommitTransition payload")?;
+                                let commit_bytes = announce.commit.as_ref().map(|s| s.as_bytes()).unwrap_or(&[]);
+                                if let Some(invalid_payload) = self.dave_session.handle_announce_commit(announce.transition_id, commit_bytes)? {
+                                    let invalid_msg = VoiceGatewayPayload {
+                                        op: DaveOpcode::MlsInvalidCommitWelcome as u8,
+                                        d: Some(invalid_payload),
+                                        seq: None,
+                                    };
+                                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&invalid_msg)?));
+                                }
+                            }
+                        }
+                        _ => {
+                            log::debug!("Unhandled DAVE JSON opcode: {:?}", dave_op);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(actions)
+    }
+
+    /// Processes an incoming binary message from the voice gateway WebSocket.
+    ///
+    /// Dispatches server-to-client DAVE opcodes:
+    /// - Opcode 25 (MLS External Sender Package) -> responds with Opcode 26 (MLS Key Package).
+    /// - Opcode 27 (MLS Proposals) -> responds with Opcode 28 (MLS Commit Welcome) if commit is generated.
+    /// - Opcode 30 (MLS Welcome) -> responds with Opcode 31 (MLS Invalid Commit Welcome) if welcome fails.
+    pub fn handle_incoming_binary(&mut self, data: &[u8]) -> Result<Vec<VoiceGatewayAction>> {
+        let (seq, opcode, payload) = parse_server_binary_message(data)?;
+        self.last_seq = seq as i64;
+        let mut actions = Vec::new();
+
+        match opcode {
+            DaveOpcode::MlsExternalSender => {
+                let key_package_frame = self.dave_session.handle_external_sender(payload)?;
+                actions.push(VoiceGatewayAction::SendBinaryMessage(key_package_frame));
+            }
+            DaveOpcode::MlsProposals => {
+                if payload.is_empty() {
+                    bail!("Opcode 27 Proposals binary frame has empty payload");
+                }
+                let op_type = payload[0];
+                let proposals_bytes = &payload[1..];
+                if let Some(commit_welcome_frame) = self.dave_session.handle_proposals(op_type, proposals_bytes, None)? {
+                    actions.push(VoiceGatewayAction::SendBinaryMessage(commit_welcome_frame));
+                }
+            }
+            DaveOpcode::MlsWelcome => {
+                if payload.len() < 2 {
+                    bail!("Opcode 30 Welcome binary frame is too short: {} bytes", payload.len());
+                }
+                let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                let welcome_bytes = &payload[2..];
+                if let Some(invalid_payload) = self.dave_session.handle_welcome(transition_id, welcome_bytes)? {
+                    let invalid_msg = VoiceGatewayPayload {
+                        op: DaveOpcode::MlsInvalidCommitWelcome as u8,
+                        d: Some(invalid_payload),
+                        seq: None,
+                    };
+                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&invalid_msg)?));
+                }
+            }
+            _ => {
+                log::warn!("Unhandled binary voice opcode: {:?}", opcode);
             }
         }
 
@@ -910,6 +1041,41 @@ impl VoiceGateway {
         Ok(())
     }
 
+    /// Returns a reference to the inner state machine lock.
+    pub fn state_machine(&self) -> Arc<RwLock<VoiceGatewayStateMachine>> {
+        self.state_machine.clone()
+    }
+
+    /// Encrypts an outgoing Opus frame using the active DAVE session (or passthrough).
+    pub async fn encrypt_opus_frame(&self, frame: &[u8]) -> Result<Vec<u8>> {
+        let mut sm = self.state_machine.write().await;
+        sm.dave_session.encrypt_opus_frame(frame)
+    }
+
+    /// Decrypts an incoming Opus frame from a remote participant (or passthrough).
+    pub async fn decrypt_opus_frame(&self, sender_user_id: u64, frame: &[u8]) -> Result<Vec<u8>> {
+        let mut sm = self.state_machine.write().await;
+        sm.dave_session.decrypt_opus_frame(sender_user_id, frame)
+    }
+
+    /// Decrypts an incoming Opus frame by sender SSRC (or passthrough).
+    pub async fn decrypt_opus_frame_by_ssrc(&self, ssrc: u32, frame: &[u8]) -> Result<Vec<u8>> {
+        let mut sm = self.state_machine.write().await;
+        sm.dave_session.decrypt_opus_frame_by_ssrc(ssrc, frame)
+    }
+
+    /// Returns the currently negotiated DAVE protocol version.
+    pub async fn dave_protocol_version(&self) -> u16 {
+        let sm = self.state_machine.read().await;
+        sm.dave_session.protocol_version()
+    }
+
+    /// Returns whether DAVE E2EE is active and ready to encrypt frames.
+    pub async fn is_dave_ready(&self) -> bool {
+        let sm = self.state_machine.read().await;
+        sm.dave_session.is_ready()
+    }
+
     /// Sends a raw text message over the WebSocket connection.
     async fn send_text(&self, text: String) -> Result<()> {
         let lock = self.outbound_tx.read().await;
@@ -917,6 +1083,19 @@ impl VoiceGateway {
             tx.send(WsMessage::Text(text.into()))
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to send voice message: {}", e))?;
+            Ok(())
+        } else {
+            bail!("Voice gateway is not connected");
+        }
+    }
+
+    /// Sends a raw binary message over the WebSocket connection.
+    pub async fn send_binary(&self, data: Vec<u8>) -> Result<()> {
+        let lock = self.outbound_tx.read().await;
+        if let Some(ref tx) = *lock {
+            tx.send(WsMessage::Binary(data.into()))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send binary voice message: {}", e))?;
             Ok(())
         } else {
             bail!("Voice gateway is not connected");
@@ -1044,6 +1223,9 @@ async fn run_voice_loop(
                                                     VoiceGatewayAction::SendMessage(payload_text) => {
                                                         let _ = ws_write.send(WsMessage::Text(payload_text.into())).await;
                                                     }
+                                                    VoiceGatewayAction::SendBinaryMessage(bin) => {
+                                                        let _ = ws_write.send(WsMessage::Binary(bin.into())).await;
+                                                    }
                                                     VoiceGatewayAction::StartHeartbeat { interval_ms } => {
                                                         if let Some(tx) = hb_interval_sender.take() {
                                                             let _ = tx.send(interval_ms);
@@ -1092,6 +1274,31 @@ async fn run_voice_loop(
                                         }
                                         Err(e) => {
                                             log::error!("Error handling voice gateway payload: {}", e);
+                                        }
+                                    }
+                                }
+                                Some(Ok(WsMessage::Binary(bin_bytes))) => {
+                                    let actions_result = {
+                                        let mut sm = state_machine.write().await;
+                                        sm.handle_incoming_binary(&bin_bytes)
+                                    };
+
+                                    match actions_result {
+                                        Ok(actions) => {
+                                            for action in actions {
+                                                match action {
+                                                    VoiceGatewayAction::SendBinaryMessage(bin) => {
+                                                        let _ = ws_write.send(WsMessage::Binary(bin.into())).await;
+                                                    }
+                                                    VoiceGatewayAction::SendMessage(payload_text) => {
+                                                        let _ = ws_write.send(WsMessage::Text(payload_text.into())).await;
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("Error handling binary voice gateway payload: {}", e);
                                         }
                                     }
                                 }
@@ -1476,6 +1683,7 @@ mod tests {
         let expected_desc = SessionDescription {
             mode: "aead_aes256_gcm_rtpsize".to_string(),
             secret_key: secret,
+            dave_protocol_version: None,
         };
         assert_eq!(*sm.current_state(), VoiceConnectionState::Connected(expected_desc.clone()));
         assert_eq!(actions, vec![VoiceGatewayAction::SessionDescriptionReceived(expected_desc)]);
@@ -1515,6 +1723,7 @@ mod tests {
         let session_desc = SessionDescription {
             mode: "aead_aes256_gcm_rtpsize".to_string(),
             secret_key: vec![1; 32],
+            dave_protocol_version: None,
         };
         sm.session_description = Some(session_desc.clone());
         sm.state = VoiceConnectionState::Connected(session_desc.clone());
@@ -1671,5 +1880,76 @@ mod tests {
             s => panic!("Expected Failed state, got {:?}", s),
         }
         assert!(matches!(action, Some(VoiceGatewayAction::CloseConnection { can_resume: false, .. })));
+    }
+
+    #[test]
+    fn test_dave_identify_default_version() {
+        let mut cfg = sample_config();
+        cfg.max_dave_protocol_version = None;
+        let sm = VoiceGatewayStateMachine::new(cfg);
+        let id = sm.generate_identify();
+        let val = serde_json::to_value(&id).unwrap();
+        assert_eq!(val["d"]["max_dave_protocol_version"], 1);
+    }
+
+    #[test]
+    fn test_dave_session_description_negotiation_and_transition() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        assert_eq!(sm.dave_session().protocol_version(), 0);
+
+        // Server negotiates DAVE version 1 in SessionDescription
+        let session_raw = r#"{
+            "op": 4,
+            "d": {
+                "mode": "aead_aes256_gcm_rtpsize",
+                "secret_key": [0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1,2,3,4,5,6,7,8,9,0,1],
+                "dave_protocol_version": 1
+            }
+        }"#;
+        let actions = sm.handle_incoming_text(session_raw).unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(sm.dave_session().protocol_version(), 1);
+
+        // Server sends Opcode 21 Prepare Transition
+        let prep_raw = r#"{"op": 21, "d": {"transition_id": 100, "protocol_version": 1}}"#;
+        let prep_actions = sm.handle_incoming_text(prep_raw).unwrap();
+        assert_eq!(prep_actions.len(), 1);
+        // Expect Opcode 23 Transition Ready
+        if let VoiceGatewayAction::SendMessage(msg) = &prep_actions[0] {
+            let val: serde_json::Value = serde_json::from_str(msg).unwrap();
+            assert_eq!(val["op"], 23);
+            assert_eq!(val["d"]["transition_id"], 100);
+        } else {
+            panic!("Expected Opcode 23 Transition Ready");
+        }
+
+        // Server sends Opcode 22 Execute Transition
+        let exec_raw = r#"{"op": 22, "d": {"transition_id": 100}}"#;
+        let exec_actions = sm.handle_incoming_text(exec_raw).unwrap();
+        assert!(exec_actions.is_empty());
+
+        // Test speaking mapping
+        let speaking_raw = r#"{"op": 5, "d": {"speaking": 1, "ssrc": 9999, "user_id": "123456789"}}"#;
+        sm.handle_incoming_text(speaking_raw).unwrap();
+        assert_eq!(sm.dave_session().get_user_id_by_ssrc(9999), Some(123456789));
+
+        // Media passthrough test
+        let frame = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let encrypted = sm.dave_session_mut().encrypt_opus_frame(&frame).unwrap();
+        assert_eq!(encrypted, frame); // In passthrough fallback while MLS group forms
+
+        let decrypted = sm.dave_session_mut().decrypt_opus_frame_by_ssrc(9999, &frame).unwrap();
+        assert_eq!(decrypted, frame);
+    }
+
+    #[test]
+    fn test_dave_binary_frame_handling() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        sm.dave_session_mut().init_session(1).unwrap();
+
+        // Synthetic Opcode 25: external sender package with malformed bytes should return Err cleanly
+        let server_bin = vec![0x00, 0x0F, 25];
+        let res = sm.handle_incoming_binary(&server_bin);
+        assert!(res.is_err());
     }
 }

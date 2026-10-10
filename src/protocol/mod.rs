@@ -14,6 +14,7 @@ pub mod transport;
 pub mod voice_crypto;
 pub mod voice_udp;
 pub mod voice_gateway;
+pub mod voice_dave;
 
 pub use auth::{AuthToken, TokenStorage, TokenType};
 pub use bridge::ProtocolBridge;
@@ -34,6 +35,12 @@ pub use voice_gateway::{
     describe_voice_close_code, SessionDescription, VoiceCloseDecision, VoiceGateway,
     VoiceGatewayConfig, VoiceGatewayEvent, VoiceReady, VoiceServerData,
     FALLBACK_ENCRYPTION_MODE, PREFERRED_ENCRYPTION_MODE,
+};
+pub use voice_dave::{
+    format_client_binary_message, parse_server_binary_message, DaveAnnounceCommitTransitionPayload,
+    DaveExecuteTransitionPayload, DaveInvalidCommitWelcomePayload, DaveOpcode,
+    DavePrepareEpochPayload, DavePrepareTransitionPayload, DaveTransitionReadyPayload,
+    VoiceDaveSession, SUPPORTED_DAVE_PROTOCOL_VERSION,
 };
 
 
