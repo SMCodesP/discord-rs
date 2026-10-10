@@ -29,7 +29,8 @@ pub use transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent}
 pub use voice_crypto::*;
 pub use voice_udp::*;
 pub use voice_gateway::{
-    SessionDescription, VoiceGateway, VoiceGatewayConfig, VoiceReady, VoiceServerData,
+    describe_voice_close_code, SessionDescription, VoiceCloseDecision, VoiceGateway,
+    VoiceGatewayConfig, VoiceGatewayEvent, VoiceReady, VoiceServerData,
     FALLBACK_ENCRYPTION_MODE, PREFERRED_ENCRYPTION_MODE,
 };
 
