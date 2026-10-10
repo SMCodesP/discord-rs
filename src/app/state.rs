@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use crate::domain::channel::ChannelType;
+use crate::domain::voice::VoiceState;
 use crate::domain::message::{Attachment, Author, Message, Reaction};
 use crate::domain::settings::{
     AccountConnection, AccessibilitySettings, AuthorizedApp, FamilyCenterLink,
@@ -444,6 +445,10 @@ pub struct AppState {
     pub message_display_mode: MessageDisplayMode,
     pub accessibility_settings: AccessibilitySettings,
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
+    /// Active voice states by voice channel ID
+    pub voice_states_by_channel: HashMap<String, Vec<VoiceState>>,
+    /// Configured user limits by channel ID
+    pub channel_user_limits: HashMap<String, u32>,
 }
 
 fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
@@ -1280,7 +1285,11 @@ impl AppState {
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
+            voice_states_by_channel: HashMap::new(),
+            channel_user_limits: HashMap::new(),
         };
+        state.set_channel_user_limit("chan-voice-pair", 2);
+        state.set_channel_user_limit("chan-gh-dev-sync", 4);
         state.sync_guild_media();
         state
     }
@@ -1761,6 +1770,50 @@ impl AppState {
         self.active_voice_call = None;
     }
 
+    /// Updates or removes a voice state across all channels
+    pub fn update_voice_state(&mut self, state: VoiceState) {
+        let user_id = state.user_id.clone();
+        // Remove the user from any channel they were previously in
+        for states in self.voice_states_by_channel.values_mut() {
+            states.retain(|s| s.user_id != user_id);
+        }
+        // If channel_id == Some(cid), add or update in cid
+        if let Some(ref cid) = state.channel_id {
+            let entry = self.voice_states_by_channel.entry(cid.clone()).or_default();
+            if let Some(existing) = entry.iter_mut().find(|s| s.user_id == user_id) {
+                *existing = state;
+            } else {
+                entry.push(state);
+            }
+        }
+    }
+
+    /// Returns the slice of active voice states connected to a specific channel
+    pub fn voice_states_for_channel(&self, channel_id: &str) -> &[VoiceState] {
+        self.voice_states_by_channel
+            .get(channel_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Sets capacity user limit for a channel (0 = unlimited)
+    pub fn set_channel_user_limit(&mut self, channel_id: impl Into<String>, limit: u32) {
+        let cid = channel_id.into();
+        self.channel_user_limits.insert(cid, limit);
+    }
+
+    /// Gets capacity user limit for a channel if configured
+    pub fn get_channel_user_limit(&self, channel_id: &str) -> Option<u32> {
+        self.channel_user_limits.get(channel_id).copied()
+    }
+
+    /// Populates multiple voice states from a guild initial snapshot
+    pub fn populate_guild_voice_states(&mut self, states: Vec<VoiceState>) {
+        for state in states {
+            self.update_voice_state(state);
+        }
+    }
+
     /// Toggles self mute
     pub fn toggle_mute(&mut self) {
         if let Some(ref tel) = self.telemetry {
@@ -2239,7 +2292,15 @@ impl AppState {
                 self.auth_error = Some(reason.clone());
                 self.connection_status = format!("Desconectado: {}", reason);
             }
+            TransportEvent::VoiceStateUpdate(state) => {
+                self.update_voice_state(state);
+            }
             TransportEvent::GuildChannelsUpdated { guild_id, channels } => {
+                for ch in &channels {
+                    if let Some(limit) = ch.user_limit {
+                        self.channel_user_limits.insert(ch.id.clone(), limit);
+                    }
+                }
                 let categories = organize_channels_into_categories(&guild_id, channels);
 
                 if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
@@ -2259,6 +2320,11 @@ impl AppState {
                 }
             }
             TransportEvent::GuildCreate(g) => {
+                for ch in &g.channels {
+                    if let Some(limit) = ch.user_limit {
+                        self.channel_user_limits.insert(ch.id.clone(), limit);
+                    }
+                }
                 let icon_url = g.icon_url();
                 let icon_hash = g.icon.clone();
                 let categories = organize_channels_into_categories(&g.id, g.channels);
