@@ -1,6 +1,6 @@
 use crate::domain::{
     Attachment, Author, Channel, ChannelType, Embed, EmbedField, Guild, Message, MessageStickerItem,
-    Reaction, Role, User, VoiceState,
+    Reaction, Role, User, VoiceState, AvatarDecorationData,
 };
 use crate::protocol::auth::{AuthToken, TokenType};
 use crate::protocol::cache_engine::DiscordCacheEngine;
@@ -1416,6 +1416,13 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
     user.global_name = val.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
     user.avatar = val.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
     user.bot = val.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Some(decor_val) = val.get("avatar_decoration_data") {
+        if !decor_val.is_null() {
+            if let Ok(decor) = serde_json::from_value::<AvatarDecorationData>(decor_val.clone()) {
+                user.avatar_decoration_data = Some(decor);
+            }
+        }
+    }
     Some(user)
 }
 
