@@ -95,6 +95,9 @@ pub struct Activity {
     pub state: Option<String>,
     /// Unix timestamp of when the activity started.
     pub created_at: Option<i64>,
+    /// Optional emoji for custom status.
+    #[serde(default)]
+    pub emoji: Option<CustomStatusEmoji>,
 }
 
 impl Activity {
@@ -105,6 +108,7 @@ impl Activity {
             details: None,
             state: None,
             created_at: None,
+            emoji: None,
         }
     }
 
@@ -120,7 +124,156 @@ impl Activity {
             state: Some(text),
             details: None,
             created_at: None,
+            emoji: None,
         }
+    }
+
+    pub fn custom_with_emoji(text: Option<String>, emoji: Option<CustomStatusEmoji>) -> Self {
+        Self {
+            name: "Custom Status".to_string(),
+            activity_type: ActivityType::Custom,
+            state: text,
+            details: None,
+            created_at: None,
+            emoji,
+        }
+    }
+}
+
+/// Custom emoji or unicode emoji for user custom status.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CustomStatusEmoji {
+    /// Name of the emoji (or unicode character if native unicode emoji).
+    pub name: String,
+    /// Snowflake ID if custom guild emoji, None if native unicode emoji.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Whether the emoji is animated.
+    #[serde(default)]
+    pub animated: bool,
+}
+
+impl CustomStatusEmoji {
+    pub fn unicode(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            id: None,
+            animated: false,
+        }
+    }
+
+    pub fn custom(id: impl Into<String>, name: impl Into<String>, animated: bool) -> Self {
+        Self {
+            id: Some(id.into()),
+            name: name.into(),
+            animated,
+        }
+    }
+
+    /// CDN URL if custom emoji, or None if unicode.
+    pub fn image_url(&self) -> Option<String> {
+        self.id.as_ref().map(|id| {
+            let ext = if self.animated { "gif" } else { "png" };
+            format!("https://cdn.discordapp.com/emojis/{}.{}?size=48", id, ext)
+        })
+    }
+}
+
+/// Custom status phrase and optional emoji.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CustomStatus {
+    /// Custom status phrase/text.
+    pub text: Option<String>,
+    /// Optional emoji (unicode or custom Discord emoji).
+    pub emoji: Option<CustomStatusEmoji>,
+}
+
+impl CustomStatus {
+    pub fn new(text: Option<String>, emoji: Option<CustomStatusEmoji>) -> Self {
+        Self { text, emoji }
+    }
+
+    pub fn from_text(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            emoji: None,
+        }
+    }
+
+    pub fn with_emoji(mut self, emoji: CustomStatusEmoji) -> Self {
+        self.emoji = Some(emoji);
+        self
+    }
+}
+
+/// Real-time presence information for a user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct Presence {
+    pub user_id: String,
+    pub status: PresenceStatus,
+    pub activity: Option<Activity>,
+    pub custom_status: Option<CustomStatus>,
+}
+
+impl Presence {
+    pub fn new(user_id: impl Into<String>, status: PresenceStatus) -> Self {
+        Self {
+            user_id: user_id.into(),
+            status,
+            activity: None,
+            custom_status: None,
+        }
+    }
+
+    pub fn with_custom_status(mut self, custom_status: CustomStatus) -> Self {
+        self.custom_status = Some(custom_status);
+        self
+    }
+
+    pub fn with_activity(mut self, activity: Activity) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+}
+
+/// Data representing an avatar decoration equipped by a user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvatarDecorationData {
+    /// Asset hash or identifier for the decoration preset.
+    pub asset: String,
+    /// Optional SKU Snowflake identifier for the store collectible.
+    #[serde(default)]
+    pub sku_id: Option<String>,
+}
+
+impl AvatarDecorationData {
+    /// Creates a new decoration with just the asset identifier.
+    pub fn new(asset: impl Into<String>) -> Self {
+        Self {
+            asset: asset.into(),
+            sku_id: None,
+        }
+    }
+
+    /// Creates a decoration with an asset and SKU ID.
+    pub fn with_sku(asset: impl Into<String>, sku_id: impl Into<String>) -> Self {
+        Self {
+            asset: asset.into(),
+            sku_id: Some(sku_id.into()),
+        }
+    }
+
+    /// Canonical CDN URL for this decoration preset.
+    pub fn url(&self) -> String {
+        format!(
+            "https://cdn.discordapp.com/avatar-decoration-presets/{}.png?size=96&passthrough=true",
+            self.asset
+        )
+    }
+
+    /// Returns true if the decoration is an animated APNG (`a_` prefix).
+    pub fn is_animated(&self) -> bool {
+        self.asset.starts_with("a_")
     }
 }
 
@@ -145,6 +298,12 @@ pub struct User {
     pub presence: PresenceStatus,
     /// Active Rich Presence or custom status activity.
     pub activity: Option<Activity>,
+    /// Custom status phrase and emoji.
+    #[serde(default)]
+    pub custom_status: Option<CustomStatus>,
+    /// Active avatar decoration equipped by the user.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 impl User {
@@ -158,6 +317,8 @@ impl User {
             bot: false,
             presence: PresenceStatus::Offline,
             activity: None,
+            custom_status: None,
+            avatar_decoration_data: None,
         }
     }
 
@@ -177,5 +338,92 @@ impl User {
                 format!("https://cdn.discordapp.com/avatars/{}/{}.png", self.id, hash)
             }
         })
+    }
+
+    /// Returns the avatar decoration CDN URL if the user has an equipped decoration.
+    pub fn avatar_decoration_url(&self) -> Option<String> {
+        self.avatar_decoration_data.as_ref().map(|d| d.url())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_avatar_decoration_data_url_and_animation() {
+        let static_decor = AvatarDecorationData::new("b456abc");
+        assert_eq!(
+            static_decor.url(),
+            "https://cdn.discordapp.com/avatar-decoration-presets/b456abc.png?size=96&passthrough=true"
+        );
+        assert!(!static_decor.is_animated());
+        assert_eq!(static_decor.sku_id, None);
+
+        let animated_decor = AvatarDecorationData::with_sku("a_def123", "sku-999");
+        assert_eq!(
+            animated_decor.url(),
+            "https://cdn.discordapp.com/avatar-decoration-presets/a_def123.png?size=96&passthrough=true"
+        );
+        assert!(animated_decor.is_animated());
+        assert_eq!(animated_decor.sku_id.as_deref(), Some("sku-999"));
+    }
+
+    #[test]
+    fn test_user_serde_with_avatar_decoration_data() {
+        // Payload without decoration field (should deserialize with None due to #[serde(default)])
+        let json_no_decor = r#"{"id":"1","username":"alice"}"#;
+        let user: User = serde_json::from_str(json_no_decor).unwrap();
+        assert_eq!(user.avatar_decoration_data, None);
+        assert_eq!(user.avatar_decoration_url(), None);
+
+        // Payload with null decoration field
+        let json_null_decor = r#"{"id":"2","username":"bob","avatar_decoration_data":null}"#;
+        let user_null: User = serde_json::from_str(json_null_decor).unwrap();
+        assert_eq!(user_null.avatar_decoration_data, None);
+
+        // Payload with populated decoration
+        let json_with_decor = r#"{
+            "id":"3",
+            "username":"charlie",
+            "avatar_decoration_data":{
+                "asset":"a_fire_ring",
+                "sku_id":"sku_fire"
+            }
+        }"#;
+        let user_decor: User = serde_json::from_str(json_with_decor).unwrap();
+        let decor = user_decor.avatar_decoration_data.as_ref().unwrap();
+        assert_eq!(decor.asset, "a_fire_ring");
+        assert_eq!(decor.sku_id.as_deref(), Some("sku_fire"));
+        assert!(decor.is_animated());
+        assert_eq!(
+            user_decor.avatar_decoration_url().unwrap(),
+            "https://cdn.discordapp.com/avatar-decoration-presets/a_fire_ring.png?size=96&passthrough=true"
+        );
+    }
+    #[test]
+    fn test_custom_status_and_emoji_models() {
+        let unicode_emoji = CustomStatusEmoji::unicode("🦀");
+        assert_eq!(unicode_emoji.name, "🦀");
+        assert_eq!(unicode_emoji.id, None);
+        assert_eq!(unicode_emoji.image_url(), None);
+
+        let custom_emoji = CustomStatusEmoji::custom("123456789", "ferris", false);
+        assert_eq!(custom_emoji.id, Some("123456789".to_string()));
+        assert_eq!(
+            custom_emoji.image_url(),
+            Some("https://cdn.discordapp.com/emojis/123456789.png?size=48".to_string())
+        );
+
+        let cs = CustomStatus::from_text("Coding in Rust").with_emoji(unicode_emoji);
+        assert_eq!(cs.text, Some("Coding in Rust".to_string()));
+        assert_eq!(cs.emoji.as_ref().unwrap().name, "🦀");
+
+        let presence = Presence::new("user-1", PresenceStatus::Online)
+            .with_custom_status(cs.clone())
+            .with_activity(Activity::playing("Rust"));
+        assert_eq!(presence.status, PresenceStatus::Online);
+        assert_eq!(presence.custom_status, Some(cs));
+        assert_eq!(presence.activity.unwrap().name, "Rust");
     }
 }

@@ -181,6 +181,7 @@ fn test_no_hardcoded_ferris_dm_and_clean_state() {
         is_group_dm: false,
         recipient_ids: vec!["user-ferris".into()],
         recipient_names: vec!["Ferris".into()],
+        user_limit: None,
     });
 
     // Legitimate temporary DM opened by user
@@ -223,6 +224,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         is_group_dm: false,
         recipient_ids: vec!["user-bot-dyno".into()],
         recipient_names: vec!["Dyno".into()],
+        user_limit: None,
     });
 
     let friend_dm_id = "dm-chan-alice-888".to_string();
@@ -239,6 +241,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         is_group_dm: false,
         recipient_ids: vec!["user-alice".into()],
         recipient_names: vec!["Alice".into()],
+        user_limit: None,
     });
 
     // Also open a pending temp DM with Carol

@@ -1,6 +1,7 @@
 use crate::domain::{
-    Attachment, Author, Channel, ChannelType, Embed, EmbedField, Guild, Message, MessageStickerItem,
-    Reaction, Role, User, VoiceState,
+    Activity, ActivityType, Attachment, Author, AvatarDecorationData, Channel, ChannelType,
+    CustomStatus, CustomStatusEmoji, Embed, EmbedField, Guild, Message, MessageStickerItem,
+    PresenceStatus, Reaction, Role, User, VoiceState,
 };
 use crate::protocol::auth::{AuthToken, TokenType};
 use crate::protocol::cache_engine::DiscordCacheEngine;
@@ -51,6 +52,10 @@ pub struct DiscordApiClient {
     session_id: Arc<RwLock<Option<String>>>,
     resume_gateway_url: Arc<RwLock<Option<String>>>,
     gateway_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    outbound_gateway_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<WsMessage>>>>,
+    current_user_id: Arc<RwLock<Option<String>>>,
+    last_voice_session_id: Arc<RwLock<Option<String>>>,
+    last_voice_server: Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
 }
 
 impl DiscordApiClient {
@@ -75,6 +80,10 @@ impl DiscordApiClient {
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
             gateway_task: Arc::new(Mutex::new(None)),
+            outbound_gateway_tx: Arc::new(RwLock::new(None)),
+            current_user_id: Arc::new(RwLock::new(None)),
+            last_voice_session_id: Arc::new(RwLock::new(None)),
+            last_voice_server: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -103,6 +112,10 @@ impl DiscordApiClient {
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
             gateway_task: Arc::new(Mutex::new(None)),
+            outbound_gateway_tx: Arc::new(RwLock::new(None)),
+            current_user_id: Arc::new(RwLock::new(None)),
+            last_voice_session_id: Arc::new(RwLock::new(None)),
+            last_voice_server: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -214,6 +227,7 @@ impl DiscordApiClient {
         if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
             log::debug!("[DiscordApiClient] /users/@me retornou 304 Not Modified. Carregando do cache em disco.");
             if let Some(cached_user) = self.cache_engine.load_current_user() {
+                *self.current_user_id.write().await = Some(cached_user.id.clone());
                 return Ok(cached_user);
             }
         }
@@ -224,6 +238,7 @@ impl DiscordApiClient {
 
         let val: serde_json::Value = resp.json().await?;
         let user = parse_user_from_json(&val).context("Failed to parse user from /users/@me")?;
+        *self.current_user_id.write().await = Some(user.id.clone());
         self.cache_engine.save_current_user(&user);
         Ok(user)
     }
@@ -345,6 +360,7 @@ impl DiscordApiClient {
 
         Ok(guild_folders)
     }
+
 
     /// Fetches all custom emojis for a guild (/guilds/{guild_id}/emojis) with local disk cache
     pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<DiscordEmoji>> {
@@ -528,6 +544,15 @@ impl DiscordApiClient {
         Ok(sounds)
     }
 
+    /// Fetches the profile effects collectibles catalog (/collectibles-categories/v2)
+    pub async fn get_profile_effects_catalog(&self) -> Result<crate::components::ProfileEffectCatalog> {
+        let path = "/collectibles-categories/v2?include_bundles=true&variants_return_style=2";
+        let req = self.auth_request(reqwest::Method::GET, path);
+        let resp = self.send_request(path, req).await?;
+        let raw_json: serde_json::Value = resp.json().await?;
+        Ok(crate::components::ProfileEffectCatalog::from_categories_json(&raw_json))
+    }
+
     /// Sends a sticker message to a text channel (/channels/{channel_id}/messages)
     pub async fn send_sticker_message(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
@@ -559,6 +584,76 @@ impl DiscordApiClient {
 
         Ok(msg)
     }
+
+    /// Send Opcode 4 Voice State Update to Discord Gateway.
+    pub async fn send_voice_state_update(
+        &self,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> Result<()> {
+        let payload = json!({
+            "op": 4,
+            "d": {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "self_mute": self_mute,
+                "self_deaf": self_deaf,
+            }
+        });
+        self.send_gateway_payload(&payload).await
+    }
+
+    /// Send an arbitrary JSON payload to the main Gateway WebSocket.
+    pub async fn send_gateway_payload(&self, payload: &serde_json::Value) -> Result<()> {
+        let text = serde_json::to_string(payload)?;
+        let lock = self.outbound_gateway_tx.read().await;
+        if let Some(ref tx) = *lock {
+            tx.send(WsMessage::Text(text.into()))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send gateway message: {}", e))?;
+            Ok(())
+        } else {
+            bail!("Gateway is not connected");
+        }
+    }
+
+    /// Ring participants in a DM / private channel via POST /channels/{id}/call/ring
+    pub async fn ring_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
+        let path = format!("/channels/{}/call/ring", channel_id);
+        let body = if let Some(recips) = recipients {
+            json!({ "recipients": recips })
+        } else {
+            json!({})
+        };
+        let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
+        let _ = self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Stop ringing participants in a DM / private channel via POST /channels/{id}/call/stop-ringing
+    pub async fn stop_ringing_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
+        let path = format!("/channels/{}/call/stop-ringing", channel_id);
+        let body = if let Some(recips) = recipients {
+            json!({ "recipients": recips })
+        } else {
+            json!({})
+        };
+        let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
+        let _ = self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Get the latest captured voice session_id for the current user.
+    pub async fn current_voice_session_id(&self) -> Option<String> {
+        self.last_voice_session_id.read().await.clone()
+    }
+
+    /// Get the latest captured voice server information (token, endpoint, guild_id/channel_id).
+    pub async fn current_voice_server(&self) -> Option<crate::protocol::VoiceServerData> {
+        self.last_voice_server.read().await.clone()
+    }
 }
 
 #[async_trait]
@@ -574,8 +669,11 @@ impl DiscordTransport for DiscordApiClient {
         let last_sequence = self.last_sequence.clone();
         let session_id_lock = self.session_id.clone();
         let resume_gateway_lock = self.resume_gateway_url.clone();
-
         let cache_engine_clone = self.cache_engine.clone();
+        let outbound_tx_lock = self.outbound_gateway_tx.clone();
+        let current_user_id_lock = self.current_user_id.clone();
+        let voice_session_id_lock = self.last_voice_session_id.clone();
+        let voice_server_lock = self.last_voice_server.clone();
 
         let handle = tokio::spawn(async move {
             run_gateway_loop(
@@ -586,6 +684,10 @@ impl DiscordTransport for DiscordApiClient {
                 session_id_lock,
                 resume_gateway_lock,
                 cache_engine_clone,
+                outbound_tx_lock,
+                current_user_id_lock,
+                voice_session_id_lock,
+                voice_server_lock,
             )
             .await;
         });
@@ -602,6 +704,7 @@ impl DiscordTransport for DiscordApiClient {
         if let Some(task) = lock.take() {
             task.abort();
         }
+        *self.outbound_gateway_tx.write().await = None;
         let _ = self
             .event_sender
             .send(TransportEvent::Disconnected("Disconnected by client".to_string()));
@@ -899,6 +1002,24 @@ impl DiscordTransport for DiscordApiClient {
         Ok(())
     }
 
+    async fn send_voice_state_update(
+        &self,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> anyhow::Result<()> {
+        self.send_voice_state_update(guild_id, channel_id, self_mute, self_deaf).await
+    }
+
+    async fn ring_call(
+        &self,
+        channel_id: &str,
+        recipients: Option<Vec<String>>,
+    ) -> anyhow::Result<()> {
+        self.ring_call(channel_id, recipients).await
+    }
+
     fn subscribe_events(&self) -> broadcast::Receiver<TransportEvent> {
         self.event_sender.subscribe()
     }
@@ -914,6 +1035,10 @@ async fn run_gateway_loop(
     session_id: Arc<RwLock<Option<String>>>,
     resume_gateway_url: Arc<RwLock<Option<String>>>,
     cache_engine: Arc<DiscordCacheEngine>,
+    outbound_gateway_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<WsMessage>>>>,
+    current_user_id: Arc<RwLock<Option<String>>>,
+    last_voice_session_id: Arc<RwLock<Option<String>>>,
+    last_voice_server: Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
 ) {
     let mut backoff_seconds = 1;
 
@@ -1033,9 +1158,10 @@ async fn run_gateway_loop(
                 // Spawn Heartbeat Task
                 let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel();
                 let seq_tracker = last_sequence.clone();
-                let (hb_send_tx, mut hb_send_rx) = tokio::sync::mpsc::channel::<WsMessage>(8);
+                let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<WsMessage>(64);
+                *outbound_gateway_tx.write().await = Some(cmd_tx.clone());
 
-                let hb_tx_clone = hb_send_tx.clone();
+                let hb_tx_clone = cmd_tx.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
                     loop {
@@ -1058,7 +1184,7 @@ async fn run_gateway_loop(
                 // WebSocket Processing Loop
                 loop {
                     tokio::select! {
-                        Some(msg_to_send) = hb_send_rx.recv() => {
+                        Some(msg_to_send) = cmd_rx.recv() => {
                             if ws_write.send(msg_to_send).await.is_err() {
                                 break;
                             }
@@ -1082,6 +1208,9 @@ async fn run_gateway_loop(
                                                         &session_id,
                                                         &resume_gateway_url,
                                                         &cache_engine,
+                                                        &current_user_id,
+                                                        &last_voice_session_id,
+                                                        &last_voice_server,
                                                     ).await;
                                                 }
                                             }
@@ -1131,11 +1260,13 @@ async fn run_gateway_loop(
                 }
 
                 let _ = heartbeat_stop_tx.send(());
+                *outbound_gateway_tx.write().await = None;
                 is_connected.store(false, Ordering::SeqCst);
                 let _ = event_tx.send(TransportEvent::Disconnected("Gateway disconnected".to_string()));
             }
             Err(err) => {
                 log::error!("Failed to connect to Discord gateway: {}", err);
+                *outbound_gateway_tx.write().await = None;
                 is_connected.store(false, Ordering::SeqCst);
                 let _ = event_tx.send(TransportEvent::Disconnected(format!("Falha ao conectar no Gateway: {}", err)));
             }
@@ -1153,6 +1284,9 @@ async fn handle_dispatch(
     session_id: &Arc<RwLock<Option<String>>>,
     resume_gateway_url: &Arc<RwLock<Option<String>>>,
     cache_engine: &Arc<DiscordCacheEngine>,
+    current_user_id: &Arc<RwLock<Option<String>>>,
+    last_voice_session_id: &Arc<RwLock<Option<String>>>,
+    last_voice_server: &Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
 ) {
     match event_name {
         "READY" => {
@@ -1167,6 +1301,8 @@ async fn handle_dispatch(
                 .get("user")
                 .and_then(parse_user_from_json)
                 .unwrap_or_else(|| User::new("me", "Authenticated User"));
+
+            *current_user_id.write().await = Some(user.id.clone());
 
             let mut guilds = Vec::new();
             if let Some(raw_guilds) = data.get("guilds").and_then(|v| v.as_array()) {
@@ -1228,11 +1364,63 @@ async fn handle_dispatch(
             cache_engine.save_current_user(&user);
             cache_engine.save_guilds(&guilds);
 
+            // Discord web stores user settings / DM pins in binary Protobuf (PreloadedUserSettings); Gateway READY / REST doesn't expose them in JSON, so pinned DMs are managed locally in discord-rs AppState.
+            let raw_pinned = data
+                .get("user_settings")
+                .and_then(|us| us.get("pinned_dms"))
+                .or_else(|| data.get("pinned_dms"))
+                .and_then(|v| v.as_array());
+
+            let mut pinned_dms = Vec::new();
+            if let Some(arr) = raw_pinned {
+                for item in arr {
+                    if let Some(id) = item.as_str() {
+                        pinned_dms.push(id.to_string());
+                    } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        pinned_dms.push(id.to_string());
+                    }
+                }
+            }
+
             let _ = event_tx.send(TransportEvent::Ready {
                 user,
                 guilds,
                 guild_folders,
             });
+
+            // Extrair presenças iniciais de amigos/contatos do payload READY
+            if let Some(raw_presences) = data.get("presences").and_then(|v| v.as_array()) {
+                for p in raw_presences {
+                    if let Some(evt) = parse_presence_from_json(p) {
+                        let _ = event_tx.send(evt);
+                    }
+                }
+            }
+
+            if !pinned_dms.is_empty() {
+                let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
+            }
+
+            // Popula voice_states iniciais a partir do snapshot do READY
+            if let Some(raw_guilds) = data.get("guilds").and_then(|v| v.as_array()) {
+                for g in raw_guilds {
+                    let g_id = g.get("id").and_then(|v| v.as_str());
+                    if let Some(raw_states) = g.get("voice_states").and_then(|v| v.as_array()) {
+                        for vs_val in raw_states {
+                            if let Some(state) = parse_voice_state_from_json(vs_val, g_id) {
+                                let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                for vs_val in raw_states {
+                    if let Some(state) = parse_voice_state_from_json(vs_val, None) {
+                        let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                    }
+                }
+            }
         }
         "CHANNEL_CREATE" => {
             if let Some(ch) = parse_channel_from_json(&data, None) {
@@ -1273,6 +1461,45 @@ async fn handle_dispatch(
                 }
                 if let Some(raw_stickers) = data.get("stickers").and_then(|v| v.as_array()) {
                     guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                }
+
+                // Popula voice_states a partir do snapshot inicial de GUILD_CREATE
+                if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+                    if let Some(raw_members) = data.get("members").and_then(|v| v.as_array()) {
+                        for m in raw_members {
+                            if let Some(user) = m.get("user") {
+                                if let Some(uid) = user.get("id").and_then(|v| v.as_str()) {
+                                    let name = m.get("nick").and_then(|v| v.as_str())
+                                        .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                                        .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                                        .map(ToString::to_string);
+                                    let avatar = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                                        if hash.starts_with("http") {
+                                            hash.to_string()
+                                        } else {
+                                            format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, hash)
+                                        }
+                                    });
+                                    guild_members.insert(uid.to_string(), (name, avatar));
+                                }
+                            }
+                        }
+                    }
+
+                    for vs_val in raw_states {
+                        if let Some(mut state) = parse_voice_state_from_json(vs_val, Some(id)) {
+                            if state.user_name.is_none() {
+                                if let Some((name, avatar)) = guild_members.get(&state.user_id) {
+                                    state.user_name = name.clone();
+                                    if state.avatar_url.is_none() {
+                                        state.avatar_url = avatar.clone();
+                                    }
+                                }
+                            }
+                            let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                        }
+                    }
                 }
 
                 let _ = event_tx.send(TransportEvent::GuildCreate(guild));
@@ -1382,18 +1609,37 @@ async fn handle_dispatch(
             }
         }
         "VOICE_STATE_UPDATE" => {
-            if let Some(user_id) = data.get("user_id").and_then(|v| v.as_str()) {
-                let mut state = VoiceState::new(user_id, "");
-                state.guild_id = data.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                state.channel_id = data.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                state.session_id = data.get("session_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                state.mute = data.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.deaf = data.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.self_mute = data.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.self_deaf = data.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+            if let Some(state) = parse_voice_state_from_json(&data, None) {
+                {
+                    let my_id = current_user_id.read().await;
+                    if my_id.as_deref() == Some(state.user_id.as_str()) && !state.session_id.is_empty() {
+                        *last_voice_session_id.write().await = Some(state.session_id.clone());
+                    }
+                }
 
                 let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
             }
+        }
+        "VOICE_SERVER_UPDATE" => {
+            let token = data.get("token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let guild_id = data.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
+            let channel_id = data.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
+            let endpoint = data.get("endpoint").and_then(|v| v.as_str()).map(ToString::to_string);
+
+            let server_data = crate::protocol::VoiceServerData {
+                token: token.clone(),
+                guild_id: guild_id.clone(),
+                channel_id: channel_id.clone(),
+                endpoint: endpoint.clone(),
+            };
+            *last_voice_server.write().await = Some(server_data);
+
+            let _ = event_tx.send(TransportEvent::VoiceServerUpdate {
+                token,
+                guild_id,
+                channel_id,
+                endpoint,
+            });
         }
         "TYPING_START" => {
             if let (Some(ch_id), Some(user_id)) = (
@@ -1422,6 +1668,11 @@ async fn handle_dispatch(
                 .to_string();
             if !id.is_empty() {
                 let _ = event_tx.send(TransportEvent::RelationshipRemove { id });
+            }
+        }
+        "PRESENCE_UPDATE" => {
+            if let Some(evt) = parse_presence_from_json(&data) {
+                let _ = event_tx.send(evt);
             }
         }
         _ => {}
@@ -1480,7 +1731,57 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
     user.global_name = val.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
     user.avatar = val.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
     user.bot = val.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Some(decor_val) = val.get("avatar_decoration_data") {
+        if !decor_val.is_null() {
+            if let Ok(decor) = serde_json::from_value::<AvatarDecorationData>(decor_val.clone()) {
+                user.avatar_decoration_data = Some(decor);
+            }
+        }
+    }
     Some(user)
+}
+
+pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<VoiceState> {
+    let user_id = val.get("user_id")?.as_str()?;
+    let session_id = val.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+    let mut state = VoiceState::new(user_id, session_id);
+    state.guild_id = val.get("guild_id").and_then(|v| v.as_str()).or(default_guild_id).map(ToString::to_string);
+    state.channel_id = val.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    state.mute = val.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.deaf = val.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_mute = val.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_deaf = val.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_video = val.get("self_video").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_stream = val.get("self_stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.suppress = val.get("suppress").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if let Some(member) = val.get("member") {
+        if let Some(user) = member.get("user") {
+            state.user_name = member.get("nick").and_then(|v| v.as_str())
+                .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                .map(ToString::to_string);
+            state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                if hash.starts_with("http") {
+                    hash.to_string()
+                } else {
+                    format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+                }
+            });
+        }
+    } else if let Some(user) = val.get("user") {
+        state.user_name = user.get("global_name").and_then(|v| v.as_str())
+            .or_else(|| user.get("username").and_then(|v| v.as_str()))
+            .map(ToString::to_string);
+        state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+            if hash.starts_with("http") {
+                hash.to_string()
+            } else {
+                format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+            }
+        });
+    }
+    Some(state)
 }
 
 fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<Channel> {
@@ -1526,6 +1827,7 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
     ch.topic = val.get("topic").and_then(|v| v.as_str()).map(ToString::to_string);
     ch.position = val.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     ch.last_message_id = val.get("last_message_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    ch.user_limit = val.get("user_limit").and_then(|v| v.as_u64()).map(|l| l as u32);
     ch.is_pinned = val
         .get("is_pinned")
         .and_then(|v| v.as_bool())
@@ -1815,4 +2117,164 @@ fn urlencoding_encode(s: &str) -> String {
         }
     }
     encoded
+}
+
+pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<TransportEvent> {
+    let user_id = val
+        .get("user")
+        .and_then(|u| {
+            if let Some(id) = u.get("id").and_then(|v| v.as_str()) {
+                Some(id.to_string())
+            } else if let Some(s) = u.as_str() {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| val.get("user_id").and_then(|v| v.as_str()).map(ToString::to_string))?;
+
+    let status_str = val.get("status").and_then(|v| v.as_str()).unwrap_or("offline");
+    let status = match status_str.to_lowercase().as_str() {
+        "online" => PresenceStatus::Online,
+        "idle" => PresenceStatus::Idle,
+        "dnd" => PresenceStatus::DoNotDisturb,
+        _ => PresenceStatus::Offline,
+    };
+
+    let mut primary_activity: Option<Activity> = None;
+    let mut custom_status: Option<CustomStatus> = None;
+
+    if let Some(activities) = val.get("activities").and_then(|v| v.as_array()) {
+        for act in activities {
+            let type_num = act.get("type").and_then(|v| v.as_u64());
+            let name = act.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Discord Activity Type 4 is Custom Status
+            let is_custom = type_num == Some(4) || name.eq_ignore_ascii_case("Custom Status");
+            if is_custom {
+                let state_text = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                let emoji = act.get("emoji").and_then(|e| {
+                    let emoji_name = e.get("name").and_then(|v| v.as_str())?;
+                    let emoji_id = e.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let animated = e.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
+                    Some(CustomStatusEmoji {
+                        name: emoji_name.to_string(),
+                        id: emoji_id,
+                        animated,
+                    })
+                });
+
+                if state_text.is_some() || emoji.is_some() {
+                    custom_status = Some(CustomStatus {
+                        text: state_text,
+                        emoji,
+                    });
+                }
+            } else if primary_activity.is_none() {
+                let act_type = match type_num {
+                    Some(0) => ActivityType::Playing,
+                    Some(1) => ActivityType::Streaming,
+                    Some(2) => ActivityType::Listening,
+                    Some(3) => ActivityType::Watching,
+                    Some(5) => ActivityType::Competing,
+                    _ => ActivityType::Playing,
+                };
+                let mut activity = Activity::new(name, act_type);
+                activity.details = act.get("details").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.state = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.created_at = act.get("created_at").and_then(|v| v.as_i64());
+                primary_activity = Some(activity);
+            }
+        }
+    }
+
+    Some(TransportEvent::PresenceUpdate {
+        user_id,
+        status,
+        activity: primary_activity,
+        custom_status,
+    })
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_presence_update_with_custom_status() {
+        let json = serde_json::json!({
+            "user": { "id": "100000000000000001" },
+            "status": "online",
+            "activities": [
+                {
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": "I found her... ( A )",
+                    "emoji": {
+                        "name": "🌸",
+                        "id": null,
+                        "animated": false
+                    }
+                },
+                {
+                    "name": "VALORANT",
+                    "type": 0
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "100000000000000001");
+                assert_eq!(status, PresenceStatus::Online);
+                let cs = custom_status.expect("custom status should be present");
+                assert_eq!(cs.text, Some("I found her... ( A )".to_string()));
+                assert_eq!(cs.emoji.unwrap().name, "🌸");
+                let act = activity.expect("activity should be present");
+                assert_eq!(act.name, "VALORANT");
+            }
+            _ => panic!("Expected PresenceUpdate event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_presence_custom_emoji_and_idle() {
+        let json = serde_json::json!({
+            "user_id": "999888777",
+            "status": "idle",
+            "activities": [
+                {
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": "Studying",
+                    "emoji": {
+                        "name": "pepe_study",
+                        "id": "12345678",
+                        "animated": true
+                    }
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "999888777");
+                assert_eq!(status, PresenceStatus::Idle);
+                assert!(activity.is_none());
+                let cs = custom_status.unwrap();
+                assert_eq!(cs.text, Some("Studying".to_string()));
+                let emoji = cs.emoji.unwrap();
+                assert_eq!(emoji.name, "pepe_study");
+                assert_eq!(emoji.id, Some("12345678".to_string()));
+                assert!(emoji.animated);
+                assert_eq!(
+                    emoji.image_url(),
+                    Some("https://cdn.discordapp.com/emojis/12345678.gif?size=48".to_string())
+                );
+            }
+            _ => panic!("Expected PresenceUpdate"),
+        }
+    }
 }

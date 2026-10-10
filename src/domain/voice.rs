@@ -27,9 +27,21 @@ pub struct VoiceState {
     /// Whether the user is broadcasting camera video.
     #[serde(default)]
     pub self_video: bool,
+    /// Whether the user is broadcasting a screen share / Go Live stream.
+    #[serde(default)]
+    pub self_stream: bool,
     /// Whether the user is suppressed (e.g. stage channel audience).
     #[serde(default)]
     pub suppress: bool,
+    /// Optional member display name / username
+    #[serde(default)]
+    pub user_name: Option<String>,
+    /// Optional member avatar URL / hash
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    // Fed by voice gateway WebRTC / RTP connection opcode 5 Speaking
+    #[serde(skip)]
+    pub is_speaking: bool,
 }
 
 impl VoiceState {
@@ -44,8 +56,64 @@ impl VoiceState {
             self_deaf: false,
             self_mute: false,
             self_video: false,
+            self_stream: false,
             suppress: false,
+            user_name: None,
+            avatar_url: None,
+            is_speaking: false,
         }
+    }
+
+    pub fn with_channel_id(mut self, channel_id: impl Into<String>) -> Self {
+        self.channel_id = Some(channel_id.into());
+        self
+    }
+
+    pub fn with_guild_id(mut self, guild_id: impl Into<String>) -> Self {
+        self.guild_id = Some(guild_id.into());
+        self
+    }
+
+    pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
+        self.user_name = Some(name.into());
+        self
+    }
+
+    pub fn with_avatar_url(mut self, url: impl Into<String>) -> Self {
+        self.avatar_url = Some(url.into());
+        self
+    }
+
+    pub fn with_self_stream(mut self, stream: bool) -> Self {
+        self.self_stream = stream;
+        self
+    }
+
+    pub fn with_speaking(mut self, speaking: bool) -> Self {
+        self.is_speaking = speaking;
+        self
+    }
+
+    pub fn with_mute(mut self, mute: bool) -> Self {
+        self.mute = mute;
+        self
+    }
+
+    pub fn with_deaf(mut self, deaf: bool) -> Self {
+        self.deaf = deaf;
+        self
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.mute || self.self_mute
+    }
+
+    pub fn is_deafened(&self) -> bool {
+        self.deaf || self.self_deaf
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.user_name.as_deref().unwrap_or(&self.user_id)
     }
 
     pub fn is_connected(&self) -> bool {

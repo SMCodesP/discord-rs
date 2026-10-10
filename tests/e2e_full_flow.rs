@@ -52,6 +52,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                     is_group_dm: false,
                     recipient_ids: Vec::new(),
                     recipient_names: Vec::new(),
+                    user_limit: None,
                 }],
             },
             CategoryItemState {
@@ -71,6 +72,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     },
                     ChannelItemState {
                         id: format!("chan-{}-dev", id),
@@ -85,6 +87,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     },
                 ],
             },
@@ -277,6 +280,7 @@ fn test_e2e_home_and_dm_navigation_with_friends() {
     assert_eq!(state.friends[0].presence, PresenceStatus::Offline);
     assert_eq!(state.friends[1].display_name, "ana_rust");
     assert_eq!(state.friends[1].avatar_text, "A");
+    assert_eq!(state.friends[1].presence, PresenceStatus::Offline);
 }
 
 // =========================================================================

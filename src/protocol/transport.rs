@@ -1,5 +1,5 @@
 use crate::domain::{
-    Activity, Channel, Guild, Message, PresenceStatus, User, VoiceParticipant, VoiceState,
+    Activity, Channel, CustomStatus, Guild, Message, PresenceStatus, User, VoiceParticipant, VoiceState,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -83,11 +83,20 @@ pub enum TransportEvent {
         user_id: String,
         status: PresenceStatus,
         activity: Option<Activity>,
+        #[serde(default)]
+        custom_status: Option<CustomStatus>,
     },
     /// Voice state for a user changed (e.g. joined/left voice channel, mute, deaf).
     VoiceStateUpdate(VoiceState),
     /// Participant status updated in an active voice room.
     VoiceParticipantUpdate(VoiceParticipant),
+    /// Voice server update dispatched by main Discord Gateway for establishing voice connection
+    VoiceServerUpdate {
+        token: String,
+        guild_id: Option<String>,
+        channel_id: Option<String>,
+        endpoint: Option<String>,
+    },
     /// A user started typing in a channel.
     TypingStart {
         channel_id: String,
@@ -150,6 +159,8 @@ pub enum TransportEvent {
         guild_id: String,
         stickers: Vec<crate::protocol::media_cache::DiscordSticker>,
     },
+    /// Pinned direct message (DM) channel IDs updated from user settings or cache
+    PinnedDmsUpdated(Vec<String>),
 }
 
 /// Asynchronous transport abstraction for Discord communication.
@@ -244,6 +255,28 @@ pub trait DiscordTransport: Send + Sync {
         message_id: &str,
         emoji: &str,
     ) -> anyhow::Result<()>;
+
+    /// Send Opcode 4 Voice State Update to Discord Gateway.
+    async fn send_voice_state_update(
+        &self,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> anyhow::Result<()> {
+        let _ = (guild_id, channel_id, self_mute, self_deaf);
+        Ok(())
+    }
+
+    /// Ring participants in a DM / private channel via POST /channels/{id}/call/ring.
+    async fn ring_call(
+        &self,
+        channel_id: &str,
+        recipients: Option<Vec<String>>,
+    ) -> anyhow::Result<()> {
+        let _ = (channel_id, recipients);
+        Ok(())
+    }
 
     /// Subscribe to real-time events emitted by the transport.
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TransportEvent>;

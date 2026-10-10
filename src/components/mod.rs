@@ -9,6 +9,7 @@ pub mod channel_item;
 pub mod guild_item;
 pub mod member_item;
 pub mod modal;
+pub mod profile_effect;
 pub mod text_input;
 pub mod tooltip;
 
@@ -20,6 +21,10 @@ pub use channel_item::ChannelItem;
 pub use guild_item::GuildItem;
 pub use member_item::MemberItem;
 pub use modal::Modal;
+pub use profile_effect::{
+    render_profile_effect, render_profile_effect_for_user, ProfileEffectCatalog,
+    ProfileEffectConfig, ProfileEffectLayer, ProfileEffectLayerSource, UserProfileEffect,
+};
 pub use text_input::{
     TextInput, TextInputActionCallback, TextInputChangeCallback, TextInputMaskCallback,
 };

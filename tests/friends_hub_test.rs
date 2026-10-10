@@ -120,7 +120,9 @@ fn test_active_now_aggregation_from_presence() {
             details: Some("Playing on Official Server".into()),
             state: Some("In Lobby".into()),
             created_at: Some(1700000000),
+            emoji: None,
         }),
+        custom_status: None,
     });
 
     assert_eq!(state.active_now_items.len(), 1);
@@ -140,7 +142,9 @@ fn test_active_now_aggregation_from_presence() {
             details: Some("Song Title".into()),
             state: Some("Artist Name".into()),
             created_at: None,
+            emoji: None,
         }),
+        custom_status: None,
     });
 
     assert_eq!(state.active_now_items.len(), 1);
@@ -155,6 +159,7 @@ fn test_active_now_aggregation_from_presence() {
         user_id: "user-game".into(),
         status: DomainPresenceStatus::Offline,
         activity: None,
+        custom_status: None,
     });
     assert_eq!(state.active_now_items.len(), 0);
 }
@@ -181,6 +186,7 @@ fn test_relationship_default_presence_is_offline() {
         user_id: "user-new".into(),
         status: DomainPresenceStatus::Online,
         activity: None,
+        custom_status: None,
     });
     let f = state.friends.iter().find(|f| f.id == "user-new").unwrap();
     assert_eq!(f.presence, PresenceStatus::Online);

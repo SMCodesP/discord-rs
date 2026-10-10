@@ -1,6 +1,14 @@
 use gpui::*;
+use crate::components::avatar::{Avatar, AvatarSize};
+use crate::domain::user::{ActivityType, PresenceStatus};
+use crate::tokens::colors::text_muted;
 use crate::tokens::icons::*;
-use super::state::{ActiveModal, AppState, FriendsTab};
+use super::state::{ActiveModal, AppState, ChannelKind, FriendsTab};
+
+#[inline]
+fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
+    icon_headphones_off(size, color)
+}
 
 /// Channel sidebar (240px wide) containing:
 /// - Server header
@@ -9,6 +17,8 @@ use super::state::{ActiveModal, AppState, FriendsTab};
 /// - Bottom user profile & audio controls panel
 pub struct ChannelSidebar {
     state: Entity<AppState>,
+    context_menu_dm: Option<(String, Point<Pixels>)>,
+    focus_handle: FocusHandle,
 }
 
 impl ChannelSidebar {
@@ -17,12 +27,24 @@ impl ChannelSidebar {
             cx.notify();
         })
         .detach();
-        Self { state }
+
+        // Initialize pinned_dms_path in AppState for the live application if not yet set
+        state.update(cx, |s, _cx| {
+            if s.pinned_dms_path.is_none() {
+                s.set_pinned_dms_path(Some(crate::protocol::pinned_dms::pinned_dms_cache_path()));
+            }
+        });
+
+        Self {
+            state,
+            context_menu_dm: None,
+            focus_handle: cx.focus_handle(),
+        }
     }
 }
 
 impl Render for ChannelSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let selected_guild = state.get_selected_guild().cloned();
         let selected_channel_id = state.selected_channel_id.clone();
@@ -30,8 +52,128 @@ impl Render for ChannelSidebar {
         let current_user = state.current_user.clone();
         let is_dm = state.selected_guild_id.is_none();
         let app_entity = self.state.clone();
+        let self_entity = cx.entity().clone();
+        let viewport = window.viewport_size();
+
+        let context_menu_overlay = if let Some((ref target_dm_id, click_pos)) = self.context_menu_dm {
+            let dm_id = target_dm_id.clone();
+            let is_pinned = state.dm_channels.iter().find(|d| d.id == dm_id).map(|d| d.is_pinned).unwrap_or(false)
+                || state.pinned_dms.contains(&dm_id);
+            let app_entity_menu = self.state.clone();
+            let self_close = cx.entity().clone();
+
+            let pin_label = if is_pinned {
+                "Desafixar conversa"
+            } else {
+                "Fixar conversa"
+            };
+
+            let self_close_left = self_close.clone();
+            let self_close_right = self_close.clone();
+
+            Some(
+                deferred(
+                    div()
+                        .child(
+                            // Full-window transparent backdrop to catch clicks outside and dismiss the context menu
+                            anchored()
+                                .position(point(px(0.0), px(0.0)))
+                                .child(
+                                    div()
+                                        .w(viewport.width)
+                                        .h(viewport.height)
+                                        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                            self_close_left.update(cx, |this, cx| {
+                                                this.context_menu_dm = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                        .on_mouse_down(MouseButton::Right, move |_ev, _win, cx| {
+                                            self_close_right.update(cx, |this, cx| {
+                                                this.context_menu_dm = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                )
+                        )
+                        .child(
+                            // Context menu anchored at the exact click position, snapping dynamically to window bounds
+                            anchored()
+                                .position(click_pos)
+                                .snap_to_window()
+                                .child(
+                                    div()
+                                        .w(px(180.0))
+                                        .bg(rgb(0x111214))
+                                        .border_1()
+                                        .border_color(rgb(0x232428))
+                                        .rounded(px(6.0))
+                                        .shadow_lg()
+                                        .p(px(6.0))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .child(
+                                            div()
+                                                .h(px(32.0))
+                                                .px(px(8.0))
+                                                .rounded(px(4.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(rgb(0x4752c4)).text_color(rgb(0xffffff)))
+                                                .text_color(rgb(0xdbdee1))
+                                                .text_size(px(13.0))
+                                                .on_mouse_down(MouseButton::Left, {
+                                                    let app = app_entity_menu.clone();
+                                                    let target_id = dm_id.clone();
+                                                    let self_close = cx.entity().clone();
+                                                    move |_ev, _win, cx| {
+                                                        app.update(cx, |state, cx| {
+                                                            state.toggle_pin_dm_channel(&target_id);
+                                                            cx.notify();
+                                                        });
+                                                        self_close.update(cx, |this, cx| {
+                                                            this.context_menu_dm = None;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
+                                                .child(pin_label)
+                                                .child(icon_pin(px(14.0), rgb(0x949ba4)))
+                                        )
+                                )
+                        )
+                )
+            )
+        } else {
+            None
+        };
 
         div()
+            .track_focus(&self.focus_handle)
+            .key_context("channel_sidebar")
+            .on_key_down({
+                let self_esc = cx.entity().clone();
+                move |ev: &KeyDownEvent, _window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        self_esc.update(cx, |this, cx| {
+                            if this.context_menu_dm.is_some() {
+                                this.context_menu_dm = None;
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+            })
+            .relative()
             .flex()
             .flex_col()
             .w(px(240.0))
@@ -297,200 +439,172 @@ impl Render for ChannelSidebar {
                                         let entity = app_entity.clone();
                                         let is_group = dm.is_group_dm || dm.recipient_names.len() > 1;
 
-                                        let avatar_el = if let Some(ref icon_url) = dm.icon_url {
-                                            div()
-                                                .size(px(32.0))
-                                                .rounded_full()
-                                                .overflow_hidden()
-                                                .flex_shrink_0()
-                                                .child(img(icon_url.clone()).size_full().rounded_full())
-                                        } else if is_group {
-                                            let names = if !dm.recipient_names.is_empty() {
-                                                dm.recipient_names.clone()
+                                        // Resolver presença e status customizado do destinatário da DM
+                                        let recipient_id = dm.recipient_ids.first();
+                                        let recipient_friend = state.friends.iter().find(|f| {
+                                            if let Some(rid) = recipient_id {
+                                                f.id == *rid
                                             } else {
-                                                dm_name.split(',').map(|s| s.trim().to_string()).collect()
-                                            };
-                                            let first_initial = names.get(0).and_then(|n| n.chars().next()).unwrap_or('A').to_uppercase().to_string();
-                                            let second_badge = if names.len() > 2 {
-                                                format!("+{}", names.len() - 1)
-                                            } else {
-                                                names.get(1).and_then(|n| n.chars().next()).unwrap_or('B').to_uppercase().to_string()
-                                            };
+                                                f.username == dm_name || f.display_name == dm_name
+                                            }
+                                        });
 
-                                            div()
-                                                .size(px(32.0))
-                                                .relative()
-                                                .flex_shrink_0()
-                                                .child(
-                                                    div()
-                                                        .absolute()
-                                                        .top(px(0.0))
-                                                        .left(px(0.0))
-                                                        .size(px(20.0))
-                                                        .rounded_full()
-                                                        .bg(rgb(0x5865f2))
-                                                        .border_2()
-                                                        .border_color(rgb(0x2b2d31))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .text_color(rgb(0xffffff))
-                                                        .text_size(px(10.0))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .child(first_initial)
-                                                )
-                                                .child(
-                                                    div()
-                                                        .absolute()
-                                                        .bottom(px(0.0))
-                                                        .right(px(0.0))
-                                                        .size(px(20.0))
-                                                        .rounded_full()
-                                                        .bg(rgb(0xeb459e))
-                                                        .border_2()
-                                                        .border_color(rgb(0x2b2d31))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .text_color(rgb(0xffffff))
-                                                        .text_size(px(9.0))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .child(second_badge)
-                                                )
+                                        let presence_info = recipient_id
+                                            .and_then(|rid| state.get_user_presence(rid))
+                                            .or_else(|| {
+                                                recipient_friend.and_then(|f| state.get_user_presence(&f.id))
+                                            });
+
+                                        let presence_status = presence_info
+                                            .map(|p| p.status)
+                                            .or_else(|| recipient_friend.map(|f| crate::domain::user::PresenceStatus::from(f.presence)))
+                                            .unwrap_or(PresenceStatus::Offline);
+
+                                        let custom_status = if let Some(p) = presence_info {
+                                            p.custom_status.clone()
                                         } else {
-                                            let avatar_char = dm_name.chars().next().unwrap_or('@').to_uppercase().to_string();
-                                            div()
-                                                .size(px(32.0))
-                                                .rounded_full()
-                                                .bg(rgb(0x5865f2))
-                                                .flex_shrink_0()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .text_color(rgb(0xffffff))
-                                                .text_size(px(14.0))
-                                                .font_weight(FontWeight::BOLD)
-                                                .child(avatar_char)
+                                            recipient_friend.and_then(|f| {
+                                                f.custom_status
+                                                    .as_ref()
+                                                    .map(|text| crate::domain::user::CustomStatus::from_text(text.clone()))
+                                            })
                                         };
 
-                                        dm_items.push(
+                                        let game_activity = presence_info
+                                            .and_then(|p| p.activity.as_ref())
+                                            .filter(|a| a.activity_type == ActivityType::Playing || (!a.name.is_empty() && a.name != "Custom Status"));
+
+                                        let avatar_el = render_dm_avatar(
+                                            is_group,
+                                            &dm_name,
+                                            &dm.recipient_names,
+                                            dm.icon_url.as_deref(),
+                                            recipient_friend.and_then(|f| f.avatar_url.as_deref()),
+                                            presence_status,
+                                        );
+
+                                        let subtitle_el = if is_group {
+                                            None
+                                        } else {
+                                            render_dm_subtitle(
+                                                custom_status.as_ref(),
+                                                game_activity,
+                                                presence_status == PresenceStatus::Offline,
+                                            )
+                                        };
+
+                                        let is_pinned = dm.is_pinned || dm.topic.as_deref().map_or(false, |t| t.contains("pin") || t.contains("fixad"));
+                                        let text_col_el = render_dm_text_column(
+                                            dm_name,
+                                            is_selected,
+                                            unread,
+                                            is_pinned,
+                                            subtitle_el,
+                                        );
+
+                                        let mut row = div()
+                                            .h(px(42.0))
+                                            .px(px(8.0))
+                                            .rounded(px(4.0))
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .cursor_pointer()
+                                            .bg(if is_selected {
+                                                rgb(0x3f4248)
+                                            } else {
+                                                rgba(0x00000000)
+                                            })
+                                            .hover(|s| s.bg(rgb(0x35373c)))
+                                            .on_mouse_down(MouseButton::Left, {
+                                                let click_entity = entity.clone();
+                                                let click_cid = dm_id.clone();
+                                                move |_event, _window, cx| {
+                                                    let cid = click_cid.clone();
+                                                    click_entity.update(cx, |s, cx| {
+                                                        s.select_channel(cid);
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            })
+                                            .on_mouse_down(MouseButton::Right, {
+                                                let self_ctx = self_entity.clone();
+                                                let menu_cid = dm_id.clone();
+                                                move |event, window, cx| {
+                                                    let pos = event.position;
+                                                    self_ctx.update(cx, |this, cx| {
+                                                        this.context_menu_dm = Some((menu_cid.clone(), pos));
+                                                        window.focus(&this.focus_handle);
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(10.0))
+                                                    .child(avatar_el)
+                                                    .child(text_col_el),
+                                            );
+
+                                        if mention_count > 0 {
+                                            row = row.child(
+                                                div()
+                                                    .min_w(px(16.0))
+                                                    .h(px(16.0))
+                                                    .px(px(4.0))
+                                                    .rounded_full()
+                                                    .bg(rgb(0xf23f43))
+                                                    .text_color(rgb(0xffffff))
+                                                    .text_size(px(10.0))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(mention_count.to_string()),
+                                            );
+                                        }
+
+                                        row = row.child(
                                             div()
-                                                .h(px(42.0))
-                                                .px(px(8.0))
-                                                .rounded(px(4.0))
                                                 .flex()
                                                 .items_center()
-                                                .justify_between()
-                                                .cursor_pointer()
-                                                .bg(if is_selected {
-                                                    rgb(0x3f4248)
-                                                } else {
-                                                    rgba(0x00000000)
-                                                })
-                                                .hover(|s| s.bg(rgb(0x35373c)))
-                                                .on_mouse_down(MouseButton::Left, {
-                                                    let click_entity = entity.clone();
-                                                    let click_cid = dm_id.clone();
-                                                    move |_event, _window, cx| {
-                                                        let cid = click_cid.clone();
-                                                        click_entity.update(cx, |s, cx| {
-                                                            s.select_channel(cid);
-                                                            cx.notify();
-                                                        });
-                                                    }
-                                                })
-                                                .child(
+                                                .gap(px(4.0))
+                                                .child({
+                                                    let add_entity = entity.clone();
+                                                    let add_cid = dm_id.clone();
                                                     div()
+                                                        .size(px(20.0))
+                                                        .rounded(px(4.0))
                                                         .flex()
                                                         .items_center()
-                                                        .gap(px(10.0))
-                                                        .child(avatar_el)
-                                                        .child(
-                                                            div()
-                                                                .flex()
-                                                                .items_center()
-                                                                .gap(px(6.0))
-                                                                .child(
-                                                                    div()
-                                                                        .text_color(if is_selected {
-                                                                            rgb(0xffffff)
-                                                                        } else if unread {
-                                                                            rgb(0xf2f3f5)
-                                                                        } else {
-                                                                            rgb(0x949ba4)
-                                                                        })
-                                                                        .font_weight(if is_selected || unread {
-                                                                            FontWeight::SEMIBOLD
-                                                                        } else {
-                                                                            FontWeight::NORMAL
-                                                                        })
-                                                                        .text_size(px(14.0))
-                                                                        .child(dm_name),
-                                                                )
-                                                                .children(if dm.is_pinned || dm.topic.as_deref().map_or(false, |t| t.contains("pin") || t.contains("fixad")) {
-                                                                    Some(icon_pin(px(12.0), rgb(0x949ba4)))
-                                                                } else {
-                                                                    None
-                                                                }),
-                                                        ),
-                                                )
-                                                .children(if mention_count > 0 {
-                                                    Some(
-                                                        div()
-                                                            .min_w(px(16.0))
-                                                            .h(px(16.0))
-                                                            .px(px(4.0))
-                                                            .rounded_full()
-                                                            .bg(rgb(0xf23f43))
-                                                            .text_color(rgb(0xffffff))
-                                                            .text_size(px(10.0))
-                                                            .font_weight(FontWeight::BOLD)
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .child(mention_count.to_string()),
-                                                    )
-                                                } else {
-                                                    None
-                                                })
-                                                .child(
-                                                    div()
-                                                        .flex()
-                                                        .items_center()
-                                                        .gap(px(4.0))
-                                                        .child({
-                                                            let add_entity = entity.clone();
-                                                            let add_cid = dm_id.clone();
-                                                            div()
-                                                                .size(px(20.0))
-                                                                .rounded(px(4.0))
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .text_color(rgb(0x80848e))
-                                                                .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x35373c)))
-                                                                .cursor_pointer()
-                                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                                    add_entity.update(cx, |s, cx| {
-                                                                        s.open_modal(ActiveModal::AddFriendToGroup(add_cid.clone()));
-                                                                        cx.notify();
-                                                                    });
-                                                                })
-                                                                 .child(icon_user(px(14.0), rgb(0x80848e)))
+                                                        .justify_center()
+                                                        .text_color(rgb(0x80848e))
+                                                        .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x35373c)))
+                                                        .cursor_pointer()
+                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                                            add_entity.update(cx, |s, cx| {
+                                                                s.open_modal(ActiveModal::AddFriendToGroup(add_cid.clone()));
+                                                                cx.notify();
+                                                            });
                                                         })
-                                                        .child(
-                                                            div()
-                                                                .size(px(16.0))
-                                                                .rounded_full()
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .text_color(rgb(0x80848e))
-                                                                .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x1e1f22)))
-                                                                .child(icon_close(px(12.0), rgb(0x80848e))),
-                                                        )
+                                                        .child(icon_user(px(14.0), rgb(0x80848e)))
+                                                })
+                                                .child(
+                                                    div()
+                                                        .size(px(16.0))
+                                                        .rounded_full()
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .text_color(rgb(0x80848e))
+                                                        .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x1e1f22)))
+                                                        .child(icon_close(px(12.0), rgb(0x80848e))),
                                                 ),
                                         );
+
+                                        dm_items.push(row);
                                     }
                                 }
                                 dm_items
@@ -557,6 +671,54 @@ impl Render for ChannelSidebar {
                                             let mention_count = channel.mention_count;
                                             let entity = app_entity.clone();
 
+                                            let is_voice = ch_kind == ChannelKind::Voice;
+                                            let voice_states = if is_voice {
+                                                state.voice_states_for_channel(&ch_id)
+                                            } else {
+                                                &[]
+                                            };
+
+                                            let capacity_badge = if is_voice {
+                                                let count = voice_states.len();
+                                                let limit = channel.user_limit.unwrap_or(0);
+                                                if limit > 0 {
+                                                    let is_full = count >= limit as usize;
+                                                    Some(
+                                                        div()
+                                                            .h(px(18.0))
+                                                            .px(px(6.0))
+                                                            .rounded(px(9.0))
+                                                            .bg(if is_full { rgb(0xda373c) } else { rgb(0x232428) })
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(11.0))
+                                                            .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                                            .text_color(if is_full { rgb(0xffffff) } else { rgb(0x949ba4) })
+                                                            .child(format!("{}/{}", count, limit)),
+                                                    )
+                                                } else if count > 0 {
+                                                    Some(
+                                                        div()
+                                                            .h(px(18.0))
+                                                            .px(px(6.0))
+                                                            .rounded(px(9.0))
+                                                            .bg(rgb(0x232428))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_size(px(11.0))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(rgb(0x949ba4))
+                                                            .child(count.to_string()),
+                                                    )
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+
                                             category_elements.push(
                                                 div()
                                                     .h(px(34.0))
@@ -619,26 +781,157 @@ impl Render for ChannelSidebar {
                                                                     .child(ch_name),
                                                             ),
                                                     )
-                                                    .children(if mention_count > 0 {
-                                                        Some(
-                                                            div()
-                                                                .min_w(px(16.0))
-                                                                .h(px(16.0))
-                                                                .px(px(4.0))
-                                                                .rounded_full()
-                                                                .bg(rgb(0xf23f43))
-                                                                .flex()
-                                                                .items_center()
-                                                                .justify_center()
-                                                                .text_color(rgb(0xffffff))
-                                                                .text_size(px(10.0))
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .child(mention_count.to_string()),
-                                                        )
-                                                    } else {
-                                                        None
-                                                    }),
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap(px(4.0))
+                                                            .children(capacity_badge)
+                                                            .children(if mention_count > 0 {
+                                                                Some(
+                                                                    div()
+                                                                        .min_w(px(16.0))
+                                                                        .h(px(16.0))
+                                                                        .px(px(4.0))
+                                                                        .rounded_full()
+                                                                        .bg(rgb(0xf23f43))
+                                                                        .flex()
+                                                                        .items_center()
+                                                                        .justify_center()
+                                                                        .text_color(rgb(0xffffff))
+                                                                        .text_size(px(10.0))
+                                                                        .font_weight(FontWeight::BOLD)
+                                                                        .child(mention_count.to_string()),
+                                                                )
+                                                            } else {
+                                                                None
+                                                            })
+                                                    ),
                                             );
+
+                                            // Membros conectados abaixo do canal de voz
+                                            if is_voice && !voice_states.is_empty() {
+                                                for vs in voice_states {
+                                                    let vs_uid = vs.user_id.clone();
+                                                    let display_name = if let Some(ref name) = vs.user_name {
+                                                        name.clone()
+                                                    } else if vs_uid == current_user.id {
+                                                        current_user.display_name.clone()
+                                                    } else if let Some(m) = state.members.iter().find(|m| m.id == vs_uid) {
+                                                        m.name.clone()
+                                                    } else if let Some(f) = state.friends.iter().find(|f| f.id == vs_uid) {
+                                                        f.display_name.clone()
+                                                    } else {
+                                                        String::new()
+                                                    };
+
+                                                    let avatar_url = vs.avatar_url.clone().or_else(|| {
+                                                        if vs_uid == current_user.id {
+                                                             current_user.avatar_url.clone()
+                                                        } else {
+                                                             state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
+                                                        }
+                                                    });
+
+                                                    let initial = display_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+
+                                                    let is_speaking = vs.is_speaking;
+                                                    let is_muted = vs.is_muted();
+                                                    let is_deafened = vs.is_deafened();
+                                                    let is_streaming = vs.self_stream;
+
+                                                    category_elements.push(
+                                                        div()
+                                                            .h(px(28.0))
+                                                            .pl(px(32.0))
+                                                            .pr(px(8.0))
+                                                            .rounded(px(4.0))
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .cursor_pointer()
+                                                            .hover(|s| s.bg(rgb(0x35373c)))
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .gap(px(8.0))
+                                                                    .overflow_hidden()
+                                                                    // Mini-avatar 20x20 com anel verde se estiver falando
+                                                                    .child(
+                                                                        div()
+                                                                            .size(px(20.0))
+                                                                            .rounded_full()
+                                                                            .overflow_hidden()
+                                                                            .flex_shrink_0()
+                                                                            .border(if is_speaking { px(2.0) } else { px(0.0) })
+                                                                            .border_color(rgb(0x23a55a))
+                                                                            .child(if let Some(ref url) = avatar_url {
+                                                                                img(url.clone()).size_full().rounded_full().into_any_element()
+                                                                            } else {
+                                                                                div()
+                                                                                    .size_full()
+                                                                                    .rounded_full()
+                                                                                    .bg(rgb(0x5865f2))
+                                                                                    .flex()
+                                                                                    .items_center()
+                                                                                    .justify_center()
+                                                                                    .text_color(rgb(0xffffff))
+                                                                                    .text_size(px(10.0))
+                                                                                    .font_weight(FontWeight::BOLD)
+                                                                                    .child(initial)
+                                                                                    .into_any_element()
+                                                                            })
+                                                                    )
+                                                                    // Nome do usuário conectado
+                                                                    .child(
+                                                                        div()
+                                                                            .text_size(px(13.0))
+                                                                            .font_weight(FontWeight::MEDIUM)
+                                                                            .text_color(rgb(0x949ba4))
+                                                                            .overflow_hidden()
+                                                                            .child(display_name)
+                                                                    )
+                                                            )
+                                                            // Ícones de mudo, deafen e badge "AO VIVO"
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .flex_row()
+                                                                    .items_center()
+                                                                    .gap(px(4.0))
+                                                                    .children(if is_streaming {
+                                                                        Some(
+                                                                            div()
+                                                                                .px(px(4.0))
+                                                                                .py(px(1.0))
+                                                                                .rounded(px(3.0))
+                                                                                .bg(rgb(0xf23f43))
+                                                                                .text_color(rgb(0xffffff))
+                                                                                .text_size(px(9.0))
+                                                                                .font_weight(FontWeight::BOLD)
+                                                                                .child("AO VIVO")
+                                                                        )
+                                                                    } else {
+                                                                        None
+                                                                    })
+                                                                    .children(if is_muted {
+                                                                        Some(icon_mic_off(px(14.0), rgb(0xf23f43)))
+                                                                    } else {
+                                                                        None
+                                                                    })
+                                                                    .children(if is_deafened {
+                                                                        Some(icon_speaker_off(px(14.0), rgb(0xf23f43)))
+                                                                    } else {
+                                                                        None
+                                                                    })
+                                                            )
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -897,5 +1190,221 @@ impl Render for ChannelSidebar {
                             )
                     })
             )
+            .children(context_menu_overlay)
     }
 }
+
+fn render_dm_avatar(
+    is_group: bool,
+    dm_name: &str,
+    recipient_names: &[String],
+    icon_url: Option<&str>,
+    recipient_friend_avatar: Option<&str>,
+    presence_status: PresenceStatus,
+) -> AnyElement {
+    if is_group {
+        let names = if !recipient_names.is_empty() {
+            recipient_names.to_vec()
+        } else {
+            dm_name.split(',').map(|s| s.trim().to_string()).collect()
+        };
+        let first_initial = names
+            .first()
+            .and_then(|n| n.chars().next())
+            .unwrap_or('A')
+            .to_uppercase()
+            .to_string();
+        let second_badge = if names.len() > 2 {
+            format!("+{}", names.len() - 1)
+        } else {
+            names
+                .get(1)
+                .and_then(|n| n.chars().next())
+                .unwrap_or('B')
+                .to_uppercase()
+                .to_string()
+        };
+
+        div()
+            .size(px(32.0))
+            .relative()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .size(px(20.0))
+                    .rounded_full()
+                    .bg(rgb(0x5865f2))
+                    .border_2()
+                    .border_color(rgb(0x2b2d31))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(0xffffff))
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(first_initial),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(0.0))
+                    .right(px(0.0))
+                    .size(px(20.0))
+                    .rounded_full()
+                    .bg(rgb(0xeb459e))
+                    .border_2()
+                    .border_color(rgb(0x2b2d31))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(rgb(0xffffff))
+                    .text_size(px(9.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(second_badge),
+            )
+            .into_any_element()
+    } else {
+        let avatar_src = icon_url.or(recipient_friend_avatar).map(|s| s.to_string());
+        Avatar::new(dm_name.to_string())
+            .size(AvatarSize::Px32)
+            .opt_src(avatar_src)
+            .status(presence_status)
+            .cutout_color(rgb(0x2b2d31))
+            .into_any_element()
+    }
+}
+
+fn render_dm_subtitle(
+    custom_status: Option<&crate::domain::user::CustomStatus>,
+    game_activity: Option<&crate::domain::user::Activity>,
+    is_offline: bool,
+) -> Option<AnyElement> {
+    if is_offline {
+        return None;
+    }
+
+    if let Some(cs) = custom_status {
+        let has_text = cs.text.as_ref().map_or(false, |t| !t.trim().is_empty());
+        let has_emoji = cs.emoji.is_some();
+        if has_text || has_emoji {
+            let mut sub_div = div()
+                .h(px(14.0))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .overflow_hidden();
+
+            if let Some(ref emoji) = cs.emoji {
+                if let Some(url) = emoji.image_url() {
+                    sub_div = sub_div.child(
+                        img(url)
+                            .size(px(14.0))
+                            .flex_shrink_0(),
+                    );
+                } else if !emoji.name.is_empty() {
+                    sub_div = sub_div.child(
+                        div()
+                            .size(px(14.0))
+                            .text_size(px(11.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_shrink_0()
+                            .child(emoji.name.clone()),
+                    );
+                }
+            }
+
+            if let Some(ref text) = cs.text {
+                if !text.trim().is_empty() {
+                    sub_div = sub_div.child(
+                        div()
+                            .text_size(px(11.0))
+                            .line_height(px(14.0))
+                            .text_color(text_muted())
+                            .truncate()
+                            .child(text.clone()),
+                    );
+                }
+            }
+
+            return Some(sub_div.into_any_element());
+        }
+    }
+
+    if let Some(act) = game_activity {
+        let game_text = format!("Jogando {}", act.name);
+        return Some(
+            div()
+                .h(px(14.0))
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .line_height(px(14.0))
+                        .text_color(text_muted())
+                        .truncate()
+                        .child(game_text),
+                )
+                .into_any_element(),
+        );
+    }
+
+    None
+}
+
+fn render_dm_text_column(
+    dm_name: String,
+    is_selected: bool,
+    unread: bool,
+    is_pinned: bool,
+    subtitle_el: Option<AnyElement>,
+) -> AnyElement {
+    let title_color = if is_selected {
+        rgb(0xffffff)
+    } else if unread {
+        rgb(0xf2f3f5)
+    } else {
+        rgb(0x949ba4)
+    };
+    let font_weight = if is_selected || unread {
+        FontWeight::SEMIBOLD
+    } else {
+        FontWeight::NORMAL
+    };
+
+    let mut title_row = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_color(title_color)
+                .font_weight(font_weight)
+                .text_size(px(14.0))
+                .child(dm_name),
+        );
+
+    if is_pinned {
+        title_row = title_row.child(icon_pin(px(12.0), rgb(0x949ba4)));
+    }
+
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .overflow_hidden()
+        .child(title_row);
+
+    if let Some(sub) = subtitle_el {
+        col = col.child(sub);
+    }
+
+    col.into_any_element()
+}
+

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use crate::domain::channel::ChannelType;
+use crate::domain::voice::VoiceState;
 use crate::domain::message::{Attachment, Author, Message, Reaction};
 use crate::domain::settings::{
     AccountConnection, AccessibilitySettings, AuthorizedApp, FamilyCenterLink,
@@ -42,10 +43,21 @@ impl PresenceStatus {
 impl From<crate::domain::user::PresenceStatus> for PresenceStatus {
     fn from(s: crate::domain::user::PresenceStatus) -> Self {
         match s {
-            crate::domain::user::PresenceStatus::Online => PresenceStatus::Online,
-            crate::domain::user::PresenceStatus::Idle => PresenceStatus::Idle,
-            crate::domain::user::PresenceStatus::DoNotDisturb => PresenceStatus::DoNotDisturb,
-            crate::domain::user::PresenceStatus::Offline => PresenceStatus::Offline,
+            crate::domain::user::PresenceStatus::Online => Self::Online,
+            crate::domain::user::PresenceStatus::Idle => Self::Idle,
+            crate::domain::user::PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+            crate::domain::user::PresenceStatus::Offline => Self::Offline,
+        }
+    }
+}
+
+impl From<PresenceStatus> for crate::domain::user::PresenceStatus {
+    fn from(s: PresenceStatus) -> Self {
+        match s {
+            PresenceStatus::Online => Self::Online,
+            PresenceStatus::Idle => Self::Idle,
+            PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
+            PresenceStatus::Offline => Self::Offline,
         }
     }
 }
@@ -141,6 +153,8 @@ pub struct ChannelItemState {
     pub recipient_ids: Vec<String>,
     #[serde(default)]
     pub recipient_names: Vec<String>,
+    #[serde(default)]
+    pub user_limit: Option<u32>,
 }
 
 /// Category grouping in channel sidebar
@@ -427,6 +441,10 @@ pub struct AppState {
     pub is_connecting: bool,
     /// Direct Message (DM) channels
     pub dm_channels: Vec<ChannelItemState>,
+    /// Pinned direct message channel IDs (ordered strictly as in user settings)
+    pub pinned_dms: Vec<String>,
+    /// Optional path to pinned DMs cache on disk (None disables disk persistence, e.g. in tests)
+    pub pinned_dms_path: Option<std::path::PathBuf>,
     /// User's guild folders grouping
     pub guild_folders: Vec<crate::protocol::GuildFolder>,
     /// Set of expanded folder IDs in guild rail
@@ -449,6 +467,8 @@ pub struct AppState {
     pub message_requests: Vec<MessageRequestItem>,
     /// Rich Presence activities in Active Now panel
     pub active_now_items: Vec<ActiveNowItem>,
+    /// Real-time user presences indexed by user Snowflake ID
+    pub presences_by_user: HashMap<String, crate::domain::user::Presence>,
     /// Telemetry & Parity monitoring handle
     pub telemetry: Option<crate::telemetry::TelemetryHandle>,
 
@@ -463,6 +483,8 @@ pub struct AppState {
     pub message_display_mode: MessageDisplayMode,
     pub accessibility_settings: AccessibilitySettings,
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
+    /// Active voice states by voice channel ID
+    pub voice_states_by_channel: HashMap<String, Vec<VoiceState>>,
 }
 
 fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
@@ -634,6 +656,7 @@ fn organize_channels_into_categories(
             is_group_dm: c.channel_type == ChannelType::GroupDm,
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),
+            user_limit: c.user_limit,
         }
     };
 
@@ -708,6 +731,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-announcements".into(),
@@ -722,6 +746,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -742,6 +767,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-help".into(),
@@ -756,6 +782,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-showcase".into(),
@@ -770,6 +797,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -790,6 +818,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-voice-pair".into(),
@@ -804,6 +833,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -865,6 +895,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                         ChannelItemState {
                             id: "chan-gpui-showcase".into(),
@@ -879,6 +910,7 @@ impl AppState {
                             is_group_dm: false,
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
+                            user_limit: None,
                         },
                     ],
                 },
@@ -898,6 +930,7 @@ impl AppState {
                         is_group_dm: false,
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
+                        user_limit: None,
                     }],
                 },
             ],
@@ -1074,6 +1107,9 @@ impl AppState {
             auth_error: None,
             is_connecting,
             dm_channels: Vec::new(),
+            presences_by_user: HashMap::new(),
+            pinned_dms: Vec::new(),
+            pinned_dms_path: None,
             guild_folders,
             expanded_folders: std::collections::HashSet::new(),
             friends: if has_token {
@@ -1146,74 +1182,7 @@ impl AppState {
                     },
                 ]
             },
-            active_now_items: vec![
-                ActiveNowItem {
-                    id: "act-1".into(),
-                    user_id: "user-juniodevs".into(),
-                    username: "juniodevs".into(),
-                    display_name: "juniodevs".into(),
-                    avatar_url: None,
-                    avatar_text: "J".into(),
-                    presence: PresenceStatus::Idle,
-                    kind: ActiveNowKind::RichPresence,
-                    app_name: "Visual Studio Code".into(),
-                    header_subtitle: "Visual Studio Code – 1h".into(),
-                    app_icon_symbol: "code".into(),
-                    details_title: "Editing README.md".into(),
-                    details_state: Some("Workspace: THUGwithSKATE3".into()),
-                    elapsed_time_text: Some("01:13:26 decorridos".into()),
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: None,
-                },
-                ActiveNowItem {
-                    id: "act-2".into(),
-                    user_id: "user-mattfh".into(),
-                    username: "Mattfh".into(),
-                    display_name: "Mattfh".into(),
-                    avatar_url: None,
-                    avatar_text: "M".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Quest,
-                    app_name: "ROBLOX".into(),
-                    header_subtitle: "Jogando uma missão · Promovido(a)".into(),
-                    app_icon_symbol: "game".into(),
-                    details_title: "Reivindique 700 Orbs".into(),
-                    details_state: Some("Jogue Animal Hospital on Roblox durante 15 minutos com o seu cliente Discord aberto e ganhe 700 Orbs.".into()),
-                    elapsed_time_text: None,
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: Some("Aceitar missão".into()),
-                },
-                ActiveNowItem {
-                    id: "act-3".into(),
-                    user_id: "user-gabriel".into(),
-                    username: "gabriel_rodrigues".into(),
-                    display_name: "Gabriel Rodrigues".into(),
-                    avatar_url: None,
-                    avatar_text: "G".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Spotify,
-                    app_name: "Spotify".into(),
-                    header_subtitle: "Ouvindo Spotify".into(),
-                    app_icon_symbol: "music".into(),
-                    details_title: "Starboy (feat. Daft Punk)".into(),
-                    details_state: Some("The Weeknd — Starboy".into()),
-                    elapsed_time_text: Some("Jogando há 1h 24m".into()),
-                    spotify_track: Some("Starboy (feat. Daft Punk)".into()),
-                    spotify_artist: Some("The Weeknd".into()),
-                    spotify_album: Some("Starboy".into()),
-                    spotify_progress_text: Some(("1:24".into(), "3:50".into())),
-                    spotify_progress_pct: Some(0.36),
-                    button_text: Some("Ouvir no Spotify".into()),
-                },
-            ],
+            active_now_items: Vec::new(),
             telemetry: Some(crate::telemetry::global().clone()),
 
             nitro_tier: NitroTier::Full,
@@ -1303,6 +1272,7 @@ impl AppState {
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
+            voice_states_by_channel: HashMap::new(),
         };
         state.sync_guild_media();
         state
@@ -1609,15 +1579,31 @@ impl AppState {
     }
 
     /// Sorts DMs according to Discord rules:
-    /// 1. Pinned DMs (is_pinned: true) at the top.
+    /// 1. Pinned DMs (is_pinned: true) at the absolute top, strictly adhering to the order in `pinned_dms`.
     /// 2. Channels with the most recent messages closest to the top (last_message_id descending Snowflake).
     pub fn sort_dm_channels(&mut self) {
+        let pinned_order = &self.pinned_dms;
         self.dm_channels.sort_by(|a, b| {
-            // 1. DMs fixadas no topo (is_pinned: true vem antes de false)
+            // 1. DMs fixadas no topo absoluto (is_pinned: true vem antes de false)
             match (a.is_pinned, b.is_pinned) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
-                _ => {}
+                (true, true) => {
+                    // Ambas são fixadas: manter a ordem estrita do array pinned_dms
+                    let pos_a = pinned_order.iter().position(|id| id == &a.id);
+                    let pos_b = pinned_order.iter().position(|id| id == &b.id);
+                    match (pos_a, pos_b) {
+                        (Some(idx_a), Some(idx_b)) => {
+                            if idx_a != idx_b {
+                                return idx_a.cmp(&idx_b);
+                            }
+                        }
+                        (Some(_), None) => return std::cmp::Ordering::Less,
+                        (None, Some(_)) => return std::cmp::Ordering::Greater,
+                        (None, None) => {}
+                    }
+                }
+                (false, false) => {}
             }
 
             // 2. Mensagem mais recente mais perto do topo (decrescente por Snowflake)
@@ -1634,6 +1620,64 @@ impl AppState {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
+    }
+
+    /// Sets the disk persistence path for pinned DMs. When set, loads from disk if available.
+    pub fn set_pinned_dms_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.pinned_dms_path = path;
+        if let Some(ref p) = self.pinned_dms_path {
+            self.pinned_dms = crate::protocol::pinned_dms::load_pinned_dms_from_path(p);
+            for dm in &mut self.dm_channels {
+                dm.is_pinned = self.pinned_dms.contains(&dm.id);
+            }
+            self.sort_dm_channels();
+        }
+    }
+
+    /// Pins a DM channel: adds to pinned_dms, marks is_pinned = true, re-sorts and persists to disk if configured.
+    pub fn pin_dm_channel(&mut self, channel_id: &str) {
+        if !self.pinned_dms.contains(&channel_id.to_string()) {
+            self.pinned_dms.push(channel_id.to_string());
+        }
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = true;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Unpins a DM channel: removes from pinned_dms, sets is_pinned = false, re-sorts and persists to disk if configured.
+    pub fn unpin_dm_channel(&mut self, channel_id: &str) {
+        self.pinned_dms.retain(|id| id != channel_id);
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = false;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Toggles pin status for a DM channel.
+    pub fn toggle_pin_dm_channel(&mut self, channel_id: &str) {
+        let is_currently_pinned = self
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.is_pinned)
+            .unwrap_or(false)
+            || self.pinned_dms.contains(&channel_id.to_string());
+        if is_currently_pinned {
+            self.unpin_dm_channel(channel_id);
+        } else {
+            self.pin_dm_channel(channel_id);
+        }
     }
 
     /// Selects a channel
@@ -1931,14 +1975,6 @@ impl AppState {
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
                 },
-                VoiceParticipantState {
-                    id: "user-ferris".into(),
-                    name: "Ferris".into(),
-                    avatar_text: "🦀".into(),
-                    is_speaking: true,
-                    is_muted: false,
-                    is_deafened: false,
-                },
             ],
         });
     }
@@ -1949,6 +1985,56 @@ impl AppState {
             tel.track_button_click("disconnect_voice", "Desconectar Voz", 0);
         }
         self.active_voice_call = None;
+    }
+
+    /// Updates or removes a voice state across all channels
+    pub fn update_voice_state(&mut self, mut state: VoiceState) {
+        let user_id = state.user_id.clone();
+        // Resolução de nome de exibição e avatar a partir dos caches locais se não vierem no voice state
+        if state.user_name.is_none() {
+            if user_id == self.current_user.id {
+                state.user_name = Some(self.current_user.display_name.clone());
+                if state.avatar_url.is_none() {
+                    state.avatar_url = self.current_user.avatar_url.clone();
+                }
+            } else if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
+                state.user_name = Some(m.name.clone());
+            } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
+                state.user_name = Some(f.display_name.clone());
+                if state.avatar_url.is_none() {
+                    state.avatar_url = f.avatar_url.clone();
+                }
+            }
+        }
+
+        // Remove the user from any channel they were previously in
+        for states in self.voice_states_by_channel.values_mut() {
+            states.retain(|s| s.user_id != user_id);
+        }
+        // If channel_id == Some(cid), add or update in cid
+        if let Some(ref cid) = state.channel_id {
+            let entry = self.voice_states_by_channel.entry(cid.clone()).or_default();
+            if let Some(existing) = entry.iter_mut().find(|s| s.user_id == user_id) {
+                *existing = state;
+            } else {
+                entry.push(state);
+            }
+        }
+    }
+
+    /// Returns the slice of active voice states connected to a specific channel
+    pub fn voice_states_for_channel(&self, channel_id: &str) -> &[VoiceState] {
+        self.voice_states_by_channel
+            .get(channel_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Populates multiple voice states from a guild initial snapshot
+    pub fn populate_guild_voice_states(&mut self, states: Vec<VoiceState>) {
+        for state in states {
+            self.update_voice_state(state);
+        }
     }
 
     /// Toggles self mute
@@ -2419,7 +2505,7 @@ impl AppState {
             TransportEvent::Connected => {
                 self.is_connected_to_gateway = true;
                 self.is_connecting = false;
-                self.connection_status = "Gateway Conectado".to_string();
+                self.connection_status = "Conectado".to_string();
                 self.auth_error = None;
                 self.close_modal();
             }
@@ -2428,6 +2514,9 @@ impl AppState {
                 self.is_connecting = false;
                 self.auth_error = Some(reason.clone());
                 self.connection_status = format!("Desconectado: {}", reason);
+            }
+            TransportEvent::VoiceStateUpdate(state) => {
+                self.update_voice_state(state);
             }
             TransportEvent::GuildChannelsUpdated { guild_id, channels } => {
                 let categories = organize_channels_into_categories(&guild_id, channels);
@@ -2530,6 +2619,7 @@ impl AppState {
                     .into_iter()
                     .map(|c| {
                         let is_group = c.channel_type == ChannelType::GroupDm;
+                        let is_pinned = c.is_pinned || self.pinned_dms.contains(&c.id);
                         ChannelItemState {
                             id: c.id,
                             name: c.name,
@@ -2538,11 +2628,12 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned,
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
+                            user_limit: None,
                         }
                     })
                     .collect();
@@ -2609,11 +2700,12 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned: c.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
+                            user_limit: None,
                         },
                     );
                 }
@@ -2661,11 +2753,12 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: channel.icon_url.clone(),
-                            is_pinned: channel.is_pinned,
+                            is_pinned: channel.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: channel.last_message_id.clone(),
                             is_group_dm: is_group,
                             recipient_ids: channel.recipient_ids.clone(),
                             recipient_names: channel.recipient_names.clone(),
+                            user_limit: None,
                         },
                     );
                 }
@@ -2738,8 +2831,17 @@ impl AppState {
                                 }
                             }),
                             avatar_text,
-                            presence: existing_presence,
-                            custom_status: existing_status,
+                            presence: self
+                                .presences_by_user
+                                .get(&r.id)
+                                .map(|p| PresenceStatus::from(p.status))
+                                .unwrap_or(existing_presence),
+                            custom_status: self
+                                .presences_by_user
+                                .get(&r.id)
+                                .and_then(|p| p.custom_status.as_ref())
+                                .and_then(|cs| cs.text.clone())
+                                .or(existing_status),
                             relationship_type: r.rel_type,
                         }
                     })
@@ -2797,23 +2899,69 @@ impl AppState {
                 self.pending_relationship_actions.remove(&id);
                 log::warn!("Relationship action failed for user {}: {}", id, error);
             }
-            TransportEvent::PresenceUpdate { user_id, status, activity } => {
+            TransportEvent::PresenceUpdate {
+                user_id,
+                status,
+                activity,
+                custom_status,
+            } => {
+                self.update_user_presence(user_id.clone(), status, activity.clone(), custom_status);
                 let st: PresenceStatus = status.into();
-                if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
-                    friend.presence = st;
-                    if let Some(ref act) = activity {
-                        friend.custom_status = Some(act.name.clone());
-                    }
-                }
-                if let Some(member) = self.members.iter_mut().find(|m| m.id == user_id) {
-                    member.presence = st;
-                    if let Some(ref act) = activity {
-                        member.activity = Some(act.name.clone());
-                    }
-                }
                 self.update_active_now_from_presence(&user_id, st, activity.as_ref());
             }
+            TransportEvent::PinnedDmsUpdated(pinned) => {
+                self.pinned_dms = pinned;
+                for dm in &mut self.dm_channels {
+                    dm.is_pinned = self.pinned_dms.contains(&dm.id);
+                }
+                self.sort_dm_channels();
+                if let Some(ref path) = self.pinned_dms_path {
+                    crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Returns the cached presence for a given user ID
+    pub fn get_user_presence(&self, user_id: &str) -> Option<&crate::domain::user::Presence> {
+        self.presences_by_user.get(user_id)
+    }
+
+    /// Updates or inserts a user's real-time presence, propagating to friends and members
+    pub fn update_user_presence(
+        &mut self,
+        user_id: String,
+        status: crate::domain::user::PresenceStatus,
+        activity: Option<crate::domain::user::Activity>,
+        custom_status: Option<crate::domain::user::CustomStatus>,
+    ) {
+        let entry = self
+            .presences_by_user
+            .entry(user_id.clone())
+            .or_insert_with(|| crate::domain::user::Presence::new(&user_id, status));
+        entry.status = status;
+        entry.activity = activity.clone();
+        entry.custom_status = custom_status.clone();
+
+        let app_status: PresenceStatus = status.into();
+
+        // 1. Atualizar amigo na lista de amigos se existir
+        if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
+            friend.presence = app_status;
+            friend.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
+        }
+
+        // 2. Se for o usuário autenticado, atualizar perfil atual
+        if self.current_user.id == user_id {
+            self.current_user.presence = app_status;
+            self.current_user.custom_status = custom_status.as_ref().and_then(|cs| cs.text.clone());
+        }
+
+        // 3. Atualizar membros na lista de membros se presente
+        if let Some(member) = self.members.iter_mut().find(|m| m.id == user_id) {
+            member.presence = app_status;
+            member.activity = activity.as_ref().map(|act| act.name.clone());
         }
     }
 
@@ -3254,6 +3402,7 @@ impl AppState {
             is_group_dm: false,
             recipient_ids: vec![user_id.to_string()],
             recipient_names: vec![username.to_string()],
+            user_limit: None,
         };
 
         self.dm_channels.insert(0, item);
@@ -3305,6 +3454,7 @@ impl AppState {
             is_group_dm: true,
             recipient_ids,
             recipient_names,
+            user_limit: None,
         };
 
         self.dm_channels.insert(0, item);
