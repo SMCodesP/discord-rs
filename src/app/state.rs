@@ -39,6 +39,17 @@ impl PresenceStatus {
     }
 }
 
+impl From<crate::domain::user::PresenceStatus> for PresenceStatus {
+    fn from(s: crate::domain::user::PresenceStatus) -> Self {
+        match s {
+            crate::domain::user::PresenceStatus::Online => PresenceStatus::Online,
+            crate::domain::user::PresenceStatus::Idle => PresenceStatus::Idle,
+            crate::domain::user::PresenceStatus::DoNotDisturb => PresenceStatus::DoNotDisturb,
+            crate::domain::user::PresenceStatus::Offline => PresenceStatus::Offline,
+        }
+    }
+}
+
 /// Active modal dialogs in the application
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveModal {
@@ -424,6 +435,10 @@ pub struct AppState {
     pub friends: Vec<FriendItemState>,
     /// Active tab in Friends Hub
     pub friends_tab: FriendsTab,
+    /// Username input for Add Friend tab
+    pub add_friend_input: String,
+    /// Feedback status message for Add Friend (is_success, text)
+    pub add_friend_feedback: Option<(bool, String)>,
     /// Active subtab in Message Requests
     pub message_requests_subtab: MessageRequestsSubTab,
     /// Direct message requests (Pending & Spam)
@@ -1074,6 +1089,8 @@ impl AppState {
                 ]
             },
             friends_tab: FriendsTab::Online,
+            add_friend_input: String::new(),
+            add_friend_feedback: None,
             message_requests_subtab: MessageRequestsSubTab::YouMayKnow,
             message_requests: if has_token {
                 Vec::new()
@@ -1311,6 +1328,151 @@ impl AppState {
     /// Clears all flagged spam message requests
     pub fn clear_spam_requests(&mut self) {
         self.message_requests.retain(|r| !r.is_spam);
+    }
+
+    /// Sends a friend request by username (and optional tag) via API and updates state optimistically
+    pub fn send_friend_request(&mut self, target: &str) {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            self.add_friend_feedback = Some((false, "Insira um nome de usuário válido.".to_string()));
+            return;
+        }
+
+        let (uname, disc) = match trimmed.split_once('#') {
+            Some((u, d)) => (u.trim().to_string(), Some(d.trim().to_string())),
+            None => (trimmed.to_string(), None),
+        };
+
+        // Optimistically record outgoing friend request (type 4)
+        if !self.friends.iter().any(|f| f.username.eq_ignore_ascii_case(&uname) && f.relationship_type == 4) {
+            self.friends.push(FriendItemState {
+                id: format!("req-{}", uname),
+                username: uname.clone(),
+                display_name: uname.clone(),
+                avatar_url: None,
+                avatar_text: uname.chars().next().unwrap_or('?').to_uppercase().to_string(),
+                presence: PresenceStatus::Offline,
+                custom_status: None,
+                relationship_type: 4,
+            });
+        }
+        self.add_friend_feedback = Some((true, format!("Solicitação de amizade enviada para {}!", uname)));
+        self.add_friend_input.clear();
+
+        if let Some(ref token_str) = self.auth_token {
+            let auth = if self.is_user_token {
+                crate::protocol::AuthToken::user(token_str)
+            } else {
+                crate::protocol::AuthToken::bot(token_str)
+            };
+            let client = crate::protocol::DiscordApiClient::new(auth);
+            let u = uname;
+            let d = disc;
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(e) = client.send_friend_request(&u, d.as_deref()).await {
+                        log::warn!("Falha ao enviar solicitação de amizade: {:?}", e);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Accepts an incoming friend request (type 3 -> 1)
+    pub fn accept_friend_request(&mut self, user_id: &str) {
+        if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
+            friend.relationship_type = 1;
+        }
+
+        if let Some(ref token_str) = self.auth_token {
+            let auth = if self.is_user_token {
+                crate::protocol::AuthToken::user(token_str)
+            } else {
+                crate::protocol::AuthToken::bot(token_str)
+            };
+            let client = crate::protocol::DiscordApiClient::new(auth);
+            let uid = user_id.to_string();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(e) = client.accept_friend_request(&uid).await {
+                        log::warn!("Falha ao aceitar pedido de amizade: {:?}", e);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Removes, declines, cancels or unblocks a relationship
+    pub fn remove_relationship(&mut self, user_id: &str) {
+        self.friends.retain(|f| f.id != user_id);
+        self.active_now_items.retain(|a| a.user_id != user_id);
+
+        if let Some(ref token_str) = self.auth_token {
+            let auth = if self.is_user_token {
+                crate::protocol::AuthToken::user(token_str)
+            } else {
+                crate::protocol::AuthToken::bot(token_str)
+            };
+            let client = crate::protocol::DiscordApiClient::new(auth);
+            let uid = user_id.to_string();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(e) = client.remove_relationship(&uid).await {
+                        log::warn!("Falha ao remover relacionamento: {:?}", e);
+                    }
+                });
+            }
+        }
+    }
+
+    /// Updates or removes an Active Now item when friend presence or activity changes
+    pub fn update_active_now_from_presence(
+        &mut self,
+        user_id: &str,
+        status: PresenceStatus,
+        activity: Option<&crate::domain::Activity>,
+    ) {
+        self.active_now_items.retain(|a| a.user_id != user_id);
+        if status == PresenceStatus::Offline {
+            return;
+        }
+        let friend = match self.friends.iter().find(|f| f.id == user_id && f.relationship_type == 1) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        if let Some(act) = activity {
+            let (kind, app_icon, header_subtitle) = match act.activity_type {
+                crate::domain::user::ActivityType::Playing => (ActiveNowKind::Game, "🎮".to_string(), format!("{} – Ativo", act.name)),
+                crate::domain::user::ActivityType::Streaming => (ActiveNowKind::RichPresence, "📡".to_string(), format!("Transmitindo {}", act.name)),
+                crate::domain::user::ActivityType::Listening => (ActiveNowKind::Spotify, "🎧".to_string(), "Ouvindo Spotify".to_string()),
+                crate::domain::user::ActivityType::Watching => (ActiveNowKind::RichPresence, "📺".to_string(), format!("Assistindo {}", act.name)),
+                _ => (ActiveNowKind::RichPresence, "✨".to_string(), act.name.clone()),
+            };
+            let elapsed_text = act.created_at.map(|_| "jogando agora".to_string());
+            let is_spotify = act.activity_type == crate::domain::user::ActivityType::Listening;
+            self.active_now_items.push(ActiveNowItem {
+                id: format!("act-{}", user_id),
+                user_id: user_id.to_string(),
+                username: friend.username.clone(),
+                display_name: friend.display_name.clone(),
+                avatar_url: friend.avatar_url.clone(),
+                avatar_text: friend.avatar_text.clone(),
+                presence: status,
+                kind,
+                app_name: act.name.clone(),
+                header_subtitle,
+                app_icon_symbol: app_icon,
+                details_title: act.details.clone().unwrap_or_else(|| act.name.clone()),
+                details_state: act.state.clone(),
+                elapsed_time_text: elapsed_text,
+                spotify_track: if is_spotify { act.details.clone() } else { None },
+                spotify_artist: if is_spotify { act.state.clone() } else { None },
+                spotify_album: None,
+                spotify_progress_text: None,
+                spotify_progress_pct: None,
+                button_text: None,
+            });
+        }
     }
 
     /// Selects a guild (or None for DMs / Home)
@@ -2520,6 +2682,7 @@ impl AppState {
                 }
             }
             TransportEvent::RelationshipsUpdated(relationships) => {
+                let old_friends = std::mem::take(&mut self.friends);
                 self.friends = relationships
                     .into_iter()
                     .map(|r| {
@@ -2530,6 +2693,11 @@ impl AppState {
                             .unwrap_or('?')
                             .to_uppercase()
                             .to_string();
+                        let (existing_presence, existing_status) = old_friends
+                            .iter()
+                            .find(|f| f.id == r.id)
+                            .map(|f| (f.presence, f.custom_status.clone()))
+                            .unwrap_or((PresenceStatus::Online, None));
                         FriendItemState {
                             id: r.id.clone(),
                             username: r.username,
@@ -2542,12 +2710,67 @@ impl AppState {
                                 }
                             }),
                             avatar_text,
-                            presence: PresenceStatus::Online,
-                            custom_status: None,
+                            presence: existing_presence,
+                            custom_status: existing_status,
                             relationship_type: r.rel_type,
                         }
                     })
                     .collect();
+            }
+            TransportEvent::RelationshipAdd(r) => {
+                let display_name = r.global_name.unwrap_or_else(|| r.username.clone());
+                let avatar_text = display_name
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
+                let avatar_url = r.avatar.as_ref().map(|hash| {
+                    if hash.starts_with("http://") || hash.starts_with("https://") {
+                        hash.clone()
+                    } else {
+                        format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", r.id, hash)
+                    }
+                });
+
+                if let Some(existing) = self.friends.iter_mut().find(|f| f.id == r.id) {
+                    existing.username = r.username;
+                    existing.display_name = display_name;
+                    existing.avatar_url = avatar_url;
+                    existing.avatar_text = avatar_text;
+                    existing.relationship_type = r.rel_type;
+                } else {
+                    self.friends.push(FriendItemState {
+                        id: r.id,
+                        username: r.username,
+                        display_name,
+                        avatar_url,
+                        avatar_text,
+                        presence: PresenceStatus::Online,
+                        custom_status: None,
+                        relationship_type: r.rel_type,
+                    });
+                }
+            }
+            TransportEvent::RelationshipRemove { id } => {
+                self.friends.retain(|f| f.id != id);
+                self.active_now_items.retain(|a| a.user_id != id);
+            }
+            TransportEvent::PresenceUpdate { user_id, status, activity } => {
+                let st: PresenceStatus = status.into();
+                if let Some(friend) = self.friends.iter_mut().find(|f| f.id == user_id) {
+                    friend.presence = st;
+                    if let Some(ref act) = activity {
+                        friend.custom_status = Some(act.name.clone());
+                    }
+                }
+                if let Some(member) = self.members.iter_mut().find(|m| m.id == user_id) {
+                    member.presence = st;
+                    if let Some(ref act) = activity {
+                        member.activity = Some(act.name.clone());
+                    }
+                }
+                self.update_active_now_from_presence(&user_id, st, activity.as_ref());
             }
             _ => {}
         }
