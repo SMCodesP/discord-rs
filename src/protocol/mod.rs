@@ -44,9 +44,9 @@ pub use voice_dave::{
     VoiceDaveSession, SUPPORTED_DAVE_PROTOCOL_VERSION,
 };
 pub use voice_session::{
-    AudioBridge, AudioBridgeCommand, FrameCipher, MainSignalingChannel, PassthroughFrameCipher,
-    VoiceGatewayFactory, VoiceGatewayTransport, VoiceSession, VoiceSessionConfig,
-    VoiceSessionState,
+    AudioBridge, AudioBridgeCommand, DaveFrameCipher, FrameCipher, MainSignalingChannel,
+    PassthroughFrameCipher, VoiceGatewayFactory, VoiceGatewayTransport, VoicePacketStats,
+    VoiceSession, VoiceSessionConfig, VoiceSessionEvent, VoiceSessionState,
 };
 
 

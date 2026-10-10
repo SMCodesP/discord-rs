@@ -43,23 +43,18 @@ pub const DEFAULT_MAX_DAVE_PROTOCOL_VERSION: u32 = SUPPORTED_DAVE_PROTOCOL_VERSI
 // In the Opcode 0 Identify payload, clients specify `max_dave_protocol_version`.
 //
 // Implications for End-to-End Call Functionality:
-// 1. Setting `max_dave_protocol_version: 0`:
-//    - Tells Discord that this client requests legacy transport encryption (AEAD
-//      AES-256-GCM / XChaCha20-Poly1305 between client and Discord's voice SFU).
-//    - Discord responds normally with Opcode 2 Ready and Opcode 4 Session Description,
-//      providing the standard 32-byte `secret_key`.
-//    - For guilds, bots, and standard voice channels that allow non-DAVE clients,
-//      audio and video streams function fully end-to-end using standard RTP AEAD encryption.
-// 2. In DAVE-enforced calls:
-//    - If Discord strictly enforces DAVE on a guild or call (or all other participants
-//      use DAVE MLS epoch ratchet encryption), a client sending version 0 might either:
-//      a) Receive un-decodable DAVE-wrapped Opus frames from other participants, or
-//      b) Have its audio rejected by clients requiring MLS verification.
-//    - Full end-to-end support for DAVE-enforced rooms requires implementing the MLS
-//      cryptographic ratchet state machine (handling Discord Voice Opcodes 21-31).
-// 3. For the signaling layer implemented here:
-//    - We send `max_dave_protocol_version: 0` (or configured value), properly
-//      signaling client capabilities in accordance with the official v8 documentation.
+// 1. DAVE Enforcement (Post-March 1, 2026):
+//    - Discord strictly enforces DAVE E2EE across direct calls, group DMs, and voice channels.
+//    - Clients must support DAVE Protocol Version 1 (RFC 9420 MLS) to participate.
+//    - We send `max_dave_protocol_version: 1` by default in Opcode 0 Identify.
+// 2. Full DAVE Protocol State Machine:
+//    - Opcodes 21-31 manage MLS group lifecycle (KeyPackages, Proposals, Commits, Welcomes).
+//    - Server-to-client binary framing (u16 seq + u8 op + payload) is decoded and dispatched.
+//    - Client-to-server binary frames (u8 op + payload) are generated for KeyPackages and CommitWelcomes.
+//    - Session Description (Opcode 4) provides negotiated `dave_protocol_version` and secret key.
+// 3. Media Cryptor Contract:
+//    - Opus frames are encrypted with current MLS epoch key and decrypted per remote sender.
+//    - Automatic passthrough fallback is preserved during handshakes, transitions, or version 0.
 
 // ============================================================================
 // CONTRACT WITH VoiceUDP AGENT (Primitive Types Only)
@@ -366,6 +361,11 @@ pub enum VoiceGatewayEvent {
     Speaking(SpeakingPayload),
     HeartbeatAck { latency_ms: Option<u64> },
     Resumed,
+    DavePrepareTransition(DavePrepareTransitionPayload),
+    DaveExecuteTransition(DaveExecuteTransitionPayload),
+    DavePrepareEpoch(DavePrepareEpochPayload),
+    DaveAnnounceCommit(DaveAnnounceCommitTransitionPayload),
+    DaveBinaryMessage(Vec<u8>),
     Disconnected {
         code: Option<u16>,
         reason: String,
@@ -401,6 +401,10 @@ pub enum VoiceGatewayAction {
     SpeakingUpdate(SpeakingPayload),
     HeartbeatAckReceived { timestamp: Option<u64> },
     Resumed,
+    DavePrepareTransition(DavePrepareTransitionPayload),
+    DaveExecuteTransition(DaveExecuteTransitionPayload),
+    DavePrepareEpoch(DavePrepareEpochPayload),
+    DaveAnnounceCommit(DaveAnnounceCommitTransitionPayload),
     CloseConnection { reason: String, can_resume: bool },
 }
 
@@ -1077,7 +1081,7 @@ impl VoiceGateway {
     }
 
     /// Sends a raw text message over the WebSocket connection.
-    async fn send_text(&self, text: String) -> Result<()> {
+    pub async fn send_text(&self, text: String) -> Result<()> {
         let lock = self.outbound_tx.read().await;
         if let Some(ref tx) = *lock {
             tx.send(WsMessage::Text(text.into()))
@@ -1251,6 +1255,18 @@ async fn run_voice_loop(
                                                     }
                                                     VoiceGatewayAction::Resumed => {
                                                         let _ = event_sender.send(VoiceGatewayEvent::Resumed);
+                                                    }
+                                                    VoiceGatewayAction::DavePrepareTransition(prep) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::DavePrepareTransition(prep));
+                                                    }
+                                                    VoiceGatewayAction::DaveExecuteTransition(exec) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::DaveExecuteTransition(exec));
+                                                    }
+                                                    VoiceGatewayAction::DavePrepareEpoch(epoch) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::DavePrepareEpoch(epoch));
+                                                    }
+                                                    VoiceGatewayAction::DaveAnnounceCommit(announce) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::DaveAnnounceCommit(announce));
                                                     }
                                                     VoiceGatewayAction::CloseConnection { reason, can_resume } => {
                                                         log::warn!("Voice connection closing: {}", reason);

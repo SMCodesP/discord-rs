@@ -31,8 +31,8 @@ use discord_rs::media::capture::SpeakingEvent;
 use discord_rs::protocol::{
     AudioBridge, AudioBridgeCommand, FrameCipher, MainSignalingChannel, RtpCrypto,
     SessionDescription, TransportEvent, VoiceCloseDecision, VoiceGatewayEvent,
-    VoiceGatewayTransport, VoiceReady, VoiceSession, VoiceSessionConfig, VoiceSessionState,
-    IP_DISCOVERY_PACKET_LEN, SILENCE_FRAME, SILENCE_FRAME_COUNT,
+    VoiceGatewayTransport, VoiceReady, VoiceSession, VoiceSessionConfig, VoiceSessionEvent,
+    VoiceSessionState, IP_DISCOVERY_PACKET_LEN, SILENCE_FRAME, SILENCE_FRAME_COUNT,
 };
 
 fn sample_key() -> [u8; 32] {
@@ -158,6 +158,7 @@ impl VoiceGatewayTransport for MockVoiceGateway {
         Ok(SessionDescription {
             mode: mode.to_string(),
             secret_key: sample_key().to_vec(),
+            dave_protocol_version: None,
         })
     }
 
@@ -638,6 +639,117 @@ async fn test_voice_session_custom_frame_cipher_extension_point() {
 
     assert_eq!(delivered, raw_frame);
     assert_eq!(dec_counter.load(Ordering::SeqCst), 1);
+
+    session.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_voice_session_default_dave_frame_cipher_and_events_flow() {
+    let ssrc = 0x11223344;
+    let (udp_addr, _udp_handle, mut udp_rx) = spawn_test_udp_server(ssrc).await;
+
+    let signaling = Arc::new(MockMainSignaling::new(Some(format!("127.0.0.1:{}", udp_addr.port()))));
+
+    let (audio_out_tx, audio_out_rx) = mpsc::channel(32);
+    let (_audio_spk_tx, audio_spk_rx) = mpsc::channel(16);
+    let (audio_cmd_tx, mut audio_cmd_rx) = mpsc::channel(64);
+
+    let audio_bridge = AudioBridge::from_channels(audio_out_rx, audio_spk_rx, audio_cmd_tx);
+    let mock_gw = Arc::new(MockVoiceGateway::new(udp_addr.port(), ssrc));
+    let mock_gw_clone = mock_gw.clone();
+
+    tokio::spawn(async move {
+        while let Some(cmd) = audio_cmd_rx.recv().await {
+            match cmd {
+                AudioBridgeCommand::StartSession { responder } => {
+                    let _ = responder.send(Ok(()));
+                }
+                AudioBridgeCommand::ReceiveOpusPacket { .. } => {}
+                _ => {}
+            }
+        }
+    });
+
+    let user_id = 123456789;
+    let channel_id = 987654321;
+    let config = VoiceSessionConfig {
+        guild_id: Some(10),
+        channel_id,
+        user_id,
+        self_mute: false,
+        self_deaf: false,
+    };
+
+    // Inicializa sem with_cipher para garantir que DaveFrameCipher é o padrão de produção
+    let session = VoiceSession::new(config, signaling.clone(), audio_bridge)
+        .with_gateway_factory(move |_cfg| mock_gw_clone.clone());
+
+    // Verifica que a sessão DAVE foi injetada com os IDs corretos
+    {
+        let dave = session.dave_session();
+        let lock = dave.lock().unwrap();
+        assert_eq!(lock.user_id(), user_id);
+        assert_eq!(lock.channel_id(), channel_id);
+    }
+
+    let mut events_rx = session.subscribe_events();
+    session.start().await.unwrap();
+    session.wait_until_connected(Duration::from_secs(3)).await.unwrap();
+
+    // 1. Simula evento Speaking para registrar mapeamento SSRC -> user_id na sessão DAVE
+    let remote_ssrc = 0x55667788;
+    let remote_user_id = 1122334455;
+    let _ = mock_gw.event_tx.send(VoiceGatewayEvent::Speaking(
+        discord_rs::protocol::voice_gateway::SpeakingPayload {
+            speaking: 1,
+            delay: 0,
+            ssrc: remote_ssrc,
+            user_id: Some(remote_user_id.to_string()),
+        },
+    ));
+
+    // Aguarda processamento do evento de fala
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    {
+        let dave = session.dave_session();
+        let lock = dave.lock().unwrap();
+        assert_eq!(lock.get_user_id_by_ssrc(remote_ssrc), Some(remote_user_id));
+    }
+
+    // 2. Envia quadro de áudio e valida estatísticas RTP
+    let raw_frame = vec![0xF8, 0xFF, 0xFE, 0x01, 0x02, 0x03];
+    audio_out_tx.send(raw_frame.clone()).await.unwrap();
+
+    let received_pkt = tokio::time::timeout(Duration::from_millis(500), udp_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &sample_key()).unwrap();
+    let (_, decrypted_rtp) = crypto.decrypt_packet(&received_pkt).unwrap();
+    assert_eq!(decrypted_rtp, raw_frame);
+
+    let stats = session.packet_stats();
+    assert_eq!(stats.sent_packets, 1);
+
+    // 3. Simula evento DAVE ExecuteTransition e valida emissão em VoiceSessionEvent
+    let _ = mock_gw.event_tx.send(VoiceGatewayEvent::DaveExecuteTransition(
+        discord_rs::protocol::voice_dave::DaveExecuteTransitionPayload {
+            transition_id: 42,
+        },
+    ));
+
+    let received_event = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if let Ok(VoiceSessionEvent::DaveTransitionExecuted { transition_id }) = events_rx.recv().await {
+                return transition_id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(received_event, 42);
 
     session.disconnect().await.unwrap();
 }

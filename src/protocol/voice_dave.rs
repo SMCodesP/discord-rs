@@ -310,6 +310,14 @@ impl VoiceDaveSession {
         ))
     }
 
+    /// Creates and returns a new serialized MLS Key Package for Opcode 26.
+    pub fn create_key_package(&mut self) -> Result<Vec<u8>> {
+        let session = self.session.as_mut().context("DAVE session not initialized")?;
+        session
+            .create_key_package()
+            .map_err(|e| anyhow::anyhow!("Failed to create MLS key package: {:?}", e))
+    }
+
     /// Handles Opcode 27 (MLS Proposals).
     ///
     /// Processes MLS proposals (operation 0: append, 1: revoke). If a commit is generated,
@@ -656,21 +664,46 @@ mod tests {
     }
 
     #[test]
-    fn test_media_contract_encryption_and_decryption_with_davey_aes_gcm() {
-        use davey::aead::{Aead, KeyInit};
-        use davey::{Aes256Gcm, Nonce};
+    fn test_two_voice_dave_sessions_offline_mls_group_constraints() {
+        // User A (user_id: 111111) and User B (user_id: 222222) in the same channel (channel_id: 999999)
+        let channel_id = 999999;
+        let mut dave_a = VoiceDaveSession::new(111111, channel_id);
+        let mut dave_b = VoiceDaveSession::new(222222, channel_id);
 
-        let key = [0x42u8; 32];
-        let cipher = Aes256Gcm::new_from_slice(&key).expect("Invalid key");
-        let nonce = Nonce::from_slice(&[7u8; 12]);
+        // 1. Both sessions initialize with DAVE Protocol Version 1
+        dave_a.init_session(1).unwrap();
+        dave_b.init_session(1).unwrap();
 
-        let opus_frame = b"Discord Voice Opus Audio Packet Test 2026";
-        let encrypted = cipher.encrypt(nonce, opus_frame.as_ref()).expect("Encrypt failed");
+        assert_eq!(dave_a.protocol_version(), 1);
+        assert_eq!(dave_b.protocol_version(), 1);
+        assert!(!dave_a.is_ready());
+        assert!(!dave_b.is_ready());
 
-        assert_ne!(encrypted.as_slice(), opus_frame.as_ref());
-        assert_eq!(encrypted.len(), opus_frame.len() + 16);
+        // 2. Both sessions can generate valid MLS KeyPackages (Opcode 26) independently
+        let key_package_a = dave_a.create_key_package().expect("User A KeyPackage generation failed");
+        let key_package_b = dave_b.create_key_package().expect("User B KeyPackage generation failed");
 
-        let decrypted = cipher.decrypt(nonce, encrypted.as_ref()).expect("Decrypt failed");
-        assert_eq!(decrypted.as_slice(), opus_frame.as_ref());
+        assert!(!key_package_a.is_empty());
+        assert!(!key_package_b.is_empty());
+        assert_ne!(key_package_a, key_package_b);
+
+        // 3. Architectural Verification: An offline 2-user MLS group cannot be formed
+        // directly between two clients without Discord Gateway's external sender credentials.
+        // Specifically, davey::DaveSession requires Opcode 25 (ExternalSender) before proposals
+        // or commits can be processed. Without external_sender, proposals return NoGroup / NoExternalSender.
+        let proposals_result = dave_a.handle_proposals(0, &key_package_b, None);
+        assert!(
+            proposals_result.is_err(),
+            "Processing proposals without external sender / pending group must fail"
+        );
+
+        // 4. Media Contract Verification: Prior to server-orchestrated MLS ratcheting,
+        // both clients remain in passthrough fallback mode, ensuring zero audio disruption.
+        let sample_opus = vec![0xF8, 0xFF, 0xFE, 0xAA, 0xBB, 0xCC];
+        let encrypted_a = dave_a.encrypt_opus_frame(&sample_opus).unwrap();
+        assert_eq!(encrypted_a, sample_opus);
+
+        let decrypted_b = dave_b.decrypt_opus_frame(dave_a.user_id(), &encrypted_a).unwrap();
+        assert_eq!(decrypted_b, sample_opus);
     }
 }

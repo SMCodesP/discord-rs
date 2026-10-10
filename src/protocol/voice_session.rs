@@ -25,7 +25,7 @@
 //! contrato de integração com a implementação completa do agente VoiceGW.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,9 +39,12 @@ use crate::media::{AudioEngine, AudioError};
 use crate::protocol::discord_api::DiscordApiClient;
 use crate::protocol::transport::{DiscordTransport, TransportEvent};
 use crate::protocol::voice_crypto::RtpCrypto;
+use crate::protocol::voice_dave::{
+    parse_server_binary_message, DaveOpcode, VoiceDaveSession,
+};
 use crate::protocol::voice_gateway::{
     SessionDescription, VoiceCloseDecision, VoiceGateway, VoiceGatewayConfig, VoiceGatewayEvent,
-    VoiceReady, VoiceServerData,
+    VoiceReady, VoiceServerData, DEFAULT_MAX_DAVE_PROTOCOL_VERSION,
 };
 use crate::protocol::voice_udp::{VoicePacket, VoiceUdpSocket};
 
@@ -50,8 +53,6 @@ use crate::protocol::voice_udp::{VoicePacket, VoiceUdpSocket};
 // ============================================================================
 
 /// Contrato para cifradores de quadros Opus entre a camada de áudio e o transporte RTP.
-///
-/// O agente VoiceGW fornecerá a implementação de produção com MLS / DAVE.
 pub trait FrameCipher: Send + Sync {
     /// Cifra um quadro Opus antes de envelopá-lo no cabeçalho RTP e na criptografia de transporte AEAD.
     fn encrypt_opus_frame(&mut self, frame: &[u8]) -> Result<Vec<u8>>;
@@ -74,6 +75,62 @@ impl FrameCipher for PassthroughFrameCipher {
     }
 }
 
+/// Cifrador de quadros de mídia usando o protocolo DAVE (E2EE com MLS / RFC 9420).
+///
+/// Encapsula uma [`VoiceDaveSession`] compartilhada via `Arc<std::sync::Mutex<...>>` para sincronizar
+/// o estado criptográfico de chaves e ratchets MLS com o laço de sinalização do gateway.
+#[derive(Clone)]
+pub struct DaveFrameCipher {
+    session: Arc<std::sync::Mutex<VoiceDaveSession>>,
+}
+
+impl DaveFrameCipher {
+    /// Cria uma nova instância de `DaveFrameCipher` a partir de uma sessão DAVE compartilhada.
+    pub fn new(session: Arc<std::sync::Mutex<VoiceDaveSession>>) -> Self {
+        Self { session }
+    }
+
+    /// Cria uma nova instância inicializando internamente uma [`VoiceDaveSession`].
+    pub fn for_user_and_channel(user_id: u64, channel_id: u64) -> Self {
+        Self {
+            session: Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(user_id, channel_id))),
+        }
+    }
+
+    /// Retorna a referência para a sessão DAVE subjacente.
+    pub fn session(&self) -> Arc<std::sync::Mutex<VoiceDaveSession>> {
+        self.session.clone()
+    }
+}
+
+impl FrameCipher for DaveFrameCipher {
+    fn encrypt_opus_frame(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
+        let mut sess = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Lock envenenado em VoiceDaveSession"))?;
+        sess.encrypt_opus_frame(frame)
+    }
+
+    fn decrypt_opus_frame(&mut self, sender_user_id: u64, frame: &[u8]) -> Result<Vec<u8>> {
+        let mut sess = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Lock envenenado em VoiceDaveSession"))?;
+        sess.decrypt_opus_frame(sender_user_id, frame)
+    }
+}
+
+impl FrameCipher for VoiceDaveSession {
+    fn encrypt_opus_frame(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
+        VoiceDaveSession::encrypt_opus_frame(self, frame)
+    }
+
+    fn decrypt_opus_frame(&mut self, sender_user_id: u64, frame: &[u8]) -> Result<Vec<u8>> {
+        VoiceDaveSession::decrypt_opus_frame(self, sender_user_id, frame)
+    }
+}
+
 // ============================================================================
 // 2. Estados Observáveis do Ciclo de Vida da Sessão
 // ============================================================================
@@ -89,6 +146,32 @@ pub enum VoiceSessionState {
     Connected,
     /// Tentando reconectar após perda transitória de rede ou indicação do servidor.
     Reconnecting,
+}
+
+/// Estatísticas periódicas de transmissão e recepção de pacotes RTP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VoicePacketStats {
+    pub sent_packets: u64,
+    pub recv_packets: u64,
+}
+
+/// Eventos observáveis do ciclo de vida e progresso da sessão de voz.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VoiceSessionEvent {
+    /// Opcode 4 enviado ao Gateway principal.
+    VoiceStateSent,
+    /// Metadados de servidor recebidos (VOICE_SERVER_UPDATE).
+    VoiceServerReceived { endpoint: String },
+    /// Voice Gateway autenticado e Opcode 2 Ready recebido com SSRC.
+    ReadyReceived { ssrc: u32, ip: String, port: u16 },
+    /// IP discovery concluído sobre o mesmo socket UDP.
+    IpDiscovered { ip: String, port: u16 },
+    /// Opcode 1 enviado e Opcode 4 Session Description recebido com chave de voz.
+    SessionDescriptionReceived { mode: String, dave_protocol_version: Option<u32> },
+    /// Transição de época DAVE executada.
+    DaveTransitionExecuted { transition_id: u16 },
+    /// Conexão desconectada ou encerrada.
+    Disconnected { code: Option<u16>, reason: String },
 }
 
 // ============================================================================
@@ -196,6 +279,18 @@ pub trait VoiceGatewayTransport: Send + Sync {
     /// Subscreve eventos em tempo real do Voice Gateway.
     fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent>;
 
+    /// Envia uma mensagem de texto (JSON) sobre o WebSocket do Voice Gateway.
+    async fn send_text(&self, text: String) -> Result<()> {
+        let _ = text;
+        Ok(())
+    }
+
+    /// Envia uma mensagem binária sobre o WebSocket do Voice Gateway.
+    async fn send_binary(&self, data: Vec<u8>) -> Result<()> {
+        let _ = data;
+        Ok(())
+    }
+
     /// Desconecta graciosamente do Voice Gateway.
     async fn disconnect(&self) -> Result<()>;
 }
@@ -225,6 +320,14 @@ impl VoiceGatewayTransport for VoiceGateway {
 
     fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
         VoiceGateway::subscribe_events(self)
+    }
+
+    async fn send_text(&self, text: String) -> Result<()> {
+        VoiceGateway::send_text(self, text).await
+    }
+
+    async fn send_binary(&self, data: Vec<u8>) -> Result<()> {
+        VoiceGateway::send_binary(self, data).await
     }
 
     async fn disconnect(&self) -> Result<()> {
@@ -422,6 +525,10 @@ pub struct VoiceSession {
     signaling: Arc<dyn MainSignalingChannel>,
     audio_bridge: Arc<Mutex<AudioBridge>>,
     frame_cipher: Arc<Mutex<Box<dyn FrameCipher>>>,
+    dave_session: Arc<std::sync::Mutex<VoiceDaveSession>>,
+    events_tx: broadcast::Sender<VoiceSessionEvent>,
+    sent_packets: Arc<AtomicU64>,
+    recv_packets: Arc<AtomicU64>,
     gateway_factory: VoiceGatewayFactory,
     session_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
@@ -439,9 +546,18 @@ impl VoiceSession {
         let (state_tx, state_rx) = watch::channel(VoiceSessionState::Disconnected {
             reason: "Sessão inicializada".into(),
         });
+        let (events_tx, _) = broadcast::channel(64);
 
         let self_mute = Arc::new(AtomicBool::new(config.self_mute));
         let self_deaf = Arc::new(AtomicBool::new(config.self_deaf));
+        let sent_packets = Arc::new(AtomicU64::new(0));
+        let recv_packets = Arc::new(AtomicU64::new(0));
+
+        let dave_session = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(
+            config.user_id,
+            config.channel_id,
+        )));
+        let default_cipher = DaveFrameCipher::new(dave_session.clone());
 
         Self {
             config,
@@ -449,7 +565,11 @@ impl VoiceSession {
             state_rx,
             signaling,
             audio_bridge: Arc::new(Mutex::new(audio_bridge)),
-            frame_cipher: Arc::new(Mutex::new(Box::new(PassthroughFrameCipher))),
+            frame_cipher: Arc::new(Mutex::new(Box::new(default_cipher))),
+            dave_session,
+            events_tx,
+            sent_packets,
+            recv_packets,
             gateway_factory: Arc::new(|cfg| Arc::new(VoiceGateway::new(cfg))),
             session_task: Arc::new(Mutex::new(None)),
             active_gateway: Arc::new(Mutex::new(None)),
@@ -480,10 +600,28 @@ impl VoiceSession {
         Self::new(config, signaling, bridge)
     }
 
-    /// Configura um cifrador de quadros customizado (ex.: DAVE MLS do agente VoiceGW).
+    /// Configura um cifrador de quadros customizado (ex.: fallback para testes unitários/offline).
     pub fn with_cipher<C: FrameCipher + 'static>(self, cipher: C) -> Self {
         *self.frame_cipher.try_lock().expect("cipher mutex uncontended at build time") = Box::new(cipher);
         self
+    }
+
+    /// Retorna a sessão DAVE subjacente da chamada.
+    pub fn dave_session(&self) -> Arc<std::sync::Mutex<VoiceDaveSession>> {
+        self.dave_session.clone()
+    }
+
+    /// Subscreve aos eventos observáveis do ciclo de vida da chamada.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<VoiceSessionEvent> {
+        self.events_tx.subscribe()
+    }
+
+    /// Retorna as estatísticas de transmissão e recepção de pacotes RTP.
+    pub fn packet_stats(&self) -> VoicePacketStats {
+        VoicePacketStats {
+            sent_packets: self.sent_packets.load(Ordering::Relaxed),
+            recv_packets: self.recv_packets.load(Ordering::Relaxed),
+        }
     }
 
     /// Configura uma fábrica customizada para o Voice Gateway (útil para testes unitários/offline).
@@ -569,6 +707,10 @@ impl VoiceSession {
         let signaling = self.signaling.clone();
         let audio_bridge = self.audio_bridge.clone();
         let frame_cipher = self.frame_cipher.clone();
+        let dave_session = self.dave_session.clone();
+        let events_tx = self.events_tx.clone();
+        let sent_packets = self.sent_packets.clone();
+        let recv_packets = self.recv_packets.clone();
         let gateway_factory = self.gateway_factory.clone();
         let state_tx = self.state_tx.clone();
         let active_gateway = self.active_gateway.clone();
@@ -581,6 +723,10 @@ impl VoiceSession {
                 signaling,
                 audio_bridge,
                 frame_cipher,
+                dave_session,
+                events_tx,
+                sent_packets,
+                recv_packets,
                 gateway_factory,
                 state_tx.clone(),
                 active_gateway,
@@ -665,6 +811,10 @@ async fn run_voice_session(
     signaling: Arc<dyn MainSignalingChannel>,
     audio_bridge: Arc<Mutex<AudioBridge>>,
     frame_cipher: Arc<Mutex<Box<dyn FrameCipher>>>,
+    dave_session: Arc<std::sync::Mutex<VoiceDaveSession>>,
+    events_tx: broadcast::Sender<VoiceSessionEvent>,
+    sent_packets: Arc<AtomicU64>,
+    recv_packets: Arc<AtomicU64>,
     gateway_factory: VoiceGatewayFactory,
     state_tx: watch::Sender<VoiceSessionState>,
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
@@ -685,6 +835,8 @@ async fn run_voice_session(
         .send_voice_state_update(guild_str.as_deref(), Some(&channel_str), initial_mute, initial_deaf)
         .await
         .context("Falha ao enviar Opcode 4 (Voice State Update)")?;
+
+    let _ = events_tx.send(VoiceSessionEvent::VoiceStateSent);
 
     // ------------------------------------------------------------------------
     // Passo 2: Aguardar session_id + token + endpoint
@@ -743,6 +895,9 @@ async fn run_voice_session(
     log::info!(
         "[VoiceSession] Handshake inicial concluído. Endpoint: {endpoint}, SessionID: {session_id}"
     );
+    let _ = events_tx.send(VoiceSessionEvent::VoiceServerReceived {
+        endpoint: endpoint.clone(),
+    });
 
     // ------------------------------------------------------------------------
     // Passo 3: Conectar Voice Gateway v8 e aguardar Opcode 2 Ready
@@ -753,7 +908,7 @@ async fn run_voice_session(
         user_id: config.user_id.to_string(),
         session_id,
         token,
-        max_dave_protocol_version: Some(0),
+        max_dave_protocol_version: Some(DEFAULT_MAX_DAVE_PROTOCOL_VERSION),
     };
 
     let gateway = (gateway_factory)(gw_config);
@@ -773,6 +928,11 @@ async fn run_voice_session(
         ready.port,
         ready.modes
     );
+    let _ = events_tx.send(VoiceSessionEvent::ReadyReceived {
+        ssrc: ready.ssrc,
+        ip: ready.ip.clone(),
+        port: ready.port,
+    });
 
     // ------------------------------------------------------------------------
     // Passo 4: Conectar socket UDP e executar IP Discovery no MESMO socket
@@ -791,6 +951,10 @@ async fn run_voice_session(
         discovered_ip,
         discovered_port
     );
+    let _ = events_tx.send(VoiceSessionEvent::IpDiscovered {
+        ip: discovered_ip.clone(),
+        port: discovered_port,
+    });
 
     // ------------------------------------------------------------------------
     // Passo 5: Opcode 1 Select Protocol e Opcode 4 Session Description
@@ -802,9 +966,26 @@ async fn run_voice_session(
         .context("Falha ao selecionar protocolo e aguardar Session Description")?;
 
     log::info!(
-        "[VoiceSession] Session Description recebida com sucesso: modo={}",
-        session_desc.mode
+        "[VoiceSession] Session Description recebida com sucesso: modo={}, dave_version={:?}",
+        session_desc.mode,
+        session_desc.dave_protocol_version
     );
+    let _ = events_tx.send(VoiceSessionEvent::SessionDescriptionReceived {
+        mode: session_desc.mode.clone(),
+        dave_protocol_version: session_desc.dave_protocol_version,
+    });
+
+    if let Some(version) = session_desc.dave_protocol_version {
+        let mut dave = dave_session.lock().unwrap();
+        if let Err(e) = dave.init_session(version as u16) {
+            log::warn!("[VoiceSession] Falha ao inicializar DAVE versão {version}: {e}");
+        } else {
+            log::info!("[VoiceSession] DAVE sessão inicializada com sucesso com versão {version}");
+        }
+    } else {
+        let mut dave = dave_session.lock().unwrap();
+        let _ = dave.init_session(0);
+    }
 
     let key_32: [u8; 32] = session_desc
         .secret_key
@@ -860,6 +1041,7 @@ async fn run_voice_session(
     let ssrc_map_clone = ssrc_to_user.clone();
     let audio_bridge_clone = audio_bridge.clone();
     let frame_cipher_clone = frame_cipher.clone();
+    let recv_packets_counter = recv_packets.clone();
 
     // Loop de Recepção UDP (áudio remoto)
     let recv_handle = tokio::spawn(async move {
@@ -871,6 +1053,7 @@ async fn run_voice_session(
                     timestamp,
                     payload,
                 }) => {
+                    recv_packets_counter.fetch_add(1, Ordering::Relaxed);
                     let sender_user_id = {
                         let map = ssrc_map_clone.read().await;
                         map.get(&ssrc).copied().unwrap_or(ssrc as u64)
@@ -914,6 +1097,8 @@ async fn run_voice_session(
 
                 if let Err(err) = udp_sender.send_opus_frame(&ciphered_frame).await {
                     log::warn!("[VoiceSession] Erro ao transmitir quadro RTP: {err}");
+                } else {
+                    sent_packets.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
@@ -930,18 +1115,107 @@ async fn run_voice_session(
                 }
             }
 
-            // 3. Eventos do Voice Gateway (alimenta SSRC map e monitora fechamento)
+            // 3. Eventos do Voice Gateway (alimenta SSRC map, DAVE e monitora fechamento)
             Ok(gw_event) = gateway_events_rx.recv() => {
                 match gw_event {
                     VoiceGatewayEvent::Speaking(speaking_payload) => {
                         if let Some(ref uid_str) = speaking_payload.user_id {
                             if let Ok(uid) = uid_str.parse::<u64>() {
                                 ssrc_to_user.write().await.insert(speaking_payload.ssrc, uid);
+                                if let Ok(mut dave) = dave_session.lock() {
+                                    dave.register_ssrc_user_mapping(speaking_payload.ssrc, uid);
+                                }
                             }
                         }
                     }
-                    VoiceGatewayEvent::Disconnected { code: _, reason, decision } => {
+                    VoiceGatewayEvent::DaveBinaryMessage(data) => {
+                        if let Ok((_seq, opcode, payload)) = parse_server_binary_message(&data) {
+                            match opcode {
+                                DaveOpcode::MlsExternalSender => {
+                                    let resp_opt = {
+                                        let mut dave = dave_session.lock().unwrap();
+                                        dave.handle_external_sender(payload).ok()
+                                    };
+                                    if let Some(resp) = resp_opt {
+                                        if let Err(e) = gateway.send_binary(resp).await {
+                                            log::warn!("[VoiceSession] Falha ao enviar Opcode 26 KeyPackage: {e}");
+                                        }
+                                    }
+                                }
+                                DaveOpcode::MlsProposals => {
+                                    if !payload.is_empty() {
+                                        let op_type = payload[0];
+                                        let proposals = &payload[1..];
+                                        let resp_opt = {
+                                            let mut dave = dave_session.lock().unwrap();
+                                            dave.handle_proposals(op_type, proposals, None).ok().flatten()
+                                        };
+                                        if let Some(resp) = resp_opt {
+                                            if let Err(e) = gateway.send_binary(resp).await {
+                                                log::warn!("[VoiceSession] Falha ao enviar Opcode 28 CommitWelcome: {e}");
+                                            }
+                                        }
+                                    }
+                                }
+                                DaveOpcode::MlsWelcome => {
+                                    if payload.len() >= 2 {
+                                        let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                                        let welcome_bytes = &payload[2..];
+                                        let invalid_opt = {
+                                            let mut dave = dave_session.lock().unwrap();
+                                            dave.handle_welcome(transition_id, welcome_bytes).ok().flatten()
+                                        };
+                                        if let Some(invalid) = invalid_opt {
+                                            let payload_json = serde_json::to_string(&invalid).unwrap();
+                                            let text = format!("{{\"op\":31,\"d\":{}}}", payload_json);
+                                            let _ = gateway.send_text(text).await;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    VoiceGatewayEvent::DavePrepareTransition(prep) => {
+                        let ready = {
+                            let mut dave = dave_session.lock().unwrap();
+                            dave.handle_prepare_transition(prep.transition_id, prep.protocol_version)
+                        };
+                        let payload_json = serde_json::to_string(&ready).unwrap();
+                        let text = format!("{{\"op\":23,\"d\":{}}}", payload_json);
+                        if let Err(e) = gateway.send_text(text).await {
+                            log::warn!("[VoiceSession] Falha ao enviar Opcode 23 TransitionReady: {e}");
+                        }
+                    }
+                    VoiceGatewayEvent::DaveExecuteTransition(exec) => {
+                        let mut dave = dave_session.lock().unwrap();
+                        let _ = dave.handle_execute_transition(exec.transition_id);
+                        let _ = events_tx.send(VoiceSessionEvent::DaveTransitionExecuted {
+                            transition_id: exec.transition_id,
+                        });
+                    }
+                    VoiceGatewayEvent::DavePrepareEpoch(epoch) => {
+                        let mut dave = dave_session.lock().unwrap();
+                        dave.handle_prepare_epoch(epoch.epoch, epoch.protocol_version);
+                    }
+                    VoiceGatewayEvent::DaveAnnounceCommit(announce) => {
+                        let commit_bytes = announce.commit.as_ref().map(|s| s.as_bytes()).unwrap_or(&[]);
+                        let invalid_opt = {
+                            let mut dave = dave_session.lock().unwrap();
+                            dave.handle_announce_commit(announce.transition_id, commit_bytes).ok().flatten()
+                        };
+                        if let Some(invalid) = invalid_opt {
+                            let payload_json = serde_json::to_string(&invalid).unwrap();
+                            let text = format!("{{\"op\":31,\"d\":{}}}", payload_json);
+                            let _ = gateway.send_text(text).await;
+                        }
+                    }
+                    VoiceGatewayEvent::Disconnected { code, reason, decision } => {
                         log::info!("[VoiceSession] Voice Gateway desconectado: {reason} (decisão: {decision:?})");
+                        let _ = events_tx.send(VoiceSessionEvent::Disconnected {
+                            code,
+                            reason: reason.clone(),
+                        });
                         match decision {
                             VoiceCloseDecision::Resume | VoiceCloseDecision::NewSession => {
                                 let _ = state_tx.send(VoiceSessionState::Reconnecting);

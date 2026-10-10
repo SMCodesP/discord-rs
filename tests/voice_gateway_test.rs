@@ -648,23 +648,3 @@ fn test_dave_signaling_and_media_contract_flow() {
     let decrypted = sm.dave_session_mut().decrypt_opus_frame_by_ssrc(7777, &raw_opus_audio).unwrap();
     assert_eq!(decrypted, raw_opus_audio); // Passthrough intact
 }
-
-#[test]
-fn test_dave_authenticated_cipher_encryption_and_decryption() {
-    use davey::aead::{Aead, KeyInit};
-    use davey::{Aes256Gcm, Nonce};
-
-    let key = [0x5Au8; 32];
-    let cipher = Aes256Gcm::new_from_slice(&key).expect("Invalid key length");
-    let nonce = Nonce::from_slice(&[1u8; 12]);
-
-    let original_opus = b"Synthetic Discord Voice Opus Audio Packet Frame 2026";
-    let encrypted = cipher.encrypt(nonce, original_opus.as_ref()).expect("Encryption failed");
-
-    // Ciphertext must differ and include 16-byte auth tag
-    assert_ne!(encrypted.as_slice(), original_opus.as_slice());
-    assert_eq!(encrypted.len(), original_opus.len() + 16);
-
-    let decrypted = cipher.decrypt(nonce, encrypted.as_ref()).expect("Decryption failed");
-    assert_eq!(decrypted.as_slice(), original_opus.as_slice());
-}
