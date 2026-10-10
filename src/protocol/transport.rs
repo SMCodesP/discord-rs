@@ -161,6 +161,16 @@ pub enum TransportEvent {
     },
     /// Pinned direct message (DM) channel IDs updated from user settings or cache
     PinnedDmsUpdated(Vec<String>),
+    /// A user profile was fetched from the REST API
+    UserProfileLoaded {
+        user_id: String,
+        profile: Box<crate::domain::profile::UserProfileData>,
+    },
+    /// A user profile fetch failed
+    UserProfileError {
+        user_id: String,
+        error: String,
+    },
 }
 
 /// Asynchronous transport abstraction for Discord communication.

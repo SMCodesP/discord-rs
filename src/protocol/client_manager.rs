@@ -30,6 +30,7 @@ pub struct ClientManager {
     transport: Arc<RwLock<Arc<dyn DiscordTransport>>>,
     mode: Arc<RwLock<ConnectionMode>>,
     event_tx: broadcast::Sender<TransportEvent>,
+    real_client: Arc<RwLock<Option<Arc<DiscordApiClient>>>>,
 }
 
 impl std::fmt::Debug for ClientManager {
@@ -50,6 +51,7 @@ impl ClientManager {
             transport: Arc::new(RwLock::new(mock)),
             mode: Arc::new(RwLock::new(ConnectionMode::Mock)),
             event_tx,
+            real_client: Arc::new(RwLock::new(None)),
         };
 
         (manager, event_rx)
@@ -105,6 +107,8 @@ impl ClientManager {
         {
             let mut current = self.transport.write().await;
             *current = real_client.clone();
+            let mut rc = self.real_client.write().await;
+            *rc = Some(real_client.clone());
         }
 
         info!("Cliente do Discord configurado com sucesso como transporte ativo.");
@@ -223,6 +227,8 @@ impl ClientManager {
         {
             let mut current = self.transport.write().await;
             *current = mock;
+            let mut rc = self.real_client.write().await;
+            *rc = None;
         }
         {
             let mut mode = self.mode.write().await;
@@ -230,6 +236,28 @@ impl ClientManager {
         }
         let _ = self.event_tx.send(TransportEvent::Connected);
         Ok(())
+    }
+
+    /// Fetches a user profile from the active Discord API client (/users/{user_id}/profile)
+    pub async fn get_user_profile(&self, user_id: &str) -> Result<crate::domain::profile::UserProfileData> {
+        self.get_user_profile_with_guild(user_id, None).await
+    }
+
+    /// Fetches a user profile within an optional guild context (/users/{user_id}/profile)
+    pub async fn get_user_profile_with_guild(
+        &self,
+        user_id: &str,
+        guild_id: Option<&str>,
+    ) -> Result<crate::domain::profile::UserProfileData> {
+        let client_opt = {
+            let lock = self.real_client.read().await;
+            lock.clone()
+        };
+        if let Some(client) = client_opt {
+            client.get_user_profile_with_guild(user_id, guild_id).await
+        } else {
+            anyhow::bail!("Cliente Discord não conectado para busca de perfil ao vivo")
+        }
     }
 
     /// Creates or opens an existing direct message (DM) channel with a user

@@ -544,7 +544,20 @@ impl Render for ChannelSidebar {
                                                     .flex()
                                                     .items_center()
                                                     .gap(px(10.0))
-                                                    .child(avatar_el)
+                                                    .child({
+                                                        let mut av = div().child(avatar_el).cursor_pointer();
+                                                        if let Some(uid) = dm.recipient_ids.first().cloned() {
+                                                            let av_entity = entity.clone();
+                                                            av = av.on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                                                let uid = uid.clone();
+                                                                av_entity.update(cx, |s, cx| {
+                                                                    s.open_user_profile(&uid);
+                                                                    cx.notify();
+                                                                });
+                                                            });
+                                                        }
+                                                        av
+                                                    })
                                                     .child(text_col_el),
                                             );
 
@@ -1407,4 +1420,3 @@ fn render_dm_text_column(
 
     col.into_any_element()
 }
-

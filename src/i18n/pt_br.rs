@@ -140,6 +140,16 @@ pub const DICTIONARY: &[(&str, &str)] = &[
     ("connection.mock", "Modo Demonstração (Mock)"),
     ("connection.disconnect", "Desconectar"),
     ("connection.failed", "Falha ao autenticar"),
+
+    // Perfil de Usuário
+    ("profile.about_me", "Sobre mim"),
+    ("profile.discord_member_since", "Membro do Discord desde"),
+    ("profile.server_member_since", "Membro do servidor desde"),
+    ("profile.mutual_guilds", "Servidores em comum"),
+    ("profile.mutual_friends", "Amigos em comum"),
+    ("profile.message_placeholder", "Conversar com @{username}"),
+    ("profile.loading", "Carregando perfil..."),
+    ("profile.error", "Não foi possível carregar o perfil."),
 ];
 
 /// Procura uma chave no dicionário pt-BR.

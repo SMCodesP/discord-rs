@@ -43,7 +43,7 @@ impl RootView {
         let state = cx.new(|_cx| {
             let mut s = AppState::new();
             s.telemetry = Some(tel_init);
-            s.client_manager = Some(client_manager);
+            s.client_manager = Some(client_manager.clone());
             if let Some(ref token) = s.auth_token {
                 let cm = cm_auto_login;
                 let auth = if s.is_user_token {
@@ -75,6 +75,8 @@ impl RootView {
             }
         })
         .detach();
+
+        cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 
         let guild_rail = cx.new(|cx| GuildRail::new(state.clone(), cx));
         let channel_sidebar = cx.new(|cx| ChannelSidebar::new(state.clone(), cx));
@@ -119,6 +121,8 @@ impl RootView {
             cx.notify();
         })
         .detach();
+
+        cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 
         Self {
             state,
@@ -246,6 +250,30 @@ impl Render for RootView {
                                 render_create_group_dm_modal(entity, &state).into_any_element()
                             }
                         }),
+                )
+            } else {
+                None
+            })
+            // =========================================================================
+            // USER PROFILE POPOUT OVERLAY (Fase 4)
+            // =========================================================================
+            .children(if let Some(ref popout) = state.profile_popout {
+                let entity = app_entity.clone();
+                let popout_state = popout.clone();
+                let catalog = state.profile_effects_catalog.clone();
+                let presence = state.presences_by_user.get(&popout.user_id).cloned();
+                Some(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .child(crate::app::user_profile_popout::render_user_profile_popout(
+                            entity,
+                            &popout_state,
+                            &catalog,
+                            presence.as_ref(),
+                        )),
                 )
             } else {
                 None

@@ -762,10 +762,22 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
             )
     } else {
         // Full mode: displays avatar
+        let author_id = message.author.id.clone();
         div()
             .w(px(48.0))
             .flex_shrink_0()
             .pt(px(2.0))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                let state_entity = cx.try_global::<crate::app::state::AppStateGlobal>().map(|g| g.0.clone());
+                if let Some(state_entity) = state_entity {
+                    let aid = author_id.clone();
+                    state_entity.update(cx, |s, cx| {
+                        s.open_user_profile(&aid);
+                        cx.notify();
+                    });
+                }
+            })
             .child(render_avatar(&author_name, message.author.avatar_url().as_deref()))
     };
 
@@ -784,6 +796,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
 
     if !config.is_grouped {
         // Author header row (Username, BOT tag, Timestamp)
+        let author_id = message.author.id.clone();
         let mut header_row = div()
             .flex()
             .flex_row()
@@ -796,6 +809,16 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
                     .text_color(name_color)
                     .cursor_pointer()
                     .hover(|s| s.border_b_1().border_color(name_color))
+                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                        let state_entity = cx.try_global::<crate::app::state::AppStateGlobal>().map(|g| g.0.clone());
+                        if let Some(state_entity) = state_entity {
+                            let aid = author_id.clone();
+                            state_entity.update(cx, |s, cx| {
+                                s.open_user_profile(&aid);
+                                cx.notify();
+                            });
+                        }
+                    })
                     .child(author_name),
             );
 

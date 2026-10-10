@@ -9,6 +9,9 @@ use crate::protocol::media_cache::{
     DiscordEmoji, DiscordSticker, MediaCacheManager, SoundboardSound, StickerFormatType,
     StickerPack, TenorGif,
 };
+use crate::domain::profile::{
+    snowflake_to_datetime, ConnectedAccount, MutualGuild, ProfileBadge, UserProfileData,
+};
 use crate::protocol::rate_limiter::RateLimitManager;
 use crate::protocol::transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent};
 use anyhow::{bail, Context, Result};
@@ -241,6 +244,33 @@ impl DiscordApiClient {
         *self.current_user_id.write().await = Some(user.id.clone());
         self.cache_engine.save_current_user(&user);
         Ok(user)
+    }
+
+    /// Fetches a user's full profile (/users/{user_id}/profile)
+    pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileData> {
+        self.get_user_profile_with_guild(user_id, None).await
+    }
+
+    /// Fetches a user's full profile optionally within a guild context (/users/{user_id}/profile)
+    pub async fn get_user_profile_with_guild(
+        &self,
+        user_id: &str,
+        guild_id: Option<&str>,
+    ) -> Result<UserProfileData> {
+        let mut path = format!(
+            "/users/{}/profile?with_mutual_guilds=true&with_mutual_friends_count=true",
+            user_id
+        );
+        if let Some(gid) = guild_id {
+            path.push_str(&format!("&guild_id={}", gid));
+        }
+
+        let req = self.auth_request(reqwest::Method::GET, &path);
+        let resp = self.send_request(&path, req).await?;
+        let val: serde_json::Value = resp.json().await?;
+        let profile = parse_user_profile_from_json(&val)
+            .context("Failed to parse user profile from API response")?;
+        Ok(profile)
     }
 
     /// Fetches all direct message (DM) channels for the authenticated user (/users/@me/channels)
@@ -1739,6 +1769,138 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
         }
     }
     Some(user)
+}
+
+pub fn parse_user_profile_from_json(val: &serde_json::Value) -> Option<UserProfileData> {
+    let user_val = val.get("user")?;
+    let user = parse_user_from_json(user_val)?;
+
+    let bio = val
+        .get("user_profile")
+        .and_then(|up| up.get("bio"))
+        .and_then(|v| v.as_str())
+        .or_else(|| user_val.get("bio").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let pronouns = val
+        .get("user_profile")
+        .and_then(|up| up.get("pronouns"))
+        .and_then(|v| v.as_str())
+        .or_else(|| user_val.get("pronouns").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+
+    let banner = user_val
+        .get("banner")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            val.get("user_profile")
+                .and_then(|up| up.get("banner"))
+                .and_then(|v| v.as_str())
+        })
+        .map(ToString::to_string);
+
+    let banner_color = user_val
+        .get("banner_color")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+
+    let accent_color = user_val
+        .get("accent_color")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            val.get("user_profile")
+                .and_then(|up| up.get("accent_color"))
+                .and_then(|v| v.as_u64())
+        })
+        .map(|v| v as u32);
+
+    let mut badges = Vec::new();
+    if let Some(arr) = val.get("badges").and_then(|v| v.as_array()) {
+        for b in arr {
+            if let (Some(id), Some(desc), Some(icon)) = (
+                b.get("id").and_then(|v| v.as_str()),
+                b.get("description").and_then(|v| v.as_str()),
+                b.get("icon").and_then(|v| v.as_str()),
+            ) {
+                badges.push(ProfileBadge {
+                    id: id.to_string(),
+                    description: desc.to_string(),
+                    icon: icon.to_string(),
+                    link: b.get("link").and_then(|v| v.as_str()).map(ToString::to_string),
+                });
+            }
+        }
+    }
+
+    let mut connected_accounts = Vec::new();
+    if let Some(arr) = val.get("connected_accounts").and_then(|v| v.as_array()) {
+        for ca in arr {
+            if let (Some(t), Some(id), Some(name)) = (
+                ca.get("type").and_then(|v| v.as_str()),
+                ca.get("id").and_then(|v| v.as_str()),
+                ca.get("name").and_then(|v| v.as_str()),
+            ) {
+                connected_accounts.push(ConnectedAccount {
+                    account_type: t.to_string(),
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    verified: ca.get("verified").and_then(|v| v.as_bool()).unwrap_or(false),
+                });
+            }
+        }
+    }
+
+    let mut mutual_guilds = Vec::new();
+    if let Some(arr) = val.get("mutual_guilds").and_then(|v| v.as_array()) {
+        for mg in arr {
+            if let Some(id) = mg.get("id").and_then(|v| v.as_str()) {
+                mutual_guilds.push(MutualGuild {
+                    id: id.to_string(),
+                    nick: mg.get("nick").and_then(|v| v.as_str()).map(ToString::to_string),
+                });
+            }
+        }
+    }
+
+    let mutual_friends_count = val
+        .get("mutual_friends_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+
+    let created_at = snowflake_to_datetime(&user.id);
+
+    let joined_server_at = val
+        .get("guild_member")
+        .and_then(|gm| gm.get("joined_at"))
+        .or_else(|| val.get("joined_at"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let profile_effect_id = val
+        .get("user_profile")
+        .and_then(|up| up.get("profile_effect"))
+        .and_then(|pe| pe.get("id").or_else(|| pe.get("sku_id")))
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+
+    Some(UserProfileData {
+        user,
+        bio,
+        pronouns,
+        banner,
+        banner_color,
+        accent_color,
+        profile_effect_id,
+        badges,
+        connected_accounts,
+        mutual_guilds,
+        mutual_friends_count,
+        created_at,
+        joined_server_at,
+    })
 }
 
 pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<VoiceState> {

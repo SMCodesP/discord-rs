@@ -20,6 +20,7 @@ impl Render for MemberSidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let members = state.members.clone();
+        let state_entity = self.state.clone();
 
         // Organize members into groups preserving order: Admin, Moderador, Bots, Membros, Offline
         let mut groups: Vec<(&'static str, Vec<super::state::MemberItemState>)> = vec![
@@ -68,8 +69,9 @@ impl Render for MemberSidebar {
                         groups
                             .into_iter()
                             .filter(|(_, list)| !list.is_empty())
-                            .map(|(title, member_list)| {
+                            .map(move |(title, member_list)| {
                         let count = member_list.len();
+                        let entity_group = state_entity.clone();
 
                         div()
                             .flex()
@@ -85,12 +87,14 @@ impl Render for MemberSidebar {
                                     .text_size(px(11.0))
                                     .child(format!("{} — {}", title, count)),
                             )
-                            .children(member_list.into_iter().map(|member| {
+                            .children(member_list.into_iter().map(move |member| {
                                 let status_color = member.presence.color_rgb();
                                 let role_color = member.role_color;
                                 let is_bot = member.is_bot;
                                 let activity = member.activity.clone();
 
+                                let member_uid = member.id.clone();
+                                let entity_profile = entity_group.clone();
                                 div()
                                     .h(px(44.0))
                                     .px(px(8.0))
@@ -101,6 +105,14 @@ impl Render for MemberSidebar {
                                     .gap(px(10.0))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(0x35373c)))
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                        let uid = member_uid.clone();
+                                        entity_profile.update(cx, |s, cx| {
+                                            let current_guild = s.selected_guild_id.clone();
+                                            s.open_user_profile_in_guild(&uid, current_guild);
+                                            cx.notify();
+                                        });
+                                    })
                                     // Avatar with Presence indicator
                                     .child(
                                         div()

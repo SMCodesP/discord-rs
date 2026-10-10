@@ -298,7 +298,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn test_catalog_population_and_empty_fallback() {
-        let mut catalog = ProfileEffectCatalog::new();
+        let catalog = ProfileEffectCatalog::new();
         assert!(catalog.get("non_existent").is_none());
 
         // Unknown effect renders nothing

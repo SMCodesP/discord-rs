@@ -937,6 +937,7 @@ fn render_friends_list_view(
 
     for (idx, friend) in filtered.into_iter().enumerate() {
         let entity_click = entity.clone();
+        let entity_profile = entity.clone();
         let target_cid = friend.channel_id.clone();
         let click_uid = friend.user_id.clone();
         let click_uname = friend.display_name.clone();
@@ -996,7 +997,6 @@ fn render_friends_list_view(
                 div()
                     .flex()
                     .flex_row()
-                    .items_center()
                     .gap(px(8.0))
                     .child(
                         div()
@@ -1179,6 +1179,19 @@ fn render_friends_list_view(
                     .child(
                         div()
                             .relative()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, {
+                                let entity_profile = entity_profile.clone();
+                                let profile_uid = friend_uid.clone();
+                                move |_ev, _win, cx| {
+                                    if !profile_uid.is_empty() {
+                                        entity_profile.update(cx, |s, cx| {
+                                            s.open_user_profile(&profile_uid);
+                                            cx.notify();
+                                        });
+                                    }
+                                }
+                            })
                             .child(if let Some(ref url) = friend.avatar_url {
                                 if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
                                     div()
@@ -1246,6 +1259,20 @@ fn render_friends_list_view(
                                             .font_weight(WEIGHT_SEMIBOLD)
                                             .text_size(font_size_base())
                                             .text_color(rgb(HEX_WHITE))
+                                            .cursor_pointer()
+                                            .hover(|s| s.underline())
+                                            .on_mouse_down(MouseButton::Left, {
+                                                let entity_profile = entity_profile.clone();
+                                                let profile_uid = friend_uid.clone();
+                                                move |_ev, _win, cx| {
+                                                    if !profile_uid.is_empty() {
+                                                        entity_profile.update(cx, |s, cx| {
+                                                            s.open_user_profile(&profile_uid);
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                }
+                                            })
                                             .child(friend.display_name),
                                     )
                                     .child(
