@@ -25,6 +25,7 @@ cpal = "0.15"
 opus = "0.3"
 aes-gcm = "0.10"
 chacha20poly1305 = "0.10"
+davey = "0.1.4"
 v4l = "0.14"
 ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
 x11rb = { version = "0.13", features = ["shm"] }

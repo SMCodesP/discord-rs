@@ -77,6 +77,7 @@ fn test_voice_udp_contract_types() {
     let session_desc = SessionDescription {
         mode: PREFERRED_ENCRYPTION_MODE.to_string(),
         secret_key: secret.clone(),
+        dave_protocol_version: None,
     };
     assert_eq!(session_desc.mode, "aead_aes256_gcm_rtpsize");
     assert_eq!(session_desc.secret_key.len(), 32);
@@ -316,6 +317,7 @@ fn test_state_machine_full_offline_handshake() {
     let expected_desc = SessionDescription {
         mode: "aead_aes256_gcm_rtpsize".to_string(),
         secret_key: secret,
+        dave_protocol_version: None,
     };
     assert_eq!(*sm.current_state(), VoiceConnectionState::Connected(expected_desc.clone()));
     assert_eq!(actions, vec![VoiceGatewayAction::SessionDescriptionReceived(expected_desc)]);
@@ -344,6 +346,7 @@ fn test_state_machine_buffered_resume() {
     let session = SessionDescription {
         mode: "aead_aes256_gcm_rtpsize".to_string(),
         secret_key: vec![3u8; 32],
+        dave_protocol_version: None,
     };
     sm.set_session_description(session.clone());
     sm.set_state(VoiceConnectionState::Connected(session.clone()));
@@ -482,4 +485,166 @@ fn test_voice_gateway_event_disconnected_structure() {
     } else {
         panic!("Expected Disconnected event");
     }
+}
+
+// ============================================================================
+// DAVE PROTOCOL & E2EE MEDIA CONTRACT TESTS
+// ============================================================================
+
+#[test]
+fn test_dave_opcodes_and_framing() {
+    use discord_rs::protocol::{
+        format_client_binary_message, parse_server_binary_message, DaveOpcode,
+    };
+
+    // Test opcode byte mappings and classification
+    assert_eq!(DaveOpcode::from_u8(21), Some(DaveOpcode::PrepareTransition));
+    assert_eq!(DaveOpcode::from_u8(22), Some(DaveOpcode::ExecuteTransition));
+    assert_eq!(DaveOpcode::from_u8(23), Some(DaveOpcode::TransitionReady));
+    assert_eq!(DaveOpcode::from_u8(24), Some(DaveOpcode::PrepareEpoch));
+    assert_eq!(DaveOpcode::from_u8(25), Some(DaveOpcode::MlsExternalSender));
+    assert_eq!(DaveOpcode::from_u8(26), Some(DaveOpcode::MlsKeyPackage));
+    assert_eq!(DaveOpcode::from_u8(27), Some(DaveOpcode::MlsProposals));
+    assert_eq!(DaveOpcode::from_u8(28), Some(DaveOpcode::MlsCommitWelcome));
+    assert_eq!(DaveOpcode::from_u8(29), Some(DaveOpcode::MlsAnnounceCommitTransition));
+    assert_eq!(DaveOpcode::from_u8(30), Some(DaveOpcode::MlsWelcome));
+    assert_eq!(DaveOpcode::from_u8(31), Some(DaveOpcode::MlsInvalidCommitWelcome));
+    assert_eq!(DaveOpcode::from_u8(100), None);
+
+    assert!(DaveOpcode::MlsExternalSender.is_binary());
+    assert!(DaveOpcode::MlsKeyPackage.is_binary());
+    assert!(DaveOpcode::MlsProposals.is_binary());
+    assert!(DaveOpcode::MlsCommitWelcome.is_binary());
+    assert!(DaveOpcode::MlsWelcome.is_binary());
+
+    assert!(DaveOpcode::PrepareTransition.is_json());
+    assert!(DaveOpcode::ExecuteTransition.is_json());
+    assert!(DaveOpcode::TransitionReady.is_json());
+    assert!(DaveOpcode::PrepareEpoch.is_json());
+    assert!(DaveOpcode::MlsAnnounceCommitTransition.is_json());
+    assert!(DaveOpcode::MlsInvalidCommitWelcome.is_json());
+
+    // Test client binary formatting: [opcode (1 byte), payload...]
+    let client_msg = format_client_binary_message(DaveOpcode::MlsKeyPackage, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    assert_eq!(client_msg.len(), 5);
+    assert_eq!(client_msg[0], 26);
+    assert_eq!(&client_msg[1..], &[0xDE, 0xAD, 0xBE, 0xEF]);
+
+    // Test server binary parsing: [seq (2 bytes BE), opcode (1 byte), payload...]
+    let raw_server = vec![0x01, 0x02, 25, 0xCA, 0xFE, 0xBA, 0xBE];
+    let (seq, op, payload) = parse_server_binary_message(&raw_server).expect("Failed to parse binary message");
+    assert_eq!(seq, 0x0102);
+    assert_eq!(op, DaveOpcode::MlsExternalSender);
+    assert_eq!(payload, &[0xCA, 0xFE, 0xBA, 0xBE]);
+
+    // Truncated binary frame error handling
+    assert!(parse_server_binary_message(&[0x01, 0x02]).is_err());
+}
+
+#[test]
+fn test_dave_json_payloads_serialization() {
+    use discord_rs::protocol::{
+        DaveAnnounceCommitTransitionPayload, DaveExecuteTransitionPayload,
+        DaveInvalidCommitWelcomePayload, DavePrepareEpochPayload, DavePrepareTransitionPayload,
+        DaveTransitionReadyPayload,
+    };
+
+    // Opcode 21
+    let prep = DavePrepareTransitionPayload { transition_id: 42, protocol_version: 1 };
+    let json = serde_json::to_string(&prep).unwrap();
+    let parsed: DavePrepareTransitionPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, prep);
+
+    // Opcode 22
+    let exec = DaveExecuteTransitionPayload { transition_id: 42 };
+    let json = serde_json::to_string(&exec).unwrap();
+    let parsed: DaveExecuteTransitionPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, exec);
+
+    // Opcode 23
+    let ready = DaveTransitionReadyPayload { transition_id: 42 };
+    let json = serde_json::to_string(&ready).unwrap();
+    let parsed: DaveTransitionReadyPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, ready);
+
+    // Opcode 24
+    let epoch = DavePrepareEpochPayload { epoch: 100, protocol_version: 1 };
+    let json = serde_json::to_string(&epoch).unwrap();
+    let parsed: DavePrepareEpochPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, epoch);
+
+    // Opcode 29
+    let announce = DaveAnnounceCommitTransitionPayload {
+        transition_id: 42,
+        commit: Some("base64commit".to_string()),
+    };
+    let json = serde_json::to_string(&announce).unwrap();
+    let parsed: DaveAnnounceCommitTransitionPayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, announce);
+
+    // Opcode 31
+    let invalid = DaveInvalidCommitWelcomePayload { transition_id: 42 };
+    let json = serde_json::to_string(&invalid).unwrap();
+    let parsed: DaveInvalidCommitWelcomePayload = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, invalid);
+}
+
+#[test]
+fn test_dave_default_identify_version_1() {
+    let mut config = mock_voice_config();
+    config.max_dave_protocol_version = None;
+    let sm = VoiceGatewayStateMachine::new(config);
+    let identify = sm.generate_identify();
+
+    let value = serde_json::to_value(&identify).unwrap();
+    assert_eq!(value["d"]["max_dave_protocol_version"], 1);
+}
+
+#[test]
+fn test_dave_signaling_and_media_contract_flow() {
+    let mut sm = VoiceGatewayStateMachine::new(mock_voice_config());
+
+    // 1. SessionDescription arrives with negotiated DAVE version 1
+    let session_msg = r#"{
+        "op": 4,
+        "d": {
+            "mode": "aead_aes256_gcm_rtpsize",
+            "secret_key": [1,2,3,4,5,6,7,8,9,1,2,3,4,5,6,7,8,9,1,2,3,4,5,6,7,8,9,1,2,3,4,5],
+            "dave_protocol_version": 1
+        }
+    }"#;
+    let actions = sm.handle_incoming_text(session_msg).unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(sm.dave_session().protocol_version(), 1);
+
+    // 2. Server sends Opcode 21 Prepare Transition
+    let prep_msg = r#"{"op": 21, "d": {"transition_id": 5, "protocol_version": 1}}"#;
+    let actions = sm.handle_incoming_text(prep_msg).unwrap();
+    assert_eq!(actions.len(), 1);
+    // Client must automatically reply with Opcode 23 Transition Ready
+    if let VoiceGatewayAction::SendMessage(json_str) = &actions[0] {
+        let val: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(val["op"], 23);
+        assert_eq!(val["d"]["transition_id"], 5);
+    } else {
+        panic!("Expected SendMessage(TransitionReady)");
+    }
+
+    // 3. Server sends Opcode 22 Execute Transition
+    let exec_msg = r#"{"op": 22, "d": {"transition_id": 5}}"#;
+    let actions = sm.handle_incoming_text(exec_msg).unwrap();
+    assert!(actions.is_empty());
+
+    // 4. Remote participant speaking mapping (SSRC -> User ID)
+    let speaking_msg = r#"{"op": 5, "d": {"speaking": 1, "ssrc": 7777, "user_id": "999888777"}}"#;
+    sm.handle_incoming_text(speaking_msg).unwrap();
+    assert_eq!(sm.dave_session().get_user_id_by_ssrc(7777), Some(999888777));
+
+    // 5. Media contract verification: Passthrough while MLS key negotiation proceeds
+    let raw_opus_audio = vec![0xF8, 0xFF, 0xFE, 0x01, 0x02, 0x03];
+    let encrypted = sm.dave_session_mut().encrypt_opus_frame(&raw_opus_audio).unwrap();
+    assert_eq!(encrypted, raw_opus_audio); // Passthrough intact
+
+    let decrypted = sm.dave_session_mut().decrypt_opus_frame_by_ssrc(7777, &raw_opus_audio).unwrap();
+    assert_eq!(decrypted, raw_opus_audio); // Passthrough intact
 }
