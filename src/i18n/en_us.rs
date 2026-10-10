@@ -129,6 +129,16 @@ pub const DICTIONARY: &[(&str, &str)] = &[
     ("connection.mock", "Demo Mode (Mock)"),
     ("connection.disconnect", "Disconnect"),
     ("connection.failed", "Authentication failed"),
+
+    // User Profile
+    ("profile.about_me", "About Me"),
+    ("profile.discord_member_since", "Discord Member Since"),
+    ("profile.server_member_since", "Server Member Since"),
+    ("profile.mutual_guilds", "Mutual Servers"),
+    ("profile.mutual_friends", "Mutual Friends"),
+    ("profile.message_placeholder", "Message @{username}"),
+    ("profile.loading", "Loading profile..."),
+    ("profile.error", "Unable to load profile."),
 ];
 
 pub fn lookup(key: &str) -> Option<&'static str> {

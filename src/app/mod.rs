@@ -17,6 +17,7 @@ pub mod header_bar;
 pub mod member_sidebar;
 pub mod root_view;
 pub mod state;
+pub mod user_profile_popout;
 pub mod user_settings;
 pub mod voice_call_panel;
 
@@ -27,5 +28,6 @@ pub use header_bar::HeaderBar;
 pub use member_sidebar::MemberSidebar;
 pub use root_view::RootView;
 pub use state::*;
+pub use user_profile_popout::*;
 pub use user_settings::UserSettingsModal;
 pub use voice_call_panel::VoiceCallPanel;

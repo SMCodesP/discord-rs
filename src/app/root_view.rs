@@ -43,7 +43,7 @@ impl RootView {
         let state = cx.new(|_cx| {
             let mut s = AppState::new();
             s.telemetry = Some(tel_init);
-            s.client_manager = Some(client_manager);
+            s.client_manager = Some(client_manager.clone());
             if let Some(ref token) = s.auth_token {
                 let cm = cm_auto_login;
                 let auth = if s.is_user_token {
@@ -68,6 +68,39 @@ impl RootView {
                     let _ = cx.update(|cx| {
                         let _ = state_weak.update(cx, |state, cx| {
                             state.handle_transport_event(evt);
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+
+        let state_weak_profile = state.downgrade();
+        let cm_profile = client_manager.clone();
+        cx.spawn(|_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let mut profile_rx = crate::app::user_profile_popout::subscribe_profile_trigger();
+                while let Ok(uid) = profile_rx.recv().await {
+                    let uid_fetch = uid.clone();
+                    let cm = cm_profile.clone();
+                    let state_weak = state_weak_profile.clone();
+                    let _ = cx.update(|cx| {
+                        let _ = state_weak.update(cx, |state, cx| {
+                            state.open_user_profile(&uid);
+                            cx.notify();
+                        });
+                    });
+
+                    // Async fetch via client manager
+                    let res = cm.get_user_profile(&uid_fetch).await;
+                    let _ = cx.update(|cx| {
+                        let _ = state_weak.update(cx, |state, cx| {
+                            match res {
+                                Ok(data) => state.set_profile_popout_data(&uid_fetch, data),
+                                Err(err) => state.set_profile_popout_error(&uid_fetch, err.to_string()),
+                            }
                             cx.notify();
                         });
                     });
@@ -117,6 +150,39 @@ impl RootView {
 
         cx.observe(&state, |_this, _state, cx| {
             cx.notify();
+        })
+        .detach();
+
+        let state_weak_profile = state.downgrade();
+        cx.spawn(|_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let mut profile_rx = crate::app::user_profile_popout::subscribe_profile_trigger();
+                while let Ok(uid) = profile_rx.recv().await {
+                    let uid_fetch = uid.clone();
+                    let state_weak = state_weak_profile.clone();
+                    let cm_opt = cx.update(|cx| {
+                        state_weak.update(cx, |state, cx| {
+                            state.open_user_profile(&uid);
+                            cx.notify();
+                            state.client_manager.clone()
+                        }).ok().flatten()
+                    }).ok().flatten();
+
+                    if let Some(cm) = cm_opt {
+                        let res = cm.get_user_profile(&uid_fetch).await;
+                        let _ = cx.update(|cx| {
+                            let _ = state_weak.update(cx, |state, cx| {
+                                match res {
+                                    Ok(data) => state.set_profile_popout_data(&uid_fetch, data),
+                                    Err(err) => state.set_profile_popout_error(&uid_fetch, err.to_string()),
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
+                }
+            }
         })
         .detach();
 
@@ -246,6 +312,23 @@ impl Render for RootView {
                                 render_create_group_dm_modal(entity, &state).into_any_element()
                             }
                         }),
+                )
+            } else {
+                None
+            })
+            // =========================================================================
+            // USER PROFILE POPOUT OVERLAY (Fase 4)
+            // =========================================================================
+            .children(if let Some(ref popout) = state.profile_popout {
+                let entity = app_entity.clone();
+                let popout_state = popout.clone();
+                Some(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .child(crate::app::user_profile_popout::render_user_profile_popout(entity, &popout_state)),
                 )
             } else {
                 None

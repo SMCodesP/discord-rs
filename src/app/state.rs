@@ -444,6 +444,8 @@ pub struct AppState {
     pub message_display_mode: MessageDisplayMode,
     pub accessibility_settings: AccessibilitySettings,
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
+    /// Currently opened user profile popout
+    pub profile_popout: Option<crate::app::user_profile_popout::ProfilePopoutState>,
 }
 
 fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
@@ -1280,6 +1282,7 @@ impl AppState {
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
+            profile_popout: None,
         };
         state.sync_guild_media();
         state
@@ -1604,6 +1607,165 @@ impl AppState {
             tel.track_button_click("close_modal", "Fechar Modal", 0);
         }
         self.active_modal = None;
+    }
+
+    /// Opens the user profile popout for a user (optionally with guild context)
+    pub fn open_user_profile(&mut self, user_id: &str) {
+        self.open_user_profile_in_guild(user_id, self.selected_guild_id.clone());
+    }
+
+    /// Opens the user profile popout with specific guild context
+    pub fn open_user_profile_in_guild(&mut self, user_id: &str, guild_id: Option<String>) {
+        let uid = user_id.to_string();
+        let fallback = self.build_fallback_profile_data(&uid, guild_id.as_deref());
+        self.profile_popout = Some(crate::app::user_profile_popout::ProfilePopoutState {
+            user_id: uid.clone(),
+            guild_id,
+            data: fallback,
+            is_loading: true,
+            error: None,
+            active_tab: crate::app::user_profile_popout::ProfileTab::MutualGuilds,
+            quick_message: String::new(),
+        });
+        crate::app::user_profile_popout::trigger_open_profile(&uid);
+    }
+
+    /// Closes the active user profile popout
+    pub fn close_profile_popout(&mut self) {
+        self.profile_popout = None;
+    }
+
+    /// Updates the profile popout with loaded data
+    pub fn set_profile_popout_data(&mut self, user_id: &str, data: crate::app::user_profile_popout::UserProfileData) {
+        if let Some(ref mut popout) = self.profile_popout {
+            if popout.user_id == user_id {
+                popout.data = Some(data);
+                popout.is_loading = false;
+                popout.error = None;
+            }
+        }
+    }
+
+    /// Sets an error on the profile popout
+    pub fn set_profile_popout_error(&mut self, user_id: &str, error: String) {
+        if let Some(ref mut popout) = self.profile_popout {
+            if popout.user_id == user_id {
+                popout.is_loading = false;
+                if popout.data.is_none() {
+                    popout.error = Some(error);
+                }
+            }
+        }
+    }
+
+    /// Builds fallback profile data from local friends, members, or current_user
+    pub fn build_fallback_profile_data(&self, user_id: &str, _guild_id: Option<&str>) -> Option<crate::app::user_profile_popout::UserProfileData> {
+        let to_domain_presence = |p: PresenceStatus| match p {
+            PresenceStatus::Online => crate::domain::user::PresenceStatus::Online,
+            PresenceStatus::Idle => crate::domain::user::PresenceStatus::Idle,
+            PresenceStatus::DoNotDisturb => crate::domain::user::PresenceStatus::DoNotDisturb,
+            PresenceStatus::Offline => crate::domain::user::PresenceStatus::Offline,
+        };
+
+        let uid = user_id.to_string();
+        // Check current_user
+        if self.current_user.id == uid || uid == "me" || uid == "@me" {
+            let mut user = crate::domain::user::User::new(&self.current_user.id, &self.current_user.username);
+            user.global_name = Some(self.current_user.display_name.clone());
+            user.avatar = self.current_user.avatar_url.clone();
+            user.discriminator = self.current_user.discriminator.clone();
+            user.presence = to_domain_presence(self.current_user.presence);
+            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
+            return Some(crate::app::user_profile_popout::UserProfileData {
+                user,
+                bio: None,
+                pronouns: None,
+                banner: None,
+                banner_color: None,
+                accent_color: None,
+                badges: Vec::new(),
+                connected_accounts: Vec::new(),
+                mutual_guilds: Vec::new(),
+                mutual_friends_count: 0,
+                created_at,
+                joined_server_at: None,
+            });
+        }
+
+        // Check members
+        if let Some(m) = self.members.iter().find(|m| m.id == uid) {
+            let mut user = crate::domain::user::User::new(&m.id, &m.name);
+            user.global_name = Some(m.name.clone());
+            user.bot = m.is_bot;
+            user.presence = to_domain_presence(m.presence);
+            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
+            return Some(crate::app::user_profile_popout::UserProfileData {
+                user,
+                bio: None,
+                pronouns: None,
+                banner: None,
+                banner_color: None,
+                accent_color: None,
+                badges: Vec::new(),
+                connected_accounts: Vec::new(),
+                mutual_guilds: Vec::new(),
+                mutual_friends_count: 0,
+                created_at,
+                joined_server_at: None,
+            });
+        }
+
+        // Check friends
+        if let Some(f) = self.friends.iter().find(|f| f.id == uid) {
+            let mut user = crate::domain::user::User::new(&f.id, &f.username);
+            user.global_name = Some(f.display_name.clone());
+            user.avatar = f.avatar_url.clone();
+            user.presence = to_domain_presence(f.presence);
+            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
+            return Some(crate::app::user_profile_popout::UserProfileData {
+                user,
+                bio: None,
+                pronouns: None,
+                banner: None,
+                banner_color: None,
+                accent_color: None,
+                badges: Vec::new(),
+                connected_accounts: Vec::new(),
+                mutual_guilds: Vec::new(),
+                mutual_friends_count: 0,
+                created_at,
+                joined_server_at: None,
+            });
+        }
+
+        // Check DM channels
+        if let Some(dm) = self.dm_channels.iter().find(|dm| {
+            dm.id == uid
+                || dm.recipient_ids.contains(&uid)
+                || dm.id.trim_start_matches("dm-") == uid
+        }) {
+            let recipient_id = dm.recipient_ids.first().cloned().unwrap_or_else(|| uid.clone());
+            let mut user = crate::domain::user::User::new(&recipient_id, &dm.name);
+            user.global_name = Some(dm.name.clone());
+            user.avatar = dm.icon_url.clone();
+            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
+            return Some(crate::app::user_profile_popout::UserProfileData {
+                user,
+                bio: None,
+                pronouns: None,
+                banner: None,
+                banner_color: None,
+                accent_color: None,
+                badges: Vec::new(),
+                connected_accounts: Vec::new(),
+                mutual_guilds: Vec::new(),
+                mutual_friends_count: 0,
+                created_at,
+                joined_server_at: None,
+            });
+        }
+
+        None
     }
 
     /// Sets the active settings tab

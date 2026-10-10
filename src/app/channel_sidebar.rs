@@ -404,7 +404,15 @@ impl Render for ChannelSidebar {
                                                         .flex()
                                                         .items_center()
                                                         .gap(px(10.0))
-                                                        .child(avatar_el)
+                                                        .child({
+                                                            let mut av = div().child(avatar_el).cursor_pointer();
+                                                            if let Some(uid) = dm.recipient_ids.first().cloned() {
+                                                                av = av.on_mouse_down(MouseButton::Left, move |_ev, _win, _cx| {
+                                                                    crate::app::user_profile_popout::trigger_open_profile(&uid);
+                                                                });
+                                                            }
+                                                            av
+                                                        })
                                                         .child(
                                                             div()
                                                                 .flex()

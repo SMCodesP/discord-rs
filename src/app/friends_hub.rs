@@ -949,9 +949,14 @@ fn render_friends_list_view(
                     .items_center()
                     .gap(px(12.0))
                     // Avatar Container with Status Dot
-                    .child(
+                    .child({
+                        let f_uid = friend.user_id.clone();
                         div()
                             .relative()
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_ev, _win, _cx| {
+                                crate::app::user_profile_popout::trigger_open_profile(&f_uid);
+                            })
                             .child(if let Some(ref url) = friend.avatar_url {
                                 if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
                                     div()
@@ -996,8 +1001,8 @@ fn render_friends_list_view(
                                     .bg(rgb(friend.presence_color))
                                     .border_2()
                                     .border_color(rgb(0x313338)),
-                            ),
-                    )
+                            )
+                    })
                     // Names & Status
                     .child(
                         div()

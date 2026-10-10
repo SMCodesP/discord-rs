@@ -91,6 +91,7 @@ impl Render for MemberSidebar {
                                 let is_bot = member.is_bot;
                                 let activity = member.activity.clone();
 
+                                let member_uid = member.id.clone();
                                 div()
                                     .h(px(44.0))
                                     .px(px(8.0))
@@ -101,6 +102,9 @@ impl Render for MemberSidebar {
                                     .gap(px(10.0))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(rgb(0x35373c)))
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, _cx| {
+                                        crate::app::user_profile_popout::trigger_open_profile(&member_uid);
+                                    })
                                     // Avatar with Presence indicator
                                     .child(
                                         div()
