@@ -366,6 +366,7 @@ impl DiscordApiClient {
         Ok(guild_folders)
     }
 
+
     /// Fetches all custom emojis for a guild (/guilds/{guild_id}/emojis) with local disk cache
     pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<DiscordEmoji>> {
         if let Some(cached) = self.media_cache.load_guild_emojis_from_disk(guild_id) {
@@ -1347,11 +1348,33 @@ async fn handle_dispatch(
             cache_engine.save_current_user(&user);
             cache_engine.save_guilds(&guilds);
 
+            // Discord web stores user settings / DM pins in binary Protobuf (PreloadedUserSettings); Gateway READY / REST doesn't expose them in JSON, so pinned DMs are managed locally in discord-rs AppState.
+            let raw_pinned = data
+                .get("user_settings")
+                .and_then(|us| us.get("pinned_dms"))
+                .or_else(|| data.get("pinned_dms"))
+                .and_then(|v| v.as_array());
+
+            let mut pinned_dms = Vec::new();
+            if let Some(arr) = raw_pinned {
+                for item in arr {
+                    if let Some(id) = item.as_str() {
+                        pinned_dms.push(id.to_string());
+                    } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        pinned_dms.push(id.to_string());
+                    }
+                }
+            }
+
             let _ = event_tx.send(TransportEvent::Ready {
                 user,
                 guilds,
                 guild_folders,
             });
+
+            if !pinned_dms.is_empty() {
+                let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
+            }
         }
         "CHANNEL_CREATE" => {
             if let Some(ch) = parse_channel_from_json(&data, None) {

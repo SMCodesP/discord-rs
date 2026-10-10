@@ -117,6 +117,8 @@ pub enum TransportEvent {
         guild_id: String,
         stickers: Vec<crate::protocol::media_cache::DiscordSticker>,
     },
+    /// Pinned direct message (DM) channel IDs updated from user settings or cache
+    PinnedDmsUpdated(Vec<String>),
 }
 
 /// Asynchronous transport abstraction for Discord communication.

@@ -416,6 +416,10 @@ pub struct AppState {
     pub is_connecting: bool,
     /// Direct Message (DM) channels
     pub dm_channels: Vec<ChannelItemState>,
+    /// Pinned direct message channel IDs (ordered strictly as in user settings)
+    pub pinned_dms: Vec<String>,
+    /// Optional path to pinned DMs cache on disk (None disables disk persistence, e.g. in tests)
+    pub pinned_dms_path: Option<std::path::PathBuf>,
     /// User's guild folders grouping
     pub guild_folders: Vec<crate::protocol::GuildFolder>,
     /// Set of expanded folder IDs in guild rail
@@ -1055,6 +1059,8 @@ impl AppState {
             auth_error: None,
             is_connecting,
             dm_channels: Vec::new(),
+            pinned_dms: Vec::new(),
+            pinned_dms_path: None,
             guild_folders,
             expanded_folders: std::collections::HashSet::new(),
             friends: if has_token {
@@ -1352,15 +1358,31 @@ impl AppState {
     }
 
     /// Sorts DMs according to Discord rules:
-    /// 1. Pinned DMs (is_pinned: true) at the top.
+    /// 1. Pinned DMs (is_pinned: true) at the absolute top, strictly adhering to the order in `pinned_dms`.
     /// 2. Channels with the most recent messages closest to the top (last_message_id descending Snowflake).
     pub fn sort_dm_channels(&mut self) {
+        let pinned_order = &self.pinned_dms;
         self.dm_channels.sort_by(|a, b| {
-            // 1. DMs fixadas no topo (is_pinned: true vem antes de false)
+            // 1. DMs fixadas no topo absoluto (is_pinned: true vem antes de false)
             match (a.is_pinned, b.is_pinned) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
-                _ => {}
+                (true, true) => {
+                    // Ambas são fixadas: manter a ordem estrita do array pinned_dms
+                    let pos_a = pinned_order.iter().position(|id| id == &a.id);
+                    let pos_b = pinned_order.iter().position(|id| id == &b.id);
+                    match (pos_a, pos_b) {
+                        (Some(idx_a), Some(idx_b)) => {
+                            if idx_a != idx_b {
+                                return idx_a.cmp(&idx_b);
+                            }
+                        }
+                        (Some(_), None) => return std::cmp::Ordering::Less,
+                        (None, Some(_)) => return std::cmp::Ordering::Greater,
+                        (None, None) => {}
+                    }
+                }
+                (false, false) => {}
             }
 
             // 2. Mensagem mais recente mais perto do topo (decrescente por Snowflake)
@@ -1377,6 +1399,64 @@ impl AppState {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
+    }
+
+    /// Sets the disk persistence path for pinned DMs. When set, loads from disk if available.
+    pub fn set_pinned_dms_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.pinned_dms_path = path;
+        if let Some(ref p) = self.pinned_dms_path {
+            self.pinned_dms = crate::protocol::pinned_dms::load_pinned_dms_from_path(p);
+            for dm in &mut self.dm_channels {
+                dm.is_pinned = self.pinned_dms.contains(&dm.id);
+            }
+            self.sort_dm_channels();
+        }
+    }
+
+    /// Pins a DM channel: adds to pinned_dms, marks is_pinned = true, re-sorts and persists to disk if configured.
+    pub fn pin_dm_channel(&mut self, channel_id: &str) {
+        if !self.pinned_dms.contains(&channel_id.to_string()) {
+            self.pinned_dms.push(channel_id.to_string());
+        }
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = true;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Unpins a DM channel: removes from pinned_dms, sets is_pinned = false, re-sorts and persists to disk if configured.
+    pub fn unpin_dm_channel(&mut self, channel_id: &str) {
+        self.pinned_dms.retain(|id| id != channel_id);
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = false;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Toggles pin status for a DM channel.
+    pub fn toggle_pin_dm_channel(&mut self, channel_id: &str) {
+        let is_currently_pinned = self
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.is_pinned)
+            .unwrap_or(false)
+            || self.pinned_dms.contains(&channel_id.to_string());
+        if is_currently_pinned {
+            self.unpin_dm_channel(channel_id);
+        } else {
+            self.pin_dm_channel(channel_id);
+        }
     }
 
     /// Selects a channel
@@ -2265,6 +2345,7 @@ impl AppState {
                     .into_iter()
                     .map(|c| {
                         let is_group = c.channel_type == ChannelType::GroupDm;
+                        let is_pinned = c.is_pinned || self.pinned_dms.contains(&c.id);
                         ChannelItemState {
                             id: c.id,
                             name: c.name,
@@ -2273,7 +2354,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned,
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
@@ -2344,7 +2425,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned: c.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
@@ -2396,7 +2477,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: channel.icon_url.clone(),
-                            is_pinned: channel.is_pinned,
+                            is_pinned: channel.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: channel.last_message_id.clone(),
                             is_group_dm: is_group,
                             recipient_ids: channel.recipient_ids.clone(),
@@ -2473,6 +2554,16 @@ impl AppState {
                         }
                     })
                     .collect();
+            }
+            TransportEvent::PinnedDmsUpdated(pinned) => {
+                self.pinned_dms = pinned;
+                for dm in &mut self.dm_channels {
+                    dm.is_pinned = self.pinned_dms.contains(&dm.id);
+                }
+                self.sort_dm_channels();
+                if let Some(ref path) = self.pinned_dms_path {
+                    crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+                }
             }
             _ => {}
         }
