@@ -418,6 +418,8 @@ pub struct AppState {
     pub dm_channels: Vec<ChannelItemState>,
     /// Pinned direct message channel IDs (ordered strictly as in user settings)
     pub pinned_dms: Vec<String>,
+    /// Optional path to pinned DMs cache on disk (None disables disk persistence, e.g. in tests)
+    pub pinned_dms_path: Option<std::path::PathBuf>,
     /// User's guild folders grouping
     pub guild_folders: Vec<crate::protocol::GuildFolder>,
     /// Set of expanded folder IDs in guild rail
@@ -1057,7 +1059,8 @@ impl AppState {
             auth_error: None,
             is_connecting,
             dm_channels: Vec::new(),
-            pinned_dms: crate::protocol::pinned_dms::load_pinned_dms_from_disk(),
+            pinned_dms: Vec::new(),
+            pinned_dms_path: None,
             guild_folders,
             expanded_folders: std::collections::HashSet::new(),
             friends: if has_token {
@@ -1465,7 +1468,19 @@ impl AppState {
         });
     }
 
-    /// Pins a DM channel: adds to pinned_dms, marks is_pinned = true, re-sorts and persists to disk.
+    /// Sets the disk persistence path for pinned DMs. When set, loads from disk if available.
+    pub fn set_pinned_dms_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.pinned_dms_path = path;
+        if let Some(ref p) = self.pinned_dms_path {
+            self.pinned_dms = crate::protocol::pinned_dms::load_pinned_dms_from_path(p);
+            for dm in &mut self.dm_channels {
+                dm.is_pinned = self.pinned_dms.contains(&dm.id);
+            }
+            self.sort_dm_channels();
+        }
+    }
+
+    /// Pins a DM channel: adds to pinned_dms, marks is_pinned = true, re-sorts and persists to disk if configured.
     pub fn pin_dm_channel(&mut self, channel_id: &str) {
         if !self.pinned_dms.contains(&channel_id.to_string()) {
             self.pinned_dms.push(channel_id.to_string());
@@ -1476,10 +1491,12 @@ impl AppState {
             }
         }
         self.sort_dm_channels();
-        crate::protocol::pinned_dms::save_pinned_dms_to_disk(&self.pinned_dms);
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
     }
 
-    /// Unpins a DM channel: removes from pinned_dms, sets is_pinned = false, re-sorts and persists to disk.
+    /// Unpins a DM channel: removes from pinned_dms, sets is_pinned = false, re-sorts and persists to disk if configured.
     pub fn unpin_dm_channel(&mut self, channel_id: &str) {
         self.pinned_dms.retain(|id| id != channel_id);
         for dm in &mut self.dm_channels {
@@ -1488,7 +1505,9 @@ impl AppState {
             }
         }
         self.sort_dm_channels();
-        crate::protocol::pinned_dms::save_pinned_dms_to_disk(&self.pinned_dms);
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
     }
 
     /// Toggles pin status for a DM channel.
@@ -2617,7 +2636,9 @@ impl AppState {
                     dm.is_pinned = self.pinned_dms.contains(&dm.id);
                 }
                 self.sort_dm_channels();
-                crate::protocol::pinned_dms::save_pinned_dms_to_disk(&self.pinned_dms);
+                if let Some(ref path) = self.pinned_dms_path {
+                    crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+                }
             }
             _ => {}
         }

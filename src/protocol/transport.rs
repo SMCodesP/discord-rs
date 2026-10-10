@@ -153,11 +153,6 @@ pub trait DiscordTransport: Send + Sync {
     /// List all direct message (DM) channels for the authenticated user (/users/@me/channels).
     async fn list_dm_channels(&self) -> anyhow::Result<Vec<Channel>>;
 
-    /// Retrieve pinned direct message channel IDs from user settings or cache.
-    async fn get_user_pinned_dms(&self) -> anyhow::Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-
     /// Create or retrieve an existing direct message channel with a user (/users/@me/channels).
     async fn create_or_get_dm_channel(&self, recipient_id: &str) -> anyhow::Result<Channel> {
         let _ = recipient_id;

@@ -10,6 +10,7 @@ use super::state::{ActiveModal, AppState, FriendsTab};
 pub struct ChannelSidebar {
     state: Entity<AppState>,
     context_menu_dm: Option<(String, Point<Pixels>)>,
+    focus_handle: FocusHandle,
 }
 
 impl ChannelSidebar {
@@ -18,15 +19,24 @@ impl ChannelSidebar {
             cx.notify();
         })
         .detach();
+
+        // Initialize pinned_dms_path in AppState for the live application if not yet set
+        state.update(cx, |s, _cx| {
+            if s.pinned_dms_path.is_none() {
+                s.set_pinned_dms_path(Some(crate::protocol::pinned_dms::pinned_dms_cache_path()));
+            }
+        });
+
         Self {
             state,
             context_menu_dm: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 }
 
 impl Render for ChannelSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let selected_guild = state.get_selected_guild().cloned();
         let selected_channel_id = state.selected_channel_id.clone();
@@ -35,6 +45,7 @@ impl Render for ChannelSidebar {
         let is_dm = state.selected_guild_id.is_none();
         let app_entity = self.state.clone();
         let self_entity = cx.entity().clone();
+        let viewport = window.viewport_size();
 
         let context_menu_overlay = if let Some((ref target_dm_id, click_pos)) = self.context_menu_dm {
             let dm_id = target_dm_id.clone();
@@ -53,79 +64,107 @@ impl Render for ChannelSidebar {
             let self_close_right = self_close.clone();
 
             Some(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                        self_close_left.update(cx, |this, cx| {
-                            this.context_menu_dm = None;
-                            cx.notify();
-                        });
-                    })
-                    .on_mouse_down(MouseButton::Right, move |_ev, _win, cx| {
-                        self_close_right.update(cx, |this, cx| {
-                            this.context_menu_dm = None;
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .top(click_pos.y.max(px(10.0)).min(px(560.0)))
-                            .left(click_pos.x.max(px(10.0)).min(px(180.0)))
-                            .w(px(180.0))
-                            .bg(rgb(0x111214))
-                            .border_1()
-                            .border_color(rgb(0x232428))
-                            .rounded(px(6.0))
-                            .shadow_lg()
-                            .p(px(6.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
-                                cx.stop_propagation();
-                            })
-                            .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
-                                cx.stop_propagation();
-                            })
-                            .child(
-                                div()
-                                    .h(px(32.0))
-                                    .px(px(8.0))
-                                    .rounded(px(4.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x4752c4)).text_color(rgb(0xffffff)))
-                                    .text_color(rgb(0xdbdee1))
-                                    .text_size(px(13.0))
-                                    .on_mouse_down(MouseButton::Left, {
-                                        let app = app_entity_menu.clone();
-                                        let target_id = dm_id.clone();
-                                        let self_close = cx.entity().clone();
-                                        move |_ev, _win, cx| {
-                                            app.update(cx, |state, cx| {
-                                                state.toggle_pin_dm_channel(&target_id);
-                                                cx.notify();
-                                            });
-                                            self_close.update(cx, |this, cx| {
+                deferred(
+                    div()
+                        .child(
+                            // Full-window transparent backdrop to catch clicks outside and dismiss the context menu
+                            anchored()
+                                .position(point(px(0.0), px(0.0)))
+                                .child(
+                                    div()
+                                        .w(viewport.width)
+                                        .h(viewport.height)
+                                        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                            self_close_left.update(cx, |this, cx| {
                                                 this.context_menu_dm = None;
                                                 cx.notify();
                                             });
-                                        }
-                                    })
-                                    .child(pin_label)
-                                    .child(icon_pin(px(14.0), rgb(0x949ba4)))
-                            )
-                    )
+                                        })
+                                        .on_mouse_down(MouseButton::Right, move |_ev, _win, cx| {
+                                            self_close_right.update(cx, |this, cx| {
+                                                this.context_menu_dm = None;
+                                                cx.notify();
+                                            });
+                                        })
+                                )
+                        )
+                        .child(
+                            // Context menu anchored at the exact click position, snapping dynamically to window bounds
+                            anchored()
+                                .position(click_pos)
+                                .snap_to_window()
+                                .child(
+                                    div()
+                                        .w(px(180.0))
+                                        .bg(rgb(0x111214))
+                                        .border_1()
+                                        .border_color(rgb(0x232428))
+                                        .rounded(px(6.0))
+                                        .shadow_lg()
+                                        .p(px(6.0))
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(2.0))
+                                        .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .child(
+                                            div()
+                                                .h(px(32.0))
+                                                .px(px(8.0))
+                                                .rounded(px(4.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(rgb(0x4752c4)).text_color(rgb(0xffffff)))
+                                                .text_color(rgb(0xdbdee1))
+                                                .text_size(px(13.0))
+                                                .on_mouse_down(MouseButton::Left, {
+                                                    let app = app_entity_menu.clone();
+                                                    let target_id = dm_id.clone();
+                                                    let self_close = cx.entity().clone();
+                                                    move |_ev, _win, cx| {
+                                                        app.update(cx, |state, cx| {
+                                                            state.toggle_pin_dm_channel(&target_id);
+                                                            cx.notify();
+                                                        });
+                                                        self_close.update(cx, |this, cx| {
+                                                            this.context_menu_dm = None;
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
+                                                .child(pin_label)
+                                                .child(icon_pin(px(14.0), rgb(0x949ba4)))
+                                        )
+                                )
+                        )
+                )
             )
         } else {
             None
         };
 
         div()
+            .track_focus(&self.focus_handle)
+            .key_context("channel_sidebar")
+            .on_key_down({
+                let self_esc = cx.entity().clone();
+                move |ev: &KeyDownEvent, _window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        self_esc.update(cx, |this, cx| {
+                            if this.context_menu_dm.is_some() {
+                                this.context_menu_dm = None;
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+            })
             .relative()
             .flex()
             .flex_col()
@@ -497,10 +536,11 @@ impl Render for ChannelSidebar {
                                                 .on_mouse_down(MouseButton::Right, {
                                                     let self_ctx = self_entity.clone();
                                                     let menu_cid = dm_id.clone();
-                                                    move |event, _window, cx| {
+                                                    move |event, window, cx| {
                                                         let pos = event.position;
                                                         self_ctx.update(cx, |this, cx| {
                                                             this.context_menu_dm = Some((menu_cid.clone(), pos));
+                                                            window.focus(&this.focus_handle);
                                                             cx.notify();
                                                         });
                                                     }

@@ -151,3 +151,67 @@ fn test_pinned_dms_updated_event() {
     assert_eq!(state.dm_channels[2].id, "dm-2");
     assert!(!state.dm_channels[2].is_pinned);
 }
+
+#[test]
+fn test_pinned_dms_isolation_does_not_touch_user_home() {
+    let canonical_cache_file = pinned_dms_cache_path();
+    // Ensure clean state before test
+    let was_present = canonical_cache_file.exists();
+
+    let mut state = AppState::new();
+    assert!(state.pinned_dms_path.is_none());
+
+    let ch1 = Channel::text("dm-iso-1", "Channel Iso 1");
+    let ch2 = Channel::text("dm-iso-2", "Channel Iso 2");
+    state.handle_transport_event(TransportEvent::DmChannelsUpdated(vec![ch1, ch2]));
+
+    state.pin_dm_channel("dm-iso-1");
+    state.toggle_pin_dm_channel("dm-iso-2");
+    state.unpin_dm_channel("dm-iso-1");
+    state.handle_transport_event(TransportEvent::PinnedDmsUpdated(vec!["dm-iso-2".to_string()]));
+
+    // If cache file didn't exist before, it MUST NOT have been created by AppState actions
+    if !was_present {
+        assert!(
+            !canonical_cache_file.exists(),
+            "AppState::new() must not touch user's config directory in tests: {:?}",
+            canonical_cache_file
+        );
+    }
+}
+
+#[test]
+fn test_pinned_dms_custom_path_persistence() {
+    let temp_dir = std::env::temp_dir().join(format!("discord_rs_custom_path_test_{}", std::process::id()));
+    let temp_cache_file = temp_dir.join("pinned_dms.json");
+
+    let mut state = AppState::new();
+    state.set_pinned_dms_path(Some(temp_cache_file.clone()));
+    assert_eq!(state.pinned_dms_path, Some(temp_cache_file.clone()));
+
+    let ch1 = Channel::text("dm-p-1", "DM 1");
+    let ch2 = Channel::text("dm-p-2", "DM 2");
+    state.handle_transport_event(TransportEvent::DmChannelsUpdated(vec![ch1, ch2]));
+
+    state.pin_dm_channel("dm-p-1");
+    assert!(temp_cache_file.exists());
+    let loaded = load_pinned_dms_from_path(&temp_cache_file);
+    assert_eq!(loaded, vec!["dm-p-1"]);
+
+    // Test a second AppState instance pointing to the same temp cache file
+    let mut state2 = AppState::new();
+    let ch1_b = Channel::text("dm-p-1", "DM 1");
+    let ch2_b = Channel::text("dm-p-2", "DM 2");
+    state2.handle_transport_event(TransportEvent::DmChannelsUpdated(vec![ch1_b, ch2_b]));
+    state2.set_pinned_dms_path(Some(temp_cache_file.clone()));
+    assert_eq!(state2.pinned_dms, vec!["dm-p-1"]);
+    assert_eq!(state2.dm_channels[0].id, "dm-p-1");
+    assert!(state2.dm_channels[0].is_pinned);
+
+    // Unpin and verify disk updates
+    state.unpin_dm_channel("dm-p-1");
+    let loaded_after_unpin = load_pinned_dms_from_path(&temp_cache_file);
+    assert!(loaded_after_unpin.is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

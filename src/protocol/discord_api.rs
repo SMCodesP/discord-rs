@@ -352,39 +352,6 @@ impl DiscordApiClient {
         Ok(guild_folders)
     }
 
-    /// Fetches user settings (specifically pinned_dms) from /users/@me/settings with cache fallback
-    pub async fn get_user_pinned_dms(&self) -> Result<Vec<String>> {
-        let path = "/users/@me/settings";
-        let req = self.auth_request(reqwest::Method::GET, path);
-        match self.send_request(path, req).await {
-            Ok(resp) => {
-                if let Ok(val) = resp.json::<serde_json::Value>().await {
-                    let raw_pinned = val
-                        .get("pinned_dms")
-                        .or_else(|| val.get("user_settings").and_then(|us| us.get("pinned_dms")))
-                        .and_then(|v| v.as_array());
-                    if let Some(arr) = raw_pinned {
-                        let pinned: Vec<String> = arr
-                            .iter()
-                            .filter_map(|item| {
-                                item.as_str()
-                                    .map(ToString::to_string)
-                                    .or_else(|| item.get("id").and_then(|v| v.as_str()).map(ToString::to_string))
-                            })
-                            .collect();
-                        if !pinned.is_empty() {
-                            crate::protocol::pinned_dms::save_pinned_dms_to_disk(&pinned);
-                            return Ok(pinned);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log::debug!("[DiscordApiClient] /users/@me/settings failed: {:?}", e);
-            }
-        }
-        Ok(crate::protocol::pinned_dms::load_pinned_dms_from_disk())
-    }
 
     /// Fetches all custom emojis for a guild (/guilds/{guild_id}/emojis) with local disk cache
     pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<DiscordEmoji>> {
@@ -779,10 +746,6 @@ impl DiscordTransport for DiscordApiClient {
 
     async fn list_dm_channels(&self) -> Result<Vec<Channel>> {
         self.list_dm_channels().await
-    }
-
-    async fn get_user_pinned_dms(&self) -> anyhow::Result<Vec<String>> {
-        self.get_user_pinned_dms().await
     }
 
     async fn create_or_get_dm_channel(&self, recipient_id: &str) -> anyhow::Result<Channel> {
@@ -1260,7 +1223,7 @@ async fn handle_dispatch(
             cache_engine.save_current_user(&user);
             cache_engine.save_guilds(&guilds);
 
-            // Extrair canais fixados (pinned_dms) de user_settings ou data
+            // Discord web stores user settings / DM pins in binary Protobuf (PreloadedUserSettings); Gateway READY / REST doesn't expose them in JSON, so pinned DMs are managed locally in discord-rs AppState.
             let raw_pinned = data
                 .get("user_settings")
                 .and_then(|us| us.get("pinned_dms"))
@@ -1276,12 +1239,6 @@ async fn handle_dispatch(
                         pinned_dms.push(id.to_string());
                     }
                 }
-            }
-
-            if pinned_dms.is_empty() {
-                pinned_dms = crate::protocol::pinned_dms::load_pinned_dms_from_disk();
-            } else {
-                crate::protocol::pinned_dms::save_pinned_dms_to_disk(&pinned_dms);
             }
 
             let _ = event_tx.send(TransportEvent::Ready {
