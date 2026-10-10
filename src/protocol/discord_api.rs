@@ -314,47 +314,41 @@ impl DiscordApiClient {
 
         let mut relationships = Vec::new();
         for r in raw_relationships {
-            let id = r
-                .get("id")
-                .and_then(|v| v.as_str())
-                .or_else(|| r.get("user").and_then(|u| u.get("id")).and_then(|v| v.as_str()))
-                .unwrap_or_default()
-                .to_string();
-            let rel_type = r.get("type").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-
-            let user_val = r.get("user");
-            let username = user_val
-                .and_then(|u| u.get("username"))
-                .and_then(|v| v.as_str())
-                .or_else(|| r.get("username").and_then(|v| v.as_str()))
-                .unwrap_or("Desconhecido")
-                .to_string();
-            let global_name = user_val
-                .and_then(|u| u.get("global_name"))
-                .and_then(|v| v.as_str())
-                .or_else(|| r.get("global_name").and_then(|v| v.as_str()))
-                .map(ToString::to_string);
-            let avatar_hash = user_val
-                .and_then(|u| u.get("avatar"))
-                .and_then(|v| v.as_str())
-                .or_else(|| r.get("avatar").and_then(|v| v.as_str()));
-            let avatar = avatar_hash.map(|hash| {
-                if hash.starts_with("http://") || hash.starts_with("https://") {
-                    hash.to_string()
-                } else {
-                    format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", id, hash)
-                }
-            });
-
-            relationships.push(Relationship {
-                id,
-                rel_type,
-                username,
-                global_name,
-                avatar,
-            });
+            if let Some(rel) = parse_relationship_from_json(&r) {
+                relationships.push(rel);
+            }
         }
         Ok(relationships)
+    }
+
+    /// Sends a friend request to a user (/users/@me/relationships)
+    pub async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> Result<()> {
+        let path = "/users/@me/relationships";
+        let mut body = serde_json::json!({
+            "username": username,
+        });
+        if let Some(disc) = discriminator {
+            body["discriminator"] = serde_json::Value::String(disc.to_string());
+        }
+        let req = self.auth_request(reqwest::Method::POST, path).json(&body);
+        self.send_request(path, req).await?;
+        Ok(())
+    }
+
+    /// Accepts an incoming friend request (/users/@me/relationships/{user_id})
+    pub async fn accept_friend_request(&self, user_id: &str) -> Result<()> {
+        let path = format!("/users/@me/relationships/{}", user_id);
+        let req = self.auth_request(reqwest::Method::PUT, &path).json(&serde_json::json!({}));
+        self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Removes a relationship (decline, cancel, unfriend, or unblock) (/users/@me/relationships/{user_id})
+    pub async fn remove_relationship(&self, user_id: &str) -> Result<()> {
+        let path = format!("/users/@me/relationships/{}", user_id);
+        let req = self.auth_request(reqwest::Method::DELETE, &path);
+        self.send_request(&path, req).await?;
+        Ok(())
     }
 
     /// Fetches user settings (specifically guild_folders) from /users/@me/settings
@@ -886,6 +880,18 @@ impl DiscordTransport for DiscordApiClient {
 
     async fn list_relationships(&self) -> Result<Vec<Relationship>> {
         self.list_relationships().await
+    }
+
+    async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> anyhow::Result<()> {
+        self.send_friend_request(username, discriminator).await
+    }
+
+    async fn accept_friend_request(&self, user_id: &str) -> anyhow::Result<()> {
+        self.accept_friend_request(user_id).await
+    }
+
+    async fn remove_relationship(&self, user_id: &str) -> anyhow::Result<()> {
+        self.remove_relationship(user_id).await
     }
 
     async fn get_messages(&self, channel_id: &str, limit: usize) -> Result<Vec<Message>> {
@@ -1678,6 +1684,22 @@ async fn handle_dispatch(
                 });
             }
         }
+        "RELATIONSHIP_ADD" => {
+            if let Some(rel) = parse_relationship_from_json(&data) {
+                let _ = event_tx.send(TransportEvent::RelationshipAdd(rel));
+            }
+        }
+        "RELATIONSHIP_REMOVE" => {
+            let id = data
+                .get("id")
+                .and_then(|v| v.as_str())
+                .or_else(|| data.get("user").and_then(|u| u.get("id")).and_then(|v| v.as_str()))
+                .unwrap_or_default()
+                .to_string();
+            if !id.is_empty() {
+                let _ = event_tx.send(TransportEvent::RelationshipRemove { id });
+            }
+        }
         "PRESENCE_UPDATE" => {
             if let Some(evt) = parse_presence_from_json(&data) {
                 let _ = event_tx.send(evt);
@@ -1688,6 +1710,48 @@ async fn handle_dispatch(
 }
 
 // --- JSON Parsers for Discord Data Models ---
+
+/// Deserializes a user relationship from Discord JSON payload.
+pub fn parse_relationship_from_json(r: &serde_json::Value) -> Option<Relationship> {
+    let id = r
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| r.get("user").and_then(|u| u.get("id")).and_then(|v| v.as_str()))?
+        .to_string();
+    let rel_type = r.get("type").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+
+    let user_val = r.get("user");
+    let username = user_val
+        .and_then(|u| u.get("username"))
+        .and_then(|v| v.as_str())
+        .or_else(|| r.get("username").and_then(|v| v.as_str()))
+        .unwrap_or("Desconhecido")
+        .to_string();
+    let global_name = user_val
+        .and_then(|u| u.get("global_name"))
+        .and_then(|v| v.as_str())
+        .or_else(|| r.get("global_name").and_then(|v| v.as_str()))
+        .map(ToString::to_string);
+    let avatar_hash = user_val
+        .and_then(|u| u.get("avatar"))
+        .and_then(|v| v.as_str())
+        .or_else(|| r.get("avatar").and_then(|v| v.as_str()));
+    let avatar = avatar_hash.map(|hash| {
+        if hash.starts_with("http://") || hash.starts_with("https://") {
+            hash.to_string()
+        } else {
+            format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", id, hash)
+        }
+    });
+
+    Some(Relationship {
+        id,
+        rel_type,
+        username,
+        global_name,
+        avatar,
+    })
+}
 
 fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
     let id = val.get("id")?.as_str()?;

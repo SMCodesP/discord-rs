@@ -23,6 +23,29 @@ pub struct Relationship {
     pub avatar: Option<String>,
 }
 
+impl Relationship {
+    pub const TYPE_FRIEND: u32 = 1;
+    pub const TYPE_BLOCKED: u32 = 2;
+    pub const TYPE_INCOMING_REQUEST: u32 = 3;
+    pub const TYPE_OUTGOING_REQUEST: u32 = 4;
+
+    pub fn is_friend(&self) -> bool {
+        self.rel_type == Self::TYPE_FRIEND
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        self.rel_type == Self::TYPE_BLOCKED
+    }
+
+    pub fn is_incoming_request(&self) -> bool {
+        self.rel_type == Self::TYPE_INCOMING_REQUEST
+    }
+
+    pub fn is_outgoing_request(&self) -> bool {
+        self.rel_type == Self::TYPE_OUTGOING_REQUEST
+    }
+}
+
 /// High-level real-time transport events emitted by the Discord Gateway or Mock provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TransportEvent {
@@ -104,6 +127,23 @@ pub enum TransportEvent {
     },
     /// User relationships / friends list updated
     RelationshipsUpdated(Vec<Relationship>),
+    /// User relationship added or updated in real-time
+    RelationshipAdd(Relationship),
+    /// User relationship removed in real-time
+    RelationshipRemove {
+        id: String,
+    },
+    /// Friend request outcome notification (success/error message)
+    FriendRequestResult {
+        username: String,
+        success: bool,
+        message: String,
+    },
+    /// Relationship action (accept, decline, remove) failed
+    RelationshipActionFailed {
+        id: String,
+        error: String,
+    },
     /// Batch message history loaded for a channel (avoids flooding individual MessageCreate events)
     ChannelMessagesLoaded {
         channel_id: String,
@@ -181,6 +221,24 @@ pub trait DiscordTransport: Send + Sync {
     /// List all user relationships (friends, incoming/outgoing requests, blocked) (/users/@me/relationships).
     async fn list_relationships(&self) -> anyhow::Result<Vec<Relationship>> {
         Ok(Vec::new())
+    }
+
+    /// Send a friend request to a user (/users/@me/relationships)
+    async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> anyhow::Result<()> {
+        let _ = (username, discriminator);
+        anyhow::bail!("send_friend_request not supported on this transport");
+    }
+
+    /// Accept a pending friend request (/users/@me/relationships/{user_id})
+    async fn accept_friend_request(&self, user_id: &str) -> anyhow::Result<()> {
+        let _ = user_id;
+        anyhow::bail!("accept_friend_request not supported on this transport");
+    }
+
+    /// Remove, decline, unblock or cancel a relationship (/users/@me/relationships/{user_id})
+    async fn remove_relationship(&self, user_id: &str) -> anyhow::Result<()> {
+        let _ = user_id;
+        anyhow::bail!("remove_relationship not supported on this transport");
     }
 
     /// Retrieve the most recent messages for a channel.

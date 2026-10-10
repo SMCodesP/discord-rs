@@ -456,4 +456,31 @@ impl ClientManager {
         };
         transport.get_guild_stickers(guild_id).await
     }
+
+    /// Sends a friend request to a user (/users/@me/relationships)
+    pub async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.send_friend_request(username, discriminator).await
+    }
+
+    /// Accepts an incoming friend request (/users/@me/relationships/{user_id})
+    pub async fn accept_friend_request(&self, user_id: &str) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.accept_friend_request(user_id).await
+    }
+
+    /// Removes, declines, cancels or unblocks a relationship (/users/@me/relationships/{user_id})
+    pub async fn remove_relationship(&self, user_id: &str) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.remove_relationship(user_id).await
+    }
 }

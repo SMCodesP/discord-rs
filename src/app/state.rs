@@ -453,6 +453,14 @@ pub struct AppState {
     pub friends: Vec<FriendItemState>,
     /// Active tab in Friends Hub
     pub friends_tab: FriendsTab,
+    /// Username input for Add Friend tab
+    pub add_friend_input: String,
+    /// Feedback status message for Add Friend (is_success, text)
+    pub add_friend_feedback: Option<(bool, String)>,
+    /// Whether a friend request submission is in progress
+    pub is_sending_friend_request: bool,
+    /// Set of user IDs with in-flight relationship actions (accept, decline, remove)
+    pub pending_relationship_actions: HashSet<String>,
     /// Active subtab in Message Requests
     pub message_requests_subtab: MessageRequestsSubTab,
     /// Direct message requests (Pending & Spam)
@@ -1128,6 +1136,10 @@ impl AppState {
                 ]
             },
             friends_tab: FriendsTab::Online,
+            add_friend_input: String::new(),
+            add_friend_feedback: None,
+            is_sending_friend_request: false,
+            pending_relationship_actions: HashSet::new(),
             message_requests_subtab: MessageRequestsSubTab::YouMayKnow,
             message_requests: if has_token {
                 Vec::new()
@@ -1301,6 +1313,173 @@ impl AppState {
     /// Clears all flagged spam message requests
     pub fn clear_spam_requests(&mut self) {
         self.message_requests.retain(|r| !r.is_spam);
+    }
+
+    /// Sends a friend request by username (and optional tag) via active ClientManager
+    pub fn send_friend_request(&mut self, target: &str) {
+        let trimmed = target.trim();
+        if trimmed.is_empty() {
+            self.add_friend_feedback = Some((false, "Insira um nome de usuário válido.".to_string()));
+            return;
+        }
+
+        let (uname, disc) = match trimmed.split_once('#') {
+            Some((u, d)) => (u.trim().to_string(), Some(d.trim().to_string())),
+            None => (trimmed.to_string(), None),
+        };
+
+        self.is_sending_friend_request = true;
+        self.add_friend_feedback = None;
+
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let u = uname;
+            let d = disc;
+            tokio::spawn(async move {
+                match cm.send_friend_request(&u, d.as_deref()).await {
+                    Ok(()) => {
+                        cm.emit_event(crate::protocol::TransportEvent::FriendRequestResult {
+                            username: u.clone(),
+                            success: true,
+                            message: format!("Solicitação de amizade enviada para {}!", u),
+                        });
+                    }
+                    Err(e) => {
+                        cm.emit_event(crate::protocol::TransportEvent::FriendRequestResult {
+                            username: u,
+                            success: false,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    /// Accepts an incoming friend request (delegated to ClientManager)
+    pub fn accept_friend_request(&mut self, user_id: &str) {
+        self.pending_relationship_actions.insert(user_id.to_string());
+
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let uid = user_id.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = cm.accept_friend_request(&uid).await {
+                    log::warn!("Falha ao aceitar pedido de amizade: {:?}", e);
+                    cm.emit_event(crate::protocol::TransportEvent::RelationshipActionFailed {
+                        id: uid,
+                        error: e.to_string(),
+                    });
+                }
+            });
+        }
+    }
+
+    /// Removes, declines, cancels or unblocks a relationship (delegated to ClientManager)
+    pub fn remove_relationship(&mut self, user_id: &str) {
+        self.pending_relationship_actions.insert(user_id.to_string());
+
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let uid = user_id.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = cm.remove_relationship(&uid).await {
+                    log::warn!("Falha ao remover relacionamento: {:?}", e);
+                    cm.emit_event(crate::protocol::TransportEvent::RelationshipActionFailed {
+                        id: uid,
+                        error: e.to_string(),
+                    });
+                }
+            });
+        }
+    }
+
+    /// Updates or removes an Active Now item when friend presence or activity changes
+    pub fn update_active_now_from_presence(
+        &mut self,
+        user_id: &str,
+        status: PresenceStatus,
+        activity: Option<&crate::domain::Activity>,
+    ) {
+        self.active_now_items.retain(|a| a.user_id != user_id);
+        if status == PresenceStatus::Offline {
+            return;
+        }
+        let friend = match self.friends.iter().find(|f| f.id == user_id && f.relationship_type == 1) {
+            Some(f) => f.clone(),
+            None => return,
+        };
+        if let Some(act) = activity {
+            let is_spotify = act.activity_type == crate::domain::user::ActivityType::Listening;
+
+            // Compute real elapsed time from activity created_at timestamp if present
+            let (elapsed_short, elapsed_bottom) = if let Some(ts) = act.created_at {
+                let now_ts = chrono::Utc::now().timestamp();
+                let diff = (now_ts - ts).max(0);
+                let hours = diff / 3600;
+                let mins = (diff % 3600) / 60;
+                let secs = diff % 60;
+                let short = if hours > 0 {
+                    format!("{}h {}m", hours, mins)
+                } else {
+                    format!("{}m", mins.max(1))
+                };
+                let bottom = if hours > 0 {
+                    format!("{:02}:{:02}:{:02} elapsed", hours, mins, secs)
+                } else {
+                    format!("{:02}:{:02} elapsed", mins, secs)
+                };
+                (Some(short), Some(bottom))
+            } else {
+                (None, None)
+            };
+
+            let (kind, header_subtitle) = match act.activity_type {
+                crate::domain::user::ActivityType::Playing => {
+                    let sub = if let Some(ref dur) = elapsed_short {
+                        format!("{} – {}", act.name, dur)
+                    } else {
+                        act.name.clone()
+                    };
+                    (ActiveNowKind::Game, sub)
+                }
+                crate::domain::user::ActivityType::Streaming => {
+                    (ActiveNowKind::RichPresence, format!("Transmitindo {}", act.name))
+                }
+                crate::domain::user::ActivityType::Listening => {
+                    (ActiveNowKind::Spotify, "Spotify".to_string())
+                }
+                crate::domain::user::ActivityType::Watching => {
+                    (ActiveNowKind::RichPresence, format!("Assistindo {}", act.name))
+                }
+                _ => (ActiveNowKind::RichPresence, act.name.clone()),
+            };
+
+            let elapsed_time_text = if is_spotify { None } else { elapsed_bottom };
+
+            self.active_now_items.push(ActiveNowItem {
+                id: format!("act-{}", user_id),
+                user_id: user_id.to_string(),
+                username: friend.username.clone(),
+                display_name: friend.display_name.clone(),
+                avatar_url: friend.avatar_url.clone(),
+                avatar_text: friend.avatar_text.clone(),
+                presence: status,
+                kind,
+                app_name: act.name.clone(),
+                header_subtitle,
+                app_icon_symbol: String::new(),
+                details_title: act.details.clone().unwrap_or_else(|| act.name.clone()),
+                details_state: act.state.clone(),
+                elapsed_time_text,
+                spotify_track: if is_spotify { act.details.clone() } else { None },
+                spotify_artist: if is_spotify { act.state.clone() } else { None },
+                spotify_album: None,
+                spotify_progress_text: None,
+                spotify_progress_pct: None,
+                button_text: None,
+            });
+        }
     }
 
     /// Selects a guild (or None for DMs / Home)
@@ -2851,6 +3030,7 @@ impl AppState {
                 }
             }
             TransportEvent::RelationshipsUpdated(relationships) => {
+                let old_friends = std::mem::take(&mut self.friends);
                 self.friends = relationships
                     .into_iter()
                     .map(|r| {
@@ -2861,6 +3041,11 @@ impl AppState {
                             .unwrap_or('?')
                             .to_uppercase()
                             .to_string();
+                        let (existing_presence, existing_status) = old_friends
+                            .iter()
+                            .find(|f| f.id == r.id)
+                            .map(|f| (f.presence, f.custom_status.clone()))
+                            .unwrap_or((PresenceStatus::Offline, None));
                         FriendItemState {
                             id: r.id.clone(),
                             username: r.username,
@@ -2877,16 +3062,69 @@ impl AppState {
                                 .presences_by_user
                                 .get(&r.id)
                                 .map(|p| PresenceStatus::from(p.status))
-                                .unwrap_or(PresenceStatus::Offline),
+                                .unwrap_or(existing_presence),
                             custom_status: self
                                 .presences_by_user
                                 .get(&r.id)
                                 .and_then(|p| p.custom_status.as_ref())
-                                .and_then(|cs| cs.text.clone()),
+                                .and_then(|cs| cs.text.clone())
+                                .or(existing_status),
                             relationship_type: r.rel_type,
                         }
                     })
                     .collect();
+            }
+            TransportEvent::RelationshipAdd(r) => {
+                self.pending_relationship_actions.remove(&r.id);
+                let display_name = r.global_name.unwrap_or_else(|| r.username.clone());
+                let avatar_text = display_name
+                    .chars()
+                    .next()
+                    .unwrap_or('?')
+                    .to_uppercase()
+                    .to_string();
+                let avatar_url = r.avatar.as_ref().map(|hash| {
+                    if hash.starts_with("http://") || hash.starts_with("https://") {
+                        hash.clone()
+                    } else {
+                        format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", r.id, hash)
+                    }
+                });
+
+                if let Some(existing) = self.friends.iter_mut().find(|f| f.id == r.id) {
+                    existing.username = r.username;
+                    existing.display_name = display_name;
+                    existing.avatar_url = avatar_url;
+                    existing.avatar_text = avatar_text;
+                    existing.relationship_type = r.rel_type;
+                } else {
+                    self.friends.push(FriendItemState {
+                        id: r.id,
+                        username: r.username,
+                        display_name,
+                        avatar_url,
+                        avatar_text,
+                        presence: PresenceStatus::Offline,
+                        custom_status: None,
+                        relationship_type: r.rel_type,
+                    });
+                }
+            }
+            TransportEvent::RelationshipRemove { id } => {
+                self.pending_relationship_actions.remove(&id);
+                self.friends.retain(|f| f.id != id);
+                self.active_now_items.retain(|a| a.user_id != id);
+            }
+            TransportEvent::FriendRequestResult { username: _, success, message } => {
+                self.is_sending_friend_request = false;
+                self.add_friend_feedback = Some((success, message));
+                if success {
+                    self.add_friend_input.clear();
+                }
+            }
+            TransportEvent::RelationshipActionFailed { id, error } => {
+                self.pending_relationship_actions.remove(&id);
+                log::warn!("Relationship action failed for user {}: {}", id, error);
             }
             TransportEvent::PresenceUpdate {
                 user_id,
@@ -2894,7 +3132,9 @@ impl AppState {
                 activity,
                 custom_status,
             } => {
-                self.update_user_presence(user_id, status, activity, custom_status);
+                self.update_user_presence(user_id.clone(), status, activity.clone(), custom_status);
+                let st: PresenceStatus = status.into();
+                self.update_active_now_from_presence(&user_id, st, activity.as_ref());
             }
             TransportEvent::PinnedDmsUpdated(pinned) => {
                 self.pinned_dms = pinned;
