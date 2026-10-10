@@ -9,6 +9,7 @@ use super::state::{ActiveModal, AppState, FriendsTab};
 /// - Bottom user profile & audio controls panel
 pub struct ChannelSidebar {
     state: Entity<AppState>,
+    context_menu_dm: Option<(String, Point<Pixels>)>,
 }
 
 impl ChannelSidebar {
@@ -17,7 +18,10 @@ impl ChannelSidebar {
             cx.notify();
         })
         .detach();
-        Self { state }
+        Self {
+            state,
+            context_menu_dm: None,
+        }
     }
 }
 
@@ -30,8 +34,99 @@ impl Render for ChannelSidebar {
         let current_user = state.current_user.clone();
         let is_dm = state.selected_guild_id.is_none();
         let app_entity = self.state.clone();
+        let self_entity = cx.entity().clone();
+
+        let context_menu_overlay = if let Some((ref target_dm_id, click_pos)) = self.context_menu_dm {
+            let dm_id = target_dm_id.clone();
+            let is_pinned = state.dm_channels.iter().find(|d| d.id == dm_id).map(|d| d.is_pinned).unwrap_or(false)
+                || state.pinned_dms.contains(&dm_id);
+            let app_entity_menu = self.state.clone();
+            let self_close = cx.entity().clone();
+
+            let pin_label = if is_pinned {
+                "Desafixar conversa"
+            } else {
+                "Fixar conversa"
+            };
+
+            let self_close_left = self_close.clone();
+            let self_close_right = self_close.clone();
+
+            Some(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                        self_close_left.update(cx, |this, cx| {
+                            this.context_menu_dm = None;
+                            cx.notify();
+                        });
+                    })
+                    .on_mouse_down(MouseButton::Right, move |_ev, _win, cx| {
+                        self_close_right.update(cx, |this, cx| {
+                            this.context_menu_dm = None;
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top(click_pos.y.max(px(10.0)).min(px(560.0)))
+                            .left(click_pos.x.max(px(10.0)).min(px(180.0)))
+                            .w(px(180.0))
+                            .bg(rgb(0x111214))
+                            .border_1()
+                            .border_color(rgb(0x232428))
+                            .rounded(px(6.0))
+                            .shadow_lg()
+                            .p(px(6.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(
+                                div()
+                                    .h(px(32.0))
+                                    .px(px(8.0))
+                                    .rounded(px(4.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(0x4752c4)).text_color(rgb(0xffffff)))
+                                    .text_color(rgb(0xdbdee1))
+                                    .text_size(px(13.0))
+                                    .on_mouse_down(MouseButton::Left, {
+                                        let app = app_entity_menu.clone();
+                                        let target_id = dm_id.clone();
+                                        let self_close = cx.entity().clone();
+                                        move |_ev, _win, cx| {
+                                            app.update(cx, |state, cx| {
+                                                state.toggle_pin_dm_channel(&target_id);
+                                                cx.notify();
+                                            });
+                                            self_close.update(cx, |this, cx| {
+                                                this.context_menu_dm = None;
+                                                cx.notify();
+                                            });
+                                        }
+                                    })
+                                    .child(pin_label)
+                                    .child(icon_pin(px(14.0), rgb(0x949ba4)))
+                            )
+                    )
+            )
+        } else {
+            None
+        };
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .w(px(240.0))
@@ -399,6 +494,17 @@ impl Render for ChannelSidebar {
                                                         });
                                                     }
                                                 })
+                                                .on_mouse_down(MouseButton::Right, {
+                                                    let self_ctx = self_entity.clone();
+                                                    let menu_cid = dm_id.clone();
+                                                    move |event, _window, cx| {
+                                                        let pos = event.position;
+                                                        self_ctx.update(cx, |this, cx| {
+                                                            this.context_menu_dm = Some((menu_cid.clone(), pos));
+                                                            cx.notify();
+                                                        });
+                                                    }
+                                                })
                                                 .child(
                                                     div()
                                                         .flex()
@@ -428,7 +534,7 @@ impl Render for ChannelSidebar {
                                                                         .child(dm_name),
                                                                 )
                                                                 .children(if dm.is_pinned || dm.topic.as_deref().map_or(false, |t| t.contains("pin") || t.contains("fixad")) {
-                                                                    Some(icon_pin(px(12.0), rgb(0x949ba4)))
+                                                                    Some(icon_pin(px(14.0), rgb(0x949ba4)))
                                                                 } else {
                                                                     None
                                                                 }),
@@ -897,5 +1003,6 @@ impl Render for ChannelSidebar {
                             )
                     })
             )
+            .children(context_menu_overlay)
     }
 }
