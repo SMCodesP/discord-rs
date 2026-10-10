@@ -8,10 +8,12 @@ pub mod i18n;
 pub mod protocol;
 pub mod telemetry;
 pub mod tokens;
+pub mod media;
 
 pub use app::*;
 pub use chat::*;
 pub use components::*;
+pub use media::*;
 pub use protocol::ProtocolBridge;
 pub use protocol::*;
 pub use telemetry::*;
