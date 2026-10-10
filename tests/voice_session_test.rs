@@ -82,18 +82,12 @@ impl MainSignalingChannel for MockMainSignaling {
 
         // Se conectando a um canal e configurado com endpoint automático, despacha eventos
         if let (Some(chan_id), Some(ep)) = (channel_id, &self.auto_reply_endpoint) {
-            let _ = self.event_tx.send(TransportEvent::VoiceStateUpdate(VoiceState {
-                guild_id: guild_id.map(String::from),
-                channel_id: Some(chan_id.to_string()),
-                user_id: "123456789".to_string(),
-                session_id: "test-voice-session-xyz".to_string(),
-                deaf: false,
-                mute: false,
-                self_deaf,
-                self_mute,
-                self_video: false,
-                suppress: false,
-            }));
+            let mut voice_state = VoiceState::new("123456789", "test-voice-session-xyz");
+            voice_state.guild_id = guild_id.map(String::from);
+            voice_state.channel_id = Some(chan_id.to_string());
+            voice_state.self_deaf = self_deaf;
+            voice_state.self_mute = self_mute;
+            let _ = self.event_tx.send(TransportEvent::VoiceStateUpdate(voice_state));
 
             let _ = self.event_tx.send(TransportEvent::VoiceServerUpdate {
                 token: "test-voice-token-999".to_string(),
