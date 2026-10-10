@@ -1292,8 +1292,38 @@ async fn handle_dispatch(
 
                 // Popula voice_states a partir do snapshot inicial de GUILD_CREATE
                 if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+                    if let Some(raw_members) = data.get("members").and_then(|v| v.as_array()) {
+                        for m in raw_members {
+                            if let Some(user) = m.get("user") {
+                                if let Some(uid) = user.get("id").and_then(|v| v.as_str()) {
+                                    let name = m.get("nick").and_then(|v| v.as_str())
+                                        .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                                        .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                                        .map(ToString::to_string);
+                                    let avatar = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                                        if hash.starts_with("http") {
+                                            hash.to_string()
+                                        } else {
+                                            format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, hash)
+                                        }
+                                    });
+                                    guild_members.insert(uid.to_string(), (name, avatar));
+                                }
+                            }
+                        }
+                    }
+
                     for vs_val in raw_states {
-                        if let Some(state) = parse_voice_state_from_json(vs_val, Some(id)) {
+                        if let Some(mut state) = parse_voice_state_from_json(vs_val, Some(id)) {
+                            if state.user_name.is_none() {
+                                if let Some((name, avatar)) = guild_members.get(&state.user_id) {
+                                    state.user_name = name.clone();
+                                    if state.avatar_url.is_none() {
+                                        state.avatar_url = avatar.clone();
+                                    }
+                                }
+                            }
                             let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
                         }
                     }
@@ -1468,6 +1498,17 @@ pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild
                 }
             });
         }
+    } else if let Some(user) = val.get("user") {
+        state.user_name = user.get("global_name").and_then(|v| v.as_str())
+            .or_else(|| user.get("username").and_then(|v| v.as_str()))
+            .map(ToString::to_string);
+        state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+            if hash.starts_with("http") {
+                hash.to_string()
+            } else {
+                format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+            }
+        });
     }
     Some(state)
 }

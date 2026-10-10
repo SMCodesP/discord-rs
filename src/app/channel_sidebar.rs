@@ -571,7 +571,7 @@ impl Render for ChannelSidebar {
 
                                             let capacity_badge = if is_voice {
                                                 let count = voice_states.len();
-                                                let limit = state.get_channel_user_limit(&ch_id).unwrap_or(0);
+                                                let limit = channel.user_limit.unwrap_or(0);
                                                 if limit > 0 {
                                                     let is_full = count >= limit as usize;
                                                     Some(
@@ -714,18 +714,18 @@ impl Render for ChannelSidebar {
                                                     } else if let Some(f) = state.friends.iter().find(|f| f.id == vs_uid) {
                                                         f.display_name.clone()
                                                     } else {
-                                                        vs_uid.clone()
+                                                        String::new()
                                                     };
 
                                                     let avatar_url = vs.avatar_url.clone().or_else(|| {
                                                         if vs_uid == current_user.id {
-                                                            current_user.avatar_url.clone()
+                                                             current_user.avatar_url.clone()
                                                         } else {
-                                                            state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
+                                                             state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
                                                         }
                                                     });
 
-                                                    let initial = display_name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                                    let initial = display_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
 
                                                     let is_speaking = vs.is_speaking;
                                                     let is_muted = vs.is_muted();

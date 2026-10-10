@@ -139,12 +139,12 @@ fn test_transport_event_voice_state_update_integration() {
 fn test_capacity_badge_and_user_limits() {
     let mut state = AppState::new();
 
-    // Set channel user limit
-    state.set_channel_user_limit("chan-voice-trio", 3);
-    state.set_channel_user_limit("chan-voice-unlimited", 0);
+    // Channel with user_limit configured directly on Channel model
+    let ch_trio = Channel::voice("chan-voice-trio", "Trio").with_user_limit(Some(3));
+    let ch_unlimited = Channel::voice("chan-voice-unlimited", "Unlimited");
 
-    assert_eq!(state.get_channel_user_limit("chan-voice-trio"), Some(3));
-    assert_eq!(state.get_channel_user_limit("chan-voice-unlimited"), Some(0));
+    assert_eq!(ch_trio.user_limit, Some(3));
+    assert_eq!(ch_unlimited.user_limit, None);
 
     // Initially 0 users
     let states_trio = state.voice_states_for_channel("chan-voice-trio");
@@ -155,7 +155,7 @@ fn test_capacity_badge_and_user_limits() {
     state.update_voice_state(VoiceState::new("u2", "s2").with_channel_id("chan-voice-trio"));
 
     let count = state.voice_states_for_channel("chan-voice-trio").len();
-    let limit = state.get_channel_user_limit("chan-voice-trio").unwrap_or(0);
+    let limit = ch_trio.user_limit.unwrap_or(0);
     assert_eq!(count, 2);
     assert_eq!(limit, 3);
     assert!(count < limit as usize); // not full
@@ -169,9 +169,20 @@ fn test_capacity_badge_and_user_limits() {
     // Add 1 user to unlimited channel -> count=1, limit=0
     state.update_voice_state(VoiceState::new("u4", "s4").with_channel_id("chan-voice-unlimited"));
     let count_unlimited = state.voice_states_for_channel("chan-voice-unlimited").len();
-    let limit_unlimited = state.get_channel_user_limit("chan-voice-unlimited").unwrap_or(0);
+    let limit_unlimited = ch_unlimited.user_limit.unwrap_or(0);
     assert_eq!(count_unlimited, 1);
     assert_eq!(limit_unlimited, 0);
+}
+
+#[test]
+fn test_voice_state_display_name_resolution() {
+    let mut state = AppState::new();
+    let vs_unknown = VoiceState::new("987654321012345678", "sess-unk").with_channel_id("chan-v1");
+    state.update_voice_state(vs_unknown);
+    let states = state.voice_states_for_channel("chan-v1");
+    assert_eq!(states.len(), 1);
+    // User name remains None when unresolvable so raw numeric ID is never displayed
+    assert!(states[0].user_name.is_none());
 }
 
 #[test]

@@ -39,8 +39,8 @@ pub struct VoiceState {
     /// Optional member avatar URL / hash
     #[serde(default)]
     pub avatar_url: Option<String>,
-    /// Real-time speaking indicator (only when real voice data exists)
-    #[serde(default)]
+    // Fed by voice gateway WebRTC / RTP connection opcode 5 Speaking
+    #[serde(skip)]
     pub is_speaking: bool,
 }
 
