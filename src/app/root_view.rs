@@ -76,38 +76,7 @@ impl RootView {
         })
         .detach();
 
-        let state_weak_profile = state.downgrade();
-        let cm_profile = client_manager.clone();
-        cx.spawn(|_view, cx: &mut AsyncApp| {
-            let cx = cx.clone();
-            async move {
-                let mut profile_rx = crate::app::user_profile_popout::subscribe_profile_trigger();
-                while let Ok(uid) = profile_rx.recv().await {
-                    let uid_fetch = uid.clone();
-                    let cm = cm_profile.clone();
-                    let state_weak = state_weak_profile.clone();
-                    let _ = cx.update(|cx| {
-                        let _ = state_weak.update(cx, |state, cx| {
-                            state.open_user_profile(&uid);
-                            cx.notify();
-                        });
-                    });
-
-                    // Async fetch via client manager
-                    let res = cm.get_user_profile(&uid_fetch).await;
-                    let _ = cx.update(|cx| {
-                        let _ = state_weak.update(cx, |state, cx| {
-                            match res {
-                                Ok(data) => state.set_profile_popout_data(&uid_fetch, data),
-                                Err(err) => state.set_profile_popout_error(&uid_fetch, err.to_string()),
-                            }
-                            cx.notify();
-                        });
-                    });
-                }
-            }
-        })
-        .detach();
+        cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 
         let guild_rail = cx.new(|cx| GuildRail::new(state.clone(), cx));
         let channel_sidebar = cx.new(|cx| ChannelSidebar::new(state.clone(), cx));
@@ -153,38 +122,7 @@ impl RootView {
         })
         .detach();
 
-        let state_weak_profile = state.downgrade();
-        cx.spawn(|_view, cx: &mut AsyncApp| {
-            let cx = cx.clone();
-            async move {
-                let mut profile_rx = crate::app::user_profile_popout::subscribe_profile_trigger();
-                while let Ok(uid) = profile_rx.recv().await {
-                    let uid_fetch = uid.clone();
-                    let state_weak = state_weak_profile.clone();
-                    let cm_opt = cx.update(|cx| {
-                        state_weak.update(cx, |state, cx| {
-                            state.open_user_profile(&uid);
-                            cx.notify();
-                            state.client_manager.clone()
-                        }).ok().flatten()
-                    }).ok().flatten();
-
-                    if let Some(cm) = cm_opt {
-                        let res = cm.get_user_profile(&uid_fetch).await;
-                        let _ = cx.update(|cx| {
-                            let _ = state_weak.update(cx, |state, cx| {
-                                match res {
-                                    Ok(data) => state.set_profile_popout_data(&uid_fetch, data),
-                                    Err(err) => state.set_profile_popout_error(&uid_fetch, err.to_string()),
-                                }
-                                cx.notify();
-                            });
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+        cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 
         Self {
             state,
@@ -322,13 +260,14 @@ impl Render for RootView {
             .children(if let Some(ref popout) = state.profile_popout {
                 let entity = app_entity.clone();
                 let popout_state = popout.clone();
+                let catalog = state.profile_effects_catalog.clone();
                 Some(
                     div()
                         .absolute()
                         .top_0()
                         .left_0()
                         .size_full()
-                        .child(crate::app::user_profile_popout::render_user_profile_popout(entity, &popout_state)),
+                        .child(crate::app::user_profile_popout::render_user_profile_popout(entity, &popout_state, &catalog)),
                 )
             } else {
                 None
@@ -625,7 +564,7 @@ fn render_login_modal(
     } else if state.is_connected_to_gateway {
         Banner::success(
             "login-success",
-            format!("Conectado como @{} ({})", state.current_user.username, state.connection_status),
+            format!("Conectado como @{}", state.current_user.username),
         )
         .title("Conectado ao Discord")
     } else if is_connecting {

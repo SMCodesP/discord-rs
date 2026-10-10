@@ -906,6 +906,7 @@ fn render_friends_list_view(
 
     for (idx, friend) in filtered.into_iter().enumerate() {
         let entity_click = entity.clone();
+        let entity_avatar = entity.clone();
         let entity_btn = entity.clone();
         let target_cid = friend.channel_id.clone();
         let btn_cid = friend.channel_id.clone();
@@ -951,11 +952,16 @@ fn render_friends_list_view(
                     // Avatar Container with Status Dot
                     .child({
                         let f_uid = friend.user_id.clone();
+                        let entity_avatar = entity_avatar.clone();
                         div()
                             .relative()
                             .cursor_pointer()
-                            .on_mouse_down(MouseButton::Left, move |_ev, _win, _cx| {
-                                crate::app::user_profile_popout::trigger_open_profile(&f_uid);
+                            .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                let uid = f_uid.clone();
+                                entity_avatar.update(cx, |s, cx| {
+                                    s.open_user_profile(&uid);
+                                    cx.notify();
+                                });
                             })
                             .child(if let Some(ref url) = friend.avatar_url {
                                 if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {

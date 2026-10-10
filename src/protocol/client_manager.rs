@@ -239,13 +239,22 @@ impl ClientManager {
     }
 
     /// Fetches a user profile from the active Discord API client (/users/{user_id}/profile)
-    pub async fn get_user_profile(&self, user_id: &str) -> Result<crate::app::user_profile_popout::UserProfileData> {
+    pub async fn get_user_profile(&self, user_id: &str) -> Result<crate::domain::profile::UserProfileData> {
+        self.get_user_profile_with_guild(user_id, None).await
+    }
+
+    /// Fetches a user profile within an optional guild context (/users/{user_id}/profile)
+    pub async fn get_user_profile_with_guild(
+        &self,
+        user_id: &str,
+        guild_id: Option<&str>,
+    ) -> Result<crate::domain::profile::UserProfileData> {
         let client_opt = {
             let lock = self.real_client.read().await;
             lock.clone()
         };
         if let Some(client) = client_opt {
-            client.get_user_profile(user_id).await
+            client.get_user_profile_with_guild(user_id, guild_id).await
         } else {
             anyhow::bail!("Cliente Discord não conectado para busca de perfil ao vivo")
         }

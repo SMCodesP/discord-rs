@@ -18,136 +18,25 @@
 
 use chrono::{DateTime, Datelike, Utc};
 use gpui::*;
-use serde::{Deserialize, Serialize};
-use std::sync::LazyLock;
-use tokio::sync::broadcast;
 
 use crate::chat::markdown::render_markdown;
-use crate::domain::user::{PresenceStatus, User};
+use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::profile_effect::{
+    render_profile_effect_for_user, ProfileEffectCatalog, UserProfileEffect,
+};
+use crate::components::TextInput;
+use crate::domain::user::PresenceStatus;
+pub use crate::domain::profile::{
+    snowflake_to_datetime, ConnectedAccount, MutualGuild, ProfileBadge, ProfilePopoutState,
+    ProfileTab, UserProfileData,
+};
 use crate::i18n::t;
 use crate::tokens::colors::*;
 use crate::tokens::icons::*;
-use crate::tokens::typography::*;
-
-// ============================================================================
-// Global Event Channel for Profile Popout Opening
-// ============================================================================
-
-static PROFILE_TRIGGER_TX: LazyLock<broadcast::Sender<String>> =
-    LazyLock::new(|| broadcast::channel(64).0);
-
-/// Triggers opening the user profile popout from anywhere in the application
-/// (chat messages, member sidebar, DM rows, friends hub).
-pub fn trigger_open_profile(user_id: &str) {
-    let _ = PROFILE_TRIGGER_TX.send(user_id.to_string());
-}
-
-/// Subscribes to profile popout opening triggers
-pub fn subscribe_profile_trigger() -> broadcast::Receiver<String> {
-    PROFILE_TRIGGER_TX.subscribe()
-}
-
-// ============================================================================
-// Data Models
-// ============================================================================
-
-/// Profile badge earned by user
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfileBadge {
-    pub id: String,
-    pub description: String,
-    pub icon: String,
-    #[serde(default)]
-    pub link: Option<String>,
-}
-
-impl ProfileBadge {
-    pub fn icon_url(&self) -> String {
-        if self.icon.starts_with("http://") || self.icon.starts_with("https://") {
-            self.icon.clone()
-        } else {
-            format!("https://cdn.discordapp.com/badge-icons/{}.png", self.icon)
-        }
-    }
-}
-
-/// Connected third-party account (Spotify, Steam, GitHub, etc.)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConnectedAccount {
-    #[serde(rename = "type")]
-    pub account_type: String,
-    pub id: String,
-    pub name: String,
-    #[serde(default)]
-    pub verified: bool,
-}
-
-/// Mutual guild shared between current user and profile target
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MutualGuild {
-    pub id: String,
-    #[serde(default)]
-    pub nick: Option<String>,
-}
-
-/// Complete official Discord User Profile data structure (GET /users/{id}/profile)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserProfileData {
-    pub user: User,
-    #[serde(default)]
-    pub bio: Option<String>,
-    #[serde(default)]
-    pub pronouns: Option<String>,
-    #[serde(default)]
-    pub banner: Option<String>,
-    #[serde(default)]
-    pub banner_color: Option<String>,
-    #[serde(default)]
-    pub accent_color: Option<u32>,
-    #[serde(default)]
-    pub badges: Vec<ProfileBadge>,
-    #[serde(default)]
-    pub connected_accounts: Vec<ConnectedAccount>,
-    #[serde(default)]
-    pub mutual_guilds: Vec<MutualGuild>,
-    #[serde(default)]
-    pub mutual_friends_count: u32,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub joined_server_at: Option<DateTime<Utc>>,
-}
-
-/// Navigation tabs in the profile popout
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum ProfileTab {
-    #[default]
-    MutualGuilds,
-    MutualFriends,
-}
-
-/// Interactive state of the opened profile popout in `AppState`
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProfilePopoutState {
-    pub user_id: String,
-    pub guild_id: Option<String>,
-    pub data: Option<UserProfileData>,
-    pub is_loading: bool,
-    pub error: Option<String>,
-    pub active_tab: ProfileTab,
-    pub quick_message: String,
-}
 
 // ============================================================================
 // Helper Utilities
 // ============================================================================
-
-/// Converts a 64-bit Discord Snowflake ID string into account creation `DateTime<Utc>`.
-/// Discord epoch is 2015-01-01T00:00:00Z (1420070400000 ms).
-pub fn snowflake_to_datetime(snowflake_str: &str) -> Option<DateTime<Utc>> {
-    let snowflake = snowflake_str.parse::<u64>().ok()?;
-    let timestamp_ms = (snowflake >> 22) + 1_420_070_400_000;
-    DateTime::from_timestamp_millis(timestamp_ms as i64)
-}
 
 /// Parses a hex color string (e.g. "#110fbf" or "110fbf") into a `u32` RGB value
 pub fn parse_hex_color(hex_str: &str) -> Option<u32> {
@@ -187,6 +76,7 @@ pub fn format_member_date(dt: DateTime<Utc>) -> String {
 pub fn render_user_profile_popout(
     app_entity: Entity<crate::app::state::AppState>,
     popout: &ProfilePopoutState,
+    catalog: &ProfileEffectCatalog,
 ) -> impl IntoElement {
     let entity_close = app_entity.clone();
     let entity_key = app_entity.clone();
@@ -214,13 +104,14 @@ pub fn render_user_profile_popout(
                 cx.notify();
             });
         })
-        .child(render_profile_card(app_entity, popout))
+        .child(render_profile_card(app_entity, popout, catalog))
 }
 
 /// Renders the 300px Popout Card container
 fn render_profile_card(
     app_entity: Entity<crate::app::state::AppState>,
     popout: &ProfilePopoutState,
+    catalog: &ProfileEffectCatalog,
 ) -> impl IntoElement {
     let entity_card = app_entity.clone();
     let entity_close_btn = app_entity.clone();
@@ -243,7 +134,7 @@ fn render_profile_card(
         });
 
     // -------------------------------------------------------------------------
-    // 1. TOP BANNER (105px height)
+    // 1. TOP BANNER (105px height) with Profile Effect Overlay
     // -------------------------------------------------------------------------
     let banner_color_val = popout
         .data
@@ -278,6 +169,20 @@ fn render_profile_card(
         );
     }
 
+    // Profile Effect Layer (rendered from official catalog over banner)
+    let profile_effect_id = popout
+        .data
+        .as_ref()
+        .and_then(|d| d.profile_effect_id.as_deref());
+    let user_effect = profile_effect_id.map(UserProfileEffect::new);
+    let effect_overlay = render_profile_effect_for_user(
+        user_effect.as_ref(),
+        catalog,
+        px(105.0),
+        Some(px(300.0)),
+    );
+    banner = banner.child(effect_overlay);
+
     // Top Right Close button on banner
     banner = banner.child(
         div()
@@ -305,7 +210,7 @@ fn render_profile_card(
     card = card.child(banner);
 
     // -------------------------------------------------------------------------
-    // 2. AVATAR + BADGES HEADER (Avatar 80x80 with negative 40px margin)
+    // 2. AVATAR + BADGES HEADER (Canonical Avatar component with decor & presence)
     // -------------------------------------------------------------------------
     let avatar_user = popout.data.as_ref().map(|d| &d.user);
     let avatar_url = avatar_user.and_then(|u| u.avatar_url());
@@ -322,8 +227,6 @@ fn render_profile_card(
         .map(|u| u.presence)
         .unwrap_or(PresenceStatus::Offline);
 
-    let status_color = presence_status.color_rgb();
-
     let avatar_initial = display_name
         .chars()
         .next()
@@ -331,58 +234,16 @@ fn render_profile_card(
         .to_uppercase()
         .to_string();
 
-    let mut avatar_content = div()
-        .relative()
-        .size(px(80.0))
-        .rounded_full()
-        .border_6()
-        .border_color(rgb(0x232428))
-        .bg(rgb(0x5865f2))
-        .flex()
-        .items_center()
-        .justify_center()
-        .overflow_hidden();
+    let avatar = Avatar::new(avatar_initial)
+        .size(AvatarSize::Px80)
+        .opt_src(avatar_url)
+        .opt_status(Some(presence_status))
+        .opt_decoration(avatar_user.and_then(|u| u.avatar_decoration_data.clone()))
+        .cutout_color(rgb(0x232428));
 
-    if let Some(ref url) = avatar_url {
-        avatar_content = avatar_content.child(
-            img(url.clone())
-                .size_full()
-                .rounded_full(),
-        );
-    } else {
-        avatar_content = avatar_content.child(
-            div()
-                .font_weight(WEIGHT_BOLD)
-                .text_color(rgb(0xffffff))
-                .text_size(px(28.0))
-                .child(avatar_initial),
-        );
-    }
-
-    // Avatar status dot (bottom right)
     let avatar_container = div()
         .relative()
-        .child(avatar_content)
-        // SLOT: Avatar Decoration Frame (Fase 5 - Agente Decor encaixará a moldura aqui)
-        .child(
-            div()
-                .id("avatar-decoration-slot")
-                .absolute()
-                .inset_0()
-                .invisible(),
-        )
-        // Presence Dot (16x16 with 3px border #232428)
-        .child(
-            div()
-                .absolute()
-                .bottom(px(0.0))
-                .right(px(0.0))
-                .size(px(16.0))
-                .rounded_full()
-                .bg(rgb(status_color))
-                .border_3()
-                .border_color(rgb(0x232428)),
-        );
+        .child(avatar);
 
     // Badges Container (aligned right)
     let badges_container = div()
@@ -556,7 +417,7 @@ fn render_profile_card(
     // Divider
     body = body.child(div().h_px().bg(rgb(0x35373c)).my(px(2.0)));
 
-    // "Sobre mim" (About Me) Bio section (Rendered with existing Markdown parser)
+    // "Sobre mim" (About Me) Bio section (Rendered with native Markdown parser)
     if let Some(ref bio) = popout.data.as_ref().and_then(|d| d.bio.as_ref()) {
         if !bio.trim().is_empty() {
             body = body.child(
@@ -583,79 +444,81 @@ fn render_profile_card(
     }
 
     // Member Dates ("Membro do Discord desde" & "Membro do servidor desde")
+    // Zero fake dates: only render when snowflake or joined_server_at is genuinely present
     let created_at = popout
         .data
         .as_ref()
-        .map(|d| d.created_at)
-        .or_else(|| snowflake_to_datetime(&popout.user_id))
-        .unwrap_or_else(Utc::now);
+        .and_then(|d| d.created_at)
+        .or_else(|| snowflake_to_datetime(&popout.user_id));
 
-    let mut dates_col = div()
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xb5bac1))
-                        .child(t("profile.discord_member_since").to_uppercase()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_info(px(14.0), rgb(0x949ba4)))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(0xdbdee1))
-                                .child(format_member_date(created_at)),
-                        ),
-                ),
-        );
+    let joined_server_at = popout.data.as_ref().and_then(|d| d.joined_server_at);
 
-    if let Some(joined_at) = popout.data.as_ref().and_then(|d| d.joined_server_at) {
-        dates_col = dates_col.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xb5bac1))
-                        .child(t("profile.server_member_since").to_uppercase()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_hash(px(14.0), rgb(0x949ba4)))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(rgb(0xdbdee1))
-                                .child(format_member_date(joined_at)),
-                        ),
-                ),
-        );
+    if created_at.is_some() || joined_server_at.is_some() {
+        let mut dates_col = div().flex().flex_col().gap(px(8.0));
+
+        if let Some(created_at) = created_at {
+            dates_col = dates_col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xb5bac1))
+                            .child(t("profile.discord_member_since").to_uppercase()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon_info(px(14.0), rgb(0x949ba4)))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xdbdee1))
+                                    .child(format_member_date(created_at)),
+                            ),
+                    ),
+            );
+        }
+
+        if let Some(joined_at) = joined_server_at {
+            dates_col = dates_col.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xb5bac1))
+                            .child(t("profile.server_member_since").to_uppercase()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon_hash(px(14.0), rgb(0x949ba4)))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0xdbdee1))
+                                    .child(format_member_date(joined_at)),
+                            ),
+                    ),
+            );
+        }
+
+        body = body.child(dates_col);
+        body = body.child(div().h_px().bg(rgb(0x35373c)).my(px(2.0)));
     }
-
-    body = body.child(dates_col);
-
-    // Divider
-    body = body.child(div().h_px().bg(rgb(0x35373c)).my(px(2.0)));
 
     // Tabs: "Servidores em comum" and "Amigos em comum"
     let mutual_guilds_count = popout
@@ -788,11 +651,12 @@ fn render_profile_card(
     card = card.child(body);
 
     // -------------------------------------------------------------------------
-    // 5. QUICK DIRECT MESSAGE INPUT (Caixa de Envio Rápido)
+    // 5. QUICK DIRECT MESSAGE INPUT (Functional real message dispatch)
     // -------------------------------------------------------------------------
-    let target_uid = popout.user_id.clone();
     let target_uname = username.clone();
-    let entity_msg = entity_card.clone();
+    let entity_quick_msg = entity_card.clone();
+    let entity_quick_enter = entity_card.clone();
+    let quick_val = popout.quick_message.clone();
 
     let quick_input = div()
         .p(px(12.0))
@@ -800,38 +664,24 @@ fn render_profile_card(
         .border_color(rgb(0x1f2023))
         .bg(rgb(0x1e1f22))
         .child(
-            div()
-                .h(px(36.0))
-                .px(px(12.0))
-                .rounded(px(6.0))
-                .bg(rgb(0x2b2d31))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x35373c)))
-                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                    let uid = target_uid.clone();
-                    let uname = target_uname.clone();
-                    entity_msg.update(cx, |s, cx| {
-                        s.close_profile_popout();
-                        s.open_dm_with_user(&uid, &uname);
+            TextInput::new("profile-quick-message-input")
+                .placeholder(format!("Conversar com @{}", target_uname))
+                .value(quick_val)
+                .full_width(true)
+                .on_change(move |val, _window, cx| {
+                    entity_quick_msg.update(cx, |s, cx| {
+                        if let Some(ref mut p) = s.profile_popout {
+                            p.quick_message = val;
+                        }
                         cx.notify();
                     });
                 })
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(text_muted())
-                        .child(format!("Conversar com @{}", username)),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(text_muted())
-                        .child("💬"),
-                ),
+                .on_enter(move |_window, cx| {
+                    entity_quick_enter.update(cx, |s, cx| {
+                        s.send_profile_popout_quick_message();
+                        cx.notify();
+                    });
+                })
         );
 
     card = card.child(quick_input);

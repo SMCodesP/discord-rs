@@ -1,9 +1,10 @@
 use chrono::{Datelike, Timelike};
 use discord_rs::app::state::AppState;
-use discord_rs::app::user_profile_popout::{
+use discord_rs::domain::profile::{
     snowflake_to_datetime, ProfileBadge, ProfileTab, UserProfileData,
 };
 use discord_rs::protocol::discord_api::parse_user_profile_from_json;
+use discord_rs::protocol::transport::TransportEvent;
 
 #[test]
 fn test_snowflake_to_datetime_calculation() {
@@ -164,11 +165,12 @@ fn test_app_state_profile_popout_workflow() {
         banner: None,
         banner_color: Some("#232428".to_string()),
         accent_color: None,
+        profile_effect_id: None,
         badges: Vec::new(),
         connected_accounts: Vec::new(),
         mutual_guilds: Vec::new(),
         mutual_friends_count: 2,
-        created_at: chrono::Utc::now(),
+        created_at: Some(chrono::Utc::now()),
         joined_server_at: None,
     };
 
@@ -208,4 +210,152 @@ fn test_app_state_profile_popout_workflow() {
     // 5. Close profile popout
     state.close_profile_popout();
     assert!(state.profile_popout.is_none());
+}
+
+#[test]
+fn test_single_fetch_and_concurrent_deduplication() {
+    let mut state = AppState::new();
+
+    // First open triggers loading
+    state.open_user_profile("user_duplicate_check");
+    assert!(state.profile_popout.is_some());
+    assert!(state.profile_popout.as_ref().unwrap().is_loading);
+
+    // Set quick message on active popout
+    state.profile_popout.as_mut().unwrap().quick_message = "drafting...".to_string();
+
+    // Second open for SAME user while is_loading is true:
+    // MUST NOT reset popout state or spawn duplicate fetch
+    state.open_user_profile("user_duplicate_check");
+    let popout = state.profile_popout.as_ref().unwrap();
+    assert_eq!(popout.user_id, "user_duplicate_check");
+    assert_eq!(popout.quick_message, "drafting...");
+    assert!(popout.is_loading);
+}
+
+#[test]
+fn test_out_of_order_stale_response_discarded() {
+    let mut state = AppState::new();
+
+    // 1. User clicks User A
+    state.open_user_profile("user_A");
+    assert_eq!(state.profile_popout.as_ref().unwrap().user_id, "user_A");
+
+    // 2. Before User A responds, User clicks User B
+    state.open_user_profile("user_B");
+    assert_eq!(state.profile_popout.as_ref().unwrap().user_id, "user_B");
+
+    // 3. Stale response for User A arrives via TransportEvent
+    let profile_a = UserProfileData {
+        user: discord_rs::domain::user::User::new("user_A", "user_a"),
+        bio: Some("User A bio".into()),
+        pronouns: None,
+        banner: None,
+        banner_color: None,
+        accent_color: None,
+        profile_effect_id: None,
+        badges: Vec::new(),
+        connected_accounts: Vec::new(),
+        mutual_guilds: Vec::new(),
+        mutual_friends_count: 0,
+        created_at: None,
+        joined_server_at: None,
+    };
+
+    state.handle_transport_event(TransportEvent::UserProfileLoaded {
+        user_id: "user_A".to_string(),
+        profile: Box::new(profile_a),
+    });
+
+    // Current popout must STILL be User B, and data must NOT be User A's data
+    let popout = state.profile_popout.as_ref().unwrap();
+    assert_eq!(popout.user_id, "user_B");
+    assert!(popout.data.is_none());
+    assert!(popout.is_loading);
+
+    // 4. Response for User B arrives
+    let profile_b = UserProfileData {
+        user: discord_rs::domain::user::User::new("user_B", "user_b"),
+        bio: Some("User B bio".into()),
+        pronouns: None,
+        banner: None,
+        banner_color: None,
+        accent_color: None,
+        profile_effect_id: None,
+        badges: Vec::new(),
+        connected_accounts: Vec::new(),
+        mutual_guilds: Vec::new(),
+        mutual_friends_count: 0,
+        created_at: None,
+        joined_server_at: None,
+    };
+
+    state.handle_transport_event(TransportEvent::UserProfileLoaded {
+        user_id: "user_B".to_string(),
+        profile: Box::new(profile_b),
+    });
+
+    let popout = state.profile_popout.as_ref().unwrap();
+    assert_eq!(popout.user_id, "user_B");
+    assert_eq!(popout.data.as_ref().unwrap().bio.as_deref(), Some("User B bio"));
+    assert!(!popout.is_loading);
+}
+
+#[test]
+fn test_zero_fake_date_non_snowflake() {
+    // When user ID is not snowflake (e.g. non-numeric string), snowflake_to_datetime is None
+    assert_eq!(snowflake_to_datetime("non-snowflake-id"), None);
+
+    let raw_json = serde_json::json!({
+        "user": {
+            "id": "non-snowflake-id",
+            "username": "custom_id_user"
+        }
+    });
+
+    let profile = parse_user_profile_from_json(&raw_json).expect("parses");
+    assert_eq!(profile.created_at, None);
+}
+
+#[test]
+fn test_profile_popout_quick_direct_message_send() {
+    let mut state = AppState::new();
+
+    // Open profile popout
+    state.open_user_profile("recipient_99");
+
+    // Populate profile data with target username
+    let test_profile = UserProfileData {
+        user: discord_rs::domain::user::User::new("recipient_99", "best_friend"),
+        bio: None,
+        pronouns: None,
+        banner: None,
+        banner_color: None,
+        accent_color: None,
+        profile_effect_id: None,
+        badges: Vec::new(),
+        connected_accounts: Vec::new(),
+        mutual_guilds: Vec::new(),
+        mutual_friends_count: 0,
+        created_at: None,
+        joined_server_at: None,
+    };
+    state.set_profile_popout_data("recipient_99", test_profile);
+
+    // User types in quick direct message field
+    state.profile_popout.as_mut().unwrap().quick_message = "Olá, vamos programar em Rust?".to_string();
+
+    // User presses Enter -> send_profile_popout_quick_message()
+    state.send_profile_popout_quick_message();
+
+    // Popout must be closed
+    assert!(state.profile_popout.is_none());
+
+    // DM channel must be selected
+    let selected_cid = state.selected_channel_id.as_ref().expect("channel selected");
+    assert!(selected_cid.contains("recipient_99") || selected_cid.starts_with("dm-"));
+
+    // Message must be dispatched into the channel
+    let msgs = state.messages_by_channel.get(selected_cid).expect("messages exist");
+    assert_eq!(msgs.last().unwrap().content, "Olá, vamos programar em Rust?");
 }

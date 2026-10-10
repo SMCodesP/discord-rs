@@ -416,6 +416,10 @@ pub struct AppState {
     pub is_connecting: bool,
     /// Direct Message (DM) channels
     pub dm_channels: Vec<ChannelItemState>,
+    /// Pinned direct message channel IDs (ordered strictly as in user settings)
+    pub pinned_dms: Vec<String>,
+    /// Optional path to pinned DMs cache on disk (None disables disk persistence, e.g. in tests)
+    pub pinned_dms_path: Option<std::path::PathBuf>,
     /// User's guild folders grouping
     pub guild_folders: Vec<crate::protocol::GuildFolder>,
     /// Set of expanded folder IDs in guild rail
@@ -445,8 +449,13 @@ pub struct AppState {
     pub accessibility_settings: AccessibilitySettings,
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
     /// Currently opened user profile popout
-    pub profile_popout: Option<crate::app::user_profile_popout::ProfilePopoutState>,
+    pub profile_popout: Option<crate::domain::profile::ProfilePopoutState>,
+    /// Collectibles profile effects catalog
+    pub profile_effects_catalog: crate::components::ProfileEffectCatalog,
 }
+
+pub struct AppStateGlobal(pub gpui::Entity<AppState>);
+impl gpui::Global for AppStateGlobal {}
 
 fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
     let mut messages = HashMap::new();
@@ -1057,6 +1066,8 @@ impl AppState {
             auth_error: None,
             is_connecting,
             dm_channels: Vec::new(),
+            pinned_dms: Vec::new(),
+            pinned_dms_path: None,
             guild_folders,
             expanded_folders: std::collections::HashSet::new(),
             friends: if has_token {
@@ -1125,74 +1136,7 @@ impl AppState {
                     },
                 ]
             },
-            active_now_items: vec![
-                ActiveNowItem {
-                    id: "act-1".into(),
-                    user_id: "user-juniodevs".into(),
-                    username: "juniodevs".into(),
-                    display_name: "juniodevs".into(),
-                    avatar_url: None,
-                    avatar_text: "J".into(),
-                    presence: PresenceStatus::Idle,
-                    kind: ActiveNowKind::RichPresence,
-                    app_name: "Visual Studio Code".into(),
-                    header_subtitle: "Visual Studio Code – 1h".into(),
-                    app_icon_symbol: "code".into(),
-                    details_title: "Editing README.md".into(),
-                    details_state: Some("Workspace: THUGwithSKATE3".into()),
-                    elapsed_time_text: Some("01:13:26 decorridos".into()),
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: None,
-                },
-                ActiveNowItem {
-                    id: "act-2".into(),
-                    user_id: "user-mattfh".into(),
-                    username: "Mattfh".into(),
-                    display_name: "Mattfh".into(),
-                    avatar_url: None,
-                    avatar_text: "M".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Quest,
-                    app_name: "ROBLOX".into(),
-                    header_subtitle: "Jogando uma missão · Promovido(a)".into(),
-                    app_icon_symbol: "game".into(),
-                    details_title: "Reivindique 700 Orbs".into(),
-                    details_state: Some("Jogue Animal Hospital on Roblox durante 15 minutos com o seu cliente Discord aberto e ganhe 700 Orbs.".into()),
-                    elapsed_time_text: None,
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: Some("Aceitar missão".into()),
-                },
-                ActiveNowItem {
-                    id: "act-3".into(),
-                    user_id: "user-gabriel".into(),
-                    username: "gabriel_rodrigues".into(),
-                    display_name: "Gabriel Rodrigues".into(),
-                    avatar_url: None,
-                    avatar_text: "G".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Spotify,
-                    app_name: "Spotify".into(),
-                    header_subtitle: "Ouvindo Spotify".into(),
-                    app_icon_symbol: "music".into(),
-                    details_title: "Starboy (feat. Daft Punk)".into(),
-                    details_state: Some("The Weeknd — Starboy".into()),
-                    elapsed_time_text: Some("Jogando há 1h 24m".into()),
-                    spotify_track: Some("Starboy (feat. Daft Punk)".into()),
-                    spotify_artist: Some("The Weeknd".into()),
-                    spotify_album: Some("Starboy".into()),
-                    spotify_progress_text: Some(("1:24".into(), "3:50".into())),
-                    spotify_progress_pct: Some(0.36),
-                    button_text: Some("Ouvir no Spotify".into()),
-                },
-            ],
+            active_now_items: Vec::new(),
             telemetry: Some(crate::telemetry::global().clone()),
 
             nitro_tier: NitroTier::Full,
@@ -1283,6 +1227,7 @@ impl AppState {
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
             profile_popout: None,
+            profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
         };
         state.sync_guild_media();
         state
@@ -1422,15 +1367,31 @@ impl AppState {
     }
 
     /// Sorts DMs according to Discord rules:
-    /// 1. Pinned DMs (is_pinned: true) at the top.
+    /// 1. Pinned DMs (is_pinned: true) at the absolute top, strictly adhering to the order in `pinned_dms`.
     /// 2. Channels with the most recent messages closest to the top (last_message_id descending Snowflake).
     pub fn sort_dm_channels(&mut self) {
+        let pinned_order = &self.pinned_dms;
         self.dm_channels.sort_by(|a, b| {
-            // 1. DMs fixadas no topo (is_pinned: true vem antes de false)
+            // 1. DMs fixadas no topo absoluto (is_pinned: true vem antes de false)
             match (a.is_pinned, b.is_pinned) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
-                _ => {}
+                (true, true) => {
+                    // Ambas são fixadas: manter a ordem estrita do array pinned_dms
+                    let pos_a = pinned_order.iter().position(|id| id == &a.id);
+                    let pos_b = pinned_order.iter().position(|id| id == &b.id);
+                    match (pos_a, pos_b) {
+                        (Some(idx_a), Some(idx_b)) => {
+                            if idx_a != idx_b {
+                                return idx_a.cmp(&idx_b);
+                            }
+                        }
+                        (Some(_), None) => return std::cmp::Ordering::Less,
+                        (None, Some(_)) => return std::cmp::Ordering::Greater,
+                        (None, None) => {}
+                    }
+                }
+                (false, false) => {}
             }
 
             // 2. Mensagem mais recente mais perto do topo (decrescente por Snowflake)
@@ -1447,6 +1408,64 @@ impl AppState {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
+    }
+
+    /// Sets the disk persistence path for pinned DMs. When set, loads from disk if available.
+    pub fn set_pinned_dms_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.pinned_dms_path = path;
+        if let Some(ref p) = self.pinned_dms_path {
+            self.pinned_dms = crate::protocol::pinned_dms::load_pinned_dms_from_path(p);
+            for dm in &mut self.dm_channels {
+                dm.is_pinned = self.pinned_dms.contains(&dm.id);
+            }
+            self.sort_dm_channels();
+        }
+    }
+
+    /// Pins a DM channel: adds to pinned_dms, marks is_pinned = true, re-sorts and persists to disk if configured.
+    pub fn pin_dm_channel(&mut self, channel_id: &str) {
+        if !self.pinned_dms.contains(&channel_id.to_string()) {
+            self.pinned_dms.push(channel_id.to_string());
+        }
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = true;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Unpins a DM channel: removes from pinned_dms, sets is_pinned = false, re-sorts and persists to disk if configured.
+    pub fn unpin_dm_channel(&mut self, channel_id: &str) {
+        self.pinned_dms.retain(|id| id != channel_id);
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = false;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Toggles pin status for a DM channel.
+    pub fn toggle_pin_dm_channel(&mut self, channel_id: &str) {
+        let is_currently_pinned = self
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.is_pinned)
+            .unwrap_or(false)
+            || self.pinned_dms.contains(&channel_id.to_string());
+        if is_currently_pinned {
+            self.unpin_dm_channel(channel_id);
+        } else {
+            self.pin_dm_channel(channel_id);
+        }
     }
 
     /// Selects a channel
@@ -1609,25 +1628,56 @@ impl AppState {
         self.active_modal = None;
     }
 
-    /// Opens the user profile popout for a user (optionally with guild context)
+    /// Opens the user profile popout for a user (with current guild context)
     pub fn open_user_profile(&mut self, user_id: &str) {
-        self.open_user_profile_in_guild(user_id, self.selected_guild_id.clone());
+        let current_guild = self.selected_guild_id.clone();
+        self.open_user_profile_in_guild(user_id, current_guild);
     }
 
     /// Opens the user profile popout with specific guild context
     pub fn open_user_profile_in_guild(&mut self, user_id: &str, guild_id: Option<String>) {
         let uid = user_id.to_string();
+
+        // Guard against duplicate concurrent fetch if already loading this user
+        if let Some(ref popout) = self.profile_popout {
+            if popout.user_id == uid && popout.is_loading {
+                return;
+            }
+        }
+
         let fallback = self.build_fallback_profile_data(&uid, guild_id.as_deref());
-        self.profile_popout = Some(crate::app::user_profile_popout::ProfilePopoutState {
+
+        self.profile_popout = Some(crate::domain::profile::ProfilePopoutState {
             user_id: uid.clone(),
-            guild_id,
+            guild_id: guild_id.clone(),
             data: fallback,
             is_loading: true,
             error: None,
-            active_tab: crate::app::user_profile_popout::ProfileTab::MutualGuilds,
+            active_tab: crate::domain::profile::ProfileTab::MutualGuilds,
             quick_message: String::new(),
         });
-        crate::app::user_profile_popout::trigger_open_profile(&uid);
+
+        // Trigger single asynchronous fetch via ClientManager if present
+        if let Some(cm) = self.client_manager.clone() {
+            let gid = guild_id.clone();
+            let target_uid = uid.clone();
+            tokio::spawn(async move {
+                match cm.get_user_profile_with_guild(&target_uid, gid.as_deref()).await {
+                    Ok(profile) => {
+                        cm.emit_event(crate::protocol::transport::TransportEvent::UserProfileLoaded {
+                            user_id: target_uid,
+                            profile: Box::new(profile),
+                        });
+                    }
+                    Err(err) => {
+                        cm.emit_event(crate::protocol::transport::TransportEvent::UserProfileError {
+                            user_id: target_uid,
+                            error: err.to_string(),
+                        });
+                    }
+                }
+            });
+        }
     }
 
     /// Closes the active user profile popout
@@ -1636,7 +1686,7 @@ impl AppState {
     }
 
     /// Updates the profile popout with loaded data
-    pub fn set_profile_popout_data(&mut self, user_id: &str, data: crate::app::user_profile_popout::UserProfileData) {
+    pub fn set_profile_popout_data(&mut self, user_id: &str, data: crate::domain::profile::UserProfileData) {
         if let Some(ref mut popout) = self.profile_popout {
             if popout.user_id == user_id {
                 popout.data = Some(data);
@@ -1658,8 +1708,32 @@ impl AppState {
         }
     }
 
+    /// Sends a quick message from the user profile popout input and closes the popout
+    pub fn send_profile_popout_quick_message(&mut self) {
+        let (user_id, username, content) = {
+            let Some(ref popout) = self.profile_popout else {
+                return;
+            };
+            let content = popout.quick_message.trim().to_string();
+            if content.is_empty() {
+                return;
+            }
+            let user_id = popout.user_id.clone();
+            let username = popout
+                .data
+                .as_ref()
+                .map(|d| d.user.username.clone())
+                .unwrap_or_else(|| user_id.clone());
+            (user_id, username, content)
+        };
+
+        let channel_id = self.open_dm_with_user(&user_id, &username);
+        self.send_message(&channel_id, &content);
+        self.close_profile_popout();
+    }
+
     /// Builds fallback profile data from local friends, members, or current_user
-    pub fn build_fallback_profile_data(&self, user_id: &str, _guild_id: Option<&str>) -> Option<crate::app::user_profile_popout::UserProfileData> {
+    pub fn build_fallback_profile_data(&self, user_id: &str, _guild_id: Option<&str>) -> Option<crate::domain::profile::UserProfileData> {
         let to_domain_presence = |p: PresenceStatus| match p {
             PresenceStatus::Online => crate::domain::user::PresenceStatus::Online,
             PresenceStatus::Idle => crate::domain::user::PresenceStatus::Idle,
@@ -1675,14 +1749,15 @@ impl AppState {
             user.avatar = self.current_user.avatar_url.clone();
             user.discriminator = self.current_user.discriminator.clone();
             user.presence = to_domain_presence(self.current_user.presence);
-            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
-            return Some(crate::app::user_profile_popout::UserProfileData {
+            let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
+            return Some(crate::domain::profile::UserProfileData {
                 user,
                 bio: None,
                 pronouns: None,
                 banner: None,
                 banner_color: None,
                 accent_color: None,
+                profile_effect_id: None,
                 badges: Vec::new(),
                 connected_accounts: Vec::new(),
                 mutual_guilds: Vec::new(),
@@ -1698,14 +1773,15 @@ impl AppState {
             user.global_name = Some(m.name.clone());
             user.bot = m.is_bot;
             user.presence = to_domain_presence(m.presence);
-            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
-            return Some(crate::app::user_profile_popout::UserProfileData {
+            let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
+            return Some(crate::domain::profile::UserProfileData {
                 user,
                 bio: None,
                 pronouns: None,
                 banner: None,
                 banner_color: None,
                 accent_color: None,
+                profile_effect_id: None,
                 badges: Vec::new(),
                 connected_accounts: Vec::new(),
                 mutual_guilds: Vec::new(),
@@ -1721,14 +1797,15 @@ impl AppState {
             user.global_name = Some(f.display_name.clone());
             user.avatar = f.avatar_url.clone();
             user.presence = to_domain_presence(f.presence);
-            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
-            return Some(crate::app::user_profile_popout::UserProfileData {
+            let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
+            return Some(crate::domain::profile::UserProfileData {
                 user,
                 bio: None,
                 pronouns: None,
                 banner: None,
                 banner_color: None,
                 accent_color: None,
+                profile_effect_id: None,
                 badges: Vec::new(),
                 connected_accounts: Vec::new(),
                 mutual_guilds: Vec::new(),
@@ -1748,14 +1825,15 @@ impl AppState {
             let mut user = crate::domain::user::User::new(&recipient_id, &dm.name);
             user.global_name = Some(dm.name.clone());
             user.avatar = dm.icon_url.clone();
-            let created_at = crate::app::user_profile_popout::snowflake_to_datetime(&user.id).unwrap_or_else(Utc::now);
-            return Some(crate::app::user_profile_popout::UserProfileData {
+            let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
+            return Some(crate::domain::profile::UserProfileData {
                 user,
                 bio: None,
                 pronouns: None,
                 banner: None,
                 banner_color: None,
                 accent_color: None,
+                profile_effect_id: None,
                 badges: Vec::new(),
                 connected_accounts: Vec::new(),
                 mutual_guilds: Vec::new(),
@@ -1902,14 +1980,6 @@ impl AppState {
                     is_speaking: false,
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
-                },
-                VoiceParticipantState {
-                    id: "user-ferris".into(),
-                    name: "Ferris".into(),
-                    avatar_text: "🦀".into(),
-                    is_speaking: true,
-                    is_muted: false,
-                    is_deafened: false,
                 },
             ],
         });
@@ -2391,7 +2461,7 @@ impl AppState {
             TransportEvent::Connected => {
                 self.is_connected_to_gateway = true;
                 self.is_connecting = false;
-                self.connection_status = "Gateway Conectado".to_string();
+                self.connection_status = "Conectado".to_string();
                 self.auth_error = None;
                 self.close_modal();
             }
@@ -2502,6 +2572,7 @@ impl AppState {
                     .into_iter()
                     .map(|c| {
                         let is_group = c.channel_type == ChannelType::GroupDm;
+                        let is_pinned = c.is_pinned || self.pinned_dms.contains(&c.id);
                         ChannelItemState {
                             id: c.id,
                             name: c.name,
@@ -2510,7 +2581,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned,
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
@@ -2581,7 +2652,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned: c.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
@@ -2633,7 +2704,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: channel.icon_url.clone(),
-                            is_pinned: channel.is_pinned,
+                            is_pinned: channel.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: channel.last_message_id.clone(),
                             is_group_dm: is_group,
                             recipient_ids: channel.recipient_ids.clone(),
@@ -2710,6 +2781,22 @@ impl AppState {
                         }
                     })
                     .collect();
+            }
+            TransportEvent::PinnedDmsUpdated(pinned) => {
+                self.pinned_dms = pinned;
+                for dm in &mut self.dm_channels {
+                    dm.is_pinned = self.pinned_dms.contains(&dm.id);
+                }
+                self.sort_dm_channels();
+                if let Some(ref path) = self.pinned_dms_path {
+                    crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+                }
+            }
+            TransportEvent::UserProfileLoaded { user_id, profile } => {
+                self.set_profile_popout_data(&user_id, *profile);
+            }
+            TransportEvent::UserProfileError { user_id, error } => {
+                self.set_profile_popout_error(&user_id, error);
             }
             _ => {}
         }
