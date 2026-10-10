@@ -16,6 +16,7 @@ struct MockState {
     messages: HashMap<String, Vec<Message>>,
     connected: bool,
     next_message_id: u64,
+    relationships: Vec<Relationship>,
 }
 
 /// Deterministic mock provider simulating Discord guilds, channels, messages, and gateway events.
@@ -408,12 +409,37 @@ impl MockDiscordProvider {
         messages.insert("chan-dm-ferris".to_string(), vec![msg_df1.clone(), msg_df2.clone()]);
         messages.insert("dm-ferris".to_string(), vec![msg_df1, msg_df2]);
 
+        let relationships = vec![
+            Relationship {
+                id: "user-ferris".to_string(),
+                rel_type: 1,
+                username: "ferris_the_crab".to_string(),
+                global_name: Some("Ferris".to_string()),
+                avatar: None,
+            },
+            Relationship {
+                id: "user-ana".to_string(),
+                rel_type: 1,
+                username: "ana_rust".to_string(),
+                global_name: Some("Ana Dev".to_string()),
+                avatar: None,
+            },
+            Relationship {
+                id: "user-carlos".to_string(),
+                rel_type: 1,
+                username: "carlos_coder".to_string(),
+                global_name: Some("Carlos".to_string()),
+                avatar: None,
+            },
+        ];
+
         let state = MockState {
             current_user,
             guilds: vec![rust_brasil_guild, gpui_hub_guild],
             messages,
             connected: false,
             next_message_id: 1000,
+            relationships,
         };
 
         Self {
@@ -559,29 +585,62 @@ impl DiscordTransport for MockDiscordProvider {
     }
 
     async fn list_relationships(&self) -> anyhow::Result<Vec<Relationship>> {
-        Ok(vec![
-            Relationship {
-                id: "user-ferris".to_string(),
-                rel_type: 1,
-                username: "ferris_the_crab".to_string(),
-                global_name: Some("Ferris".to_string()),
-                avatar: None,
-            },
-            Relationship {
-                id: "user-ana".to_string(),
-                rel_type: 1,
-                username: "ana_rust".to_string(),
-                global_name: Some("Ana Dev".to_string()),
-                avatar: None,
-            },
-            Relationship {
-                id: "user-carlos".to_string(),
-                rel_type: 1,
-                username: "carlos_coder".to_string(),
-                global_name: Some("Carlos".to_string()),
-                avatar: None,
-            },
-        ])
+        let state = self.state.read().await;
+        Ok(state.relationships.clone())
+    }
+
+    async fn send_friend_request(&self, username: &str, _discriminator: Option<&str>) -> anyhow::Result<()> {
+        let u = username.trim();
+        if u.is_empty() || u == "invalid" || u == "not_found" || u == "nao_existe" {
+            anyhow::bail!("Usuário não encontrado.");
+        }
+        let rel = Relationship {
+            id: format!("user-{}", u.to_lowercase().replace(' ', "_")),
+            rel_type: Relationship::TYPE_OUTGOING_REQUEST,
+            username: u.to_string(),
+            global_name: Some(u.to_string()),
+            avatar: None,
+        };
+        {
+            let mut state = self.state.write().await;
+            state.relationships.retain(|r| r.username != u);
+            state.relationships.push(rel.clone());
+        }
+        let _ = self.event_sender.send(TransportEvent::RelationshipAdd(rel));
+        Ok(())
+    }
+
+    async fn accept_friend_request(&self, user_id: &str) -> anyhow::Result<()> {
+        if user_id == "fail_accept" || user_id == "error" {
+            anyhow::bail!("Falha ao aceitar pedido de amizade na API.");
+        }
+        let updated = {
+            let mut state = self.state.write().await;
+            if let Some(r) = state.relationships.iter_mut().find(|r| r.id == user_id) {
+                r.rel_type = Relationship::TYPE_FRIEND;
+                Some(r.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(rel) = updated {
+            let _ = self.event_sender.send(TransportEvent::RelationshipAdd(rel));
+        }
+        Ok(())
+    }
+
+    async fn remove_relationship(&self, user_id: &str) -> anyhow::Result<()> {
+        if user_id == "fail_remove" || user_id == "error" {
+            anyhow::bail!("Falha ao remover relacionamento na API.");
+        }
+        {
+            let mut state = self.state.write().await;
+            state.relationships.retain(|r| r.id != user_id);
+        }
+        let _ = self.event_sender.send(TransportEvent::RelationshipRemove {
+            id: user_id.to_string(),
+        });
+        Ok(())
     }
 
     async fn get_messages(&self, channel_id: &str, limit: usize) -> anyhow::Result<Vec<Message>> {

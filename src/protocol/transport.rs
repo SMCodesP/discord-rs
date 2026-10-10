@@ -124,6 +124,17 @@ pub enum TransportEvent {
     RelationshipRemove {
         id: String,
     },
+    /// Friend request outcome notification (success/error message)
+    FriendRequestResult {
+        username: String,
+        success: bool,
+        message: String,
+    },
+    /// Relationship action (accept, decline, remove) failed
+    RelationshipActionFailed {
+        id: String,
+        error: String,
+    },
     /// Batch message history loaded for a channel (avoids flooding individual MessageCreate events)
     ChannelMessagesLoaded {
         channel_id: String,

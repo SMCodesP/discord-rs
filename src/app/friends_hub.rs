@@ -983,6 +983,8 @@ fn render_friends_list_view(
             _ => friend.status.clone(),
         };
 
+        let is_action_pending = state.pending_relationship_actions.contains(&friend_uid);
+
         // Right actions depending on relationship type
         let right_actions = match rel_type {
             3 => {
@@ -1002,18 +1004,21 @@ fn render_friends_list_view(
                             .size(px(36.0))
                             .rounded_full()
                             .bg(rgb(0x2b2d31))
-                            .hover(|s| s.bg(rgb(0x23a55a)).text_color(rgb(HEX_WHITE)))
-                            .cursor_pointer()
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0x23a55a)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_accept.clone();
+                                        entity_accept.update(cx, |s, cx| {
+                                            s.accept_friend_request(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                let uid = uid_accept.clone();
-                                entity_accept.update(cx, |s, cx| {
-                                    s.accept_friend_request(&uid);
-                                    cx.notify();
-                                });
-                            })
                             .child(icon_check(px(18.0), rgb(0x23a55a))),
                     )
                     .child(
@@ -1022,18 +1027,21 @@ fn render_friends_list_view(
                             .size(px(36.0))
                             .rounded_full()
                             .bg(rgb(0x2b2d31))
-                            .hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
-                            .cursor_pointer()
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_decline.clone();
+                                        entity_decline.update(cx, |s, cx| {
+                                            s.remove_relationship(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                let uid = uid_decline.clone();
-                                entity_decline.update(cx, |s, cx| {
-                                    s.remove_relationship(&uid);
-                                    cx.notify();
-                                });
-                            })
                             .child(icon_close(px(18.0), rgb(0xda373c))),
                     )
             }
@@ -1052,18 +1060,21 @@ fn render_friends_list_view(
                             .size(px(36.0))
                             .rounded_full()
                             .bg(rgb(0x2b2d31))
-                            .hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
-                            .cursor_pointer()
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_cancel.clone();
+                                        entity_cancel.update(cx, |s, cx| {
+                                            s.remove_relationship(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                let uid = uid_cancel.clone();
-                                entity_cancel.update(cx, |s, cx| {
-                                    s.remove_relationship(&uid);
-                                    cx.notify();
-                                });
-                            })
                             .child(icon_close(px(18.0), rgb(0x80848e))),
                     )
             }
@@ -1082,18 +1093,21 @@ fn render_friends_list_view(
                             .py(px(6.0))
                             .rounded(radius_xs())
                             .bg(rgb(0x2b2d31))
-                            .hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
-                            .cursor_pointer()
+                            .when(!is_action_pending, |d| {
+                                d.hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)))
+                                    .cursor_pointer()
+                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                        let uid = uid_unblock.clone();
+                                        entity_unblock.update(cx, |s, cx| {
+                                            s.remove_relationship(&uid);
+                                            cx.notify();
+                                        });
+                                    })
+                            })
+                            .when(is_action_pending, |d| d.opacity(0.4))
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(0xdbdee1))
-                            .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                let uid = uid_unblock.clone();
-                                entity_unblock.update(cx, |s, cx| {
-                                    s.remove_relationship(&uid);
-                                    cx.notify();
-                                });
-                            })
                             .child("Desbloquear"),
                     )
             }
@@ -1360,6 +1374,8 @@ pub fn render_add_friend_view(
     let current_input = state.add_friend_input.clone();
     let input_for_send = current_input.clone();
     let feedback = state.add_friend_feedback.clone();
+    let is_sending = state.is_sending_friend_request;
+    let can_send = !is_sending && !input_for_send.trim().is_empty();
 
     div()
         .flex_1()
@@ -1428,20 +1444,27 @@ pub fn render_add_friend_view(
                         .px(px(16.0))
                         .py(px(8.0))
                         .rounded(px(4.0))
-                        .bg(rgb(0x5865f2))
-                        .hover(|s| s.bg(rgb(0x4752c4)))
-                        .cursor_pointer()
-                        .text_color(rgb(0xffffff))
+                        .when(can_send, |d| {
+                            d.bg(rgb(0x5865f2))
+                                .hover(|s| s.bg(rgb(0x4752c4)))
+                                .cursor_pointer()
+                                .text_color(rgb(0xffffff))
+                                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                                    let target = input_for_send.clone();
+                                    entity_send.update(cx, |s, cx| {
+                                        s.send_friend_request(&target);
+                                        cx.notify();
+                                    });
+                                })
+                        })
+                        .when(!can_send, |d| {
+                            d.bg(rgb(0x3c4270))
+                                .opacity(0.6)
+                                .text_color(rgb(0x949ba4))
+                        })
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                            let target = input_for_send.clone();
-                            entity_send.update(cx, |s, cx| {
-                                s.send_friend_request(&target);
-                                cx.notify();
-                            });
-                        })
-                        .child("Enviar pedido de amizade"),
+                        .child(if is_sending { "Enviando..." } else { "Enviar pedido de amizade" }),
                 ),
         )
         // Feedback message (if any)

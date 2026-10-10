@@ -274,7 +274,7 @@ fn test_e2e_home_and_dm_navigation_with_friends() {
     assert_eq!(state.friends.len(), 2);
     assert_eq!(state.friends[0].display_name, "Ferris");
     assert_eq!(state.friends[0].avatar_text, "F");
-    assert_eq!(state.friends[0].presence, PresenceStatus::Online);
+    assert_eq!(state.friends[0].presence, PresenceStatus::Offline);
     assert_eq!(state.friends[1].display_name, "ana_rust");
     assert_eq!(state.friends[1].avatar_text, "A");
 }

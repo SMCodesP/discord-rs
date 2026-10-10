@@ -1,4 +1,4 @@
-use discord_rs::app::state::AppState;
+use discord_rs::app::state::{AppState, FriendItemState, PresenceStatus};
 use discord_rs::domain::user::{Activity, ActivityType, PresenceStatus as DomainPresenceStatus};
 use discord_rs::protocol::transport::{Relationship, TransportEvent};
 
@@ -127,7 +127,8 @@ fn test_active_now_aggregation_from_presence() {
     let act = &state.active_now_items[0];
     assert_eq!(act.user_id, "user-game");
     assert_eq!(act.app_name, "Rust");
-    assert_eq!(act.app_icon_symbol, "🎮");
+    assert_eq!(act.app_icon_symbol, "");
+    assert!(act.header_subtitle.starts_with("Rust"));
 
     // Presence update with Listening to Spotify
     state.handle_transport_event(TransportEvent::PresenceUpdate {
@@ -144,7 +145,8 @@ fn test_active_now_aggregation_from_presence() {
 
     assert_eq!(state.active_now_items.len(), 1);
     let spotify_act = &state.active_now_items[0];
-    assert_eq!(spotify_act.app_icon_symbol, "🎧");
+    assert_eq!(spotify_act.app_icon_symbol, "");
+    assert_eq!(spotify_act.header_subtitle, "Spotify");
     assert_eq!(spotify_act.spotify_track.as_deref(), Some("Song Title"));
     assert_eq!(spotify_act.spotify_artist.as_deref(), Some("Artist Name"));
 
@@ -157,21 +159,127 @@ fn test_active_now_aggregation_from_presence() {
     assert_eq!(state.active_now_items.len(), 0);
 }
 
-#[tokio::test]
-async fn test_send_friend_request_validation() {
+#[test]
+fn test_relationship_default_presence_is_offline() {
     let mut state = AppState::new();
+    state.friends.clear();
 
-    // Empty username validation
+    state.handle_transport_event(TransportEvent::RelationshipAdd(Relationship {
+        id: "user-new".into(),
+        username: "newbie".into(),
+        avatar: None,
+        global_name: Some("Newbie".into()),
+        rel_type: 1,
+    }));
+
+    let f = state.friends.iter().find(|f| f.id == "user-new").unwrap();
+    // Must default to Offline, not Online (Orchestrator rule 3)
+    assert_eq!(f.presence, PresenceStatus::Offline);
+
+    // Update with real presence
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "user-new".into(),
+        status: DomainPresenceStatus::Online,
+        activity: None,
+    });
+    let f = state.friends.iter().find(|f| f.id == "user-new").unwrap();
+    assert_eq!(f.presence, PresenceStatus::Online);
+}
+
+#[tokio::test]
+async fn test_send_friend_request_no_fake_line_and_result_handling() {
+    let mut state = AppState::new();
+    state.friends.clear();
+
+    // 1. Empty username validation
     state.send_friend_request("   ");
     assert_eq!(
         state.add_friend_feedback,
         Some((false, "Insira um nome de usuário válido.".into()))
     );
+    assert!(!state.is_sending_friend_request);
 
-    // Non-empty username
-    state.send_friend_request("someuser");
-    assert!(state.add_friend_feedback.is_some());
-    let (success, msg) = state.add_friend_feedback.as_ref().unwrap();
-    assert!(*success);
-    assert!(msg.contains("sucesso") || msg.contains("enviada"));
+    // 2. Sending friend request sets is_sending_friend_request without fake line
+    state.send_friend_request("valid_user#1234");
+    assert!(state.is_sending_friend_request);
+    assert!(state.add_friend_feedback.is_none());
+    // Crucial check: zero fake lines inserted in friends
+    assert_eq!(state.friends.len(), 0);
+
+    // 3. Simulating error from API/Provider
+    state.handle_transport_event(TransportEvent::FriendRequestResult {
+        username: "valid_user".into(),
+        success: false,
+        message: "Usuário não encontrado.".into(),
+    });
+    assert!(!state.is_sending_friend_request);
+    assert_eq!(
+        state.add_friend_feedback,
+        Some((false, "Usuário não encontrado.".into()))
+    );
+    assert_eq!(state.friends.len(), 0);
+
+    // 4. Simulating success from API/Provider
+    state.is_sending_friend_request = true;
+    state.handle_transport_event(TransportEvent::FriendRequestResult {
+        username: "valid_user".into(),
+        success: true,
+        message: "Solicitação enviada com sucesso!".into(),
+    });
+    assert!(!state.is_sending_friend_request);
+    assert_eq!(
+        state.add_friend_feedback,
+        Some((true, "Solicitação enviada com sucesso!".into()))
+    );
+    // Real item arrives via RelationshipAdd gateway event
+    state.handle_transport_event(TransportEvent::RelationshipAdd(Relationship {
+        id: "real-snowflake-12345".into(),
+        username: "valid_user".into(),
+        avatar: None,
+        global_name: None,
+        rel_type: 4, // Outgoing pending
+    }));
+    assert_eq!(state.friends.len(), 1);
+    assert_eq!(state.friends[0].id, "real-snowflake-12345");
+}
+
+#[test]
+fn test_pending_relationship_actions_state() {
+    let mut state = AppState::new();
+    state.friends.clear();
+
+    state.friends.push(FriendItemState {
+        id: "target-user".into(),
+        username: "target".into(),
+        display_name: "Target".into(),
+        avatar_url: None,
+        avatar_text: "T".into(),
+        presence: PresenceStatus::Offline,
+        custom_status: None,
+        relationship_type: 3, // Incoming request
+    });
+
+    state.accept_friend_request("target-user");
+    assert!(state.pending_relationship_actions.contains("target-user"));
+
+    // If action fails, event removes it from pending actions
+    state.handle_transport_event(TransportEvent::RelationshipActionFailed {
+        id: "target-user".into(),
+        error: "Erro de rede".into(),
+    });
+    assert!(!state.pending_relationship_actions.contains("target-user"));
+    assert_eq!(state.friends.len(), 1);
+
+    // If action succeeds, RelationshipAdd removes it and updates relationship_type
+    state.accept_friend_request("target-user");
+    assert!(state.pending_relationship_actions.contains("target-user"));
+    state.handle_transport_event(TransportEvent::RelationshipAdd(Relationship {
+        id: "target-user".into(),
+        username: "target".into(),
+        avatar: None,
+        global_name: Some("Target".into()),
+        rel_type: 1, // now Friend
+    }));
+    assert!(!state.pending_relationship_actions.contains("target-user"));
+    assert_eq!(state.friends[0].relationship_type, 1);
 }
