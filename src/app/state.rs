@@ -1123,74 +1123,7 @@ impl AppState {
                     },
                 ]
             },
-            active_now_items: vec![
-                ActiveNowItem {
-                    id: "act-1".into(),
-                    user_id: "user-juniodevs".into(),
-                    username: "juniodevs".into(),
-                    display_name: "juniodevs".into(),
-                    avatar_url: None,
-                    avatar_text: "J".into(),
-                    presence: PresenceStatus::Idle,
-                    kind: ActiveNowKind::RichPresence,
-                    app_name: "Visual Studio Code".into(),
-                    header_subtitle: "Visual Studio Code – 1h".into(),
-                    app_icon_symbol: "code".into(),
-                    details_title: "Editing README.md".into(),
-                    details_state: Some("Workspace: THUGwithSKATE3".into()),
-                    elapsed_time_text: Some("01:13:26 decorridos".into()),
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: None,
-                },
-                ActiveNowItem {
-                    id: "act-2".into(),
-                    user_id: "user-mattfh".into(),
-                    username: "Mattfh".into(),
-                    display_name: "Mattfh".into(),
-                    avatar_url: None,
-                    avatar_text: "M".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Quest,
-                    app_name: "ROBLOX".into(),
-                    header_subtitle: "Jogando uma missão · Promovido(a)".into(),
-                    app_icon_symbol: "game".into(),
-                    details_title: "Reivindique 700 Orbs".into(),
-                    details_state: Some("Jogue Animal Hospital on Roblox durante 15 minutos com o seu cliente Discord aberto e ganhe 700 Orbs.".into()),
-                    elapsed_time_text: None,
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: Some("Aceitar missão".into()),
-                },
-                ActiveNowItem {
-                    id: "act-3".into(),
-                    user_id: "user-gabriel".into(),
-                    username: "gabriel_rodrigues".into(),
-                    display_name: "Gabriel Rodrigues".into(),
-                    avatar_url: None,
-                    avatar_text: "G".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Spotify,
-                    app_name: "Spotify".into(),
-                    header_subtitle: "Ouvindo Spotify".into(),
-                    app_icon_symbol: "music".into(),
-                    details_title: "Starboy (feat. Daft Punk)".into(),
-                    details_state: Some("The Weeknd — Starboy".into()),
-                    elapsed_time_text: Some("Jogando há 1h 24m".into()),
-                    spotify_track: Some("Starboy (feat. Daft Punk)".into()),
-                    spotify_artist: Some("The Weeknd".into()),
-                    spotify_album: Some("Starboy".into()),
-                    spotify_progress_text: Some(("1:24".into(), "3:50".into())),
-                    spotify_progress_pct: Some(0.36),
-                    button_text: Some("Ouvir no Spotify".into()),
-                },
-            ],
+            active_now_items: Vec::new(),
             telemetry: Some(crate::telemetry::global().clone()),
 
             nitro_tier: NitroTier::Full,
@@ -1741,14 +1674,6 @@ impl AppState {
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
                 },
-                VoiceParticipantState {
-                    id: "user-ferris".into(),
-                    name: "Ferris".into(),
-                    avatar_text: "🦀".into(),
-                    is_speaking: true,
-                    is_muted: false,
-                    is_deafened: false,
-                },
             ],
         });
     }
@@ -2229,7 +2154,7 @@ impl AppState {
             TransportEvent::Connected => {
                 self.is_connected_to_gateway = true;
                 self.is_connecting = false;
-                self.connection_status = "Gateway Conectado".to_string();
+                self.connection_status = "Conectado".to_string();
                 self.auth_error = None;
                 self.close_modal();
             }

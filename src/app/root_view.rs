@@ -542,7 +542,7 @@ fn render_login_modal(
     } else if state.is_connected_to_gateway {
         Banner::success(
             "login-success",
-            format!("Conectado como @{} ({})", state.current_user.username, state.connection_status),
+            format!("Conectado como @{}", state.current_user.username),
         )
         .title("Conectado ao Discord")
     } else if is_connecting {
