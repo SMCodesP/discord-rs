@@ -1,5 +1,5 @@
 use crate::domain::{
-    Activity, Channel, Guild, Message, PresenceStatus, User, VoiceParticipant, VoiceState,
+    Activity, Channel, CustomStatus, Guild, Message, PresenceStatus, User, VoiceParticipant, VoiceState,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ pub enum TransportEvent {
         user_id: String,
         status: PresenceStatus,
         activity: Option<Activity>,
+        #[serde(default)]
+        custom_status: Option<CustomStatus>,
     },
     /// Voice state for a user changed (e.g. joined/left voice channel, mute, deaf).
     VoiceStateUpdate(VoiceState),

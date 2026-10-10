@@ -41,6 +41,7 @@ impl MockDiscordProvider {
             bot: false,
             presence: PresenceStatus::Online,
             activity: Some(Activity::playing("discord-rs (GPUI)")),
+            custom_status: None,
         };
 
         // --- Guild 1: Rust Brasil ---
