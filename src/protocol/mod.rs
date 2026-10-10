@@ -10,6 +10,8 @@ pub mod mock_provider;
 pub mod rate_limit;
 pub mod rate_limiter;
 pub mod transport;
+pub mod voice_crypto;
+pub mod voice_udp;
 
 pub use auth::{AuthToken, TokenStorage, TokenType};
 pub use bridge::ProtocolBridge;
@@ -23,5 +25,7 @@ pub use mock_provider::MockDiscordProvider;
 pub use rate_limit::*;
 pub use rate_limiter::RateLimitManager;
 pub use transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent};
+pub use voice_crypto::*;
+pub use voice_udp::*;
 
 
