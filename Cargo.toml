@@ -21,6 +21,10 @@ dirs = "7.0.0"
 rustls = { version = "0.23", features = ["ring"] }
 sha2 = "0.10"
 hex = "0.4"
+v4l = "0.14"
+ashpd = { version = "0.12", default-features = false, features = ["async-std"] }
+x11rb = { version = "0.13", features = ["shm"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [profile.dev]
 debug = 1

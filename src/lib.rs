@@ -1,6 +1,7 @@
 #![recursion_limit = "4096"]
 
 pub mod app;
+pub mod capture;
 pub mod chat;
 pub mod components;
 pub mod domain;
@@ -10,6 +11,7 @@ pub mod telemetry;
 pub mod tokens;
 
 pub use app::*;
+pub use capture::*;
 pub use chat::*;
 pub use components::*;
 pub use protocol::ProtocolBridge;
