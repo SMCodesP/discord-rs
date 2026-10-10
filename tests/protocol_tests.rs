@@ -81,6 +81,25 @@ async fn test_mock_provider_messaging_and_reactions() {
         }
         other => panic!("Unexpected event received: {:?}", other),
     }
+
+    // Send sticker
+    let sticker_msg = provider
+        .send_sticker("chan-br-general", "sticker-12345")
+        .await
+        .expect("Failed to send sticker");
+    assert!(sticker_msg.is_sticker());
+    assert_eq!(sticker_msg.sticker_id(), Some("sticker-12345".to_string()));
+    assert_eq!(sticker_msg.sticker_name(), Some("mock-sticker".to_string()));
+
+    let rx_sticker_event = rx.try_recv().expect("Expected MessageCreate event for sticker");
+    match rx_sticker_event {
+        TransportEvent::MessageCreate(m) => {
+            assert_eq!(m.id, sticker_msg.id);
+            assert!(m.is_sticker());
+            assert_eq!(m.sticker_id(), Some("sticker-12345".to_string()));
+        }
+        other => panic!("Unexpected event received: {:?}", other),
+    }
 }
 
 #[test]

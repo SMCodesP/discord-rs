@@ -272,6 +272,37 @@ impl ClientManager {
         Ok(msg)
     }
 
+    /// Sends a sticker message to a text channel using the active transport
+    pub async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
+        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => {
+                    self.emit_event(TransportEvent::DmChannelResolved {
+                        temp_id: channel_id.to_string(),
+                        channel: ch.clone(),
+                    });
+                    ch.id
+                }
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM para envio de figurinha: {:?}", e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        let msg = transport.send_sticker(&real_channel_id, sticker_id).await?;
+        // Broadcast local message creation event
+        let _ = self.event_tx.send(TransportEvent::MessageCreate(msg.clone()));
+        Ok(msg)
+    }
+
     /// Adds a reaction emoji to a message using the active transport
     pub async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
@@ -378,5 +409,23 @@ impl ClientManager {
     pub async fn current_mode(&self) -> ConnectionMode {
         let lock = self.mode.read().await;
         lock.clone()
+    }
+
+    /// Fetches all custom emojis for a guild using the active transport
+    pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<crate::protocol::media_cache::DiscordEmoji>> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.get_guild_emojis(guild_id).await
+    }
+
+    /// Fetches all custom stickers for a guild using the active transport
+    pub async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<crate::protocol::media_cache::DiscordSticker>> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.get_guild_stickers(guild_id).await
     }
 }

@@ -1,7 +1,8 @@
 use crate::domain::{
     Activity, Attachment, Author, Category, Channel, Embed, EmbedField, Guild, Message,
-    PresenceStatus, Reaction, Role, User,
+    MessageStickerItem, PresenceStatus, Reaction, Role, User,
 };
+use crate::protocol::media_cache::{DiscordEmoji, DiscordSticker, StickerFormatType};
 use crate::protocol::transport::{DiscordTransport, Relationship, TransportEvent};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -111,6 +112,36 @@ impl MockDiscordProvider {
                 chan_br_voice_pair,
             ])
             .with_roles(br_roles);
+        let mut rust_brasil_guild = rust_brasil_guild;
+        rust_brasil_guild.emojis = vec![
+            DiscordEmoji::new_custom("1001", "ferris", false, Some(rust_br_id.to_string())),
+            DiscordEmoji::new_custom("1002", "rustacean", false, Some(rust_br_id.to_string())),
+            DiscordEmoji::new_custom("1003", "crab_party", true, Some(rust_br_id.to_string())),
+            DiscordEmoji::new_custom("1004", "cargo_ship", false, Some(rust_br_id.to_string())),
+            DiscordEmoji::new_custom("1005", "unsafe_code", false, Some(rust_br_id.to_string())),
+        ];
+        rust_brasil_guild.stickers = vec![
+            DiscordSticker {
+                id: "781291131828699156".into(),
+                name: "Ferris Wave".into(),
+                description: Some("Ferris dando tchauzinho".into()),
+                tags: "ferris,wave,hi".into(),
+                format_type: StickerFormatType::Png,
+                available: true,
+                guild_id: Some(rust_br_id.to_string()),
+                pack_id: None,
+            },
+            DiscordSticker {
+                id: "781291131828699157".into(),
+                name: "Ferris Hype".into(),
+                description: Some("Ferris comemorando".into()),
+                tags: "ferris,hype,party".into(),
+                format_type: StickerFormatType::Png,
+                available: true,
+                guild_id: Some(rust_br_id.to_string()),
+                pack_id: None,
+            },
+        ];
 
         // --- Guild 2: GPUI Hub ---
         let gpui_hub_id = "guild-gpui-hub";
@@ -181,6 +212,25 @@ impl MockDiscordProvider {
                 chan_gpui_lounge,
             ])
             .with_roles(gpui_roles);
+        let mut gpui_hub_guild = gpui_hub_guild;
+        gpui_hub_guild.emojis = vec![
+            DiscordEmoji::new_custom("2001", "zed_editor", false, Some(gpui_hub_id.to_string())),
+            DiscordEmoji::new_custom("2002", "gpu_accel", false, Some(gpui_hub_id.to_string())),
+            DiscordEmoji::new_custom("2003", "pixel_perfect", false, Some(gpui_hub_id.to_string())),
+            DiscordEmoji::new_custom("2004", "fps_144", true, Some(gpui_hub_id.to_string())),
+        ];
+        gpui_hub_guild.stickers = vec![
+            DiscordSticker {
+                id: "781291131828699158".into(),
+                name: "GPUI Rocket".into(),
+                description: Some("Foguete GPUI voando a 144fps".into()),
+                tags: "gpui,fast,rocket".into(),
+                format_type: StickerFormatType::Png,
+                available: true,
+                guild_id: Some(gpui_hub_id.to_string()),
+                pack_id: None,
+            },
+        ];
 
         // --- Pre-populate message history ---
         let now = Utc::now();
@@ -383,7 +433,13 @@ impl MockDiscordProvider {
         let id = format!("msg-sim-{}", state.next_message_id);
         state.next_message_id += 1;
 
-        let msg = Message::new(id, channel_id, author, content);
+        let mut msg = Message::new(id, channel_id, author, content);
+        for guild in &state.guilds {
+            if guild.channels.iter().any(|c| c.id == channel_id) {
+                msg.guild_id = Some(guild.id.clone());
+                break;
+            }
+        }
         state
             .messages
             .entry(channel_id.to_string())
@@ -438,6 +494,18 @@ impl DiscordTransport for MockDiscordProvider {
     async fn get_guild(&self, guild_id: &str) -> anyhow::Result<Option<Guild>> {
         let state = self.state.read().await;
         Ok(state.guilds.iter().find(|g| g.id == guild_id).cloned())
+    }
+
+    async fn get_guild_emojis(&self, guild_id: &str) -> anyhow::Result<Vec<DiscordEmoji>> {
+        let state = self.state.read().await;
+        let guild = state.guilds.iter().find(|g| g.id == guild_id);
+        Ok(guild.map(|g| g.emojis.clone()).unwrap_or_default())
+    }
+
+    async fn get_guild_stickers(&self, guild_id: &str) -> anyhow::Result<Vec<DiscordSticker>> {
+        let state = self.state.read().await;
+        let guild = state.guilds.iter().find(|g| g.id == guild_id);
+        Ok(guild.map(|g| g.stickers.clone()).unwrap_or_default())
     }
 
     async fn list_channels(&self, guild_id: &str) -> anyhow::Result<Vec<Channel>> {
@@ -556,7 +624,13 @@ impl DiscordTransport for MockDiscordProvider {
             bot: state.current_user.bot,
         };
 
-        let msg = Message::new(id, channel_id, author, content);
+        let mut msg = Message::new(id, channel_id, author, content);
+        for guild in &state.guilds {
+            if guild.channels.iter().any(|c| c.id == channel_id) {
+                msg.guild_id = Some(guild.id.clone());
+                break;
+            }
+        }
 
         state
             .messages
@@ -571,6 +645,56 @@ impl DiscordTransport for MockDiscordProvider {
         }
 
         // Update channel last_message_id in all guilds
+        for guild in &mut state.guilds {
+            for chan in &mut guild.channels {
+                if chan.id == channel_id {
+                    chan.last_message_id = Some(msg.id.clone());
+                }
+            }
+        }
+
+        let _ = self.event_sender.send(TransportEvent::MessageCreate(msg.clone()));
+        Ok(msg)
+    }
+
+    async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> anyhow::Result<Message> {
+        let mut state = self.state.write().await;
+        let id = format!("msg-{}", state.next_message_id);
+        state.next_message_id += 1;
+
+        let author = Author {
+            id: state.current_user.id.clone(),
+            username: state.current_user.username.clone(),
+            global_name: state.current_user.global_name.clone(),
+            avatar: state.current_user.avatar.clone(),
+            bot: state.current_user.bot,
+        };
+
+        let mut msg = Message::new(id, channel_id, author, "");
+        for guild in &state.guilds {
+            if guild.channels.iter().any(|c| c.id == channel_id) {
+                msg.guild_id = Some(guild.id.clone());
+                break;
+            }
+        }
+        msg.sticker_items.push(MessageStickerItem::new(
+            sticker_id,
+            "mock-sticker",
+            1,
+        ));
+
+        state
+            .messages
+            .entry(channel_id.to_string())
+            .or_default()
+            .push(msg.clone());
+
+        if channel_id == "chan-dm-ferris" {
+            state.messages.entry("dm-ferris".to_string()).or_default().push(msg.clone());
+        } else if channel_id == "dm-ferris" {
+            state.messages.entry("chan-dm-ferris".to_string()).or_default().push(msg.clone());
+        }
+
         for guild in &mut state.guilds {
             for chan in &mut guild.channels {
                 if chan.id == channel_id {

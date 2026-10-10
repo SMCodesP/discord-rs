@@ -107,8 +107,11 @@ impl DiscordEmoji {
     /// URL da imagem no CDN oficial do Discord
     pub fn cdn_url(&self) -> Option<String> {
         self.id.as_ref().map(|id| {
-            let ext = if self.animated { "gif" } else { "png" };
-            format!("https://cdn.discordapp.com/emojis/{}.{}?size=64&quality=lossless", id, ext)
+            if self.animated {
+                format!("https://cdn.discordapp.com/emojis/{}.gif?size=64&quality=lossless", id)
+            } else {
+                format!("https://cdn.discordapp.com/emojis/{}.png?size=64&quality=lossless", id)
+            }
         })
     }
 
@@ -214,13 +217,12 @@ pub struct DiscordSticker {
 impl DiscordSticker {
     /// URL no CDN oficial do Discord
     pub fn cdn_url(&self) -> String {
-        let ext = match self.format_type {
-            StickerFormatType::Png => "png",
-            StickerFormatType::Apng => "png",
-            StickerFormatType::Lottie => "json",
-            StickerFormatType::Gif => "gif",
-        };
-        format!("https://cdn.discordapp.com/stickers/{}.{}?size=160", self.id, ext)
+        match self.format_type {
+            StickerFormatType::Apng | StickerFormatType::Gif => {
+                format!("https://media.discordapp.net/stickers/{}.gif?size=160", self.id)
+            }
+            _ => format!("https://media.discordapp.net/stickers/{}.webp?size=160&quality=lossless", self.id),
+        }
     }
 }
 
@@ -282,6 +284,29 @@ pub struct TenorGif {
     pub src: Option<String>,
     #[serde(default)]
     pub gif_src: Option<String>,
+}
+
+impl TenorGif {
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        preview_url: impl Into<String>,
+        url: impl Into<String>,
+        dims: (u32, u32),
+        category: Option<String>,
+    ) -> Self {
+        let p_url = preview_url.into();
+        Self {
+            id: id.into(),
+            title: title.into(),
+            preview_url: p_url.clone(),
+            url: url.into(),
+            dims,
+            category,
+            src: Some(p_url.clone()),
+            gif_src: Some(p_url),
+        }
+    }
 }
 
 /// Categoria de GIFs retornada pelo Discord
@@ -589,6 +614,19 @@ impl MediaCacheManager {
         }
     }
 
+    /// Retorna os emojis frequentemente usados sincronamente
+    pub fn get_recent_emojis_sync(&self) -> Vec<RecentEmojiItem> {
+        if let Ok(lock) = self.recent_emojis.try_read() {
+            if lock.is_empty() {
+                Self::default_recent_emojis()
+            } else {
+                lock.clone()
+            }
+        } else {
+            self.load_recent_emojis_from_disk()
+        }
+    }
+
     /// Emojis padrão fornecidos na primeira execução
     pub fn default_recent_emojis() -> Vec<RecentEmojiItem> {
         vec![
@@ -712,6 +750,342 @@ impl MediaCacheManager {
         Ok(())
     }
 
+    // --- Persistência de Figurinhas Favoritas (Favorite Stickers) ---
+
+    pub fn favorite_stickers_path(&self) -> PathBuf {
+        self.root_path.join("favorite_stickers.json")
+    }
+
+    fn load_favorite_stickers_from_disk(&self) -> Vec<DiscordSticker> {
+        let path = self.favorite_stickers_path();
+        if !path.exists() {
+            return Vec::new();
+        }
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_favorite_stickers_to_disk(&self, items: &[DiscordSticker]) -> Result<()> {
+        self.ensure_dirs()?;
+        let path = self.favorite_stickers_path();
+        let json_bytes = serde_json::to_vec_pretty(items)?;
+
+        let temp_name = format!(".tmp_fav_stickers_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_path = self.root_path.join(temp_name);
+        {
+            let mut f = File::create(&temp_path)?;
+            f.write_all(&json_bytes)?;
+            f.sync_data()?;
+        }
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    }
+
+    /// Retorna a lista de figurinhas favoritas persistidas
+    pub async fn get_favorite_stickers(&self) -> Vec<DiscordSticker> {
+        let lock = self.favorite_stickers.read().await;
+        lock.clone()
+    }
+
+    /// Retorna as figurinhas favoritas sincronamente (para rápido acesso no render)
+    pub fn get_favorite_stickers_sync(&self) -> Vec<DiscordSticker> {
+        if let Ok(lock) = self.favorite_stickers.try_read() {
+            lock.clone()
+        } else {
+            self.load_favorite_stickers_from_disk()
+        }
+    }
+
+    /// Adiciona uma figurinha aos favoritos e persiste em disco
+    pub async fn add_favorite_sticker(&self, sticker: DiscordSticker) -> Result<()> {
+        let mut list = self.favorite_stickers.write().await;
+        if !list.iter().any(|s| s.id == sticker.id) {
+            list.push(sticker);
+            self.save_favorite_stickers_to_disk(&list)?;
+        }
+        Ok(())
+    }
+
+    /// Remove uma figurinha dos favoritos pelo ID e persiste em disco
+    pub async fn remove_favorite_sticker(&self, sticker_id: &str) -> Result<()> {
+        let mut list = self.favorite_stickers.write().await;
+        let initial_len = list.len();
+        list.retain(|s| s.id != sticker_id);
+        if list.len() != initial_len {
+            self.save_favorite_stickers_to_disk(&list)?;
+        }
+        Ok(())
+    }
+
+    // --- Persistência de Emojis e Figurinhas de Guildas (Guild Media Cache) ---
+
+    pub fn guild_emojis_path(&self, guild_id: &str) -> PathBuf {
+        self.root_path.join("guilds").join(format!("{}_emojis.json", guild_id))
+    }
+
+    pub fn guild_stickers_path(&self, guild_id: &str) -> PathBuf {
+        self.root_path.join("guilds").join(format!("{}_stickers.json", guild_id))
+    }
+
+    pub fn load_guild_emojis_from_disk(&self, guild_id: &str) -> Option<Vec<DiscordEmoji>> {
+        let path = self.guild_emojis_path(guild_id);
+        if !path.exists() {
+            return None;
+        }
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+    }
+
+    pub fn save_guild_emojis_to_disk(&self, guild_id: &str, items: &[DiscordEmoji]) -> Result<()> {
+        let dir = self.root_path.join("guilds");
+        let _ = fs::create_dir_all(&dir);
+        let path = self.guild_emojis_path(guild_id);
+        let json_bytes = serde_json::to_vec_pretty(items)?;
+        let temp_name = format!(".tmp_emojis_{}_{}", guild_id, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_path = dir.join(temp_name);
+        {
+            let mut f = File::create(&temp_path)?;
+            f.write_all(&json_bytes)?;
+            f.sync_data()?;
+        }
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    }
+
+    pub fn load_guild_stickers_from_disk(&self, guild_id: &str) -> Option<Vec<DiscordSticker>> {
+        let path = self.guild_stickers_path(guild_id);
+        if !path.exists() {
+            return None;
+        }
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+    }
+
+    pub fn save_guild_stickers_to_disk(&self, guild_id: &str, items: &[DiscordSticker]) -> Result<()> {
+        let dir = self.root_path.join("guilds");
+        let _ = fs::create_dir_all(&dir);
+        let path = self.guild_stickers_path(guild_id);
+        let json_bytes = serde_json::to_vec_pretty(items)?;
+        let temp_name = format!(".tmp_stickers_{}_{}", guild_id, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_path = dir.join(temp_name);
+        {
+            let mut f = File::create(&temp_path)?;
+            f.write_all(&json_bytes)?;
+            f.sync_data()?;
+        }
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    }
+
+    /// Agrega figurinhas favoritas, figurinhas de servidores (guild stickers) e pacotes padrão oficiais do Discord
+    pub async fn get_all_stickers(&self, guild_stickers: &[DiscordSticker]) -> Vec<DiscordSticker> {
+        let mut result = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        // 1. Figurinhas favoritas persistidas
+        for sticker in self.get_favorite_stickers().await {
+            if seen_ids.insert(sticker.id.clone()) {
+                result.push(sticker);
+            }
+        }
+
+        // 2. Figurinhas de servidores (guild stickers)
+        for sticker in guild_stickers {
+            if seen_ids.insert(sticker.id.clone()) {
+                result.push(sticker.clone());
+            }
+        }
+
+        // 3. Figurinhas de pacotes padrão oficiais do Discord
+        for pack in Self::get_default_sticker_packs() {
+            for sticker in pack.stickers {
+                if seen_ids.insert(sticker.id.clone()) {
+                    result.push(sticker);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Função utilitária estática para agregar figurinhas a partir de coleções existentes
+    pub fn aggregate_stickers(
+        favorite_stickers: &[DiscordSticker],
+        guild_stickers: &[DiscordSticker],
+        packs: &[StickerPack],
+    ) -> Vec<DiscordSticker> {
+        let mut result = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
+
+        for s in favorite_stickers {
+            if seen_ids.insert(s.id.clone()) {
+                result.push(s.clone());
+            }
+        }
+
+        for s in guild_stickers {
+            if seen_ids.insert(s.id.clone()) {
+                result.push(s.clone());
+            }
+        }
+
+        for pack in packs {
+            for s in &pack.stickers {
+                if seen_ids.insert(s.id.clone()) {
+                    result.push(s.clone());
+                }
+            }
+        }
+
+        result
+    }
+
+    // --- Parser Universal de GIFs (Discord API v9 / Tenor v2 / Klipy / Giphy) ---
+
+    /// Converte um objeto JSON individual retornado pelo Discord/Tenor/Klipy em TenorGif
+    pub fn parse_gif_from_json(val: &serde_json::Value, default_category: Option<&str>) -> Option<TenorGif> {
+        let id = val.get("id").and_then(|v| v.as_str())?.to_string();
+        let title = val.get("title")
+            .or_else(|| val.get("content_description"))
+            .or_else(|| val.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("GIF")
+            .to_string();
+
+        let src = val.get("src").and_then(|v| v.as_str()).map(ToString::to_string);
+        let gif_src = val.get("gif_src").and_then(|v| v.as_str()).map(ToString::to_string);
+
+        // Extrai URL principal (suporta Discord, Tenor v2, Klipy, Giphy)
+        let url = val.get("url")
+            .and_then(|v| v.as_str())
+            .or_else(|| gif_src.as_deref())
+            .or_else(|| src.as_deref())
+            .or_else(|| {
+                val.get("media_formats")
+                    .and_then(|mf| mf.get("gif").or_else(|| mf.get("mp4")).or_else(|| mf.get("webm")))
+                    .and_then(|f| f.get("url"))
+                    .and_then(|u| u.as_str())
+            })
+            .or_else(|| {
+                val.get("images")
+                    .and_then(|img| img.get("original"))
+                    .and_then(|o| o.get("url"))
+                    .and_then(|u| u.as_str())
+            })
+            .unwrap_or_default()
+            .to_string();
+
+        // Extrai URL de preview
+        let preview_url = val.get("preview")
+            .and_then(|v| v.as_str())
+            .or_else(|| src.as_deref())
+            .or_else(|| gif_src.as_deref())
+            .or_else(|| {
+                val.get("media_formats")
+                    .and_then(|mf| mf.get("tinygif").or_else(|| mf.get("gif")))
+                    .and_then(|f| f.get("url"))
+                    .and_then(|u| u.as_str())
+            })
+            .or_else(|| {
+                val.get("images")
+                    .and_then(|img| img.get("preview_gif").or_else(|| img.get("fixed_height_small")))
+                    .and_then(|o| o.get("url"))
+                    .and_then(|u| u.as_str())
+            })
+            .unwrap_or(&url)
+            .to_string();
+
+        let dims = if let Some(arr) = val.get("dims").and_then(|v| v.as_array()) {
+            if arr.len() >= 2 {
+                let w = arr[0].as_u64().unwrap_or(220) as u32;
+                let h = arr[1].as_u64().unwrap_or(180) as u32;
+                (w, h)
+            } else {
+                (220, 180)
+            }
+        } else if let Some(dims_val) = val.get("media_formats").and_then(|mf| mf.get("gif")).and_then(|g| g.get("dims")).and_then(|d| d.as_array()) {
+            if dims_val.len() >= 2 {
+                let w = dims_val[0].as_u64().unwrap_or(220) as u32;
+                let h = dims_val[1].as_u64().unwrap_or(180) as u32;
+                (w, h)
+            } else {
+                (220, 180)
+            }
+        } else {
+            (220, 180)
+        };
+
+        let category = val.get("category")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
+            .or_else(|| default_category.map(ToString::to_string));
+
+        Some(TenorGif {
+            id,
+            title,
+            preview_url,
+            url,
+            dims,
+            category,
+            src,
+            gif_src,
+        })
+    }
+
+    /// Processa resposta com GIFs retornando lista de TenorGif
+    pub fn parse_gifs_response(val: &serde_json::Value, default_category: Option<&str>) -> Vec<TenorGif> {
+        let mut gifs = Vec::new();
+
+        if let Some(arr) = val.as_array() {
+            for item in arr {
+                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
+                    gifs.push(gif);
+                }
+            }
+        } else if let Some(arr) = val.get("gifs").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
+                    gifs.push(gif);
+                }
+            }
+        } else if let Some(arr) = val.get("results").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
+                    gifs.push(gif);
+                }
+            }
+        } else if let Some(arr) = val.get("data").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
+                    gifs.push(gif);
+                }
+            }
+        }
+
+        gifs
+    }
+
+    /// Processa categorias de GIFs do Discord
+    pub fn parse_gif_categories_response(val: &serde_json::Value) -> Vec<DiscordGifCategory> {
+        let mut cats = Vec::new();
+        if let Some(arr) = val.get("categories").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
+                    let src = item.get("src").and_then(|v| v.as_str()).map(ToString::to_string);
+                    cats.push(DiscordGifCategory {
+                        name: name.to_string(),
+                        src,
+                    });
+                }
+            }
+        }
+        cats
+    }
+
     // --- Tenor GIF Search & Trending Provider ---
 
     /// Busca GIFs no Tenor ou retorna resultados rápidos do cache/fallback
@@ -794,137 +1168,145 @@ impl MediaCacheManager {
     pub fn curated_tenor_gifs() -> Vec<TenorGif> {
         vec![
             // Trending
-            TenorGif {
-                id: "gif-1".into(),
-                title: "Cat Vibing".into(),
-                preview_url: "https://media.tenor.com/images/9c55b6ce64da0cfab1bc6bfbf165e305/tenor.gif".into(),
-                url: "https://tenor.com/view/cat-vibing-vibing-cat-white-cat-dance-gif-18872583".into(),
-                dims: (220, 180),
-                category: Some("trending".into()),
-            },
-            TenorGif {
-                id: "gif-2".into(),
-                title: "Pop Cat".into(),
-                preview_url: "https://media.tenor.com/images/220800b46377759b6cbba0e44299b8f2/tenor.gif".into(),
-                url: "https://tenor.com/view/pop-cat-mouth-open-gif-19198642".into(),
-                dims: (220, 180),
-                category: Some("trending".into()),
-            },
-            TenorGif {
-                id: "gif-3".into(),
-                title: "Dance Party".into(),
-                preview_url: "https://media.tenor.com/images/4a781b0a8523315aefc0082c9f4d45d9/tenor.gif".into(),
-                url: "https://tenor.com/view/party-parrot-dance-gif-18116315".into(),
-                dims: (220, 180),
-                category: Some("trending".into()),
-            },
-            TenorGif {
-                id: "gif-6".into(),
-                title: "Ferris the Crab".into(),
-                preview_url: "https://media.tenor.com/images/8c4f1c1f7259161a0b322a36b306b3a1/tenor.gif".into(),
-                url: "https://tenor.com/view/ferris-rust-rustlang-gif-23001928".into(),
-                dims: (220, 180),
-                category: Some("trending".into()),
-            },
+            TenorGif::new(
+                "friends-joey-53",
+                "Friends Joey: Yeah Baby!",
+                "https://static.klipy.com/ii/39f2394ae36df6e199be9eb7c9fa1012/c7/d9/zGNkmMep.webp",
+                "https://klipy.com/gifs/friends-joey-53",
+                (220, 180),
+                Some("trending".into()),
+            ),
+            TenorGif::new(
+                "happy-kid-18",
+                "Happy Kid Dance",
+                "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/b4/62/9EnVJQga.webp",
+                "https://klipy.com/gifs/happy-kid-18",
+                (220, 180),
+                Some("trending".into()),
+            ),
+            TenorGif::new(
+                "good-boy-dance",
+                "Good Boy Dance",
+                "https://static.klipy.com/ii/bea85337777ad0e23e63683391435543/67/15/sDOoiW28.webp",
+                "https://klipy.com/gifs/good-boy-dance",
+                (220, 180),
+                Some("trending".into()),
+            ),
+            TenorGif::new(
+                "chatty-cat",
+                "Chatty Cat",
+                "https://static.klipy.com/ii/f87f46a2c5aeaeed4c68910815f73eaf/84/09/8l3Tirpu.webp",
+                "https://klipy.com/gifs/goatplaybanjo-chat-4",
+                (220, 180),
+                Some("trending".into()),
+            ),
+            TenorGif::new(
+                "shocked-cat-12",
+                "Shocked Cat Reaction",
+                "https://static.klipy.com/ii/8ce8357c78ea940b9c2015daf05ce1a5/06/f3/zF3f7d6Q.webp",
+                "https://klipy.com/gifs/shocked-cat-12",
+                (220, 180),
+                Some("trending".into()),
+            ),
             // Anime
-            TenorGif {
-                id: "gif-anime-1".into(),
-                title: "Anime Sparkle".into(),
-                preview_url: "https://media.tenor.com/images/anime_sparkle.gif".into(),
-                url: "https://tenor.com/view/anime-sparkle-eyes-excited-gif-17283921".into(),
-                dims: (220, 180),
-                category: Some("anime".into()),
-            },
-            TenorGif {
-                id: "gif-anime-2".into(),
-                title: "Naruto Run".into(),
-                preview_url: "https://media.tenor.com/images/naruto_run.gif".into(),
-                url: "https://tenor.com/view/naruto-run-fast-anime-gif-15201948".into(),
-                dims: (220, 180),
-                category: Some("anime".into()),
-            },
-            TenorGif {
-                id: "gif-anime-3".into(),
-                title: "Sailor Moon Dance".into(),
-                preview_url: "https://media.tenor.com/images/sailor_dance.gif".into(),
-                url: "https://tenor.com/view/sailor-moon-dance-cute-gif-19283741".into(),
-                dims: (220, 180),
-                category: Some("anime".into()),
-            },
-            TenorGif {
-                id: "gif-anime-4".into(),
-                title: "Pikachu Shocked".into(),
-                preview_url: "https://media.tenor.com/images/pikachu_shock.gif".into(),
-                url: "https://tenor.com/view/pikachu-shocked-pokemon-surprise-gif-12938475".into(),
-                dims: (220, 180),
-                category: Some("anime".into()),
-            },
+            TenorGif::new(
+                "osaka-spin-3",
+                "Osaka Spin Anime",
+                "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/87/ad/bjdoQJNtgeCQ.webp",
+                "https://klipy.com/gifs/osaka-spin-3",
+                (220, 180),
+                Some("anime".into()),
+            ),
+            TenorGif::new(
+                "higuruma-jjk-9",
+                "Higuruma JJK Anime",
+                "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/53/5b/90r68Q75mh396n.webp",
+                "https://klipy.com/gifs/higuruma-jjk-9",
+                (220, 180),
+                Some("anime".into()),
+            ),
+            TenorGif::new(
+                "konata-lucky-star",
+                "Konata Lucky Star",
+                "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/c2/91/Cq59F1XEwK7JLwN.webp",
+                "https://klipy.com/gifs/konata-lucky-star-22",
+                (220, 180),
+                Some("anime".into()),
+            ),
+            TenorGif::new(
+                "yuki-anime",
+                "Yuki Anime",
+                "https://static.klipy.com/ii/4493325008d34b7bf8cd6813cd5c1619/12/a3/znR5NVZp2mhY8v.webp",
+                "https://klipy.com/gifs/yuki-13",
+                (220, 180),
+                Some("anime".into()),
+            ),
             // Reactions
-            TenorGif {
-                id: "gif-7".into(),
-                title: "Mind Blown".into(),
-                preview_url: "https://media.tenor.com/images/07d889ea49d799059f0f9b6c0b3967b0/tenor.gif".into(),
-                url: "https://tenor.com/view/mind-blown-tim-and-eric-gif-5374492".into(),
-                dims: (220, 180),
-                category: Some("reactions".into()),
-            },
-            TenorGif {
-                id: "gif-5".into(),
-                title: "Confused Travolta".into(),
-                preview_url: "https://media.tenor.com/images/d3f7f18b323789b52a5c4dfbd6621415/tenor.gif".into(),
-                url: "https://tenor.com/view/confused-travolta-where-gif-5432092".into(),
-                dims: (220, 180),
-                category: Some("reactions".into()),
-            },
-            TenorGif {
-                id: "gif-react-3".into(),
-                title: "Epic Facepalm".into(),
-                preview_url: "https://media.tenor.com/images/facepalm.gif".into(),
-                url: "https://tenor.com/view/facepalm-disappointed-sigh-gif-8291038".into(),
-                dims: (220, 180),
-                category: Some("reactions".into()),
-            },
-            TenorGif {
-                id: "gif-react-4".into(),
-                title: "Laughing Tears".into(),
-                preview_url: "https://media.tenor.com/images/laughing_tears.gif".into(),
-                url: "https://tenor.com/view/laughing-lol-crying-tears-gif-9283741".into(),
-                dims: (220, 180),
-                category: Some("reactions".into()),
-            },
+            TenorGif::new(
+                "prince-lol",
+                "Laughing Out Loud LOL",
+                "https://static.klipy.com/ii/c3a19a0b747a76e98651f2b9a3cca5ff/8a/b1/RalNQInL.webp",
+                "https://klipy.com/gifs/prince-shirleytemple",
+                (220, 180),
+                Some("reactions".into()),
+            ),
+            TenorGif::new(
+                "haha-dicaprio",
+                "Leonardo DiCaprio Laughing",
+                "https://static.klipy.com/ii/e293a233a303a98e471f78d04e13a1b0/ac/4d/GtctZLgp.webp",
+                "https://klipy.com/gifs/haha-117",
+                (220, 180),
+                Some("reactions".into()),
+            ),
+            TenorGif::new(
+                "lmfao-too-funny",
+                "Too Funny Laughing",
+                "https://static.klipy.com/ii/935d7ab9d8c6202580a668421940ec81/c2/4a/KMIZxbrI.webp",
+                "https://klipy.com/gifs/lmfao-too-funny",
+                (220, 180),
+                Some("reactions".into()),
+            ),
+            TenorGif::new(
+                "big-lol",
+                "Big LOL Tears of Joy",
+                "https://static.klipy.com/ii/ce286d05b8e1a47cd4f32b0e1b6dec0e/5e/4c/LNrSbHKn.webp",
+                "https://klipy.com/gifs/big-lol",
+                (220, 180),
+                Some("reactions".into()),
+            ),
             // Memes
-            TenorGif {
-                id: "gif-8".into(),
-                title: "This Is Fine".into(),
-                preview_url: "https://media.tenor.com/images/b4895696ee8c31cb801efea45c854190/tenor.gif".into(),
-                url: "https://tenor.com/view/this-is-fine-fire-dog-burning-gif-15104273".into(),
-                dims: (220, 180),
-                category: Some("memes".into()),
-            },
-            TenorGif {
-                id: "gif-4".into(),
-                title: "Rick Roll".into(),
-                preview_url: "https://media.tenor.com/images/42c38865c63567634f5904dfb3cf7d5c/tenor.gif".into(),
-                url: "https://tenor.com/view/rickroll-rick-astley-never-gonna-give-you-up-gif-18698103".into(),
-                dims: (220, 180),
-                category: Some("memes".into()),
-            },
-            TenorGif {
-                id: "gif-meme-3".into(),
-                title: "Gigachad".into(),
-                preview_url: "https://media.tenor.com/images/gigachad.gif".into(),
-                url: "https://tenor.com/view/gigachad-chad-based-gif-24819283".into(),
-                dims: (220, 180),
-                category: Some("memes".into()),
-            },
-            TenorGif {
-                id: "gif-meme-4".into(),
-                title: "Doge Wow".into(),
-                preview_url: "https://media.tenor.com/images/doge_wow.gif".into(),
-                url: "https://tenor.com/view/doge-wow-much-shibe-gif-19283719".into(),
-                dims: (220, 180),
-                category: Some("memes".into()),
-            },
+            TenorGif::new(
+                "cute-cat-meow",
+                "Adorable Kitten Meowing",
+                "https://static.klipy.com/ii/d7aec6f6f171607374b2065c836f92f4/6e/7f/aTfZJmtF.webp",
+                "https://klipy.com/gifs/cute-cat-58",
+                (220, 180),
+                Some("memes".into()),
+            ),
+            TenorGif::new(
+                "happy-cat-meme",
+                "Happy Cat Dance",
+                "https://static.klipy.com/ii/0db853ad1d7f196f1b7a6eb9ab617a5a/c3/0d/8nIwe6CIjCbGYFPLjynq.webp",
+                "https://klipy.com/gifs/happy-cat-f7u",
+                (220, 180),
+                Some("memes".into()),
+            ),
+            TenorGif::new(
+                "dance-moves-195",
+                "Boy Classroom Dance",
+                "https://static.klipy.com/ii/4e7bea9f7a3371424e6c16ebc93252fe/5f/a4/qJ3WGp6XmrV9gLqay.webp",
+                "https://klipy.com/gifs/dance-moves-195",
+                (220, 180),
+                Some("memes".into()),
+            ),
+            TenorGif::new(
+                "tina-dance",
+                "Tina Dance Meme",
+                "https://static.klipy.com/ii/e293a233a303a98e471f78d04e13a1b0/1d/19/M0IWP9pt.webp",
+                "https://klipy.com/gifs/tina-dance",
+                (220, 180),
+                Some("memes".into()),
+            ),
         ]
     }
 
@@ -992,7 +1374,7 @@ impl MediaCacheManager {
 
     // --- Sticker Packs Defaults Provider ---
 
-    /// Lista os pacotes padrão de figurinhas (Wumpus, Clyde, Nelly, etc.)
+    /// Lista os pacotes padrão de figurinhas oficiais do Discord
     pub fn get_default_sticker_packs() -> Vec<StickerPack> {
         vec![
             StickerPack {
@@ -1003,7 +1385,7 @@ impl MediaCacheManager {
                 banner_asset_id: None,
                 stickers: vec![
                     DiscordSticker {
-                        id: "749054660769218631".into(),
+                        id: "781291131828699156".into(),
                         pack_id: Some("847202553061146644".into()),
                         name: "Wumpus Wave".into(),
                         description: Some("Wumpus acenando alegremente".into()),
@@ -1013,7 +1395,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218632".into(),
+                        id: "781291442961383434".into(),
                         pack_id: Some("847202553061146644".into()),
                         name: "Wumpus Heart".into(),
                         description: Some("Wumpus com coração de amor".into()),
@@ -1023,7 +1405,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218633".into(),
+                        id: "781291606493495306".into(),
                         pack_id: Some("847202553061146644".into()),
                         name: "Wumpus GG".into(),
                         description: Some("Wumpus comemorando vitória GG".into()),
@@ -1033,7 +1415,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218634".into(),
+                        id: "781321379546398740".into(),
                         pack_id: Some("847202553061146644".into()),
                         name: "Wumpus Sad".into(),
                         description: Some("Wumpus triste e choroso".into()),
@@ -1043,7 +1425,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218635".into(),
+                        id: "809207198856904764".into(),
                         pack_id: Some("847202553061146644".into()),
                         name: "Wumpus Hype".into(),
                         description: Some("Wumpus animado e eufórico".into()),
@@ -1053,7 +1435,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218636".into(),
+                        id: "809207399054442526".into(),
                         pack_id: Some("847202553061146644".into()),
                         name: "Wumpus Sip".into(),
                         description: Some("Wumpus tomando café relaxado".into()),
@@ -1072,7 +1454,7 @@ impl MediaCacheManager {
                 banner_asset_id: None,
                 stickers: vec![
                     DiscordSticker {
-                        id: "749054660769218641".into(),
+                        id: "809207198856904764".into(),
                         pack_id: Some("847202553061146646".into()),
                         name: "Clyde Hello".into(),
                         description: Some("Clyde dando olá".into()),
@@ -1082,7 +1464,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218642".into(),
+                        id: "809207265092698112".into(),
                         pack_id: Some("847202553061146646".into()),
                         name: "Clyde Thumbs Up".into(),
                         description: Some("Clyde fazendo joinha".into()),
@@ -1092,7 +1474,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218643".into(),
+                        id: "809207315822936064".into(),
                         pack_id: Some("847202553061146646".into()),
                         name: "Clyde Thinking".into(),
                         description: Some("Clyde ponderando com processador ativo".into()),
@@ -1102,7 +1484,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218644".into(),
+                        id: "809207399054442526".into(),
                         pack_id: Some("847202553061146646".into()),
                         name: "Clyde Cool".into(),
                         description: Some("Clyde com óculos de sol estiloso".into()),
@@ -1112,7 +1494,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218645".into(),
+                        id: "781291131828699156".into(),
                         pack_id: Some("847202553061146646".into()),
                         name: "Clyde Shrug".into(),
                         description: Some("Clyde dando de ombros".into()),
@@ -1131,7 +1513,7 @@ impl MediaCacheManager {
                 banner_asset_id: None,
                 stickers: vec![
                     DiscordSticker {
-                        id: "749054660769218651".into(),
+                        id: "818596923887583302".into(),
                         pack_id: Some("847202553061146648".into()),
                         name: "Nelly Heart".into(),
                         description: Some("Nelly abraçando um coração brilhante".into()),
@@ -1141,7 +1523,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218652".into(),
+                        id: "818596976521248819".into(),
                         pack_id: Some("847202553061146648".into()),
                         name: "Nelly Peek".into(),
                         description: Some("Nelly espiando com curiosidade".into()),
@@ -1151,7 +1533,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218653".into(),
+                        id: "818597244017049652".into(),
                         pack_id: Some("847202553061146648".into()),
                         name: "Nelly Nom".into(),
                         description: Some("Nelly comendo sementinha gostosa".into()),
@@ -1161,7 +1543,7 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218654".into(),
+                        id: "818597355619483688".into(),
                         pack_id: Some("847202553061146648".into()),
                         name: "Nelly Dance".into(),
                         description: Some("Nelly dançando alegremente".into()),
@@ -1171,11 +1553,256 @@ impl MediaCacheManager {
                         guild_id: None,
                     },
                     DiscordSticker {
-                        id: "749054660769218655".into(),
+                        id: "809207399054442526".into(),
                         pack_id: Some("847202553061146648".into()),
                         name: "Nelly Sleepy".into(),
                         description: Some("Nelly dormindo quentinha".into()),
                         tags: "sleep, tired, zzz, nelly".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                ],
+            },
+            StickerPack {
+                id: "847201503668207738".into(),
+                name: "Cheerful Choco".into(),
+                sku_id: "847201503668207739".into(),
+                description: "O adorável Choco expressando sentimentos!".into(),
+                banner_asset_id: None,
+                stickers: vec![
+                    DiscordSticker {
+                        id: "781291131828699156".into(),
+                        pack_id: Some("847201503668207738".into()),
+                        name: "Wave".into(),
+                        description: Some("Choco dando olá".into()),
+                        tags: "wave, hello, hi, choco".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "781291442961383434".into(),
+                        pack_id: Some("847201503668207738".into()),
+                        name: "Sing".into(),
+                        description: Some("Choco cantando alegremente".into()),
+                        tags: "sing, music, choco".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "781291606493495306".into(),
+                        pack_id: Some("847201503668207738".into()),
+                        name: "On My Way".into(),
+                        description: Some("Choco correndo a caminho".into()),
+                        tags: "omw, run, rush, choco".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "781321379546398740".into(),
+                        pack_id: Some("847201503668207738".into()),
+                        name: "Eating".into(),
+                        description: Some("Choco comendo um lanchinho".into()),
+                        tags: "eat, food, hungry, choco".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                ],
+            },
+            StickerPack {
+                id: "809185339213611064".into(),
+                name: "Hammy Ham".into(),
+                sku_id: "809185339213611065".into(),
+                description: "Hammy, o hamster mais fofo e expressivo!".into(),
+                banner_asset_id: None,
+                stickers: vec![
+                    DiscordSticker {
+                        id: "809207198856904764".into(),
+                        pack_id: Some("809185339213611064".into()),
+                        name: "Cheer".into(),
+                        description: Some("Hammy torcendo animado".into()),
+                        tags: "cheer, yay, hammy".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "809207265092698112".into(),
+                        pack_id: Some("809185339213611064".into()),
+                        name: "Nervous".into(),
+                        description: Some("Hammy suando de nervosismo".into()),
+                        tags: "sweat, nervous, hammy".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "809207315822936064".into(),
+                        pack_id: Some("809185339213611064".into()),
+                        name: "Glare".into(),
+                        description: Some("Hammy encarando bravo".into()),
+                        tags: "glare, stare, angry, hammy".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "809207399054442526".into(),
+                        pack_id: Some("809185339213611064".into()),
+                        name: "Relax".into(),
+                        description: Some("Hammy relaxando sossegado".into()),
+                        tags: "relax, chill, hammy".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                ],
+            },
+            StickerPack {
+                id: "818534168933695490".into(),
+                name: "Smug Shiba".into(),
+                sku_id: "818534168933695491".into(),
+                description: "O clássico cãozinho Shiba Inu e seus memes!".into(),
+                banner_asset_id: None,
+                stickers: vec![
+                    DiscordSticker {
+                        id: "818596923887583302".into(),
+                        pack_id: Some("818534168933695490".into()),
+                        name: "Anime".into(),
+                        description: Some("Shiba brilhando como anime".into()),
+                        tags: "anime, shiba, sparkle".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "818596976521248819".into(),
+                        pack_id: Some("818534168933695490".into()),
+                        name: "Angry".into(),
+                        description: Some("Shiba com raiva".into()),
+                        tags: "angry, rage, doge, shiba".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "818597244017049652".into(),
+                        pack_id: Some("818534168933695490".into()),
+                        name: "Dab".into(),
+                        description: Some("Shiba fazendo dab estiloso".into()),
+                        tags: "dab, cool, swag, shiba".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "818597355619483688".into(),
+                        pack_id: Some("818534168933695490".into()),
+                        name: "OMG".into(),
+                        description: Some("Shiba chocado OMG".into()),
+                        tags: "omg, wow, shocked, shiba".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                ],
+            },
+            StickerPack {
+                id: "771803753954279446".into(),
+                name: "Lonely Leif".into(),
+                sku_id: "771803753954279447".into(),
+                description: "Leif, a plantinha mais expressiva do Discord".into(),
+                banner_asset_id: None,
+                stickers: vec![
+                    DiscordSticker {
+                        id: "772963467622744075".into(),
+                        pack_id: Some("771803753954279446".into()),
+                        name: "Frustrated".into(),
+                        description: Some("Leif frustrado e indignado".into()),
+                        tags: "frustrated, sad, leif".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "772963523630071828".into(),
+                        pack_id: Some("771803753954279446".into()),
+                        name: "Blank".into(),
+                        description: Some("Leif com olhar vazio".into()),
+                        tags: "blank, stare, leif".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "772963562553081886".into(),
+                        pack_id: Some("771803753954279446".into()),
+                        name: "Smile".into(),
+                        description: Some("Leif sorrindo gentilmente".into()),
+                        tags: "smile, happy, leif".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "772970847232458782".into(),
+                        pack_id: Some("771803753954279446".into()),
+                        name: "Proud".into(),
+                        description: Some("Leif orgulhoso e confiante".into()),
+                        tags: "proud, celebrate, leif".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                ],
+            },
+            StickerPack {
+                id: "831563211706204223".into(),
+                name: "Melty Chihuahua".into(),
+                sku_id: "831563211706204224".into(),
+                description: "O pequeno chihuahua derretendo de emoção".into(),
+                banner_asset_id: None,
+                stickers: vec![
+                    DiscordSticker {
+                        id: "831569193391489054".into(),
+                        pack_id: Some("831563211706204223".into()),
+                        name: "Oh No".into(),
+                        description: Some("Chihuahua preocupado Oh No".into()),
+                        tags: "oh no, worry, dog".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "831569335696228352".into(),
+                        pack_id: Some("831563211706204223".into()),
+                        name: "Cry".into(),
+                        description: Some("Chihuahua chorando copiosamente".into()),
+                        tags: "cry, sad, tears, dog".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "831569414746144798".into(),
+                        pack_id: Some("831563211706204223".into()),
+                        name: "Help".into(),
+                        description: Some("Chihuahua pedindo socorro".into()),
+                        tags: "help, distress, dog".into(),
+                        format_type: StickerFormatType::Png,
+                        available: true,
+                        guild_id: None,
+                    },
+                    DiscordSticker {
+                        id: "831569534459576381".into(),
+                        pack_id: Some("831563211706204223".into()),
+                        name: "Bye".into(),
+                        description: Some("Chihuahua dando tchauzinho".into()),
+                        tags: "bye, leave, wave, dog".into(),
                         format_type: StickerFormatType::Png,
                         available: true,
                         guild_id: None,
@@ -1406,5 +2033,103 @@ mod tests {
         let wumpus_pack = packs.iter().find(|p| p.name == "Wumpus Adventures").unwrap();
         assert!(wumpus_pack.stickers.len() >= 4);
         assert_eq!(wumpus_pack.stickers[0].format_type, StickerFormatType::Png);
+    }
+
+    #[tokio::test]
+    async fn test_favorite_stickers_persistence() {
+        let temp_dir = std::env::temp_dir().join(format!("discord_rs_fav_stickers_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let mgr = MediaCacheManager::with_root(&temp_dir);
+
+        let sticker = DiscordSticker {
+            id: "sticker_fav_123".into(),
+            pack_id: None,
+            name: "Super Wumpus".into(),
+            description: Some("Favorite Wumpus".into()),
+            tags: "wumpus, favorite".into(),
+            format_type: StickerFormatType::Png,
+            available: true,
+            guild_id: None,
+        };
+
+        mgr.add_favorite_sticker(sticker.clone()).await.unwrap();
+
+        let favs = mgr.get_favorite_stickers().await;
+        assert_eq!(favs.len(), 1);
+        assert_eq!(favs[0].id, "sticker_fav_123");
+
+        // Test reload from disk
+        let mgr2 = MediaCacheManager::with_root(&temp_dir);
+        let favs2 = mgr2.get_favorite_stickers().await;
+        assert_eq!(favs2.len(), 1);
+        assert_eq!(favs2[0].name, "Super Wumpus");
+
+        // Test aggregation in get_all_stickers
+        let guild_stickers = vec![
+            DiscordSticker {
+                id: "guild_sticker_1".into(),
+                pack_id: None,
+                name: "Guild Crab".into(),
+                description: None,
+                tags: "crab".into(),
+                format_type: StickerFormatType::Gif,
+                available: true,
+                guild_id: Some("guild_123".into()),
+            }
+        ];
+        let all = mgr2.get_all_stickers(&guild_stickers).await;
+        assert!(all.iter().any(|s| s.id == "sticker_fav_123"));
+        assert!(all.iter().any(|s| s.id == "guild_sticker_1"));
+        assert!(all.iter().any(|s| s.name == "Wumpus Wave")); // from default packs
+
+        // Test removal
+        mgr2.remove_favorite_sticker("sticker_fav_123").await.unwrap();
+        let favs3 = mgr2.get_favorite_stickers().await;
+        assert!(favs3.is_empty());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_sticker_format_type_serde() {
+        let json_int = "1";
+        let fmt: StickerFormatType = serde_json::from_str(json_int).unwrap();
+        assert_eq!(fmt, StickerFormatType::Png);
+
+        let json_str = "\"apng\"";
+        let fmt2: StickerFormatType = serde_json::from_str(json_str).unwrap();
+        assert_eq!(fmt2, StickerFormatType::Apng);
+
+        let serialized = serde_json::to_string(&fmt2).unwrap();
+        assert_eq!(serialized, "2");
+    }
+
+    #[test]
+    fn test_parse_gifs_discord_format() {
+        let discord_json = serde_json::json!({
+            "categories": [
+                { "name": "trending", "src": "https://media.discord.com/cat.gif" }
+            ],
+            "gifs": [
+                {
+                    "id": "discord_gif_1",
+                    "title": "Cool Dancing Cat",
+                    "url": "https://media.discord.com/cat.mp4",
+                    "src": "https://media.discord.com/cat.webm",
+                    "gif_src": "https://media.discord.com/cat.gif",
+                    "preview": "https://media.discord.com/cat_preview.gif"
+                }
+            ]
+        });
+
+        let gifs = MediaCacheManager::parse_gifs_response(&discord_json, Some("trending"));
+        assert_eq!(gifs.len(), 1);
+        assert_eq!(gifs[0].id, "discord_gif_1");
+        assert_eq!(gifs[0].title, "Cool Dancing Cat");
+        assert_eq!(gifs[0].url, "https://media.discord.com/cat.mp4");
+        assert_eq!(gifs[0].preview_url, "https://media.discord.com/cat_preview.gif");
+
+        let cats = MediaCacheManager::parse_gif_categories_response(&discord_json);
+        assert_eq!(cats.len(), 1);
+        assert_eq!(cats[0].name, "trending");
     }
 }

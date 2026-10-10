@@ -11,17 +11,19 @@ use crate::chat::editor::{
     EditorTextChangeCallback,
 };
 use crate::chat::message_list::{
-    build_chat_list_items, render_date_separator_element, render_message_row,
-    render_welcome_banner, ChatListItem, MessageActionCallback, MessageRowConfig,
+    build_chat_list_items, render_date_separator_element, render_message_context_menu,
+    render_message_row, render_welcome_banner, ChatListItem, MessageActionCallback,
+    MessageActionPosCallback, MessageContextMenuConfig, MessageRowConfig,
 };
 use crate::chat::media_picker::{
-    MediaPickerConfig, MediaPickerModal, MediaPickerTab,
+    MediaPickerConfig, MediaPickerGuildSection, MediaPickerModal, MediaPickerTab,
     OnCloseMediaPickerCallback, OnPlaySoundCallback, OnSearchQueryCallback,
     OnSelectEmojiCallback, OnSelectGifCallback, OnSelectGifCategoryCallback,
-    OnSelectStickerCallback, OnTabChangeCallback,
+    OnSelectGuildCallback, OnSelectStickerCallback, OnTabChangeCallback,
 };
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
+use crate::protocol::media_cache::MediaCacheManager;
 use crate::tokens::colors::*;
 
 /// Reactive Chat View managing real messages and input state for the active channel.
@@ -39,16 +41,24 @@ pub struct ChatView {
     pub media_picker_open: bool,
     pub media_picker_tab: MediaPickerTab,
     pub media_picker_search: String,
+    pub media_picker_react_message_id: Option<String>,
+    pub media_picker_focus_handle: FocusHandle,
+    pub media_picker_selected_guild_id: Option<String>,
+    pub media_picker_list_state: ListState,
+    pub active_context_menu: Option<(String, Point<Pixels>)>,
 }
 
 impl ChatView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let search_focus_handle = cx.focus_handle();
+        let media_picker_focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
         // Virtual ListState configured with bottom alignment (canonical chat stream)
         // and 250px overdraw to eliminate blank flashes during 144+ FPS scrolling
         let list_state = ListState::new(0, ListAlignment::Bottom, px(250.0));
+        // Top-aligned ListState for rich media picker popup with 150px overdraw windowing
+        let media_picker_list_state = ListState::new(0, ListAlignment::Top, px(150.0));
         cx.observe(&state, |_this, _state, cx| {
             cx.notify();
         })
@@ -61,6 +71,7 @@ impl ChatView {
             typing_users: Vec::new(),
             focus_handle,
             search_focus_handle,
+            media_picker_focus_handle,
             scroll_handle,
             list_state,
             last_channel_id: None,
@@ -68,6 +79,10 @@ impl ChatView {
             media_picker_open: false,
             media_picker_tab: MediaPickerTab::Emojis,
             media_picker_search: String::new(),
+            media_picker_react_message_id: None,
+            media_picker_selected_guild_id: None,
+            media_picker_list_state,
+            active_context_menu: None,
         }
     }
 
@@ -138,14 +153,21 @@ impl Render for ChatView {
         let app_entity = self.state.clone();
         let self_entity = cx.entity().clone();
 
-        // 1. Message Action: React (quick heart)
-        let cid_for_react = channel_id.clone();
+        // 1. Message Action: React -> opens emoji picker for that specific message
+        let self_for_react = self_entity.clone();
         let app_for_react = app_entity.clone();
-        let on_react: Option<MessageActionCallback> = Some(Arc::new(move |message_id: &str, _window: &mut Window, cx: &mut App| {
+        let on_react: Option<MessageActionCallback> = Some(Arc::new(move |message_id: &str, window: &mut Window, cx: &mut App| {
             let msg_id = message_id.to_string();
-            let cid = cid_for_react.clone();
-            app_for_react.update(cx, |state, cx| {
-                state.add_reaction_to_message(&cid, &msg_id, "❤️");
+            app_for_react.update(cx, |state, _cx| {
+                state.sync_guild_media();
+            });
+            self_for_react.update(cx, |this, cx| {
+                this.media_picker_open = true;
+                this.media_picker_tab = MediaPickerTab::Emojis;
+                this.media_picker_react_message_id = Some(msg_id);
+                this.media_picker_list_state.reset(0);
+                this.active_context_menu = None;
+                window.focus(&this.media_picker_focus_handle);
                 cx.notify();
             });
         }));
@@ -181,19 +203,36 @@ impl Render for ChatView {
             });
         }));
 
-        // 4. Add Reaction (+) button
-        let cid_for_add_rx = channel_id.clone();
+        // 4. Add Reaction (+) button -> opens emoji picker for that specific message
+        let self_for_add_rx = self_entity.clone();
         let app_for_add_rx = app_entity.clone();
-        let on_add_reaction: Option<AddReactionCallback> = Some(Arc::new(move |message_id: &str, _window: &mut Window, cx: &mut App| {
+        let on_add_reaction: Option<AddReactionCallback> = Some(Arc::new(move |message_id: &str, window: &mut Window, cx: &mut App| {
             let msg_id = message_id.to_string();
-            let cid = cid_for_add_rx.clone();
-            app_for_add_rx.update(cx, |state, cx| {
-                state.add_reaction_to_message(&cid, &msg_id, "👍");
+            app_for_add_rx.update(cx, |state, _cx| {
+                state.sync_guild_media();
+            });
+            self_for_add_rx.update(cx, |this, cx| {
+                this.media_picker_open = true;
+                this.media_picker_tab = MediaPickerTab::Emojis;
+                this.media_picker_react_message_id = Some(msg_id);
+                this.media_picker_list_state.reset(0);
+                this.active_context_menu = None;
+                window.focus(&this.media_picker_focus_handle);
                 cx.notify();
             });
         }));
 
-        // 5. Send message
+        // 5. More Action: (•••) button -> opens message context menu
+        let self_for_more = self_entity.clone();
+        let on_more: Option<MessageActionPosCallback> = Some(Arc::new(move |message_id: &str, pos: Point<Pixels>, _window: &mut Window, cx: &mut App| {
+            let msg_id = message_id.to_string();
+            self_for_more.update(cx, |this, cx| {
+                this.active_context_menu = Some((msg_id, pos));
+                cx.notify();
+            });
+        }));
+
+        // 6. Send message
         let cid_for_send = channel_id.clone();
         let app_for_send = app_entity.clone();
         let self_for_send = self_entity.clone();
@@ -223,7 +262,7 @@ impl Render for ChatView {
             });
         }));
 
-        // 6. Dismiss / Cancel Reply
+        // 7. Dismiss / Cancel Reply
         let self_for_cancel = self_entity.clone();
         let on_cancel_reply: Option<EditorActionCallback> = Some(Arc::new(move |_window: &mut Window, cx: &mut App| {
             self_for_cancel.update(cx, |this, cx| {
@@ -232,7 +271,7 @@ impl Render for ChatView {
             });
         }));
 
-        // 7. Text change (live typing synchronization)
+        // 8. Text change (live typing synchronization)
         let self_for_text_change = self_entity.clone();
         let on_text_change: Option<EditorTextChangeCallback> = Some(Arc::new(move |new_text: &str, _window: &mut Window, cx: &mut App| {
             let t = new_text.to_string();
@@ -249,6 +288,7 @@ impl Render for ChatView {
         let app_entity_list = app_entity.clone();
         let on_react_item = on_react.clone();
         let on_reply_item = on_reply.clone();
+        let on_more_item = on_more.clone();
         let on_rx_click_item = on_reaction_click.clone();
         let on_add_rx_item = on_add_reaction.clone();
 
@@ -275,6 +315,7 @@ impl Render for ChatView {
                                 role_color: None,
                                 on_react: on_react_item.clone(),
                                 on_reply: on_reply_item.clone(),
+                                on_more: on_more_item.clone(),
                                 on_reaction_click: on_rx_click_item.clone(),
                                 on_add_reaction: on_add_rx_item.clone(),
                             },
@@ -326,39 +367,59 @@ impl Render for ChatView {
 
         // 8. Rich Media Picker Callbacks (GIF, Sticker, Emoji)
         let self_for_gif = self_entity.clone();
-        let on_gif: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+        let app_for_gif = app_entity.clone();
+        let on_gif: Option<EditorActionCallback> = Some(Arc::new(move |window, cx| {
+            app_for_gif.update(cx, |state, _cx| {
+                state.sync_guild_media();
+            });
             self_for_gif.update(cx, |this, cx| {
                 if this.media_picker_open && this.media_picker_tab == MediaPickerTab::Gifs {
                     this.media_picker_open = false;
                 } else {
                     this.media_picker_open = true;
                     this.media_picker_tab = MediaPickerTab::Gifs;
+                    this.media_picker_list_state.reset(0);
+                    window.focus(&this.media_picker_focus_handle);
                 }
                 cx.notify();
             });
         }));
 
         let self_for_sticker = self_entity.clone();
-        let on_sticker: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+        let app_for_sticker = app_entity.clone();
+        let on_sticker: Option<EditorActionCallback> = Some(Arc::new(move |window, cx| {
+            app_for_sticker.update(cx, |state, _cx| {
+                state.sync_guild_media();
+            });
             self_for_sticker.update(cx, |this, cx| {
                 if this.media_picker_open && this.media_picker_tab == MediaPickerTab::Stickers {
                     this.media_picker_open = false;
                 } else {
                     this.media_picker_open = true;
                     this.media_picker_tab = MediaPickerTab::Stickers;
+                    this.media_picker_list_state.reset(0);
+                    window.focus(&this.media_picker_focus_handle);
                 }
                 cx.notify();
             });
         }));
 
         let self_for_emoji = self_entity.clone();
-        let on_emoji: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+        let app_for_emoji = app_entity.clone();
+        let on_emoji: Option<EditorActionCallback> = Some(Arc::new(move |window, cx| {
+            app_for_emoji.update(cx, |state, _cx| {
+                state.sync_guild_media();
+            });
             self_for_emoji.update(cx, |this, cx| {
                 if this.media_picker_open && this.media_picker_tab == MediaPickerTab::Emojis {
                     this.media_picker_open = false;
+                    this.media_picker_react_message_id = None;
                 } else {
                     this.media_picker_open = true;
                     this.media_picker_tab = MediaPickerTab::Emojis;
+                    this.media_picker_react_message_id = None;
+                    this.media_picker_list_state.reset(0);
+                    window.focus(&this.media_picker_focus_handle);
                 }
                 cx.notify();
             });
@@ -369,6 +430,7 @@ impl Render for ChatView {
             let on_close: Option<OnCloseMediaPickerCallback> = Some(Arc::new(move |_win, cx| {
                 self_close.update(cx, |this, cx| {
                     this.media_picker_open = false;
+                    this.media_picker_react_message_id = None;
                     cx.notify();
                 });
             }));
@@ -377,20 +439,35 @@ impl Render for ChatView {
             let on_tab_change: Option<OnTabChangeCallback> = Some(Arc::new(move |tab, _win, cx| {
                 self_tab.update(cx, |this, cx| {
                     this.media_picker_tab = tab;
+                    this.media_picker_list_state.reset(0);
                     cx.notify();
                 });
             }));
 
             let self_emoji = self_entity.clone();
             let app_emoji = app_entity.clone();
+            let cid_emoji = channel_id.clone();
             let on_select_emoji: Option<OnSelectEmojiCallback> = Some(Arc::new(move |emoji, _win, cx| {
                 let em = emoji.to_string();
+                let _cid = cid_emoji.clone();
                 self_emoji.update(cx, |this, cx| {
-                    this.typed_text.push_str(&em);
+                    if let Some(target_msg_id) = this.media_picker_react_message_id.take() {
+                        let target_id = target_msg_id.clone();
+                        let em_clone = em.clone();
+                        app_emoji.update(cx, |state, cx| {
+                            state.add_reaction(&target_id, &em_clone);
+                            state.record_emoji_usage(&em_clone);
+                            cx.notify();
+                        });
+                        this.media_picker_open = false;
+                    } else {
+                        this.typed_text.push_str(&em);
+                        let em_clone = em.clone();
+                        app_emoji.update(cx, |state, _cx| {
+                            state.record_emoji_usage(&em_clone);
+                        });
+                    }
                     cx.notify();
-                });
-                app_emoji.update(cx, |state, _cx| {
-                    state.record_emoji_usage(&em);
                 });
             }));
 
@@ -456,6 +533,7 @@ impl Render for ChatView {
                 let q = query.to_string();
                 self_search.update(cx, |this, cx| {
                     this.media_picker_search = q;
+                    this.media_picker_list_state.reset(0);
                     cx.notify();
                 });
             }));
@@ -465,35 +543,215 @@ impl Render for ChatView {
                 let c = cat.to_string();
                 self_cat.update(cx, |this, cx| {
                     this.media_picker_search = c;
+                    this.media_picker_list_state.reset(0);
                     cx.notify();
                 });
             }));
 
+            let self_guild = self_entity.clone();
+            let on_select_guild: Option<OnSelectGuildCallback> = Some(Arc::new(move |gid_opt, _win, cx| {
+                let next_gid = gid_opt.map(|s| s.to_string());
+                self_guild.update(cx, |this, cx| {
+                    this.media_picker_selected_guild_id = next_gid;
+                    this.media_picker_list_state.reset(0);
+                    cx.notify();
+                });
+            }));
+
+            let guild_sections: Vec<MediaPickerGuildSection> = app_state
+                .guilds
+                .iter()
+                .map(|g| MediaPickerGuildSection {
+                    guild_id: g.id.clone(),
+                    guild_name: g.name.clone(),
+                    icon_url: g.icon_url(),
+                    acronym: g.acronym.clone(),
+                    emojis: g.emojis.clone(),
+                    stickers: g.stickers.clone(),
+                })
+                .collect();
+
+            let is_picker_focused = self.media_picker_focus_handle.is_focused(window);
+
+            let self_dismiss_picker = self_entity.clone();
             Some(
                 div()
                     .absolute()
-                    .bottom(px(68.0))
-                    .right(px(16.0))
-                    .child(MediaPickerModal::render(MediaPickerConfig {
-                        active_tab: self.media_picker_tab,
-                        search_query: self.media_picker_search.clone(),
-                        recent_emojis: Vec::new(),
-                        custom_emojis: Vec::new(),
-                        stickers: Vec::new(),
-                        gifs: Vec::new(),
-                        sounds: Vec::new(),
-                        hovered_info: None,
-                        on_select_emoji,
-                        on_select_sticker,
-                        on_select_gif,
-                        on_play_sound,
-                        on_send_sound,
-                        on_close,
-                        on_tab_change,
-                        on_search_query,
-                        on_select_gif_category,
-                    }))
+                    .inset_0()
+                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                        self_dismiss_picker.update(cx, |this, cx| {
+                            this.media_picker_open = false;
+                            this.media_picker_react_message_id = None;
+                            cx.notify();
+                        });
+                    })
+                    .on_scroll_wheel(|_ev, _win, cx| {
+                        cx.stop_propagation();
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(68.0))
+                            .right(px(16.0))
+                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_scroll_wheel(|_ev, _win, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(MediaPickerModal::render(MediaPickerConfig {
+                                active_tab: self.media_picker_tab,
+                                search_query: self.media_picker_search.clone(),
+                                recent_emojis: app_state.media_cache.get_recent_emojis_sync(),
+                                custom_emojis: app_state.get_current_custom_emojis(),
+                                stickers: app_state.get_current_stickers(),
+                                gifs: MediaCacheManager::get_curated_tenor_gifs_for_category(&self.media_picker_search),
+                                sounds: Vec::new(),
+                                hovered_info: None,
+                                guild_sections,
+                                selected_guild_id: self.media_picker_selected_guild_id.clone(),
+                                focus_handle: Some(self.media_picker_focus_handle.clone()),
+                                is_focused: is_picker_focused,
+                                list_state: Some(self.media_picker_list_state.clone()),
+                                on_select_emoji,
+                                on_select_sticker,
+                                on_select_gif,
+                                on_play_sound,
+                                on_send_sound,
+                                on_close,
+                                on_tab_change,
+                                on_search_query,
+                                on_select_gif_category,
+                                on_select_guild,
+                            }))
+                    )
             )
+        } else {
+            None
+        };
+
+        let context_menu_overlay = if let Some((ref target_id, click_pos)) = self.active_context_menu {
+            let target_msg = all_messages.iter().find(|m| &m.id == target_id).cloned();
+            if let Some(msg) = target_msg {
+                let vp = window.viewport_size();
+                let menu_width = px(220.0);
+                let menu_height = px(240.0);
+                let top_y = if click_pos.y + menu_height > vp.height {
+                    (click_pos.y - menu_height).max(px(8.0))
+                } else {
+                    click_pos.y.max(px(8.0))
+                };
+                let left_x = if click_pos.x + menu_width > vp.width {
+                    (vp.width - menu_width - px(16.0)).max(px(8.0))
+                } else {
+                    click_pos.x.max(px(8.0))
+                };
+
+                let msg_id = msg.id.clone();
+                let msg_content = msg.content.clone();
+                let is_pinned = msg.pinned;
+
+                let self_close = self_entity.clone();
+                let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static> = Arc::new(move |_win, cx| {
+                    self_close.update(cx, |this, cx| {
+                        this.active_context_menu = None;
+                        cx.notify();
+                    });
+                });
+
+                let self_add_rx = self_entity.clone();
+                let on_cm_add_rx: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
+                    let id = m_id.to_string();
+                    self_add_rx.update(cx, |this, cx| {
+                        this.media_picker_open = true;
+                        this.media_picker_tab = MediaPickerTab::Emojis;
+                        this.media_picker_react_message_id = Some(id);
+                        this.media_picker_list_state.reset(0);
+                        this.active_context_menu = None;
+                        _win.focus(&this.media_picker_focus_handle);
+                        cx.notify();
+                    });
+                }));
+
+                let self_cm_reply = self_entity.clone();
+                let msg_clone = msg.clone();
+                let on_cm_reply: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
+                    let m = msg_clone.clone();
+                    self_cm_reply.update(cx, |this, cx| {
+                        this.replying_to = Some(m);
+                        this.active_context_menu = None;
+                        cx.notify();
+                    });
+                }));
+
+                let content_for_copy = msg_content.clone();
+                let on_cm_copy_text: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(content_for_copy.clone()));
+                }));
+
+                let id_for_copy = msg_id.clone();
+                let on_cm_copy_id: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(id_for_copy.clone()));
+                }));
+
+                let app_cm_pin = app_entity.clone();
+                let cid_pin = channel_id.clone();
+                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
+                    let mid = m_id.to_string();
+                    let cid = cid_pin.clone();
+                    app_cm_pin.update(cx, |state, cx| {
+                        state.pin_message(&cid, &mid);
+                        cx.notify();
+                    });
+                }));
+
+                let app_cm_del = app_entity.clone();
+                let cid_del = channel_id.clone();
+                let on_cm_delete: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
+                    let mid = m_id.to_string();
+                    let cid = cid_del.clone();
+                    app_cm_del.update(cx, |state, cx| {
+                        state.delete_message(&cid, &mid);
+                        cx.notify();
+                    });
+                }));
+
+                let self_dismiss = self_entity.clone();
+                Some(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                            self_dismiss.update(cx, |this, cx| {
+                                this.active_context_menu = None;
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .absolute()
+                                .top(top_y)
+                                .left(left_x)
+                                .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(render_message_context_menu(MessageContextMenuConfig {
+                                    message_id: msg_id,
+                                    message_content: msg_content,
+                                    is_pinned,
+                                    on_add_reaction: on_cm_add_rx,
+                                    on_reply: on_cm_reply,
+                                    on_copy_text: on_cm_copy_text,
+                                    on_copy_id: on_cm_copy_id,
+                                    on_pin: on_cm_pin,
+                                    on_delete: on_cm_delete,
+                                    on_close: Some(on_close),
+                                }))
+                        )
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -540,7 +798,8 @@ impl Render for ChatView {
                 on_cancel_reply,
                 active_media_tab: if self.media_picker_open { Some(self.media_picker_tab) } else { None },
             }))
-            .children(media_picker_overlay);
+            .children(media_picker_overlay)
+            .children(context_menu_overlay);
 
         let app_entity_shortcut = app_entity.clone();
 

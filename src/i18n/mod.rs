@@ -85,9 +85,12 @@ macro_rules! t {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_pt_br_translations() {
+        let _guard = TEST_LOCK.lock().unwrap();
         set_locale(Locale::PtBr);
         assert_eq!(t("status.online"), "Online");
         assert_eq!(t("status.idle"), "Ausente");
@@ -101,6 +104,7 @@ mod tests {
 
     #[test]
     fn test_interpolation() {
+        let _guard = TEST_LOCK.lock().unwrap();
         set_locale(Locale::PtBr);
         let msg = t_fmt("chat.placeholder", &[("channel", "geral")]);
         assert_eq!(msg, "Conversar em #geral");
@@ -114,6 +118,7 @@ mod tests {
 
     #[test]
     fn test_auth_and_connection_translations() {
+        let _guard = TEST_LOCK.lock().unwrap();
         set_locale(Locale::PtBr);
         assert_eq!(t("auth.login"), "Entrar no Discord");
         assert_eq!(t("auth.enter_token"), "Inserir Token");
@@ -133,6 +138,7 @@ mod tests {
 
     #[test]
     fn test_en_us_fallback() {
+        let _guard = TEST_LOCK.lock().unwrap();
         set_locale(Locale::EnUs);
         assert_eq!(t("status.dnd"), "Do Not Disturb");
         assert_eq!(t("user.mute"), "Mute");

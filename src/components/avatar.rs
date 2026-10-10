@@ -184,12 +184,12 @@ impl RenderOnce for Avatar {
 
         // Inner circular avatar container
         let inner_avatar = if let Some(src) = self.src {
-            if src.starts_with("http://") || src.starts_with("https://") {
+            if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") || src.starts_with("/") || src.starts_with("file://") {
                 div()
                     .size_full()
                     .rounded_full()
                     .overflow_hidden()
-                    .child(img(src).size_full())
+                    .child(img(src).size_full().rounded_full())
             } else {
                 div()
                     .size_full()
@@ -222,6 +222,7 @@ impl RenderOnce for Avatar {
             .relative()
             .w(avatar_dim)
             .h(avatar_dim)
+            .rounded_full()
             .flex_shrink_0()
             .child(inner_avatar);
 

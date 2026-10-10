@@ -780,58 +780,71 @@ fn render_friends_list_view(
         }
     }
 
-    // 2. Add from members
-    for m in &state.members {
-        if m.is_bot || m.id == state.current_user.id {
-            continue;
-        }
-        let lower = m.name.to_lowercase();
-        if seen_names.insert(lower.clone()) {
-            let (status_desc, color) = if let Some(ref act) = m.activity {
-                (act.clone(), match m.presence {
-                    PresenceStatus::Online => 0x23a55a,
-                    PresenceStatus::Idle => 0xf0b232,
-                    PresenceStatus::DoNotDisturb => 0xf23f43,
-                    PresenceStatus::Offline => 0x80848e,
-                })
-            } else {
-                match m.presence {
-                    PresenceStatus::Online => ("Disponível".into(), 0x23a55a),
-                    PresenceStatus::Idle => ("Ausente".into(), 0xf0b232),
-                    PresenceStatus::DoNotDisturb => ("Não Perturbar".into(), 0xf23f43),
-                    PresenceStatus::Offline => ("Offline".into(), 0x80848e),
-                }
-            };
-            let dm_id = state
-                .dm_channels
-                .iter()
-                .find(|d| {
-                    !d.is_group_dm
-                        && (d.recipient_ids.contains(&m.id) || d.name.eq_ignore_ascii_case(&m.name))
-                })
-                .map(|d| d.id.clone())
-                .unwrap_or_else(|| format!("dm-{}", m.id));
-
-            friends.push(FriendItem {
-                user_id: m.id.clone(),
-                display_name: m.name.clone(),
-                username: format!("@{}", lower.replace(' ', "_")),
-                avatar_text: if m.avatar_text.is_empty() {
-                    m.name.chars().next().unwrap_or('?').to_uppercase().to_string()
+    // 2. Add from members (apenas em modo de demonstração offline sem conexão ativa)
+    if !state.is_connected_to_gateway && state.auth_token.is_none() {
+        for m in &state.members {
+            if m.is_bot
+                || m.id == state.current_user.id
+                || m.id == "user-ferris"
+                || m.name.eq_ignore_ascii_case("ferris")
+            {
+                continue;
+            }
+            let lower = m.name.to_lowercase();
+            if seen_names.insert(lower.clone()) {
+                let (status_desc, color) = if let Some(ref act) = m.activity {
+                    (act.clone(), match m.presence {
+                        PresenceStatus::Online => 0x23a55a,
+                        PresenceStatus::Idle => 0xf0b232,
+                        PresenceStatus::DoNotDisturb => 0xf23f43,
+                        PresenceStatus::Offline => 0x80848e,
+                    })
                 } else {
-                    m.avatar_text.clone()
-                },
-                avatar_url: None,
-                status: status_desc,
-                channel_id: dm_id,
-                presence_color: color,
-                presence_status: m.presence,
-            });
+                    match m.presence {
+                        PresenceStatus::Online => ("Disponível".into(), 0x23a55a),
+                        PresenceStatus::Idle => ("Ausente".into(), 0xf0b232),
+                        PresenceStatus::DoNotDisturb => ("Não Perturbar".into(), 0xf23f43),
+                        PresenceStatus::Offline => ("Offline".into(), 0x80848e),
+                    }
+                };
+                let dm_id = state
+                    .dm_channels
+                    .iter()
+                    .find(|d| {
+                        !d.is_group_dm
+                            && (d.recipient_ids.contains(&m.id) || d.name.eq_ignore_ascii_case(&m.name))
+                    })
+                    .map(|d| d.id.clone())
+                    .unwrap_or_else(|| format!("dm-{}", m.id));
+
+                friends.push(FriendItem {
+                    user_id: m.id.clone(),
+                    display_name: m.name.clone(),
+                    username: format!("@{}", lower.replace(' ', "_")),
+                    avatar_text: if m.avatar_text.is_empty() {
+                        m.name.chars().next().unwrap_or('?').to_uppercase().to_string()
+                    } else {
+                        m.avatar_text.clone()
+                    },
+                    avatar_url: None,
+                    status: status_desc,
+                    channel_id: dm_id,
+                    presence_color: color,
+                    presence_status: m.presence,
+                });
+            }
         }
     }
 
     // 3. Add from dm_channels
     for dm in &state.dm_channels {
+        if dm.id == "dm-ferris"
+            || dm.id == "dm-group-gpui"
+            || dm.name.eq_ignore_ascii_case("ferris")
+            || dm.recipient_ids.iter().any(|r| r == "user-ferris")
+        {
+            continue;
+        }
         let lower = dm.name.to_lowercase();
         if seen_names.insert(lower.clone()) {
             let dm_uid = dm.recipient_ids.first().cloned().unwrap_or_default();
@@ -940,16 +953,16 @@ fn render_friends_list_view(
                         div()
                             .relative()
                             .child(if let Some(ref url) = friend.avatar_url {
-                                if url.starts_with("http://") || url.starts_with("https://") {
+                                if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
                                     div()
                                         .size(px(36.0))
                                         .rounded_full()
                                         .overflow_hidden()
                                         .flex_shrink_0()
-                                        .child(img(url.clone()).size_full())
+                                        .child(img(url.clone()).size_full().rounded_full())
                                 } else {
                                     div()
-                                        .size(avatar_md())
+                                        .size(px(36.0))
                                         .rounded_full()
                                         .bg(blurple())
                                         .flex()
@@ -962,7 +975,7 @@ fn render_friends_list_view(
                                 }
                             } else {
                                 div()
-                                    .size(avatar_md())
+                                    .size(px(36.0))
                                     .rounded_full()
                                     .bg(blurple())
                                     .flex()

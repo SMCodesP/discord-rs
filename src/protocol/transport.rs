@@ -100,6 +100,16 @@ pub enum TransportEvent {
         channel_id: String,
         messages: Vec<Message>,
     },
+    /// Custom emojis updated for a guild
+    GuildEmojisUpdated {
+        guild_id: String,
+        emojis: Vec<crate::protocol::media_cache::DiscordEmoji>,
+    },
+    /// Custom stickers updated for a guild
+    GuildStickersUpdated {
+        guild_id: String,
+        stickers: Vec<crate::protocol::media_cache::DiscordSticker>,
+    },
 }
 
 /// Asynchronous transport abstraction for Discord communication.
@@ -123,6 +133,18 @@ pub trait DiscordTransport: Send + Sync {
     /// Retrieve detailed guild information by guild ID.
     async fn get_guild(&self, guild_id: &str) -> anyhow::Result<Option<Guild>>;
 
+    /// Fetch all custom emojis for a guild (/guilds/{guild_id}/emojis).
+    async fn get_guild_emojis(&self, guild_id: &str) -> anyhow::Result<Vec<crate::protocol::media_cache::DiscordEmoji>> {
+        let _ = guild_id;
+        Ok(Vec::new())
+    }
+
+    /// Fetch all custom stickers for a guild (/guilds/{guild_id}/stickers).
+    async fn get_guild_stickers(&self, guild_id: &str) -> anyhow::Result<Vec<crate::protocol::media_cache::DiscordSticker>> {
+        let _ = guild_id;
+        Ok(Vec::new())
+    }
+
     /// List all channels within a guild.
     async fn list_channels(&self, guild_id: &str) -> anyhow::Result<Vec<Channel>>;
 
@@ -145,6 +167,9 @@ pub trait DiscordTransport: Send + Sync {
 
     /// Post a new chat message to a text channel.
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message>;
+
+    /// Post a sticker message to a text channel.
+    async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> anyhow::Result<Message>;
 
     /// Add an emoji reaction to a message.
     async fn add_reaction(

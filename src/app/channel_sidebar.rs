@@ -303,7 +303,7 @@ impl Render for ChannelSidebar {
                                                 .rounded_full()
                                                 .overflow_hidden()
                                                 .flex_shrink_0()
-                                                .child(img(icon_url.clone()).size_full())
+                                                .child(img(icon_url.clone()).size_full().rounded_full())
                                         } else if is_group {
                                             let names = if !dm.recipient_names.is_empty() {
                                                 dm.recipient_names.clone()
@@ -771,19 +771,33 @@ impl Render for ChannelSidebar {
                                         },
                                     )
                                     // Avatar with Status Dot
-                                    .child(
+                                    .child({
+                                        let avatar_inner = if let Some(ref url) = current_user.avatar_url {
+                                            div()
+                                                .size_full()
+                                                .rounded_full()
+                                                .overflow_hidden()
+                                                .child(img(url.clone()).size_full().rounded_full())
+                                        } else {
+                                            div()
+                                                .size_full()
+                                                .rounded_full()
+                                                .bg(rgb(0x5865f2))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_color(rgb(0xffffff))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_size(px(14.0))
+                                                .child(current_user.avatar_text)
+                                        };
+
                                         div()
                                             .relative()
                                             .size(px(32.0))
                                             .rounded_full()
-                                            .bg(rgb(0x5865f2))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_color(rgb(0xffffff))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(14.0))
-                                            .child(current_user.avatar_text)
+                                            .flex_shrink_0()
+                                            .child(avatar_inner)
                                             .child(
                                                 div()
                                                     .absolute()
@@ -794,8 +808,8 @@ impl Render for ChannelSidebar {
                                                     .bg(rgb(current_user.presence.color_rgb()))
                                                     .border_2()
                                                     .border_color(rgb(0x232428)),
-                                            ),
-                                    )
+                                            )
+                                    })
                                     // Display name (bold) & username (@tag or #tag)
                                     .child(
                                         div()

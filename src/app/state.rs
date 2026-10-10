@@ -151,6 +151,27 @@ pub struct GuildItemState {
     pub unread: bool,
     pub mention_count: u32,
     pub categories: Vec<CategoryItemState>,
+    #[serde(default)]
+    pub emojis: Vec<crate::protocol::media_cache::DiscordEmoji>,
+    #[serde(default)]
+    pub stickers: Vec<crate::protocol::media_cache::DiscordSticker>,
+}
+
+impl GuildItemState {
+    /// Retorna a URL do ícone da guilda (resolvendo icon_url direta ou via CDN usando icon_hash)
+    pub fn icon_url(&self) -> Option<String> {
+        if let Some(ref url) = self.icon_url {
+            if !url.is_empty() {
+                return Some(url.clone());
+            }
+        }
+        if let Some(ref hash) = self.icon_hash {
+            if !hash.is_empty() {
+                return Some(format!("https://cdn.discordapp.com/icons/{}/{}.png", self.id, hash));
+            }
+        }
+        None
+    }
 }
 
 /// Friend / Relationship representation in direct messages and friends list
@@ -322,6 +343,7 @@ pub struct CurrentUserProfile {
     pub display_name: String,
     pub discriminator: Option<String>,
     pub avatar_text: String,
+    pub avatar_url: Option<String>,
     pub custom_status: Option<String>,
     pub presence: PresenceStatus,
     pub is_muted: bool,
@@ -530,52 +552,6 @@ fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
         height: Some(512),
     }]);
     messages.insert("chan-showcase".into(), vec![s1]);
-
-    // dm-group-gpui
-    let g1 = Message::new(
-        "msg-grp-1",
-        "dm-group-gpui",
-        ferran.clone(),
-        "E aí pessoal! Como está a implementação da busca e do painel lateral?",
-    )
-    .with_timestamp(now - Duration::minutes(20));
-
-    let g2 = Message::new(
-        "msg-grp-2",
-        "dm-group-gpui",
-        ana.clone(),
-        "Ficou incrível! Chips de filtro como `from:`, `has:link`, `in:geral` e highlight amarelo #fee75c funcionando perfeitamente.",
-    )
-    .with_timestamp(now - Duration::minutes(15));
-
-    let g3 = Message::new(
-        "msg-grp-3",
-        "dm-group-gpui",
-        carlos.clone(),
-        "Também temos avatar cluster para grupos de DM e indicador de digitação em tempo real com 3 pontos piscantes.",
-    )
-    .with_timestamp(now - Duration::minutes(10))
-    .with_reactions(vec![Reaction::new("🚀", 4, true), Reaction::new("🔥", 3, false)]);
-
-    messages.insert("dm-group-gpui".into(), vec![g1, g2, g3]);
-
-    // dm-ferris
-    let df1 = Message::new(
-        "msg-df-1",
-        "dm-ferris",
-        ferran.clone(),
-        "Oi Ferris, o GPUI está muito rápido na renderização do chat!",
-    )
-    .with_timestamp(now - Duration::minutes(50));
-    let df2 = Message::new(
-        "msg-df-2",
-        "dm-ferris",
-        Author::new("user-ferris", "ferris"),
-        "Com certeza! Zero flickering e latência sub-milissegundo com aceleração por GPU. 🦀",
-    )
-    .with_timestamp(now - Duration::minutes(40));
-    messages.insert("dm-ferris".into(), vec![df1, df2]);
-
     messages
 }
 
@@ -813,6 +789,35 @@ impl AppState {
                     ],
                 },
             ],
+            emojis: vec![
+                crate::protocol::media_cache::DiscordEmoji::new_custom("1001", "ferris", false, Some("guild-rust-br".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("1002", "rustacean", false, Some("guild-rust-br".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("1003", "crab_party", true, Some("guild-rust-br".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("1004", "cargo_ship", false, Some("guild-rust-br".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("1005", "unsafe_code", false, Some("guild-rust-br".into())),
+            ],
+            stickers: vec![
+                crate::protocol::media_cache::DiscordSticker {
+                    id: "781291131828699156".into(),
+                    name: "Ferris Wave".into(),
+                    description: Some("Ferris dando tchauzinho".into()),
+                    tags: "ferris,wave,hi".into(),
+                    format_type: crate::protocol::media_cache::StickerFormatType::Png,
+                    available: true,
+                    guild_id: Some("guild-rust-br".into()),
+                    pack_id: None,
+                },
+                crate::protocol::media_cache::DiscordSticker {
+                    id: "781291131828699157".into(),
+                    name: "Ferris Hype".into(),
+                    description: Some("Ferris comemorando".into()),
+                    tags: "ferris,hype,party".into(),
+                    format_type: crate::protocol::media_cache::StickerFormatType::Png,
+                    available: true,
+                    guild_id: Some("guild-rust-br".into()),
+                    pack_id: None,
+                },
+            ],
         };
 
         let gpui_hub = GuildItemState {
@@ -877,13 +882,31 @@ impl AppState {
                     }],
                 },
             ],
+            emojis: vec![
+                crate::protocol::media_cache::DiscordEmoji::new_custom("2001", "zed_editor", false, Some("guild-gpui-hub".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("2002", "gpu_accel", false, Some("guild-gpui-hub".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("2003", "pixel_perfect", false, Some("guild-gpui-hub".into())),
+                crate::protocol::media_cache::DiscordEmoji::new_custom("2004", "fps_144", true, Some("guild-gpui-hub".into())),
+            ],
+            stickers: vec![
+                crate::protocol::media_cache::DiscordSticker {
+                    id: "781291131828699158".into(),
+                    name: "GPUI Rocket".into(),
+                    description: Some("Foguete GPUI voando a 144fps".into()),
+                    tags: "gpui,fast,rocket".into(),
+                    format_type: crate::protocol::media_cache::StickerFormatType::Png,
+                    available: true,
+                    guild_id: Some("guild-gpui-hub".into()),
+                    pack_id: None,
+                },
+            ],
         };
 
         let members = vec![
             MemberItemState {
-                id: "user-ferris".into(),
-                name: "Ferris".into(),
-                avatar_text: "🦀".into(),
+                id: "user-rustdev".into(),
+                name: "RustDev".into(),
+                avatar_text: "R".into(),
                 presence: PresenceStatus::Online,
                 role_group: "ADMINISTRADOR".into(),
                 role_color: 0x5865f2,
@@ -989,7 +1012,7 @@ impl AppState {
 
         let messages_by_channel = generate_seed_messages();
 
-        Self {
+        let mut state = Self {
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
@@ -1003,13 +1026,14 @@ impl AppState {
                 display_name: "Vanguard".into(),
                 discriminator: Some("0001".into()),
                 avatar_text: "V".into(),
+                avatar_url: None,
                 custom_status: Some("Navegando no Discord RS 🦀".into()),
                 presence: PresenceStatus::Online,
                 is_muted: false,
                 is_deafened: false,
             },
             guilds,
-            members,
+            members: if has_token { Vec::new() } else { members },
             search_query: String::new(),
             is_search_open: false,
             search_results: Vec::new(),
@@ -1030,120 +1054,75 @@ impl AppState {
             save_token_to_disk: true,
             auth_error: None,
             is_connecting,
-            dm_channels: vec![
-                ChannelItemState {
-                    id: "dm-ferris".into(),
-                    name: "Ferris".into(),
-                    kind: ChannelKind::Text,
-                    topic: Some("Mensagens Diretas com Ferris".into()),
-                    unread: false,
-                    mention_count: 1,
-                    icon_url: None,
-                    is_pinned: true,
-                    last_message_id: Some("1000000000000000002".into()),
-                    is_group_dm: false,
-                    recipient_ids: vec!["user-ferris".into()],
-                    recipient_names: vec!["Ferris".into()],
-                },
-                ChannelItemState {
-                    id: "dm-ana".into(),
-                    name: "Ana".into(),
-                    kind: ChannelKind::Text,
-                    topic: Some("Mensagens Diretas com Ana".into()),
-                    unread: false,
-                    mention_count: 0,
-                    icon_url: None,
-                    is_pinned: false,
-                    last_message_id: Some("1000000000000000001".into()),
-                    is_group_dm: false,
-                    recipient_ids: vec!["user-ana".into()],
-                    recipient_names: vec!["Ana".into()],
-                },
-                ChannelItemState {
-                    id: "dm-group-gpui".into(),
-                    name: "Ferris, Ana, Carlos".into(),
-                    kind: ChannelKind::Text,
-                    topic: Some("Grupo de trabalho: Aceleração GPUI & Discord RS".into()),
-                    unread: true,
-                    mention_count: 2,
-                    icon_url: None,
-                    is_pinned: false,
-                    last_message_id: Some("1000000000000000005".into()),
-                    is_group_dm: true,
-                    recipient_ids: vec!["user-ferris".into(), "user-ana".into(), "user-carlos".into()],
-                    recipient_names: vec!["Ferris".into(), "Ana".into(), "Carlos".into()],
-                },
-            ],
+            dm_channels: Vec::new(),
             guild_folders,
             expanded_folders: std::collections::HashSet::new(),
-            friends: vec![
-                FriendItemState {
-                    id: "user-ferris".into(),
-                    username: "ferris".into(),
-                    display_name: "Ferris the Crab".into(),
-                    avatar_url: None,
-                    avatar_text: "🦀".into(),
-                    presence: PresenceStatus::Online,
-                    custom_status: Some("Codando discord-rs 🦀".into()),
-                    relationship_type: 1,
-                },
-                FriendItemState {
-                    id: "user-ana".into(),
-                    username: "ana".into(),
-                    display_name: "Ana Dev".into(),
-                    avatar_url: None,
-                    avatar_text: "A".into(),
-                    presence: PresenceStatus::Online,
-                    custom_status: Some("Testando GPUI".into()),
-                    relationship_type: 1,
-                },
-            ],
+            friends: if has_token {
+                Vec::new()
+            } else {
+                vec![
+                    FriendItemState {
+                        id: "user-ana".into(),
+                        username: "ana".into(),
+                        display_name: "Ana Dev".into(),
+                        avatar_url: None,
+                        avatar_text: "A".into(),
+                        presence: PresenceStatus::Online,
+                        custom_status: Some("Testando GPUI".into()),
+                        relationship_type: 1,
+                    },
+                ]
+            },
             friends_tab: FriendsTab::Online,
             message_requests_subtab: MessageRequestsSubTab::YouMayKnow,
-            message_requests: vec![
-                MessageRequestItem {
-                    id: "req-1".into(),
-                    user_id: "user-guilherme".into(),
-                    username: "guilherme_dev".into(),
-                    display_name: "Guilherme Santos".into(),
-                    avatar_url: None,
-                    avatar_text: "G".into(),
-                    presence: PresenceStatus::Online,
-                    mutual_guilds: 1,
-                    mutual_guild_name: Some("Rust Brasil".into()),
-                    preview_message: "Opa! Vi seus commits no discord-rs com GPUI, muito top! Queria tirar uma dúvida sobre async tokio.".into(),
-                    timestamp: "Hoje às 18:24".into(),
-                    is_spam: false,
-                },
-                MessageRequestItem {
-                    id: "req-2".into(),
-                    user_id: "user-roberto".into(),
-                    username: "roberto_sys".into(),
-                    display_name: "Roberto Almeida".into(),
-                    avatar_text: "R".into(),
-                    avatar_url: None,
-                    presence: PresenceStatus::Idle,
-                    mutual_guilds: 2,
-                    mutual_guild_name: Some("Rust Brasil".into()),
-                    preview_message: "E aí, tudo bem? Você usa Wayland ou X11 no teste de rendering do GPUI?".into(),
-                    timestamp: "Ontem às 21:10".into(),
-                    is_spam: false,
-                },
-                MessageRequestItem {
-                    id: "req-spam-1".into(),
-                    user_id: "user-scam-bot".into(),
-                    username: "free_nitro_bot_99".into(),
-                    display_name: "Free Nitro 2026".into(),
-                    avatar_text: "🎁".into(),
-                    avatar_url: None,
-                    presence: PresenceStatus::Offline,
-                    mutual_guilds: 0,
-                    mutual_guild_name: None,
-                    preview_message: "Parabéns! Você ganhou 3 meses de Discord Nitro grátis! Clique para resgatar: http://discrod-free-nitro.xyz/gift".into(),
-                    timestamp: "Há 3 dias".into(),
-                    is_spam: true,
-                },
-            ],
+            message_requests: if has_token {
+                Vec::new()
+            } else {
+                vec![
+                    MessageRequestItem {
+                        id: "req-1".into(),
+                        user_id: "user-guilherme".into(),
+                        username: "guilherme_dev".into(),
+                        display_name: "Guilherme Santos".into(),
+                        avatar_url: None,
+                        avatar_text: "G".into(),
+                        presence: PresenceStatus::Online,
+                        mutual_guilds: 1,
+                        mutual_guild_name: Some("Rust Brasil".into()),
+                        preview_message: "Opa! Vi seus commits no discord-rs com GPUI, muito top! Queria tirar uma dúvida sobre async tokio.".into(),
+                        timestamp: "Hoje às 18:24".into(),
+                        is_spam: false,
+                    },
+                    MessageRequestItem {
+                        id: "req-2".into(),
+                        user_id: "user-roberto".into(),
+                        username: "roberto_sys".into(),
+                        display_name: "Roberto Almeida".into(),
+                        avatar_text: "R".into(),
+                        avatar_url: None,
+                        presence: PresenceStatus::Idle,
+                        mutual_guilds: 2,
+                        mutual_guild_name: Some("Rust Brasil".into()),
+                        preview_message: "E aí, tudo bem? Você usa Wayland ou X11 no teste de rendering do GPUI?".into(),
+                        timestamp: "Ontem às 21:10".into(),
+                        is_spam: false,
+                    },
+                    MessageRequestItem {
+                        id: "req-spam-1".into(),
+                        user_id: "user-scam-bot".into(),
+                        username: "free_nitro_bot_99".into(),
+                        display_name: "Free Nitro 2026".into(),
+                        avatar_text: "🎁".into(),
+                        avatar_url: None,
+                        presence: PresenceStatus::Offline,
+                        mutual_guilds: 0,
+                        mutual_guild_name: None,
+                        preview_message: "Parabéns! Você ganhou 3 meses de Discord Nitro grátis! Clique para resgatar: http://discrod-free-nitro.xyz/gift".into(),
+                        timestamp: "Há 3 dias".into(),
+                        is_spam: true,
+                    },
+                ]
+            },
             active_now_items: vec![
                 ActiveNowItem {
                     id: "act-1".into(),
@@ -1301,7 +1280,9 @@ impl AppState {
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
-        }
+        };
+        state.sync_guild_media();
+        state
     }
 
     /// Selects active tab in Friends Hub (Online, All, Pending, Blocked, AddFriend, MessageRequests)
@@ -1885,6 +1866,22 @@ impl AppState {
         }
     }
 
+    /// Deletes a message by ID from the specified channel
+    pub fn delete_message(&mut self, channel_id: &str, message_id: &str) {
+        if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
+            messages.retain(|m| m.id != message_id);
+        }
+    }
+
+    /// Toggles the pinned status of a message by ID
+    pub fn pin_message(&mut self, channel_id: &str, message_id: &str) {
+        if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.pinned = !msg.pinned;
+            }
+        }
+    }
+
     /// Sets / synchronizes real messages received from the API/Gateway for a channel
     pub fn set_channel_messages(&mut self, channel_id: &str, mut messages: Vec<Message>) {
         for msg in &messages {
@@ -1985,6 +1982,7 @@ impl AppState {
         self.connection_mode = ConnectionMode::Mock;
         self.connection_status = "Modo Demonstração (Offline)".to_string();
         self.messages_by_channel = generate_seed_messages();
+        self.dm_channels = Vec::new();
 
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
@@ -2000,11 +1998,13 @@ impl AppState {
             TransportEvent::Ready { user, guilds, guild_folders } => {
                 let display_name = user.display_name().to_string();
                 let avatar_text = user.username.chars().next().unwrap_or('U').to_uppercase().to_string();
+                let avatar_url = user.avatar_url();
                 let username = user.username;
                 self.current_user.id = user.id;
                 self.current_user.username = username.clone();
                 self.current_user.display_name = display_name;
                 self.current_user.avatar_text = avatar_text;
+                self.current_user.avatar_url = avatar_url;
                 self.is_connected_to_gateway = true;
                 self.is_connecting = false;
                 self.connection_mode = ConnectionMode::LiveDiscord(username);
@@ -2025,6 +2025,32 @@ impl AppState {
                         let icon_hash = g.icon.clone();
                         let categories = organize_channels_into_categories(&g.id, g.channels);
 
+                        let emojis = if !g.emojis.is_empty() {
+                            let _ = self.media_cache.save_guild_emojis_to_disk(&g.id, &g.emojis);
+                            g.emojis
+                        } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.emojis.clone()) {
+                            if !existing.is_empty() {
+                                existing
+                            } else {
+                                self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
+                            }
+                        } else {
+                            self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
+                        };
+
+                        let stickers = if !g.stickers.is_empty() {
+                            let _ = self.media_cache.save_guild_stickers_to_disk(&g.id, &g.stickers);
+                            g.stickers
+                        } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.stickers.clone()) {
+                            if !existing.is_empty() {
+                                existing
+                            } else {
+                                self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
+                            }
+                        } else {
+                            self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
+                        };
+
                         new_guilds.push(GuildItemState {
                             id: g.id.clone(),
                             name: g.name.clone(),
@@ -2034,6 +2060,8 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             categories,
+                            emojis,
+                            stickers,
                         });
                     }
 
@@ -2053,6 +2081,7 @@ impl AppState {
                     }
 
                     self.guilds = new_guilds;
+                    self.sync_guild_media();
                     save_guilds_to_disk(&self.guilds, &self.guild_folders);
                     if let Some(first) = self.guilds.first() {
                         self.select_guild(Some(first.id.clone()));
@@ -2064,19 +2093,30 @@ impl AppState {
                 crate::chat::markdown::prewarm_markdown_cache(&msg.content);
                 let channel_id = msg.channel_id.clone();
 
-                // Verificar se havia mensagem pendente em canal temporário dm-* diferente do canal final
-                for (temp_cid, temp_msgs) in self.messages_by_channel.iter_mut() {
-                    if temp_cid.starts_with("dm-") && temp_cid != &channel_id {
-                        if let Some(pos) = temp_msgs.iter().position(|m| {
-                            (m.id.starts_with("temp-") || m.is_pending)
-                                && (m.author.id == msg.author.id
-                                    || m.author.username == msg.author.username
-                                    || m.author.id == "user-me"
-                                    || m.author.id == self.current_user.id)
-                                && m.content == msg.content
-                        }) {
-                            temp_msgs.remove(pos);
-                            break;
+                // 1. Identificar com precisão se a mensagem pertence a uma GUILDA/SERVIDOR.
+                // Uma mensagem é estritamente de guilda se:
+                // - msg.guild_id.is_some(), OU
+                // - o canal pertencer a qualquer guilda conhecida em self.guilds.
+                let is_guild_message = msg.guild_id.is_some()
+                    || self.guilds.iter().any(|g| {
+                        g.categories.iter().any(|cat| cat.channels.iter().any(|c| c.id == channel_id))
+                    });
+
+                // Se NÃO for mensagem de guilda, verificar se havia mensagem pendente em canal temporário dm-*
+                if !is_guild_message {
+                    for (temp_cid, temp_msgs) in self.messages_by_channel.iter_mut() {
+                        if temp_cid.starts_with("dm-") && temp_cid != &channel_id {
+                            if let Some(pos) = temp_msgs.iter().position(|m| {
+                                (m.id.starts_with("temp-") || m.is_pending)
+                                    && (m.author.id == msg.author.id
+                                        || m.author.username == msg.author.username
+                                        || m.author.id == "user-me"
+                                        || m.author.id == self.current_user.id)
+                                    && m.content == msg.content
+                            }) {
+                                temp_msgs.remove(pos);
+                                break;
+                            }
                         }
                     }
                 }
@@ -2097,29 +2137,69 @@ impl AppState {
                     channel_msgs.push(msg.clone());
                 }
 
-                // Se a mensagem for de um canal de DM, atualiza last_message_id e reordena a lista
-                if let Some(dm) = self.dm_channels.iter_mut().find(|c| {
-                    c.id == channel_id
-                        || c.recipient_ids.contains(&msg.author.id)
-                        || c.recipient_names.iter().any(|n| n == &msg.author.username)
-                }) {
-                    dm.id = channel_id.clone();
-                    dm.last_message_id = Some(msg.id.clone());
-                    self.sort_dm_channels();
-                }
+                if is_guild_message {
+                    // Atualiza o last_message_id do canal da guilda, se existir
+                    for guild in &mut self.guilds {
+                        for cat in &mut guild.categories {
+                            for ch in &mut cat.channels {
+                                if ch.id == channel_id {
+                                    ch.last_message_id = Some(msg.id.clone());
+                                }
+                            }
+                        }
+                    }
+                    // MENSAGEM DE GUILDA NUNCA MODIFICA dm_channels NEM selected_channel_id DE DM!
+                } else {
+                    // Mensagem comprovadamente de DM privada (msg.guild_id.is_none() e canal não pertence a nenhuma guilda)
+                    let mut dm_updated = false;
 
-                // Se a seleção atual estiver em dm-{user_id} correspondente, migra para o canal real
-                if let Some(ref sel) = self.selected_channel_id.clone() {
-                    if sel.starts_with("dm-") && sel != &channel_id {
-                        let uid = sel.trim_start_matches("dm-");
-                        if uid == msg.author.id
-                            || self.dm_channels.iter().any(|d| {
-                                d.id == channel_id
-                                    && (d.recipient_ids.contains(&uid.to_string())
-                                        || d.recipient_names.iter().any(|n| n == uid))
-                            })
-                        {
+                    // 1. Tentar correspondência EXATA com o ID do canal de DM existente
+                    if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == channel_id) {
+                        dm.last_message_id = Some(msg.id.clone());
+                        dm_updated = true;
+                    } else if let Some(dm) = self.dm_channels.iter_mut().find(|c| {
+                        // 2. Apenas se for canal temporário dm-* ainda não resolvido E o destinatário bater com o autor
+                        c.id.starts_with("dm-") && c.recipient_ids.contains(&msg.author.id)
+                    }) {
+                        let temp_id = dm.id.clone();
+                        dm.id = channel_id.clone();
+                        dm.last_message_id = Some(msg.id.clone());
+                        dm_updated = true;
+
+                        // Se a seleção atual estiver no temporário correspondente, migra para o canal real da DM
+                        if self.selected_channel_id.as_deref() == Some(&temp_id) {
                             self.selected_channel_id = Some(channel_id.clone());
+                        }
+
+                        // Migra mensagens pendentes do canal temporário para o canal real
+                        if temp_id != channel_id {
+                            if let Some(mut pending_msgs) = self.messages_by_channel.remove(&temp_id) {
+                                for m in &mut pending_msgs {
+                                    m.channel_id = channel_id.clone();
+                                }
+                                let target_msgs = self.messages_by_channel.entry(channel_id.clone()).or_default();
+                                for p in pending_msgs {
+                                    if !target_msgs.iter().any(|m| m.id == p.id) {
+                                        target_msgs.push(p);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if dm_updated {
+                        self.sort_dm_channels();
+                    }
+
+                    // Se a seleção atual estiver em dm-{user_id} e esta DM real corresponde a esse mesmo user_id, migra a seleção
+                    if let Some(ref sel) = self.selected_channel_id.clone() {
+                        if sel.starts_with("dm-") && sel != &channel_id {
+                            let uid = sel.trim_start_matches("dm-");
+                            if uid == msg.author.id
+                                && self.dm_channels.iter().any(|d| d.id == channel_id && d.recipient_ids.contains(&uid.to_string()))
+                            {
+                                self.selected_channel_id = Some(channel_id.clone());
+                            }
                         }
                     }
                 }
@@ -2182,6 +2262,33 @@ impl AppState {
                 let icon_url = g.icon_url();
                 let icon_hash = g.icon.clone();
                 let categories = organize_channels_into_categories(&g.id, g.channels);
+
+                let emojis = if !g.emojis.is_empty() {
+                    let _ = self.media_cache.save_guild_emojis_to_disk(&g.id, &g.emojis);
+                    g.emojis
+                } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.emojis.clone()) {
+                    if !existing.is_empty() {
+                        existing
+                    } else {
+                        self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
+                    }
+                } else {
+                    self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
+                };
+
+                let stickers = if !g.stickers.is_empty() {
+                    let _ = self.media_cache.save_guild_stickers_to_disk(&g.id, &g.stickers);
+                    g.stickers
+                } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.stickers.clone()) {
+                    if !existing.is_empty() {
+                        existing
+                    } else {
+                        self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
+                    }
+                } else {
+                    self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
+                };
+
                 let item = GuildItemState {
                     id: g.id.clone(),
                     name: g.name.clone(),
@@ -2191,6 +2298,8 @@ impl AppState {
                     unread: false,
                     mention_count: 0,
                     categories,
+                    emojis,
+                    stickers,
                 };
                 if let Some(pos) = self.guilds.iter().position(|guild| guild.id == g.id) {
                     self.guilds[pos] = item;
@@ -2209,6 +2318,20 @@ impl AppState {
                     self.guilds.sort_by_key(|g| {
                         order_map.get(&g.id).copied().unwrap_or(usize::MAX)
                     });
+                }
+                save_guilds_to_disk(&self.guilds, &self.guild_folders);
+            }
+            TransportEvent::GuildEmojisUpdated { guild_id, emojis } => {
+                let _ = self.media_cache.save_guild_emojis_to_disk(&guild_id, &emojis);
+                if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+                    guild.emojis = emojis;
+                }
+                save_guilds_to_disk(&self.guilds, &self.guild_folders);
+            }
+            TransportEvent::GuildStickersUpdated { guild_id, stickers } => {
+                let _ = self.media_cache.save_guild_stickers_to_disk(&guild_id, &stickers);
+                if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+                    guild.stickers = stickers;
                 }
                 save_guilds_to_disk(&self.guilds, &self.guild_folders);
             }
@@ -2234,8 +2357,18 @@ impl AppState {
                     })
                     .collect();
 
-                // Preservar canais de DM temporários ainda não resolvidos
+                // Preservar canais de DM temporários ainda não resolvidos (ex: dm-<user_id> abertos dinamicamente)
                 for existing in &self.dm_channels {
+                    // Ignorar canais mock / fixos de demonstração antigos
+                    if existing.id == "dm-ferris"
+                        || existing.id == "dm-group-gpui"
+                        || existing.id == "dm-ana"
+                        || existing.recipient_ids.iter().any(|r| r == "user-ferris")
+                        || existing.name.eq_ignore_ascii_case("ferris")
+                    {
+                        continue;
+                    }
+
                     if existing.id.starts_with("dm-") {
                         let already_resolved = new_dms.iter().any(|d| {
                             existing.recipient_ids.iter().any(|uid| d.recipient_ids.contains(uid))
@@ -2258,12 +2391,17 @@ impl AppState {
             TransportEvent::DmChannelCreated(c) => {
                 let is_group = c.channel_type == ChannelType::GroupDm;
                 let real_id = c.id.clone();
+                let mut temp_id_to_migrate: Option<String> = None;
                 if let Some(existing) = self.dm_channels.iter_mut().find(|d| {
                     d.id == real_id
-                        || (!d.is_group_dm
+                        || (d.id.starts_with("dm-")
+                            && !d.is_group_dm
                             && !c.recipient_ids.is_empty()
                             && c.recipient_ids.iter().any(|uid| d.recipient_ids.contains(uid)))
                 }) {
+                    if existing.id.starts_with("dm-") {
+                        temp_id_to_migrate = Some(existing.id.clone());
+                    }
                     existing.id = real_id.clone();
                     existing.name = c.name;
                     existing.icon_url = c.icon_url;
@@ -2290,6 +2428,25 @@ impl AppState {
                     );
                 }
                 self.sort_dm_channels();
+
+                if let Some(temp_id) = temp_id_to_migrate {
+                    if self.selected_channel_id.as_deref() == Some(&temp_id) {
+                        self.selected_channel_id = Some(real_id.clone());
+                    }
+                    if temp_id != real_id {
+                        if let Some(mut pending_msgs) = self.messages_by_channel.remove(&temp_id) {
+                            for msg in &mut pending_msgs {
+                                msg.channel_id = real_id.clone();
+                            }
+                            let target_msgs = self.messages_by_channel.entry(real_id.clone()).or_default();
+                            for p_msg in pending_msgs {
+                                if !target_msgs.iter().any(|m| m.id == p_msg.id) {
+                                    target_msgs.push(p_msg);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             TransportEvent::DmChannelResolved { temp_id, channel } => {
                 let real_id = channel.id.clone();
@@ -2452,11 +2609,10 @@ impl AppState {
         }
     }
 
-    /// Sends a sticker message to a specific channel immediately with highlighted sticker rendering
+    /// Sends a sticker message to a specific channel immediately with authentic sticker rendering
     pub fn send_sticker(&mut self, channel_id: &str, sticker: &crate::protocol::media_cache::DiscordSticker) {
         let cid = channel_id.to_string();
         let new_id = format!("temp-{}", chrono::Utc::now().timestamp_millis());
-        let sticker_content = format!(":sticker[{}]:", sticker.name);
 
         let mut new_msg = Message::new(
             new_id,
@@ -2468,7 +2624,7 @@ impl AppState {
                 avatar: None,
                 bot: false,
             },
-            sticker_content.clone(),
+            "",
         )
         .with_pending(true);
 
@@ -2488,9 +2644,11 @@ impl AppState {
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
             let target_cid = cid;
-            let text = sticker_content;
+            let sticker_id = sticker.id.clone();
             tokio::spawn(async move {
-                let _ = cm.send_message(&target_cid, &text).await;
+                if let Err(e) = cm.send_sticker(&target_cid, &sticker_id).await {
+                    log::warn!("Falha ao enviar figurinha via ClientManager: {:?}", e);
+                }
             });
         }
     }
@@ -2502,6 +2660,112 @@ impl AppState {
         tokio::spawn(async move {
             mgr.record_emoji_use(&em, &em, false, None).await;
         });
+    }
+
+    /// Returns custom emojis for the currently selected guild, or across all guilds
+    pub fn get_current_custom_emojis(&self) -> Vec<crate::protocol::media_cache::DiscordEmoji> {
+        if let Some(ref gid) = self.selected_guild_id {
+            if let Some(guild) = self.guilds.iter().find(|g| &g.id == gid) {
+                if !guild.emojis.is_empty() {
+                    return guild.emojis.clone();
+                }
+            }
+        }
+        let mut all = Vec::new();
+        for g in &self.guilds {
+            all.extend(g.emojis.clone());
+        }
+        all
+    }
+
+    /// Returns custom stickers and favorites for the currently selected guild
+    pub fn get_current_stickers(&self) -> Vec<crate::protocol::media_cache::DiscordSticker> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // 1. Figurinhas favoritas persistidas
+        for s in self.media_cache.get_favorite_stickers_sync() {
+            if seen.insert(s.id.clone()) {
+                result.push(s);
+            }
+        }
+
+        // 2. Figurinhas do servidor selecionado (ou todos)
+        if let Some(ref gid) = self.selected_guild_id {
+            if let Some(guild) = self.guilds.iter().find(|g| &g.id == gid) {
+                for s in &guild.stickers {
+                    if seen.insert(s.id.clone()) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+        } else {
+            for g in &self.guilds {
+                for s in &g.stickers {
+                    if seen.insert(s.id.clone()) {
+                        result.push(s.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Carrega emojis e figurinhas customizados de cada guilda a partir do cache em disco imediatamente
+    /// e busca da API em segundo plano caso algum servidor ainda não os possua.
+    pub fn sync_guild_media(&mut self) {
+        let mut missing_emojis = Vec::new();
+        let mut missing_stickers = Vec::new();
+
+        // 1. Fast-path: carrega do cache particionado em disco
+        for guild in &mut self.guilds {
+            if guild.emojis.is_empty() {
+                if let Some(cached) = self.media_cache.load_guild_emojis_from_disk(&guild.id) {
+                    guild.emojis = cached;
+                }
+            }
+            if guild.stickers.is_empty() {
+                if let Some(cached) = self.media_cache.load_guild_stickers_from_disk(&guild.id) {
+                    guild.stickers = cached;
+                }
+            }
+
+            if guild.emojis.is_empty() {
+                missing_emojis.push(guild.id.clone());
+            }
+            if guild.stickers.is_empty() {
+                missing_stickers.push(guild.id.clone());
+            }
+        }
+
+        // 2. Background-path: busca da API se houver ClientManager
+        if let Some(ref cm) = self.client_manager {
+            if !missing_emojis.is_empty() || !missing_stickers.is_empty() {
+                let cm = cm.clone();
+                tokio::spawn(async move {
+                    for gid in missing_emojis {
+                        if let Ok(emojis) = cm.get_guild_emojis(&gid).await {
+                            if !emojis.is_empty() {
+                                cm.emit_event(TransportEvent::GuildEmojisUpdated {
+                                    guild_id: gid,
+                                    emojis,
+                                });
+                            }
+                        }
+                    }
+                    for gid in missing_stickers {
+                        if let Ok(stickers) = cm.get_guild_stickers(&gid).await {
+                            if !stickers.is_empty() {
+                                cm.emit_event(TransportEvent::GuildStickersUpdated {
+                                    guild_id: gid,
+                                    stickers,
+                                });
+                            }
+                        }
+                    }
+                });
+            }
+        }
     }
 
     /// Adds a reaction and dispatches it via ClientManager

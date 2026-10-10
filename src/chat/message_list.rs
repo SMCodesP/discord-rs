@@ -24,6 +24,7 @@ use crate::tokens::typography::*;
 // ============================================================================
 
 pub type MessageActionCallback = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
+pub type MessageActionPosCallback = Arc<dyn Fn(&str, Point<Pixels>, &mut Window, &mut App) + Send + Sync + 'static>;
 
 // ============================================================================
 // Date & Time Formatting Helpers (pt-BR Friendly)
@@ -149,13 +150,16 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
 // ============================================================================
 
 /// Renders the floating action bar displayed on message hover (React, Reply, More).
+/// Renders the floating action bar displayed on message hover (React, Reply, More).
 pub fn render_hover_action_bar(
     message_id: &str,
     on_react: Option<MessageActionCallback>,
     on_reply: Option<MessageActionCallback>,
+    on_more: Option<MessageActionPosCallback>,
 ) -> Div {
     let msg_id_react = message_id.to_string();
     let msg_id_reply = message_id.to_string();
+    let msg_id_more = message_id.to_string();
 
     let mut react_btn = div()
         .flex()
@@ -199,7 +203,7 @@ pub fn render_hover_action_bar(
         });
     }
 
-    let more_btn = div()
+    let mut more_btn = div()
         .flex()
         .items_center()
         .justify_center()
@@ -213,6 +217,12 @@ pub fn render_hover_action_bar(
                 .text_size(px(14.0))
                 .child("•••"),
         );
+
+    if let Some(handler) = on_more {
+        more_btn = more_btn.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            handler(&msg_id_more, event.position, window, cx);
+        });
+    }
 
     div()
         .absolute()
@@ -236,6 +246,156 @@ pub fn render_hover_action_bar(
 }
 
 // ============================================================================
+// Message Context Menu Component
+// ============================================================================
+
+/// Configuration for the message contextual dropdown menu.
+pub struct MessageContextMenuConfig {
+    pub message_id: String,
+    pub message_content: String,
+    pub is_pinned: bool,
+    pub on_add_reaction: Option<MessageActionCallback>,
+    pub on_reply: Option<MessageActionCallback>,
+    pub on_copy_text: Option<MessageActionCallback>,
+    pub on_copy_id: Option<MessageActionCallback>,
+    pub on_pin: Option<MessageActionCallback>,
+    pub on_delete: Option<MessageActionCallback>,
+    pub on_close: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>>,
+}
+
+/// Helper to render an item row inside the message context menu.
+fn render_menu_item(
+    label: &str,
+    icon: &str,
+    is_danger: bool,
+    action: Option<MessageActionCallback>,
+    message_id: &str,
+    on_close: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>>,
+) -> Div {
+    let msg_id = message_id.to_string();
+    let label_str = label.to_string();
+    let icon_str = icon.to_string();
+
+    let mut item = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px(space_2())
+        .py(px(6.0))
+        .rounded(radius_xs())
+        .cursor_pointer();
+
+    if is_danger {
+        item = item
+            .text_color(rgb(0xfa777c))
+            .hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)));
+    } else {
+        item = item
+            .text_color(text_primary())
+            .hover(|s| s.bg(rgb(0x5865f2)).text_color(rgb(HEX_WHITE)));
+    }
+
+    item = item
+        .child(
+            div()
+                .text_size(font_size_sm())
+                .font_weight(WEIGHT_NORMAL)
+                .child(label_str),
+        )
+        .child(
+            div()
+                .text_size(font_size_sm())
+                .opacity(0.8)
+                .child(icon_str),
+        );
+
+    if action.is_some() || on_close.is_some() {
+        item = item.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+            if let Some(ref act) = action {
+                act(&msg_id, window, cx);
+            }
+            if let Some(ref close) = on_close {
+                close(window, cx);
+            }
+        });
+    }
+
+    item
+}
+
+/// Renders canonical Discord message context menu popup.
+pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
+    let pin_label = if config.is_pinned {
+        "Desafixar Mensagem"
+    } else {
+        "Fixar Mensagem"
+    };
+
+    div()
+        .w(px(220.0))
+        .bg(bg_floating())
+        .border_1()
+        .border_color(rgb(0x232428))
+        .rounded(px(6.0))
+        .shadow_lg()
+        .p(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(render_menu_item(
+            "Adicionar Reação",
+            "☺",
+            false,
+            config.on_add_reaction,
+            &config.message_id,
+            config.on_close.clone(),
+        ))
+        .child(render_menu_item(
+            "Responder",
+            "↩",
+            false,
+            config.on_reply,
+            &config.message_id,
+            config.on_close.clone(),
+        ))
+        .child(div().h_px().bg(rgb(0x232428)).my(px(3.0)))
+        .child(render_menu_item(
+            "Copiar Texto",
+            "📋",
+            false,
+            config.on_copy_text,
+            &config.message_id,
+            config.on_close.clone(),
+        ))
+        .child(render_menu_item(
+            "Copiar ID da Mensagem",
+            "🆔",
+            false,
+            config.on_copy_id,
+            &config.message_id,
+            config.on_close.clone(),
+        ))
+        .child(div().h_px().bg(rgb(0x232428)).my(px(3.0)))
+        .child(render_menu_item(
+            pin_label,
+            "📌",
+            false,
+            config.on_pin,
+            &config.message_id,
+            config.on_close.clone(),
+        ))
+        .child(render_menu_item(
+            "Excluir Mensagem",
+            "🗑️",
+            true,
+            config.on_delete,
+            &config.message_id,
+            config.on_close,
+        ))
+}
+
+// ============================================================================
 // Avatar Component
 // ============================================================================
 
@@ -245,33 +405,33 @@ pub fn render_avatar(name: &str, avatar_url: Option<&str>) -> Div {
     let color = avatar_color_for_name(name);
 
     if let Some(url) = avatar_url {
-        if url.starts_with("http://") || url.starts_with("https://") {
+        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
             return div()
                 .size(avatar_md())
                 .rounded_full()
                 .overflow_hidden()
                 .flex_shrink_0()
                 .cursor_pointer()
-                .child(img(url.to_string()).size_full());
+                .child(img(url.to_string()).size_full().rounded_full());
         }
     }
 
     div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(avatar_md())
-            .rounded_full()
-            .bg(rgb(color))
-            .flex_shrink_0()
-            .cursor_pointer()
-            .child(
-                div()
-                    .font_weight(WEIGHT_BOLD)
-                    .text_color(rgb(HEX_WHITE))
-                    .text_size(font_size_md())
-                    .child(initial),
-            )
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(avatar_md())
+        .rounded_full()
+        .bg(rgb(color))
+        .flex_shrink_0()
+        .cursor_pointer()
+        .child(
+            div()
+                .font_weight(WEIGHT_BOLD)
+                .text_color(rgb(HEX_WHITE))
+                .text_size(font_size_md())
+                .child(initial),
+        )
 }
 
 // ============================================================================
@@ -372,62 +532,67 @@ pub fn render_attachments(attachments: &[Attachment]) -> Div {
     container
 }
 
-/// Renders a highlighted sticker card in chat history.
+/// Renders a clean fallback sticker card in chat history when image CDN is not available.
 pub fn render_sticker_card(sticker_name: &str) -> Div {
     div()
         .my(space_2())
-        .p(space_3())
+        .p(space_2())
         .max_w(px(220.0))
-        .bg(rgb(0x232428))
-        .border_2()
-        .border_color(rgb(HEX_BLURPLE))
-        .rounded(radius_lg())
-        .shadow_md()
+        .bg(rgb(0x2b2d31))
+        .border_1()
+        .border_color(rgb(HEX_BG_SERVER))
+        .rounded(radius_md())
         .flex()
-        .flex_col()
         .items_center()
         .gap(space_2())
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).border_color(rgb(HEX_WHITE)))
         .child(
             div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(110.0))
-                .rounded(radius_md())
-                .bg(rgb(0x2b2d31))
-                .child(
-                    div()
-                        .text_size(px(60.0))
-                        .child("🏷️"),
-                ),
+                .text_size(px(18.0))
+                .child("🏷️"),
         )
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .bg(blurple())
-                        .px(px(6.0))
-                        .py(px(2.0))
-                        .rounded(radius_xs())
-                        .text_size(px(10.0))
-                        .font_weight(WEIGHT_BOLD)
-                        .text_color(rgb(HEX_WHITE))
-                        .child("FIGURINHA"),
+                .text_size(font_size_sm())
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_titles())
+                .child(sticker_name.to_string()),
+        )
+}
+
+/// Renders a native sticker image (160x160 CDN URL) or a clean fallback card in chat history.
+pub fn render_sticker(
+    sticker_id: Option<&str>,
+    sticker_name: &str,
+    format_type: Option<u8>,
+) -> Div {
+    if let Some(id) = sticker_id {
+        if !id.is_empty() {
+            let is_animated = matches!(format_type, Some(2) | Some(4));
+            let cdn_url = if is_animated {
+                format!(
+                    "https://media.discordapp.net/stickers/{}.gif?size=160",
+                    id
                 )
+            } else {
+                format!(
+                    "https://media.discordapp.net/stickers/{}.webp?size=160&quality=lossless",
+                    id
+                )
+            };
+            return div()
+                .my(space_2())
                 .child(
-                    div()
-                        .text_size(font_size_sm())
-                        .font_weight(WEIGHT_BOLD)
-                        .text_color(text_titles())
-                        .child(sticker_name.to_string()),
-                ),
-        )
+                    img(cdn_url)
+                        .id(ElementId::from(SharedString::from(format!("msg-sticker-img-{}", id))))
+                        .size(px(160.0))
+                        .rounded(radius_md())
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.9)),
+                );
+        }
+    }
+
+    render_sticker_card(sticker_name)
 }
 
 /// Renders Discord rich embeds.
@@ -543,6 +708,7 @@ pub struct MessageRowConfig {
     pub role_color: Option<u32>,
     pub on_react: Option<MessageActionCallback>,
     pub on_reply: Option<MessageActionCallback>,
+    pub on_more: Option<MessageActionPosCallback>,
     pub on_reaction_click: Option<ReactionActionCallback>,
     pub on_add_reaction: Option<AddReactionCallback>,
 }
@@ -669,7 +835,9 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
     // Sticker or Markdown Message Content
     if message.is_sticker() {
         let sticker_name = message.sticker_name().unwrap_or_else(|| "Figurinha".to_string());
-        content_area = content_area.child(render_sticker_card(&sticker_name));
+        let sticker_id = message.sticker_id();
+        let format_type = message.sticker_format_type();
+        content_area = content_area.child(render_sticker(sticker_id.as_deref(), &sticker_name, format_type));
     } else {
         content_area = content_area.child(render_markdown(&message.content));
     }
@@ -697,8 +865,20 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
     // Floating action bar
     let mut row = row.child(left_gutter).child(content_area);
 
+    if let Some(on_more) = config.on_more.clone() {
+        let msg_id = message.id.clone();
+        row = row.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+            on_more(&msg_id, event.position, window, cx);
+        });
+    }
+
     if !message.is_pending {
-        let action_bar = render_hover_action_bar(&message.id, config.on_react, config.on_reply);
+        let action_bar = render_hover_action_bar(
+            &message.id,
+            config.on_react,
+            config.on_reply,
+            config.on_more,
+        );
         row = row.child(action_bar);
     }
 
@@ -807,6 +987,7 @@ pub fn render_message_list(
     messages: &[Message],
     on_react: Option<MessageActionCallback>,
     on_reply: Option<MessageActionCallback>,
+    on_more: Option<MessageActionPosCallback>,
     on_reaction_click: Option<ReactionActionCallback>,
     on_add_reaction: Option<AddReactionCallback>,
 ) -> Div {
@@ -870,6 +1051,7 @@ pub fn render_message_list(
                 role_color: None,
                 on_react: on_react.clone(),
                 on_reply: on_reply.clone(),
+                on_more: on_more.clone(),
                 on_reaction_click: on_reaction_click.clone(),
                 on_add_reaction: on_add_reaction.clone(),
             },
@@ -910,6 +1092,7 @@ impl Render for MessageListView {
                 None,
                 None,
                 None,
+                None,
             ))
     }
 }
@@ -940,7 +1123,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_build_chat_list_items_virtualization() {
         let author = Author::new("1001", "Bob");
-        let t0 = Utc::now();
+        let t0 = DateTime::from_timestamp(1700000000, 0).unwrap();
         let mut messages = Vec::new();
 
         for i in 0..100 {
@@ -981,9 +1164,68 @@ mod tests {
         let msg = Message::new("s1", "c1", author.clone(), ":sticker[Wumpus Wave]:");
         assert!(msg.is_sticker());
         assert_eq!(msg.sticker_name(), Some("Wumpus Wave".to_string()));
+        assert_eq!(msg.sticker_id(), None);
+
+        let sticker_item = crate::domain::MessageStickerItem::new("897123", "Wumpus Dance", 1);
+        let native_sticker_msg = Message::new("s2", "c1", author.clone(), "")
+            .with_sticker_item(sticker_item);
+        assert!(native_sticker_msg.is_sticker());
+        assert_eq!(native_sticker_msg.sticker_name(), Some("Wumpus Dance".to_string()));
+        assert_eq!(native_sticker_msg.sticker_id(), Some("897123".to_string()));
 
         let normal_msg = Message::new("m1", "c1", author, "Olá mundo");
         assert!(!normal_msg.is_sticker());
         assert_eq!(normal_msg.sticker_name(), None);
+        assert_eq!(normal_msg.sticker_id(), None);
+
+        // Verify elements construct cleanly
+        let _card = render_sticker_card("Wumpus Wave");
+        let _img_sticker = render_sticker(Some("897123"), "Wumpus Dance", Some(1));
+        let _anim_sticker = render_sticker(Some("897123"), "Wumpus Dance", Some(2));
+        let _fallback_sticker = render_sticker(None, "Wumpus Wave", None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_avatar_dimensions_and_rendering() {
+        use crate::components::avatar::AvatarSize;
+        assert_eq!(avatar_md(), px(40.0));
+        assert_eq!(avatar_sm(), px(32.0));
+        assert_eq!(AvatarSize::Px40.pixels(), px(40.0));
+        assert_eq!(AvatarSize::Px32.pixels(), px(32.0));
+
+        // Test render_avatar with URL and without URL
+        let _avatar_initials = render_avatar("Rustacean", None);
+        let _avatar_url = render_avatar("Rustacean", Some("https://cdn.discordapp.com/avatars/1/test.png"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_render_hover_action_bar_and_context_menu() {
+        let _bar = render_hover_action_bar("msg-101", None, None, None);
+
+        let menu = render_message_context_menu(MessageContextMenuConfig {
+            message_id: "msg-101".into(),
+            message_content: "Hello world".into(),
+            is_pinned: false,
+            on_add_reaction: None,
+            on_reply: None,
+            on_copy_text: None,
+            on_copy_id: None,
+            on_pin: None,
+            on_delete: None,
+            on_close: None,
+        });
+        let _pinned_menu = render_message_context_menu(MessageContextMenuConfig {
+            message_id: "msg-101".into(),
+            message_content: "Hello world".into(),
+            is_pinned: true,
+            on_add_reaction: None,
+            on_reply: None,
+            on_copy_text: None,
+            on_copy_id: None,
+            on_pin: None,
+            on_delete: None,
+            on_close: None,
+        });
+        drop(menu);
     }
 }

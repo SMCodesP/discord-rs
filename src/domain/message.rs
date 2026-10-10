@@ -159,6 +159,14 @@ impl MessageStickerItem {
             format_type,
         }
     }
+
+    pub fn cdn_url(&self) -> String {
+        if self.format_type == 2 || self.format_type == 4 {
+            format!("https://media.discordapp.net/stickers/{}.gif?size=160", self.id)
+        } else {
+            format!("https://media.discordapp.net/stickers/{}.webp?size=160&quality=lossless", self.id)
+        }
+    }
 }
 
 /// Core message entity representing a chat message.
@@ -233,6 +241,10 @@ impl Message {
             || self.content.starts_with("sticker:")
     }
 
+    pub fn sticker_id(&self) -> Option<String> {
+        self.sticker_items.first().map(|s| s.id.clone())
+    }
+
     pub fn sticker_name(&self) -> Option<String> {
         if let Some(item) = self.sticker_items.first() {
             return Some(item.name.clone());
@@ -248,6 +260,14 @@ impl Message {
             return Some(name.to_string());
         }
         None
+    }
+
+    pub fn sticker_format_type(&self) -> Option<u8> {
+        self.sticker_items.first().map(|s| s.format_type)
+    }
+
+    pub fn sticker_cdn_url(&self) -> Option<String> {
+        self.sticker_items.first().map(|s| s.cdn_url())
     }
 
     pub fn with_pending(mut self, pending: bool) -> Self {

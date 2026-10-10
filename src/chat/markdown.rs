@@ -41,6 +41,7 @@ pub enum InlineSpan {
     RoleMention { id: Option<String>, name: String },
     Link { label: String, url: String },
     Emoji(String),
+    CustomEmoji { name: String, id: String, animated: bool },
 }
 
 /// Represents block-level elements in Discord markdown.
@@ -87,6 +88,10 @@ static RE_MD_LINK: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_RAW_URL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(https?://[^\s<]+)").expect("invalid raw url regex")
+});
+
+static RE_CUSTOM_EMOJI: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^<(a)?:([a-zA-Z0-9_]+):([0-9]+)>").expect("invalid custom emoji regex")
 });
 
 pub static MARKDOWN_AST_CACHE: LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<MarkdownBlock>>>> =
@@ -352,8 +357,22 @@ pub fn parse_inlines(input: &str) -> Vec<InlineSpan> {
             }
         }
 
-        // 9. Mentions & Links (Snowflake, named, markdown links, raw urls)
+        // 9. Mentions, Links & Custom Emojis (Snowflake, named, custom emoji, markdown links, raw urls)
         if chars[idx] == '<' || chars[idx] == '@' || chars[idx] == '#' || chars[idx] == '[' || remaining_str.starts_with("http") {
+            // Discord custom emoji `<:name:id>` and `<a:name:id>`
+            if let Some(cap) = RE_CUSTOM_EMOJI.captures(&remaining_str) {
+                let full = cap.get(0).unwrap().as_str();
+                let animated = cap.get(1).is_some();
+                let name = cap.get(2).unwrap().as_str().to_string();
+                let id = cap.get(3).unwrap().as_str().to_string();
+                if !buffer.is_empty() {
+                    inlines.push(InlineSpan::Text(std::mem::take(&mut buffer)));
+                }
+                inlines.push(InlineSpan::CustomEmoji { name, id, animated });
+                idx += full.chars().count();
+                continue;
+            }
+
             // Snowflake user mention `<@12345>`
             if let Some(cap) = RE_USER_MENTION_SNOWFLAKE.captures(&remaining_str) {
                 let full = cap.get(0).unwrap().as_str();
@@ -575,6 +594,16 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
         }
 
         MarkdownBlock::Paragraph(inlines) => {
+            let meaningful_count = inlines
+                .iter()
+                .filter(|span| match span {
+                    InlineSpan::Text(t) => !t.trim().is_empty(),
+                    _ => true,
+                })
+                .count();
+            let is_single_emoji = meaningful_count == 1
+                && inlines.iter().any(|span| matches!(span, InlineSpan::CustomEmoji { .. } | InlineSpan::Emoji(_)));
+
             div()
                 .w_full()
                 .min_w(px(0.0))
@@ -585,7 +614,7 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
                 .text_size(font_size_base())
                 .text_color(text_primary())
                 .line_height(line_height_base())
-                .children(inlines.iter().map(render_inline))
+                .children(inlines.iter().map(|span| render_inline_span(span, is_single_emoji)))
         }
 
         MarkdownBlock::CodeBlock { language, content } => {
@@ -671,8 +700,8 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
     }
 }
 
-/// Renders a single inline formatted element.
-pub fn render_inline(inline: &InlineSpan) -> Div {
+/// Renders a single inline formatted element with optional single emoji flag.
+pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
     match inline {
         InlineSpan::Text(text) => {
             div()
@@ -815,11 +844,43 @@ pub fn render_inline(inline: &InlineSpan) -> Div {
         }
 
         InlineSpan::Emoji(emoji) => {
+            let mut el = div().mx(space_1());
+            if is_single_emoji {
+                el = el.text_size(px(40.0));
+            }
+            el.child(emoji.clone())
+        }
+
+        InlineSpan::CustomEmoji { name: _, id, animated } => {
+            let ext = if *animated { "gif" } else { "png" };
+            let (img_sz, cdn_sz) = if is_single_emoji {
+                (px(48.0), 48)
+            } else {
+                (px(22.0), 48)
+            };
+            let cdn_url = format!(
+                "https://cdn.discordapp.com/emojis/{}.{}?size={}&quality=lossless",
+                id, ext, cdn_sz
+            );
             div()
                 .mx(space_1())
-                .child(emoji.clone())
+                .size(img_sz)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(cdn_url)
+                        .id(ElementId::from(SharedString::from(format!("md-emoji-img-{}", id))))
+                        .size_full()
+                        .rounded(radius_xs()),
+                )
         }
     }
+}
+
+/// Renders a single inline formatted element.
+pub fn render_inline(inline: &InlineSpan) -> Div {
+    render_inline_span(inline, false)
 }
 
 // ============================================================================
@@ -889,5 +950,56 @@ mod tests {
         let blocks = parse_markdown(input);
         assert_eq!(blocks.len(), 2);
         assert!(matches!(blocks[0], MarkdownBlock::BlockQuote(_)));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_parse_custom_emojis() {
+        let input = "Olha esse <:ferris:123456789> e animado <a:party_blob:987654321>!";
+        let inlines = parse_inlines(input);
+        assert_eq!(inlines.len(), 5);
+        assert_eq!(inlines[0], InlineSpan::Text("Olha esse ".into()));
+        assert_eq!(
+            inlines[1],
+            InlineSpan::CustomEmoji {
+                name: "ferris".into(),
+                id: "123456789".into(),
+                animated: false,
+            }
+        );
+        assert_eq!(inlines[2], InlineSpan::Text(" e animado ".into()));
+        assert_eq!(
+            inlines[3],
+            InlineSpan::CustomEmoji {
+                name: "party_blob".into(),
+                id: "987654321".into(),
+                animated: true,
+            }
+        );
+        assert_eq!(inlines[4], InlineSpan::Text("!".into()));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_render_single_custom_emoji_and_inline() {
+        let single_input = "<a:hype:112233>";
+        let blocks = parse_markdown(single_input);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            MarkdownBlock::Paragraph(inlines) => {
+                assert_eq!(inlines.len(), 1);
+                assert_eq!(
+                    inlines[0],
+                    InlineSpan::CustomEmoji {
+                        name: "hype".into(),
+                        id: "112233".into(),
+                        animated: true,
+                    }
+                );
+            }
+            _ => panic!("Expected Paragraph"),
+        }
+        let _rendered_single = render_markdown(single_input);
+
+        let mixed_input = "Texto com <:custom:445566> junto.";
+        let _rendered_mixed = render_markdown(mixed_input);
     }
 }

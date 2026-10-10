@@ -1,10 +1,13 @@
 use crate::domain::{
-    Attachment, Author, Channel, ChannelType, Embed, EmbedField, Guild, Message, Reaction, Role,
-    User, VoiceState,
+    Attachment, Author, Channel, ChannelType, Embed, EmbedField, Guild, Message, MessageStickerItem,
+    Reaction, Role, User, VoiceState,
 };
 use crate::protocol::auth::{AuthToken, TokenType};
 use crate::protocol::cache_engine::DiscordCacheEngine;
-use crate::protocol::media_cache::{DiscordEmoji, DiscordSticker, SoundboardSound, StickerFormatType};
+use crate::protocol::media_cache::{
+    DiscordEmoji, DiscordSticker, MediaCacheManager, SoundboardSound, StickerFormatType,
+    StickerPack, TenorGif,
+};
 use crate::protocol::rate_limiter::RateLimitManager;
 use crate::protocol::transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent};
 use anyhow::{bail, Context, Result};
@@ -41,6 +44,7 @@ pub struct DiscordApiClient {
     http_client: reqwest::Client,
     rate_limiter: Arc<RateLimitManager>,
     cache_engine: Arc<DiscordCacheEngine>,
+    media_cache: MediaCacheManager,
     event_sender: broadcast::Sender<TransportEvent>,
     is_connected: Arc<AtomicBool>,
     last_sequence: Arc<AtomicI64>,
@@ -64,6 +68,7 @@ impl DiscordApiClient {
             http_client,
             rate_limiter: Arc::new(RateLimitManager::new()),
             cache_engine: Arc::new(DiscordCacheEngine::new()),
+            media_cache: MediaCacheManager::default_path(),
             event_sender,
             is_connected: Arc::new(AtomicBool::new(false)),
             last_sequence: Arc::new(AtomicI64::new(-1)),
@@ -91,6 +96,7 @@ impl DiscordApiClient {
             http_client,
             rate_limiter,
             cache_engine,
+            media_cache: MediaCacheManager::default_path(),
             event_sender,
             is_connected: Arc::new(AtomicBool::new(false)),
             last_sequence: Arc::new(AtomicI64::new(-1)),
@@ -124,6 +130,13 @@ impl DiscordApiClient {
 
     fn auth_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", DISCORD_API_BASE, path);
+        self.http_client
+            .request(method, url)
+            .header("Authorization", self.token.authorization_header())
+            .header("Content-Type", "application/json")
+    }
+
+    fn auth_request_url(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         self.http_client
             .request(method, url)
             .header("Authorization", self.token.authorization_header())
@@ -339,75 +352,153 @@ impl DiscordApiClient {
         Ok(guild_folders)
     }
 
-    /// Fetches all custom emojis for a guild (/guilds/{guild_id}/emojis)
+    /// Fetches all custom emojis for a guild (/guilds/{guild_id}/emojis) with local disk cache
     pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<DiscordEmoji>> {
+        if let Some(cached) = self.media_cache.load_guild_emojis_from_disk(guild_id) {
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
         let path = format!("/guilds/{}/emojis", guild_id);
         let req = self.auth_request(reqwest::Method::GET, &path);
         let resp = self.send_request(&path, req).await?;
         let raw_emojis: Vec<serde_json::Value> = resp.json().await?;
-
-        let mut emojis = Vec::new();
-        for val in raw_emojis {
-            let id = val.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
-            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("emoji").to_string();
-            let animated = val.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
-            let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
-            let roles = val
-                .get("roles")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|r| r.as_str().map(ToString::to_string)).collect())
-                .unwrap_or_default();
-
-            emojis.push(DiscordEmoji {
-                id,
-                name,
-                roles,
-                user: val.get("user").cloned(),
-                require_colons: val.get("require_colons").and_then(|v| v.as_bool()).unwrap_or(true),
-                managed: val.get("managed").and_then(|v| v.as_bool()).unwrap_or(false),
-                animated,
-                available,
-                guild_id: Some(guild_id.to_string()),
-            });
-        }
+        let emojis = parse_emojis_from_value_array(&raw_emojis, guild_id);
+        let _ = self.media_cache.save_guild_emojis_to_disk(guild_id, &emojis);
         Ok(emojis)
     }
 
-    /// Fetches all custom stickers for a guild (/guilds/{guild_id}/stickers)
+    /// Fetches all custom stickers for a guild (/guilds/{guild_id}/stickers) with local disk cache
     pub async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<DiscordSticker>> {
+        if let Some(cached) = self.media_cache.load_guild_stickers_from_disk(guild_id) {
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
         let path = format!("/guilds/{}/stickers", guild_id);
         let req = self.auth_request(reqwest::Method::GET, &path);
         let resp = self.send_request(&path, req).await?;
         let raw_stickers: Vec<serde_json::Value> = resp.json().await?;
-
-        let mut stickers = Vec::new();
-        for val in raw_stickers {
-            let id = val.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("sticker").to_string();
-            let description = val.get("description").and_then(|v| v.as_str().map(ToString::to_string));
-            let tags = val.get("tags").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let pack_id = val.get("pack_id").and_then(|v| v.as_str().map(ToString::to_string));
-            let fmt_code = val.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1);
-            let format_type = match fmt_code {
-                2 => StickerFormatType::Apng,
-                3 => StickerFormatType::Lottie,
-                4 => StickerFormatType::Gif,
-                _ => StickerFormatType::Png,
-            };
-            let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
-
-            stickers.push(DiscordSticker {
-                id,
-                pack_id,
-                name,
-                description,
-                tags,
-                format_type,
-                available,
-                guild_id: Some(guild_id.to_string()),
-            });
-        }
+        let stickers = parse_stickers_from_value_array(&raw_stickers, guild_id);
+        let _ = self.media_cache.save_guild_stickers_to_disk(guild_id, &stickers);
         Ok(stickers)
+    }
+
+    /// Fetches official sticker packs from Discord (/sticker-packs?locale=pt-BR) with local fallback
+    pub async fn get_sticker_packs(&self) -> Result<Vec<StickerPack>> {
+        let url = "https://discord.com/api/v9/sticker-packs?locale=pt-BR";
+        let req = self.auth_request_url(reqwest::Method::GET, url);
+
+        match self.send_request("/sticker-packs", req).await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        let mut packs = Vec::new();
+                        if let Some(array) = val.get("sticker_packs").and_then(|v| v.as_array()) {
+                            for pack_val in array {
+                                if let Some(pack) = parse_sticker_pack_from_json(pack_val) {
+                                    packs.push(pack);
+                                }
+                            }
+                        }
+                        if !packs.is_empty() {
+                            return Ok(packs);
+                        }
+                    }
+                }
+                log::warn!("[DiscordApiClient] get_sticker_packs returned non-success or empty, falling back to local packs");
+                Ok(MediaCacheManager::get_default_sticker_packs())
+            }
+            Err(e) => {
+                log::warn!("[DiscordApiClient] get_sticker_packs failed ({}). Falling back to local packs", e);
+                Ok(MediaCacheManager::get_default_sticker_packs())
+            }
+        }
+    }
+
+    /// Fetches trending GIFs from Discord official API (/gifs/trending?locale=pt-BR&media_format=webm) with Tenor/local fallback
+    pub async fn get_trending_gifs(&self) -> Result<Vec<TenorGif>> {
+        let url = "https://discord.com/api/v9/gifs/trending?locale=pt-BR&media_format=webm";
+        let req = self.auth_request_url(reqwest::Method::GET, url);
+
+        match self.send_request("/gifs/trending", req).await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        let gifs = MediaCacheManager::parse_gifs_response(&val, Some("trending"));
+                        if !gifs.is_empty() {
+                            return Ok(gifs);
+                        }
+                    }
+                }
+                log::warn!("[DiscordApiClient] get_trending_gifs returned non-success or empty, falling back to curated GIFs");
+                Ok(MediaCacheManager::get_curated_tenor_gifs_for_category("trending"))
+            }
+            Err(e) => {
+                log::warn!("[DiscordApiClient] get_trending_gifs request failed ({}). Falling back to curated GIFs", e);
+                Ok(MediaCacheManager::get_curated_tenor_gifs_for_category("trending"))
+            }
+        }
+    }
+
+    /// Searches GIFs via Discord official API (/gifs/search?q={query}&locale=pt-BR&media_format=mp4) with fallback
+    pub async fn search_gifs(&self, query: &str) -> Result<Vec<TenorGif>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return self.get_trending_gifs().await;
+        }
+
+        let mut url = reqwest::Url::parse("https://discord.com/api/v9/gifs/search")
+            .map_err(|e| anyhow::anyhow!("Invalid URL: {}", e))?;
+        url.query_pairs_mut()
+            .append_pair("q", q)
+            .append_pair("locale", "pt-BR")
+            .append_pair("media_format", "mp4");
+
+        let req = self.auth_request_url(reqwest::Method::GET, url.as_str());
+
+        match self.send_request("/gifs/search", req).await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(val) = resp.json::<serde_json::Value>().await {
+                        let gifs = MediaCacheManager::parse_gifs_response(&val, Some(q));
+                        if !gifs.is_empty() {
+                            return Ok(gifs);
+                        }
+                    }
+                }
+                log::warn!("[DiscordApiClient] search_gifs returned non-success or empty, falling back to curated search");
+                let fallback = MediaCacheManager::curated_tenor_gifs();
+                let filtered: Vec<TenorGif> = fallback
+                    .into_iter()
+                    .filter(|g| {
+                        g.title.to_lowercase().contains(&q.to_lowercase())
+                            || g.category.as_deref().map(|c| c.to_lowercase() == q.to_lowercase()).unwrap_or(false)
+                    })
+                    .collect();
+                if filtered.is_empty() {
+                    Ok(MediaCacheManager::curated_tenor_gifs())
+                } else {
+                    Ok(filtered)
+                }
+            }
+            Err(e) => {
+                log::warn!("[DiscordApiClient] search_gifs request failed ({}). Falling back to curated search", e);
+                let fallback = MediaCacheManager::curated_tenor_gifs();
+                let filtered: Vec<TenorGif> = fallback
+                    .into_iter()
+                    .filter(|g| {
+                        g.title.to_lowercase().contains(&q.to_lowercase())
+                            || g.category.as_deref().map(|c| c.to_lowercase() == q.to_lowercase()).unwrap_or(false)
+                    })
+                    .collect();
+                if filtered.is_empty() {
+                    Ok(MediaCacheManager::curated_tenor_gifs())
+                } else {
+                    Ok(filtered)
+                }
+            }
+        }
     }
 
     /// Fetches the default soundboard sounds provided by Discord (/soundboard-default-sounds)
@@ -441,6 +532,38 @@ impl DiscordApiClient {
             });
         }
         Ok(sounds)
+    }
+
+    /// Sends a sticker message to a text channel (/channels/{channel_id}/messages)
+    pub async fn send_sticker_message(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
+        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM para envio de figurinha {}: {:?}", recipient_id, e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let path = format!("/channels/{}/messages", resolved_id);
+        let body = json!({
+            "content": "",
+            "sticker_ids": [sticker_id]
+        });
+        let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
+        let resp = self.send_request(&path, req).await?;
+        let val: serde_json::Value = resp.json().await?;
+
+        let msg = parse_message_from_json(&val)
+            .context("Failed to deserialize sent sticker message response from Discord API")?;
+
+        self.cache_engine.apply_gateway_message_create(&msg).await;
+
+        Ok(msg)
     }
 }
 
@@ -534,6 +657,12 @@ impl DiscordTransport for DiscordApiClient {
 
             let mut guild = Guild::new(id, name, if owner { "current_user" } else { "" });
             guild.icon = icon;
+            if let Some(cached_emojis) = self.media_cache.load_guild_emojis_from_disk(id) {
+                guild.emojis = cached_emojis;
+            }
+            if let Some(cached_stickers) = self.media_cache.load_guild_stickers_from_disk(id) {
+                guild.stickers = cached_stickers;
+            }
             guilds.push(guild);
         }
 
@@ -579,8 +708,22 @@ impl DiscordTransport for DiscordApiClient {
             .with_channels(channels)
             .with_roles(roles);
         guild.icon = icon;
+        if let Some(raw_emojis) = val.get("emojis").and_then(|v| v.as_array()) {
+            guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
+        }
+        if let Some(raw_stickers) = val.get("stickers").and_then(|v| v.as_array()) {
+            guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+        }
 
         Ok(Some(guild))
+    }
+
+    async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<DiscordEmoji>> {
+        self.get_guild_emojis(guild_id).await
+    }
+
+    async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<DiscordSticker>> {
+        self.get_guild_stickers(guild_id).await
     }
 
     async fn list_channels(&self, guild_id: &str) -> Result<Vec<Channel>> {
@@ -692,6 +835,10 @@ impl DiscordTransport for DiscordApiClient {
         self.cache_engine.apply_gateway_message_create(&msg).await;
 
         Ok(msg)
+    }
+
+    async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
+        self.send_sticker_message(channel_id, sticker_id).await
     }
 
     async fn add_reaction(
@@ -1029,6 +1176,12 @@ async fn handle_dispatch(
                     });
                     let mut guild = Guild::new(id, name, "");
                     guild.icon = icon;
+                    if let Some(raw_emojis) = g.get("emojis").and_then(|v| v.as_array()) {
+                        guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
+                    }
+                    if let Some(raw_stickers) = g.get("stickers").and_then(|v| v.as_array()) {
+                        guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                    }
                     guilds.push(guild);
                 }
             }
@@ -1081,6 +1234,63 @@ async fn handle_dispatch(
                     let _ = event_tx.send(TransportEvent::DmChannelCreated(ch));
                 } else {
                     let _ = event_tx.send(TransportEvent::ChannelCreate(ch));
+                }
+            }
+        }
+        "GUILD_CREATE" => {
+            if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
+                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("Server");
+                let owner_id = data.get("owner_id").and_then(|v| v.as_str()).unwrap_or_default();
+                let icon = data.get("icon").and_then(|v| v.as_str()).map(|hash| {
+                    if hash.starts_with("http://") || hash.starts_with("https://") {
+                        hash.to_string()
+                    } else {
+                        format!("https://cdn.discordapp.com/icons/{}/{}.png?size=96", id, hash)
+                    }
+                });
+
+                let mut channels = Vec::new();
+                if let Some(raw_channels) = data.get("channels").and_then(|v| v.as_array()) {
+                    for val in raw_channels {
+                        if let Some(ch) = parse_channel_from_json(val, Some(id)) {
+                            channels.push(ch);
+                        }
+                    }
+                }
+                let roles = parse_roles_from_json(&data);
+                let mut guild = Guild::new(id, name, owner_id)
+                    .with_channels(channels)
+                    .with_roles(roles);
+                guild.icon = icon;
+                if let Some(raw_emojis) = data.get("emojis").and_then(|v| v.as_array()) {
+                    guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
+                }
+                if let Some(raw_stickers) = data.get("stickers").and_then(|v| v.as_array()) {
+                    guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                }
+
+                let _ = event_tx.send(TransportEvent::GuildCreate(guild));
+            }
+        }
+        "GUILD_EMOJIS_UPDATE" => {
+            if let Some(guild_id) = data.get("guild_id").and_then(|v| v.as_str()) {
+                if let Some(raw_emojis) = data.get("emojis").and_then(|v| v.as_array()) {
+                    let emojis = parse_emojis_from_value_array(raw_emojis, guild_id);
+                    let _ = event_tx.send(TransportEvent::GuildEmojisUpdated {
+                        guild_id: guild_id.to_string(),
+                        emojis,
+                    });
+                }
+            }
+        }
+        "GUILD_STICKERS_UPDATE" => {
+            if let Some(guild_id) = data.get("guild_id").and_then(|v| v.as_str()) {
+                if let Some(raw_stickers) = data.get("stickers").and_then(|v| v.as_array()) {
+                    let stickers = parse_stickers_from_value_array(raw_stickers, guild_id);
+                    let _ = event_tx.send(TransportEvent::GuildStickersUpdated {
+                        guild_id: guild_id.to_string(),
+                        stickers,
+                    });
                 }
             }
         }
@@ -1311,6 +1521,112 @@ fn parse_roles_from_json(guild_val: &serde_json::Value) -> Vec<Role> {
     roles
 }
 
+fn parse_emojis_from_value_array(raw_emojis: &[serde_json::Value], guild_id: &str) -> Vec<DiscordEmoji> {
+    let mut emojis = Vec::new();
+    for val in raw_emojis {
+        let id = val.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
+        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("emoji").to_string();
+        let animated = val.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
+        let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+        let roles = val
+            .get("roles")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|r| r.as_str().map(ToString::to_string)).collect())
+            .unwrap_or_default();
+
+        emojis.push(DiscordEmoji {
+            id,
+            name,
+            roles,
+            user: val.get("user").cloned(),
+            require_colons: val.get("require_colons").and_then(|v| v.as_bool()).unwrap_or(true),
+            managed: val.get("managed").and_then(|v| v.as_bool()).unwrap_or(false),
+            animated,
+            available,
+            guild_id: Some(guild_id.to_string()),
+        });
+    }
+    emojis
+}
+
+fn parse_stickers_from_value_array(raw_stickers: &[serde_json::Value], guild_id: &str) -> Vec<DiscordSticker> {
+    let mut stickers = Vec::new();
+    for val in raw_stickers {
+        let id = val.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("sticker").to_string();
+        let description = val.get("description").and_then(|v| v.as_str().map(ToString::to_string));
+        let tags = val.get("tags").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let pack_id = val.get("pack_id").and_then(|v| v.as_str()).map(ToString::to_string);
+        let fmt_code = val.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1);
+        let format_type = match fmt_code {
+            2 => StickerFormatType::Apng,
+            3 => StickerFormatType::Lottie,
+            4 => StickerFormatType::Gif,
+            _ => StickerFormatType::Png,
+        };
+        let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+
+        stickers.push(DiscordSticker {
+            id,
+            pack_id,
+            name,
+            description,
+            tags,
+            format_type,
+            available,
+            guild_id: Some(guild_id.to_string()),
+        });
+    }
+    stickers
+}
+
+fn parse_sticker_pack_from_json(val: &serde_json::Value) -> Option<StickerPack> {
+    let id = val.get("id").and_then(|v| v.as_str())?.to_string();
+    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Sticker Pack").to_string();
+    let sku_id = val.get("sku_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let description = val.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let banner_asset_id = val.get("banner_asset_id").and_then(|v| v.as_str()).map(ToString::to_string);
+
+    let mut stickers = Vec::new();
+    if let Some(arr) = val.get("stickers").and_then(|v| v.as_array()) {
+        for s in arr {
+            let s_id = s.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let s_name = s.get("name").and_then(|v| v.as_str()).unwrap_or("sticker").to_string();
+            let s_desc = s.get("description").and_then(|v| v.as_str()).map(ToString::to_string);
+            let s_tags = s.get("tags").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let s_pack_id = s.get("pack_id").and_then(|v| v.as_str()).map(ToString::to_string).or_else(|| Some(id.clone()));
+            let fmt_code = s.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1);
+            let format_type = match fmt_code {
+                2 => StickerFormatType::Apng,
+                3 => StickerFormatType::Lottie,
+                4 => StickerFormatType::Gif,
+                _ => StickerFormatType::Png,
+            };
+            let available = s.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+
+            stickers.push(DiscordSticker {
+                id: s_id,
+                pack_id: s_pack_id,
+                name: s_name,
+                description: s_desc,
+                tags: s_tags,
+                format_type,
+                available,
+                guild_id: None,
+            });
+        }
+    }
+
+    Some(StickerPack {
+        id,
+        name,
+        sku_id,
+        description,
+        stickers,
+        banner_asset_id,
+    })
+}
+
 fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
     let id = val.get("id")?.as_str()?;
     let channel_id = val.get("channel_id")?.as_str()?;
@@ -1404,6 +1720,18 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                 thumbnail_url: e.get("thumbnail").and_then(|th| th.get("url")).and_then(|v| v.as_str()).map(ToString::to_string),
                 timestamp: None,
             });
+        }
+    }
+
+    if let Some(raw_stickers) = val.get("sticker_items").and_then(|v| v.as_array()) {
+        for s in raw_stickers {
+            if let (Some(s_id), Some(s_name)) = (
+                s.get("id").and_then(|v| v.as_str()),
+                s.get("name").and_then(|v| v.as_str()),
+            ) {
+                let fmt = s.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
+                message.sticker_items.push(MessageStickerItem::new(s_id, s_name, fmt));
+            }
         }
     }
 
