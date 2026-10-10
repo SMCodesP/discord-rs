@@ -124,6 +124,47 @@ impl Activity {
     }
 }
 
+/// Data representing an avatar decoration equipped by a user.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvatarDecorationData {
+    /// Asset hash or identifier for the decoration preset.
+    pub asset: String,
+    /// Optional SKU Snowflake identifier for the store collectible.
+    #[serde(default)]
+    pub sku_id: Option<String>,
+}
+
+impl AvatarDecorationData {
+    /// Creates a new decoration with just the asset identifier.
+    pub fn new(asset: impl Into<String>) -> Self {
+        Self {
+            asset: asset.into(),
+            sku_id: None,
+        }
+    }
+
+    /// Creates a decoration with an asset and SKU ID.
+    pub fn with_sku(asset: impl Into<String>, sku_id: impl Into<String>) -> Self {
+        Self {
+            asset: asset.into(),
+            sku_id: Some(sku_id.into()),
+        }
+    }
+
+    /// Canonical CDN URL for this decoration preset.
+    pub fn url(&self) -> String {
+        format!(
+            "https://cdn.discordapp.com/avatar-decoration-presets/{}.png?size=96&passthrough=true",
+            self.asset
+        )
+    }
+
+    /// Returns true if the decoration is an animated APNG (`a_` prefix).
+    pub fn is_animated(&self) -> bool {
+        self.asset.starts_with("a_")
+    }
+}
+
 /// Core domain representation of a Discord User.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
@@ -145,6 +186,9 @@ pub struct User {
     pub presence: PresenceStatus,
     /// Active Rich Presence or custom status activity.
     pub activity: Option<Activity>,
+    /// Active avatar decoration equipped by the user.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 impl User {
@@ -158,6 +202,7 @@ impl User {
             bot: false,
             presence: PresenceStatus::Offline,
             activity: None,
+            avatar_decoration_data: None,
         }
     }
 
@@ -177,5 +222,67 @@ impl User {
                 format!("https://cdn.discordapp.com/avatars/{}/{}.png", self.id, hash)
             }
         })
+    }
+
+    /// Returns the avatar decoration CDN URL if the user has an equipped decoration.
+    pub fn avatar_decoration_url(&self) -> Option<String> {
+        self.avatar_decoration_data.as_ref().map(|d| d.url())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_avatar_decoration_data_url_and_animation() {
+        let static_decor = AvatarDecorationData::new("b456abc");
+        assert_eq!(
+            static_decor.url(),
+            "https://cdn.discordapp.com/avatar-decoration-presets/b456abc.png?size=96&passthrough=true"
+        );
+        assert!(!static_decor.is_animated());
+        assert_eq!(static_decor.sku_id, None);
+
+        let animated_decor = AvatarDecorationData::with_sku("a_def123", "sku-999");
+        assert_eq!(
+            animated_decor.url(),
+            "https://cdn.discordapp.com/avatar-decoration-presets/a_def123.png?size=96&passthrough=true"
+        );
+        assert!(animated_decor.is_animated());
+        assert_eq!(animated_decor.sku_id.as_deref(), Some("sku-999"));
+    }
+
+    #[test]
+    fn test_user_serde_with_avatar_decoration_data() {
+        // Payload without decoration field (should deserialize with None due to #[serde(default)])
+        let json_no_decor = r#"{"id":"1","username":"alice"}"#;
+        let user: User = serde_json::from_str(json_no_decor).unwrap();
+        assert_eq!(user.avatar_decoration_data, None);
+        assert_eq!(user.avatar_decoration_url(), None);
+
+        // Payload with null decoration field
+        let json_null_decor = r#"{"id":"2","username":"bob","avatar_decoration_data":null}"#;
+        let user_null: User = serde_json::from_str(json_null_decor).unwrap();
+        assert_eq!(user_null.avatar_decoration_data, None);
+
+        // Payload with populated decoration
+        let json_with_decor = r#"{
+            "id":"3",
+            "username":"charlie",
+            "avatar_decoration_data":{
+                "asset":"a_fire_ring",
+                "sku_id":"sku_fire"
+            }
+        }"#;
+        let user_decor: User = serde_json::from_str(json_with_decor).unwrap();
+        let decor = user_decor.avatar_decoration_data.as_ref().unwrap();
+        assert_eq!(decor.asset, "a_fire_ring");
+        assert_eq!(decor.sku_id.as_deref(), Some("sku_fire"));
+        assert!(decor.is_animated());
+        assert_eq!(
+            user_decor.avatar_decoration_url().unwrap(),
+            "https://cdn.discordapp.com/avatar-decoration-presets/a_fire_ring.png?size=96&passthrough=true"
+        );
     }
 }
