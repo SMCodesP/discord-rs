@@ -1,6 +1,7 @@
 use crate::domain::{
-    Attachment, Author, Channel, ChannelType, Embed, EmbedField, Guild, Message, MessageStickerItem,
-    Reaction, Role, User, VoiceState, AvatarDecorationData,
+    Activity, ActivityType, Attachment, Author, AvatarDecorationData, Channel, ChannelType,
+    CustomStatus, CustomStatusEmoji, Embed, EmbedField, Guild, Message, MessageStickerItem,
+    PresenceStatus, Reaction, Role, User, VoiceState,
 };
 use crate::protocol::auth::{AuthToken, TokenType};
 use crate::protocol::cache_engine::DiscordCacheEngine;
@@ -1381,8 +1382,38 @@ async fn handle_dispatch(
                 guild_folders,
             });
 
+            // Extrair presenças iniciais de amigos/contatos do payload READY
+            if let Some(raw_presences) = data.get("presences").and_then(|v| v.as_array()) {
+                for p in raw_presences {
+                    if let Some(evt) = parse_presence_from_json(p) {
+                        let _ = event_tx.send(evt);
+                    }
+                }
+            }
+
             if !pinned_dms.is_empty() {
                 let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
+            }
+
+            // Popula voice_states iniciais a partir do snapshot do READY
+            if let Some(raw_guilds) = data.get("guilds").and_then(|v| v.as_array()) {
+                for g in raw_guilds {
+                    let g_id = g.get("id").and_then(|v| v.as_str());
+                    if let Some(raw_states) = g.get("voice_states").and_then(|v| v.as_array()) {
+                        for vs_val in raw_states {
+                            if let Some(state) = parse_voice_state_from_json(vs_val, g_id) {
+                                let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                for vs_val in raw_states {
+                    if let Some(state) = parse_voice_state_from_json(vs_val, None) {
+                        let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                    }
+                }
             }
         }
         "CHANNEL_CREATE" => {
@@ -1424,6 +1455,45 @@ async fn handle_dispatch(
                 }
                 if let Some(raw_stickers) = data.get("stickers").and_then(|v| v.as_array()) {
                     guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                }
+
+                // Popula voice_states a partir do snapshot inicial de GUILD_CREATE
+                if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
+                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+                    if let Some(raw_members) = data.get("members").and_then(|v| v.as_array()) {
+                        for m in raw_members {
+                            if let Some(user) = m.get("user") {
+                                if let Some(uid) = user.get("id").and_then(|v| v.as_str()) {
+                                    let name = m.get("nick").and_then(|v| v.as_str())
+                                        .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                                        .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                                        .map(ToString::to_string);
+                                    let avatar = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                                        if hash.starts_with("http") {
+                                            hash.to_string()
+                                        } else {
+                                            format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, hash)
+                                        }
+                                    });
+                                    guild_members.insert(uid.to_string(), (name, avatar));
+                                }
+                            }
+                        }
+                    }
+
+                    for vs_val in raw_states {
+                        if let Some(mut state) = parse_voice_state_from_json(vs_val, Some(id)) {
+                            if state.user_name.is_none() {
+                                if let Some((name, avatar)) = guild_members.get(&state.user_id) {
+                                    state.user_name = name.clone();
+                                    if state.avatar_url.is_none() {
+                                        state.avatar_url = avatar.clone();
+                                    }
+                                }
+                            }
+                            let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
+                        }
+                    }
                 }
 
                 let _ = event_tx.send(TransportEvent::GuildCreate(guild));
@@ -1533,23 +1603,13 @@ async fn handle_dispatch(
             }
         }
         "VOICE_STATE_UPDATE" => {
-            if let Some(user_id) = data.get("user_id").and_then(|v| v.as_str()) {
-                let session_id_str = data.get("session_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if let Some(state) = parse_voice_state_from_json(&data, None) {
                 {
                     let my_id = current_user_id.read().await;
-                    if my_id.as_deref() == Some(user_id) && !session_id_str.is_empty() {
-                        *last_voice_session_id.write().await = Some(session_id_str.clone());
+                    if my_id.as_deref() == Some(state.user_id.as_str()) && !state.session_id.is_empty() {
+                        *last_voice_session_id.write().await = Some(state.session_id.clone());
                     }
                 }
-
-                let mut state = VoiceState::new(user_id, "");
-                state.guild_id = data.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                state.channel_id = data.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                state.session_id = session_id_str;
-                state.mute = data.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.deaf = data.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.self_mute = data.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
-                state.self_deaf = data.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
             }
@@ -1588,6 +1648,11 @@ async fn handle_dispatch(
                 });
             }
         }
+        "PRESENCE_UPDATE" => {
+            if let Some(evt) = parse_presence_from_json(&data) {
+                let _ = event_tx.send(evt);
+            }
+        }
         _ => {}
     }
 }
@@ -1610,6 +1675,49 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
         }
     }
     Some(user)
+}
+
+pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<VoiceState> {
+    let user_id = val.get("user_id")?.as_str()?;
+    let session_id = val.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+    let mut state = VoiceState::new(user_id, session_id);
+    state.guild_id = val.get("guild_id").and_then(|v| v.as_str()).or(default_guild_id).map(ToString::to_string);
+    state.channel_id = val.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    state.mute = val.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.deaf = val.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_mute = val.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_deaf = val.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_video = val.get("self_video").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_stream = val.get("self_stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.suppress = val.get("suppress").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if let Some(member) = val.get("member") {
+        if let Some(user) = member.get("user") {
+            state.user_name = member.get("nick").and_then(|v| v.as_str())
+                .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                .or_else(|| user.get("username").and_then(|v| v.as_str()))
+                .map(ToString::to_string);
+            state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+                if hash.starts_with("http") {
+                    hash.to_string()
+                } else {
+                    format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+                }
+            });
+        }
+    } else if let Some(user) = val.get("user") {
+        state.user_name = user.get("global_name").and_then(|v| v.as_str())
+            .or_else(|| user.get("username").and_then(|v| v.as_str()))
+            .map(ToString::to_string);
+        state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
+            if hash.starts_with("http") {
+                hash.to_string()
+            } else {
+                format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+            }
+        });
+    }
+    Some(state)
 }
 
 fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<Channel> {
@@ -1655,6 +1763,7 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
     ch.topic = val.get("topic").and_then(|v| v.as_str()).map(ToString::to_string);
     ch.position = val.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
     ch.last_message_id = val.get("last_message_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    ch.user_limit = val.get("user_limit").and_then(|v| v.as_u64()).map(|l| l as u32);
     ch.is_pinned = val
         .get("is_pinned")
         .and_then(|v| v.as_bool())
@@ -1944,4 +2053,164 @@ fn urlencoding_encode(s: &str) -> String {
         }
     }
     encoded
+}
+
+pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<TransportEvent> {
+    let user_id = val
+        .get("user")
+        .and_then(|u| {
+            if let Some(id) = u.get("id").and_then(|v| v.as_str()) {
+                Some(id.to_string())
+            } else if let Some(s) = u.as_str() {
+                Some(s.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| val.get("user_id").and_then(|v| v.as_str()).map(ToString::to_string))?;
+
+    let status_str = val.get("status").and_then(|v| v.as_str()).unwrap_or("offline");
+    let status = match status_str.to_lowercase().as_str() {
+        "online" => PresenceStatus::Online,
+        "idle" => PresenceStatus::Idle,
+        "dnd" => PresenceStatus::DoNotDisturb,
+        _ => PresenceStatus::Offline,
+    };
+
+    let mut primary_activity: Option<Activity> = None;
+    let mut custom_status: Option<CustomStatus> = None;
+
+    if let Some(activities) = val.get("activities").and_then(|v| v.as_array()) {
+        for act in activities {
+            let type_num = act.get("type").and_then(|v| v.as_u64());
+            let name = act.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Discord Activity Type 4 is Custom Status
+            let is_custom = type_num == Some(4) || name.eq_ignore_ascii_case("Custom Status");
+            if is_custom {
+                let state_text = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                let emoji = act.get("emoji").and_then(|e| {
+                    let emoji_name = e.get("name").and_then(|v| v.as_str())?;
+                    let emoji_id = e.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let animated = e.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
+                    Some(CustomStatusEmoji {
+                        name: emoji_name.to_string(),
+                        id: emoji_id,
+                        animated,
+                    })
+                });
+
+                if state_text.is_some() || emoji.is_some() {
+                    custom_status = Some(CustomStatus {
+                        text: state_text,
+                        emoji,
+                    });
+                }
+            } else if primary_activity.is_none() {
+                let act_type = match type_num {
+                    Some(0) => ActivityType::Playing,
+                    Some(1) => ActivityType::Streaming,
+                    Some(2) => ActivityType::Listening,
+                    Some(3) => ActivityType::Watching,
+                    Some(5) => ActivityType::Competing,
+                    _ => ActivityType::Playing,
+                };
+                let mut activity = Activity::new(name, act_type);
+                activity.details = act.get("details").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.state = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.created_at = act.get("created_at").and_then(|v| v.as_i64());
+                primary_activity = Some(activity);
+            }
+        }
+    }
+
+    Some(TransportEvent::PresenceUpdate {
+        user_id,
+        status,
+        activity: primary_activity,
+        custom_status,
+    })
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_presence_update_with_custom_status() {
+        let json = serde_json::json!({
+            "user": { "id": "100000000000000001" },
+            "status": "online",
+            "activities": [
+                {
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": "I found her... ( A )",
+                    "emoji": {
+                        "name": "🌸",
+                        "id": null,
+                        "animated": false
+                    }
+                },
+                {
+                    "name": "VALORANT",
+                    "type": 0
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "100000000000000001");
+                assert_eq!(status, PresenceStatus::Online);
+                let cs = custom_status.expect("custom status should be present");
+                assert_eq!(cs.text, Some("I found her... ( A )".to_string()));
+                assert_eq!(cs.emoji.unwrap().name, "🌸");
+                let act = activity.expect("activity should be present");
+                assert_eq!(act.name, "VALORANT");
+            }
+            _ => panic!("Expected PresenceUpdate event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_presence_custom_emoji_and_idle() {
+        let json = serde_json::json!({
+            "user_id": "999888777",
+            "status": "idle",
+            "activities": [
+                {
+                    "name": "Custom Status",
+                    "type": 4,
+                    "state": "Studying",
+                    "emoji": {
+                        "name": "pepe_study",
+                        "id": "12345678",
+                        "animated": true
+                    }
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "999888777");
+                assert_eq!(status, PresenceStatus::Idle);
+                assert!(activity.is_none());
+                let cs = custom_status.unwrap();
+                assert_eq!(cs.text, Some("Studying".to_string()));
+                let emoji = cs.emoji.unwrap();
+                assert_eq!(emoji.name, "pepe_study");
+                assert_eq!(emoji.id, Some("12345678".to_string()));
+                assert!(emoji.animated);
+                assert_eq!(
+                    emoji.image_url(),
+                    Some("https://cdn.discordapp.com/emojis/12345678.gif?size=48".to_string())
+                );
+            }
+            _ => panic!("Expected PresenceUpdate"),
+        }
+    }
 }

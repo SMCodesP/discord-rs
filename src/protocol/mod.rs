@@ -15,6 +15,7 @@ pub mod voice_crypto;
 pub mod voice_udp;
 pub mod voice_gateway;
 pub mod voice_dave;
+pub mod voice_session;
 
 pub use auth::{AuthToken, TokenStorage, TokenType};
 pub use bridge::ProtocolBridge;
@@ -41,6 +42,11 @@ pub use voice_dave::{
     DaveExecuteTransitionPayload, DaveInvalidCommitWelcomePayload, DaveOpcode,
     DavePrepareEpochPayload, DavePrepareTransitionPayload, DaveTransitionReadyPayload,
     VoiceDaveSession, SUPPORTED_DAVE_PROTOCOL_VERSION,
+};
+pub use voice_session::{
+    AudioBridge, AudioBridgeCommand, FrameCipher, MainSignalingChannel, PassthroughFrameCipher,
+    VoiceGatewayFactory, VoiceGatewayTransport, VoiceSession, VoiceSessionConfig,
+    VoiceSessionState,
 };
 
 
