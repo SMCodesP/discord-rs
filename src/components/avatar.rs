@@ -4,7 +4,7 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::domain::user::PresenceStatus;
+use crate::domain::user::{AvatarDecorationData, PresenceStatus};
 use crate::tokens::colors::{white, *};
 
 /// Standard Discord avatar sizes
@@ -72,6 +72,7 @@ pub struct Avatar {
     status: Option<PresenceStatus>,
     bg_color: Option<Rgba>,
     cutout_color: Option<Rgba>,
+    decoration: Option<AvatarDecorationData>,
 }
 
 impl Avatar {
@@ -84,7 +85,26 @@ impl Avatar {
             status: None,
             bg_color: None,
             cutout_color: None,
+            decoration: None,
         }
+    }
+
+    /// Sets avatar decoration data
+    pub fn decoration(mut self, decoration: AvatarDecorationData) -> Self {
+        self.decoration = Some(decoration);
+        self
+    }
+
+    /// Sets optional avatar decoration data
+    pub fn opt_decoration(mut self, decoration: Option<AvatarDecorationData>) -> Self {
+        self.decoration = decoration;
+        self
+    }
+
+    /// Convenience builder to set decoration by asset name
+    pub fn decoration_asset(mut self, asset: impl Into<String>) -> Self {
+        self.decoration = Some(AvatarDecorationData::new(asset));
+        self
     }
 
     /// Sets the avatar image URL / asset path
@@ -226,6 +246,28 @@ impl RenderOnce for Avatar {
             .flex_shrink_0()
             .child(inner_avatar);
 
+        // Render avatar decoration layer if present (120% size, -10% offset, unique id per asset)
+        if let Some(ref decor) = self.decoration {
+            let decor_url = SharedString::from(decor.url());
+            let asset = decor.asset.clone();
+            let decor_px = avatar_dim * 1.2;
+            let offset_px = avatar_dim * (-0.1);
+
+            let decor_layer = div()
+                .absolute()
+                .w(decor_px)
+                .h(decor_px)
+                .top(offset_px)
+                .left(offset_px)
+                .child(
+                    img(decor_url)
+                        .id(ElementId::from(SharedString::from(format!("avatar-decor-{}", asset))))
+                        .size_full(),
+                );
+
+            container = container.child(decor_layer);
+        }
+
         // Render status dot if requested
         if let Some(presence) = self.status {
             let dot_size = self.size.status_size();
@@ -340,4 +382,38 @@ fn render_status_indicator(
         .into_any_element()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[::core::prelude::v1::test]
+    fn test_avatar_builder_with_decoration() {
+        let decor = AvatarDecorationData::new("preset_cat_ears");
+        let avatar = Avatar::new("User")
+            .size(AvatarSize::Px32)
+            .decoration(decor.clone());
+
+        assert_eq!(avatar.size, AvatarSize::Px32);
+        assert_eq!(avatar.decoration, Some(decor));
+        assert_eq!(AvatarSize::Px32.pixels(), px(32.0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_avatar_builder_opt_and_asset() {
+        let avatar1 = Avatar::new("A").opt_decoration(None);
+        assert_eq!(avatar1.decoration, None);
+
+        let avatar2 = Avatar::new("B").decoration_asset("a_sparkles");
+        assert!(avatar2.decoration.is_some());
+        assert_eq!(avatar2.decoration.as_ref().unwrap().asset, "a_sparkles");
+        assert!(avatar2.decoration.as_ref().unwrap().is_animated());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_avatar_size_dimensions() {
+        assert_eq!(AvatarSize::Px24.pixels(), px(24.0));
+        assert_eq!(AvatarSize::Px32.pixels(), px(32.0));
+        assert_eq!(AvatarSize::Px40.pixels(), px(40.0));
+        assert_eq!(AvatarSize::Px80.pixels(), px(80.0));
+    }
+}

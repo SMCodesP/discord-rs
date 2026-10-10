@@ -9,6 +9,6 @@ pub use channel::{Channel, ChannelType};
 pub use guild::{Category, Guild, Role};
 pub use message::{Attachment, Author, Embed, EmbedAuthor, EmbedField, EmbedFooter, Message, MessageStickerItem, Reaction};
 pub use settings::*;
-pub use user::{Activity, ActivityType, CustomStatus, CustomStatusEmoji, Presence, PresenceStatus, User};
+pub use user::{Activity, ActivityType, AvatarDecorationData, CustomStatus, CustomStatusEmoji, Presence, PresenceStatus, User};
 pub use voice::{VoiceParticipant, VoiceState};
 

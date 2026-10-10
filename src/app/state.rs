@@ -438,6 +438,10 @@ pub struct AppState {
     pub is_connecting: bool,
     /// Direct Message (DM) channels
     pub dm_channels: Vec<ChannelItemState>,
+    /// Pinned direct message channel IDs (ordered strictly as in user settings)
+    pub pinned_dms: Vec<String>,
+    /// Optional path to pinned DMs cache on disk (None disables disk persistence, e.g. in tests)
+    pub pinned_dms_path: Option<std::path::PathBuf>,
     /// User's guild folders grouping
     pub guild_folders: Vec<crate::protocol::GuildFolder>,
     /// Set of expanded folder IDs in guild rail
@@ -1080,6 +1084,8 @@ impl AppState {
             is_connecting,
             dm_channels: Vec::new(),
             presences_by_user: HashMap::new(),
+            pinned_dms: Vec::new(),
+            pinned_dms_path: None,
             guild_folders,
             expanded_folders: std::collections::HashSet::new(),
             friends: if has_token {
@@ -1148,74 +1154,7 @@ impl AppState {
                     },
                 ]
             },
-            active_now_items: vec![
-                ActiveNowItem {
-                    id: "act-1".into(),
-                    user_id: "user-juniodevs".into(),
-                    username: "juniodevs".into(),
-                    display_name: "juniodevs".into(),
-                    avatar_url: None,
-                    avatar_text: "J".into(),
-                    presence: PresenceStatus::Idle,
-                    kind: ActiveNowKind::RichPresence,
-                    app_name: "Visual Studio Code".into(),
-                    header_subtitle: "Visual Studio Code – 1h".into(),
-                    app_icon_symbol: "code".into(),
-                    details_title: "Editing README.md".into(),
-                    details_state: Some("Workspace: THUGwithSKATE3".into()),
-                    elapsed_time_text: Some("01:13:26 decorridos".into()),
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: None,
-                },
-                ActiveNowItem {
-                    id: "act-2".into(),
-                    user_id: "user-mattfh".into(),
-                    username: "Mattfh".into(),
-                    display_name: "Mattfh".into(),
-                    avatar_url: None,
-                    avatar_text: "M".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Quest,
-                    app_name: "ROBLOX".into(),
-                    header_subtitle: "Jogando uma missão · Promovido(a)".into(),
-                    app_icon_symbol: "game".into(),
-                    details_title: "Reivindique 700 Orbs".into(),
-                    details_state: Some("Jogue Animal Hospital on Roblox durante 15 minutos com o seu cliente Discord aberto e ganhe 700 Orbs.".into()),
-                    elapsed_time_text: None,
-                    spotify_track: None,
-                    spotify_artist: None,
-                    spotify_album: None,
-                    spotify_progress_text: None,
-                    spotify_progress_pct: None,
-                    button_text: Some("Aceitar missão".into()),
-                },
-                ActiveNowItem {
-                    id: "act-3".into(),
-                    user_id: "user-gabriel".into(),
-                    username: "gabriel_rodrigues".into(),
-                    display_name: "Gabriel Rodrigues".into(),
-                    avatar_url: None,
-                    avatar_text: "G".into(),
-                    presence: PresenceStatus::Online,
-                    kind: ActiveNowKind::Spotify,
-                    app_name: "Spotify".into(),
-                    header_subtitle: "Ouvindo Spotify".into(),
-                    app_icon_symbol: "music".into(),
-                    details_title: "Starboy (feat. Daft Punk)".into(),
-                    details_state: Some("The Weeknd — Starboy".into()),
-                    elapsed_time_text: Some("Jogando há 1h 24m".into()),
-                    spotify_track: Some("Starboy (feat. Daft Punk)".into()),
-                    spotify_artist: Some("The Weeknd".into()),
-                    spotify_album: Some("Starboy".into()),
-                    spotify_progress_text: Some(("1:24".into(), "3:50".into())),
-                    spotify_progress_pct: Some(0.36),
-                    button_text: Some("Ouvir no Spotify".into()),
-                },
-            ],
+            active_now_items: Vec::new(),
             telemetry: Some(crate::telemetry::global().clone()),
 
             nitro_tier: NitroTier::Full,
@@ -1444,15 +1383,31 @@ impl AppState {
     }
 
     /// Sorts DMs according to Discord rules:
-    /// 1. Pinned DMs (is_pinned: true) at the top.
+    /// 1. Pinned DMs (is_pinned: true) at the absolute top, strictly adhering to the order in `pinned_dms`.
     /// 2. Channels with the most recent messages closest to the top (last_message_id descending Snowflake).
     pub fn sort_dm_channels(&mut self) {
+        let pinned_order = &self.pinned_dms;
         self.dm_channels.sort_by(|a, b| {
-            // 1. DMs fixadas no topo (is_pinned: true vem antes de false)
+            // 1. DMs fixadas no topo absoluto (is_pinned: true vem antes de false)
             match (a.is_pinned, b.is_pinned) {
                 (true, false) => return std::cmp::Ordering::Less,
                 (false, true) => return std::cmp::Ordering::Greater,
-                _ => {}
+                (true, true) => {
+                    // Ambas são fixadas: manter a ordem estrita do array pinned_dms
+                    let pos_a = pinned_order.iter().position(|id| id == &a.id);
+                    let pos_b = pinned_order.iter().position(|id| id == &b.id);
+                    match (pos_a, pos_b) {
+                        (Some(idx_a), Some(idx_b)) => {
+                            if idx_a != idx_b {
+                                return idx_a.cmp(&idx_b);
+                            }
+                        }
+                        (Some(_), None) => return std::cmp::Ordering::Less,
+                        (None, Some(_)) => return std::cmp::Ordering::Greater,
+                        (None, None) => {}
+                    }
+                }
+                (false, false) => {}
             }
 
             // 2. Mensagem mais recente mais perto do topo (decrescente por Snowflake)
@@ -1469,6 +1424,64 @@ impl AppState {
                 (None, None) => std::cmp::Ordering::Equal,
             }
         });
+    }
+
+    /// Sets the disk persistence path for pinned DMs. When set, loads from disk if available.
+    pub fn set_pinned_dms_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.pinned_dms_path = path;
+        if let Some(ref p) = self.pinned_dms_path {
+            self.pinned_dms = crate::protocol::pinned_dms::load_pinned_dms_from_path(p);
+            for dm in &mut self.dm_channels {
+                dm.is_pinned = self.pinned_dms.contains(&dm.id);
+            }
+            self.sort_dm_channels();
+        }
+    }
+
+    /// Pins a DM channel: adds to pinned_dms, marks is_pinned = true, re-sorts and persists to disk if configured.
+    pub fn pin_dm_channel(&mut self, channel_id: &str) {
+        if !self.pinned_dms.contains(&channel_id.to_string()) {
+            self.pinned_dms.push(channel_id.to_string());
+        }
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = true;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Unpins a DM channel: removes from pinned_dms, sets is_pinned = false, re-sorts and persists to disk if configured.
+    pub fn unpin_dm_channel(&mut self, channel_id: &str) {
+        self.pinned_dms.retain(|id| id != channel_id);
+        for dm in &mut self.dm_channels {
+            if dm.id == channel_id {
+                dm.is_pinned = false;
+            }
+        }
+        self.sort_dm_channels();
+        if let Some(ref path) = self.pinned_dms_path {
+            crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+        }
+    }
+
+    /// Toggles pin status for a DM channel.
+    pub fn toggle_pin_dm_channel(&mut self, channel_id: &str) {
+        let is_currently_pinned = self
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.is_pinned)
+            .unwrap_or(false)
+            || self.pinned_dms.contains(&channel_id.to_string());
+        if is_currently_pinned {
+            self.unpin_dm_channel(channel_id);
+        } else {
+            self.pin_dm_channel(channel_id);
+        }
     }
 
     /// Selects a channel
@@ -1765,14 +1778,6 @@ impl AppState {
                     is_speaking: false,
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
-                },
-                VoiceParticipantState {
-                    id: "user-ferris".into(),
-                    name: "Ferris".into(),
-                    avatar_text: "🦀".into(),
-                    is_speaking: true,
-                    is_muted: false,
-                    is_deafened: false,
                 },
             ],
         });
@@ -2254,7 +2259,7 @@ impl AppState {
             TransportEvent::Connected => {
                 self.is_connected_to_gateway = true;
                 self.is_connecting = false;
-                self.connection_status = "Gateway Conectado".to_string();
+                self.connection_status = "Conectado".to_string();
                 self.auth_error = None;
                 self.close_modal();
             }
@@ -2365,6 +2370,7 @@ impl AppState {
                     .into_iter()
                     .map(|c| {
                         let is_group = c.channel_type == ChannelType::GroupDm;
+                        let is_pinned = c.is_pinned || self.pinned_dms.contains(&c.id);
                         ChannelItemState {
                             id: c.id,
                             name: c.name,
@@ -2373,7 +2379,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned,
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
@@ -2444,7 +2450,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: c.icon_url,
-                            is_pinned: c.is_pinned,
+                            is_pinned: c.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: c.last_message_id,
                             is_group_dm: is_group,
                             recipient_ids: c.recipient_ids,
@@ -2496,7 +2502,7 @@ impl AppState {
                             unread: false,
                             mention_count: 0,
                             icon_url: channel.icon_url.clone(),
-                            is_pinned: channel.is_pinned,
+                            is_pinned: channel.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: channel.last_message_id.clone(),
                             is_group_dm: is_group,
                             recipient_ids: channel.recipient_ids.clone(),
@@ -2589,6 +2595,16 @@ impl AppState {
                 custom_status,
             } => {
                 self.update_user_presence(user_id, status, activity, custom_status);
+            }
+            TransportEvent::PinnedDmsUpdated(pinned) => {
+                self.pinned_dms = pinned;
+                for dm in &mut self.dm_channels {
+                    dm.is_pinned = self.pinned_dms.contains(&dm.id);
+                }
+                self.sort_dm_channels();
+                if let Some(ref path) = self.pinned_dms_path {
+                    crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
+                }
             }
             _ => {}
         }

@@ -128,47 +128,35 @@ impl Render for HeaderBar {
                     .flex_row()
                     .items_center()
                     .gap(px(12.0))
-                    // 0. Discord Connection Shortcut Button / Status Badge
-                    .child(if !state.is_connected_to_gateway {
+                    // 0. Discord Connection Shortcut Button (only when disconnected)
+                    .children(if !state.is_connected_to_gateway {
                         let entity = app_entity.clone();
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .px(px(10.0))
-                            .h(px(28.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(0x5865f2))
-                            .hover(|s| s.bg(rgb(0x4752c4)))
-                            .cursor_pointer()
-                            .text_color(rgb(0xffffff))
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::BOLD)
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                entity.update(cx, |state, cx| {
-                                    state.open_modal(crate::app::state::ActiveModal::Login);
-                                    cx.notify();
-                                });
-                            })
-                            .child(icon_key(px(14.0), rgb(0xffffff)))
-                            .child("Entrar no Discord")
+                        Some(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(10.0))
+                                .h(px(28.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0x5865f2))
+                                .hover(|s| s.bg(rgb(0x4752c4)))
+                                .cursor_pointer()
+                                .text_color(rgb(0xffffff))
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::BOLD)
+                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                                    entity.update(cx, |state, cx| {
+                                        state.open_modal(crate::app::state::ActiveModal::Login);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(icon_key(px(14.0), rgb(0xffffff)))
+                                .child("Entrar no Discord"),
+                        )
                     } else {
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(4.0))
-                            .px(px(8.0))
-                            .h(px(24.0))
-                            .rounded(px(4.0))
-                            .bg(rgba(0x23a55a22))
-                            .border_1()
-                            .border_color(rgb(0x23a55a))
-                            .text_color(rgb(0x23a55a))
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child("● Gateway Conectado")
+                        None
                     })
                     // 1. Notifications / Bell button
                     .child(

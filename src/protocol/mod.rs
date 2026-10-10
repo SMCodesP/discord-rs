@@ -9,7 +9,11 @@ pub mod media_cache;
 pub mod mock_provider;
 pub mod rate_limit;
 pub mod rate_limiter;
+pub mod pinned_dms;
 pub mod transport;
+pub mod voice_crypto;
+pub mod voice_udp;
+pub mod voice_gateway;
 
 pub use auth::{AuthToken, TokenStorage, TokenType};
 pub use bridge::ProtocolBridge;
@@ -22,6 +26,14 @@ pub use media_cache::*;
 pub use mock_provider::MockDiscordProvider;
 pub use rate_limit::*;
 pub use rate_limiter::RateLimitManager;
+pub use pinned_dms::{load_pinned_dms_from_disk, pinned_dms_cache_path, save_pinned_dms_to_disk};
 pub use transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent};
+pub use voice_crypto::*;
+pub use voice_udp::*;
+pub use voice_gateway::{
+    describe_voice_close_code, SessionDescription, VoiceCloseDecision, VoiceGateway,
+    VoiceGatewayConfig, VoiceGatewayEvent, VoiceReady, VoiceServerData,
+    FALLBACK_ENCRYPTION_MODE, PREFERRED_ENCRYPTION_MODE,
+};
 
 

@@ -5,7 +5,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::domain::user::{PresenceStatus, User};
+use crate::domain::user::{AvatarDecorationData, PresenceStatus, User};
 use crate::tokens::colors::*;
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
@@ -17,6 +17,7 @@ pub struct MemberItem {
     id: ElementId,
     name: SharedString,
     avatar_url: Option<SharedString>,
+    avatar_decoration: Option<AvatarDecorationData>,
     status: PresenceStatus,
     role_color: Option<Rgba>,
     is_bot: bool,
@@ -32,6 +33,7 @@ impl MemberItem {
             id: id.into(),
             name: name.into(),
             avatar_url: None,
+            avatar_decoration: None,
             status: PresenceStatus::Offline,
             role_color: None,
             is_bot: false,
@@ -46,7 +48,8 @@ impl MemberItem {
         let name_str: String = user.display_name().to_string();
         let mut item = Self::new(id, name_str)
             .status(user.presence)
-            .is_bot(user.bot);
+            .is_bot(user.bot)
+            .opt_avatar_decoration(user.avatar_decoration_data.clone());
 
         if let Some(avatar_url) = user.avatar_url() {
             item = item.avatar_url(avatar_url);
@@ -73,6 +76,18 @@ impl MemberItem {
     /// Sets optional avatar image URL
     pub fn opt_avatar_url(mut self, url: Option<impl Into<SharedString>>) -> Self {
         self.avatar_url = url.map(|u| u.into());
+        self
+    }
+
+    /// Sets avatar decoration data
+    pub fn avatar_decoration(mut self, decor: AvatarDecorationData) -> Self {
+        self.avatar_decoration = Some(decor);
+        self
+    }
+
+    /// Sets optional avatar decoration data
+    pub fn opt_avatar_decoration(mut self, decor: Option<AvatarDecorationData>) -> Self {
+        self.avatar_decoration = decor;
         self
     }
 
@@ -165,11 +180,12 @@ impl RenderOnce for MemberItem {
             });
         }
 
-        // 32px Avatar with status indicator
+        // 32px Avatar with status indicator and optional decoration
         let mut avatar = Avatar::new(self.name.clone())
             .size(AvatarSize::Px32)
             .status(self.status)
-            .cutout_color(bg_channels());
+            .cutout_color(bg_channels())
+            .opt_decoration(self.avatar_decoration);
 
         if let Some(url) = &self.avatar_url {
             avatar = avatar.src(url.clone());
