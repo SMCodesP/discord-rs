@@ -2139,7 +2139,7 @@ mod presence_tests {
     #[test]
     fn test_parse_presence_update_with_custom_status() {
         let json = serde_json::json!({
-            "user": { "id": "1428172947486543894" },
+            "user": { "id": "100000000000000001" },
             "status": "online",
             "activities": [
                 {
@@ -2162,7 +2162,7 @@ mod presence_tests {
         let event = parse_presence_from_json(&json).expect("should parse presence");
         match event {
             TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
-                assert_eq!(user_id, "1428172947486543894");
+                assert_eq!(user_id, "100000000000000001");
                 assert_eq!(status, PresenceStatus::Online);
                 let cs = custom_status.expect("custom status should be present");
                 assert_eq!(cs.text, Some("I found her... ( A )".to_string()));

@@ -77,8 +77,9 @@ fn test_app_state_presence_update_and_resolution() {
 
     // Associate user with a 1-on-1 DM channel
     state.dm_channels.push(ChannelItemState {
+        user_limit: None,
         id: "dm-ogarcone".into(),
-        name: "Ogarçone".into(),
+        name: "Amigo Teste".into(),
         kind: ChannelKind::Text,
         topic: None,
         unread: false,
@@ -88,7 +89,7 @@ fn test_app_state_presence_update_and_resolution() {
         last_message_id: None,
         is_group_dm: false,
         recipient_ids: vec![user_id.clone()],
-        recipient_names: vec!["Ogarçone".into()],
+        recipient_names: vec!["Amigo Teste".into()],
     });
 
     let dm = state.dm_channels.first().unwrap();

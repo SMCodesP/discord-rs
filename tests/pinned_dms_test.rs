@@ -18,7 +18,7 @@ fn test_pinned_dms_cache_save_and_load() {
     let cache_file = temp_dir.join("pinned_dms.json");
 
     let original = vec![
-        "1233438711597891736".to_string(),
+        "200000000000000001".to_string(),
         "987654321098765432".to_string(),
     ];
     save_pinned_dms_to_path(&cache_file, &original);
