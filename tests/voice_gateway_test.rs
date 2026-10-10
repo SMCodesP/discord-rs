@@ -8,10 +8,11 @@
 //! - Main Gateway Voice State Update Opcode 4 and VOICE_SERVER_UPDATE handling.
 
 use discord_rs::protocol::voice_gateway::{
-    format_voice_gateway_url, HelloPayload, ReadyPayload, SessionDescription,
-    SessionDescriptionPayload, SpeakingFlags, SpeakingPayload, VoiceConnectionState,
-    VoiceGatewayAction, VoiceGatewayConfig, VoiceGatewayPayload, VoiceGatewayStateMachine,
-    VoiceReady, VoiceServerData, FALLBACK_ENCRYPTION_MODE, PREFERRED_ENCRYPTION_MODE,
+    describe_voice_close_code, format_voice_gateway_url, HelloPayload, ReadyPayload,
+    SessionDescription, SessionDescriptionPayload, SpeakingFlags, SpeakingPayload,
+    VoiceCloseDecision, VoiceConnectionState, VoiceGatewayAction, VoiceGatewayConfig,
+    VoiceGatewayEvent, VoiceGatewayPayload, VoiceGatewayStateMachine, VoiceReady,
+    VoiceServerData, FALLBACK_ENCRYPTION_MODE, PREFERRED_ENCRYPTION_MODE,
 };
 
 fn mock_voice_config() -> VoiceGatewayConfig {
@@ -389,4 +390,96 @@ fn test_main_gateway_voice_state_and_server_update() {
     assert_eq!(json_val["guild_id"], "guild_123");
     assert_eq!(json_val["channel_id"], "channel_456");
     assert_eq!(json_val["endpoint"], "voice.discord.media:443");
+}
+
+#[test]
+fn test_voice_gateway_close_codes_decisions() {
+    // 1. Resumable
+    assert_eq!(VoiceCloseDecision::from_close_code(4015), VoiceCloseDecision::Resume);
+    assert!(VoiceCloseDecision::from_close_code(4015).can_resume());
+    assert_eq!(VoiceCloseDecision::from_close_code(1001), VoiceCloseDecision::Resume);
+    assert_eq!(VoiceCloseDecision::from_close_code(1006), VoiceCloseDecision::Resume);
+
+    // 2. NewSession (reconnect with Opcode 0 Identify)
+    assert_eq!(VoiceCloseDecision::from_close_code(4003), VoiceCloseDecision::NewSession);
+    assert_eq!(VoiceCloseDecision::from_close_code(4005), VoiceCloseDecision::NewSession);
+    assert_eq!(VoiceCloseDecision::from_close_code(4006), VoiceCloseDecision::NewSession);
+    assert_eq!(VoiceCloseDecision::from_close_code(4009), VoiceCloseDecision::NewSession);
+    assert!(!VoiceCloseDecision::from_close_code(4006).can_resume());
+    assert!(VoiceCloseDecision::from_close_code(4006).should_reconnect());
+
+    // 3. Fatal (stop and do not reconnect)
+    assert_eq!(VoiceCloseDecision::from_close_code(4001), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4002), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4004), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4011), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4012), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4014), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4016), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4017), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4020), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(4022), VoiceCloseDecision::Fatal);
+    assert_eq!(VoiceCloseDecision::from_close_code(1000), VoiceCloseDecision::Fatal);
+    assert!(!VoiceCloseDecision::from_close_code(4017).should_reconnect());
+    assert!(!VoiceCloseDecision::from_close_code(4014).should_reconnect());
+}
+
+#[test]
+fn test_state_machine_close_code_handling_offline() {
+    let mut sm = VoiceGatewayStateMachine::new(mock_voice_config());
+    sm.set_last_seq(100);
+
+    // Test 1: Code 4015 (Server crashed) -> Resume, keeps sequence
+    let (decision, action) = sm.handle_close_code(4015, "Server died");
+    assert_eq!(decision, VoiceCloseDecision::Resume);
+    assert_eq!(action, None);
+    assert_eq!(*sm.current_state(), VoiceConnectionState::Resuming);
+    assert_eq!(sm.last_seq(), 100);
+
+    // Test 2: Code 4006 (Session invalid) -> NewSession, sequence reset to -1
+    let (decision, action) = sm.handle_close_code(4006, "Invalidated");
+    assert_eq!(decision, VoiceCloseDecision::NewSession);
+    assert_eq!(action, None);
+    assert_eq!(*sm.current_state(), VoiceConnectionState::WaitingForHello);
+    assert_eq!(sm.last_seq(), -1);
+
+    // Test 3: Code 4017 (DAVE Required) -> Fatal, state Failed, action CloseConnection
+    let (decision, action) = sm.handle_close_code(4017, "");
+    assert_eq!(decision, VoiceCloseDecision::Fatal);
+    assert!(matches!(*sm.current_state(), VoiceConnectionState::Failed(_)));
+    if let Some(VoiceGatewayAction::CloseConnection { reason, can_resume }) = action {
+        assert!(!can_resume);
+        assert!(reason.contains("DAVE"));
+    } else {
+        panic!("Expected CloseConnection action");
+    }
+
+    // Test 4: Code 4014 (Kicked/Channel Deleted) -> Fatal, state Failed, action CloseConnection
+    let (decision, action) = sm.handle_close_code(4014, "Channel removed");
+    assert_eq!(decision, VoiceCloseDecision::Fatal);
+    assert!(matches!(*sm.current_state(), VoiceConnectionState::Failed(_)));
+    if let Some(VoiceGatewayAction::CloseConnection { reason, can_resume }) = action {
+        assert!(!can_resume);
+        assert!(reason.contains("kicked"));
+        assert!(reason.contains("Channel removed"));
+    } else {
+        panic!("Expected CloseConnection action");
+    }
+}
+
+#[test]
+fn test_voice_gateway_event_disconnected_structure() {
+    let event = VoiceGatewayEvent::Disconnected {
+        code: Some(4017),
+        reason: describe_voice_close_code(4017).to_string(),
+        decision: VoiceCloseDecision::Fatal,
+    };
+
+    if let VoiceGatewayEvent::Disconnected { code, reason, decision } = event {
+        assert_eq!(code, Some(4017));
+        assert!(reason.contains("DAVE"));
+        assert_eq!(decision, VoiceCloseDecision::Fatal);
+    } else {
+        panic!("Expected Disconnected event");
+    }
 }
