@@ -44,6 +44,7 @@ pub struct RootView {
     quick_msg_state: Option<Entity<InputState>>,
     quick_msg_sub: Option<Subscription>,
     active_modal_open: Option<ActiveModal>,
+    profile_modal_open: bool,
 }
 
 impl RootView {
@@ -119,6 +120,7 @@ impl RootView {
             quick_msg_state: None,
             quick_msg_sub: None,
             active_modal_open: None,
+            profile_modal_open: false,
         }
     }
 
@@ -156,6 +158,7 @@ impl RootView {
             quick_msg_state: None,
             quick_msg_sub: None,
             active_modal_open: None,
+            profile_modal_open: false,
         }
     }
 }
@@ -317,7 +320,7 @@ impl Render for RootView {
                     .unwrap_or_else(|| p.user_id.clone());
                 (
                     p.quick_message.clone(),
-                    format!("Conversar com @{}", uname),
+                    format!("Conversar com @{}...", uname),
                 )
             });
         if let Some((ref want_val, ref want_ph)) = quick_sync {
@@ -336,9 +339,13 @@ impl Render for RootView {
             self.quick_msg_sub = None;
         }
 
-        let (is_connected_to_gateway, active_modal) = {
+        let (is_connected_to_gateway, active_modal, is_prof_modal) = {
             let s = self.state.read(cx);
-            (s.is_connected_to_gateway, s.active_modal.clone())
+            (
+                s.is_connected_to_gateway,
+                s.active_modal.clone(),
+                s.is_profile_modal_open(),
+            )
         };
 
         // =========================================================================
@@ -422,6 +429,30 @@ impl Render for RootView {
             entity.update(cx, |s, cx| {
                 if s.active_modal.is_some() && s.active_modal != Some(ActiveModal::UserSettings) {
                     s.close_modal();
+                    cx.notify();
+                }
+            });
+        }
+
+        // Synchronize UserProfileModal with WindowState dialog layer
+        if self.profile_modal_open != is_prof_modal {
+            if self.profile_modal_open {
+                window.close_all_dialogs(cx);
+            }
+            self.profile_modal_open = is_prof_modal;
+            if is_prof_modal {
+                let entity = self.state.clone();
+                window.open_dialog(cx, move |dialog, window, cx| {
+                    let vh = window.viewport_size().height;
+                    crate::app::user_profile_popout::build_user_profile_modal_dialog(dialog, entity.clone(), vh, cx)
+                });
+            }
+        } else if self.profile_modal_open && !window.has_active_dialog(cx) {
+            self.profile_modal_open = false;
+            let entity = self.state.clone();
+            entity.update(cx, |s, cx| {
+                if s.is_profile_modal_open() {
+                    s.close_user_profile_modal();
                     cx.notify();
                 }
             });
@@ -523,6 +554,7 @@ impl Render for RootView {
                         .child(crate::app::user_profile_popout::render_user_profile_popout(
                             entity,
                             &popout_state,
+                            state.profile_anchor,
                             &catalog,
                             presence.as_ref(),
                             self.quick_msg_state.as_ref().expect("quick message state"),

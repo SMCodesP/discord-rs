@@ -68,6 +68,14 @@ pub enum ActiveModal {
 
 /// User settings navigation tabs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProfileModalTab {
+    #[default]
+    AboutMe,
+    MutualGuilds,
+    MutualFriends,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     #[default]
     MyAccount,

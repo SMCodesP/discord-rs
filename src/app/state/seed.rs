@@ -818,6 +818,9 @@ impl AppState {
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
             profile_popout: None,
+            profile_anchor: None,
+            profile_modal_open: false,
+            profile_modal_tab: ProfileModalTab::AboutMe,
             profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
             voice_states_by_channel: HashMap::new(),
         };
