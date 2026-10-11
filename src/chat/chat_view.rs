@@ -3,7 +3,6 @@
 //! welcome header, hover actions, active replies, popover media picker, and message editor.
 
 use gpui::component::input::{InputEvent, TextareaState};
-use gpui::component::popover::Popover;
 use gpui::*;
 use std::sync::Arc;
 
@@ -744,29 +743,28 @@ impl Render for ChatView {
                 div()
                     .absolute()
                     .inset_0()
+                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                        self_dismiss_picker.update(cx, |this, cx| {
+                            this.media_picker_open = false;
+                            this.media_picker_react_message_id = None;
+                            cx.notify();
+                        });
+                    })
+                    .on_scroll_wheel(|_ev, _win, cx| {
+                        cx.stop_propagation();
+                    })
                     .child(
-                        Popover::new("chat-media-picker-popover")
-                            .open(true)
-                            .appearance(false)
-                            .overlay_closable(true)
-                            .on_open_change(move |is_open, _win, cx| {
-                                if !is_open {
-                                    self_dismiss_picker.update(cx, |this, cx| {
-                                        this.media_picker_open = false;
-                                        this.media_picker_react_message_id = None;
-                                        cx.notify();
-                                    });
-                                }
+                        div()
+                            .absolute()
+                            .bottom(px(68.0))
+                            .right(px(16.0))
+                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                cx.stop_propagation();
                             })
-                            .anchor(Anchor::BottomRight)
-                            .offset(px(68.0))
-                            .child(
-                                div()
-                                    .absolute()
-                                    .bottom(px(68.0))
-                                    .right(px(16.0))
-                                    .child(modal_content),
-                            ),
+                            .on_scroll_wheel(|_ev, _win, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(modal_content),
                     ),
             )
         } else {
