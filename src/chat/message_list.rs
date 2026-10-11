@@ -117,7 +117,7 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
                 .absolute()
                 .w_full()
                 .h_px()
-                .bg(rgba(0x635a731f)), // TOKEN FALTANDO: --border-subtle
+                .bg(rgba(0x97979f1f)), // TOKEN FALTANDO: --border-subtle
         )
         .child(
             // Centered date pill
@@ -166,7 +166,7 @@ pub fn render_hover_action_bar(
 
     let mut reply_btn = IconButton::with_icon(
         format!("hover-reply-{}", message_id),
-        |sz, col| svg().path("icons/reply.svg").size(sz).text_color(col).into_any_element(),
+        |sz, col| svg().path("icons/undo-2.svg").size(sz).text_color(col).into_any_element(),
     )
     .size(px(28.0))
     .icon_size(px(16.0))
@@ -319,7 +319,7 @@ fn render_menu_item(
 
     if is_danger {
         item = item
-            .text_color(rgb(0xf87e7a)) // TOKEN FALTANDO: --control-critical-secondary-text-default
+            .text_color(rgb(0xffa09b)) // TOKEN FALTANDO: --control-critical-secondary-text-default
             .hover(|s| s.bg(rgb(0xda3e44)).text_color(white())); // TOKEN FALTANDO: --status-danger
     } else {
         item = item
@@ -965,8 +965,15 @@ pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
     items
 }
 
-/// Renders the channel welcome banner displayed at the beginning of chat history.
-pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
+/// Renders the channel or DM welcome banner displayed at the beginning of chat history.
+pub fn render_welcome_banner(channel_name: &str, channel_topic: &str, is_dm: bool) -> Div {
+    let icon_text = if is_dm { "@" } else { "#" };
+    let title_text = if is_dm {
+        channel_name.to_string()
+    } else {
+        format!("Bem-vindo(a) a #{}!", channel_name)
+    };
+
     div()
         .flex()
         .flex_col()
@@ -985,14 +992,14 @@ pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
                 .text_color(white())
                 .text_size(px(36.0))
                 .font_weight(WEIGHT_BOLD)
-                .child("#"),
+                .child(icon_text),
         )
         .child(
             div()
                 .text_color(text_titles())
                 .font_weight(WEIGHT_BOLD)
                 .text_size(font_size_2xl())
-                .child(format!("Bem-vindo(a) a #{}!", channel_name)),
+                .child(title_text),
         )
         .child(
             div()
@@ -1251,5 +1258,22 @@ mod tests {
             on_close: None,
         });
         drop(menu);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_render_welcome_banner_dm_and_guild() {
+        let dm_banner = render_welcome_banner(
+            "Usuário B",
+            "Este é o início do seu histórico de mensagens diretas com Usuário B.",
+            true,
+        );
+        drop(dm_banner);
+
+        let guild_banner = render_welcome_banner(
+            "geral",
+            "Este é o início do canal #geral.",
+            false,
+        );
+        drop(guild_banner);
     }
 }
