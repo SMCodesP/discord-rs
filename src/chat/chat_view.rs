@@ -3,9 +3,7 @@
 //! welcome header, hover actions, active replies, popover media picker, and message editor.
 
 use gpui::component::popover::Popover;
-use gpui::component::{v_virtual_list, VirtualListScrollHandle};
 use gpui::*;
-use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::app::state::AppState;
@@ -38,7 +36,6 @@ pub struct ChatView {
     pub focus_handle: FocusHandle,
     pub search_focus_handle: FocusHandle,
     pub scroll_handle: ScrollHandle,
-    pub virtual_scroll_handle: VirtualListScrollHandle,
     pub list_state: ListState,
     pub last_channel_id: Option<String>,
     pub last_message_count: usize,
@@ -58,7 +55,6 @@ impl ChatView {
         let search_focus_handle = cx.focus_handle();
         let media_picker_focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
-        let virtual_scroll_handle = VirtualListScrollHandle::new();
         // Virtual ListState configured with bottom alignment (canonical chat stream)
         let list_state = ListState::new(0, ListAlignment::Bottom, px(250.0));
         // Top-aligned ListState for rich media picker popup with 150px overdraw windowing
@@ -77,7 +73,6 @@ impl ChatView {
             search_focus_handle,
             media_picker_focus_handle,
             scroll_handle,
-            virtual_scroll_handle,
             list_state,
             last_channel_id: None,
             last_message_count: 0,
@@ -102,48 +97,6 @@ impl ChatView {
     pub fn set_typing_users(&mut self, users: Vec<String>) {
         self.typing_users = users;
     }
-}
-
-// ============================================================================
-// Small rendering helper functions returning AnyElement
-// ============================================================================
-
-fn estimate_chat_item_sizes(
-    items: &[ChatListItem],
-    messages: &[Message],
-) -> Rc<Vec<Size<Pixels>>> {
-    let sizes = items
-        .iter()
-        .map(|item| match item {
-            ChatListItem::WelcomeHeader => size(px(0.0), px(160.0)),
-            ChatListItem::DateSeparator(_) => size(px(0.0), px(40.0)),
-            ChatListItem::Message { message_idx, is_grouped } => {
-                let base_h = if *is_grouped { 24.0 } else { 44.0 };
-                let extra_h = if let Some(msg) = messages.get(*message_idx) {
-                    let mut h = 0.0;
-                    if !msg.attachments.is_empty() {
-                        h += 220.0 * msg.attachments.len() as f32;
-                    }
-                    if !msg.embeds.is_empty() {
-                        h += 100.0 * msg.embeds.len() as f32;
-                    }
-                    if !msg.reactions.is_empty() {
-                        h += 32.0;
-                    }
-                    let lines = (msg.content.len() / 60).max(1) as f32;
-                    if lines > 1.0 {
-                        h += (lines - 1.0) * 18.0;
-                    }
-                    h
-                } else {
-                    0.0
-                };
-                size(px(0.0), px(base_h + extra_h))
-            }
-            ChatListItem::BottomSpacer => size(px(0.0), px(8.0)),
-        })
-        .collect();
-    Rc::new(sizes)
 }
 
 impl Render for ChatView {
@@ -192,7 +145,6 @@ impl Render for ChatView {
             self.last_message_count = message_count;
             self.list_state.reset(total_items);
             self.scroll_handle.scroll_to_bottom();
-            self.virtual_scroll_handle.scroll_to_bottom();
         } else if self.list_state.item_count() != total_items {
             self.list_state.reset(total_items);
         }
@@ -301,7 +253,10 @@ impl Render for ChatView {
                 this.typed_text.clear();
                 this.replying_to = None;
                 this.scroll_handle.scroll_to_bottom();
-                this.virtual_scroll_handle.scroll_to_bottom();
+                let cnt = this.list_state.item_count();
+                if cnt > 0 {
+                    this.list_state.scroll_to_reveal_item(cnt.saturating_sub(1));
+                }
                 cx.notify();
             });
         }));
@@ -325,7 +280,7 @@ impl Render for ChatView {
             });
         }));
 
-        // Virtualized list items rendering via kit v_virtual_list
+        // Virtualized list items rendering via GPUI list
         let items_arc = Arc::new(chat_items.clone());
         let ch_name = channel_name.clone();
         let ch_topic = channel_topic.clone();
@@ -336,57 +291,45 @@ impl Render for ChatView {
         let on_rx_click_item = on_reaction_click.clone();
         let on_add_rx_item = on_add_reaction.clone();
 
-        let item_sizes = estimate_chat_item_sizes(&chat_items, all_messages);
+        let virtual_list = list(self.list_state.clone(), move |ix, _window, cx| {
+            if ix >= items_arc.len() {
+                return div().into_any_element();
+            }
 
-        let virtual_list = v_virtual_list(
-            cx.entity().clone(),
-            "chat-stream-virtual-list",
-            item_sizes,
-            move |_this, range, _window, cx| {
-                let mut rendered = Vec::with_capacity(range.len());
-                for ix in range {
-                    if ix >= items_arc.len() {
-                        continue;
-                    }
-                    match &items_arc[ix] {
-                        ChatListItem::WelcomeHeader => {
-                            rendered.push(render_welcome_banner(&ch_name, &ch_topic).into_any_element());
-                        }
-                        ChatListItem::DateSeparator(date) => {
-                            rendered.push(render_date_separator_element(*date).into_any_element());
-                        }
-                        ChatListItem::Message { message_idx, is_grouped } => {
-                            let state = app_entity_list.read(cx);
-                            let msgs = state.get_active_messages();
-                            if let Some(msg) = msgs.get(*message_idx) {
-                                rendered.push(
-                                    render_message_row(
-                                        msg,
-                                        MessageRowConfig {
-                                            is_grouped: *is_grouped,
-                                            role_color: None,
-                                            on_react: on_react_item.clone(),
-                                            on_reply: on_reply_item.clone(),
-                                            on_more: on_more_item.clone(),
-                                            on_reaction_click: on_rx_click_item.clone(),
-                                            on_add_reaction: on_add_rx_item.clone(),
-                                        },
-                                    )
-                                    .into_any_element(),
-                                );
-                            } else {
-                                rendered.push(div().into_any_element());
-                            }
-                        }
-                        ChatListItem::BottomSpacer => {
-                            rendered.push(div().id("chat-bottom-anchor").h(px(8.0)).into_any_element());
-                        }
+            match &items_arc[ix] {
+                ChatListItem::WelcomeHeader => {
+                    render_welcome_banner(&ch_name, &ch_topic).into_any_element()
+                }
+                ChatListItem::DateSeparator(date) => {
+                    render_date_separator_element(*date).into_any_element()
+                }
+                ChatListItem::Message { message_idx, is_grouped } => {
+                    let state = app_entity_list.read(cx);
+                    let msgs = state.get_active_messages();
+                    if let Some(msg) = msgs.get(*message_idx) {
+                        render_message_row(
+                            msg,
+                            MessageRowConfig {
+                                is_grouped: *is_grouped,
+                                role_color: None,
+                                on_react: on_react_item.clone(),
+                                on_reply: on_reply_item.clone(),
+                                on_more: on_more_item.clone(),
+                                on_reaction_click: on_rx_click_item.clone(),
+                                on_add_reaction: on_add_rx_item.clone(),
+                            },
+                        )
+                        .into_any_element()
+                    } else {
+                        div().into_any_element()
                     }
                 }
-                rendered
-            },
-        )
-        .track_scroll(&self.virtual_scroll_handle);
+                ChatListItem::BottomSpacer => {
+                    div().id("chat-bottom-anchor").h(px(8.0)).into_any_element()
+                }
+            }
+        })
+        .size_full();
 
         // Handle target message scroll/focus from Search results
         if let Some(ref target_id) = app_state.target_message_id {
@@ -397,7 +340,6 @@ impl Render for ChatView {
                     false
                 }
             }) {
-                self.virtual_scroll_handle.scroll_to_item(target_idx, ScrollStrategy::Top);
                 self.list_state.scroll_to_reveal_item(target_idx);
             }
         }

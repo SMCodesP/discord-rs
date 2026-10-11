@@ -17,7 +17,6 @@ use std::sync::Arc;
 use crate::chat::markdown::render_markdown;
 use crate::chat::reactions::{render_reaction_bar, AddReactionCallback, ReactionActionCallback};
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::button::IconButton;
 use crate::domain::message::{Attachment, Embed, Message};
 use crate::tokens::colors::white;
 use crate::tokens::colors::*;
@@ -116,7 +115,8 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
                 .absolute()
                 .w_full()
                 .h_px()
-                .bg(channel_active()),
+                // TOKEN FALTANDO: --background-modifier-accent / COR ANTIGA SEM ORIGEM: 0x3f4147
+                .bg(rgb(0x3f4147)),
         )
         .child(
             // Centered date pill
@@ -134,10 +134,10 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
 }
 
 // ============================================================================
-// Hover Action Bar Component (Kit IconButton + Tooltips)
+// Hover Action Bar Component
 // ============================================================================
 
-/// Renders the floating action bar displayed on message hover (React, Reply, More) using kit IconButton.
+/// Renders the floating action bar displayed on message hover (React, Reply, More).
 pub fn render_hover_action_bar(
     message_id: &str,
     on_react: Option<MessageActionCallback>,
@@ -148,36 +148,66 @@ pub fn render_hover_action_bar(
     let msg_id_reply = message_id.to_string();
     let msg_id_more = message_id.to_string();
 
-    let mut react_btn = IconButton::new(format!("hover-react-{}", message_id), "☺")
+    let mut react_btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
         .size(px(28.0))
-        .icon_size(px(14.0))
-        .tooltip("Adicionar Reação");
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
+        .text_color(text_muted())
+        .child(
+            div()
+                .text_size(px(14.0))
+                .child("☺"),
+        );
 
     if let Some(handler) = on_react {
-        react_btn = react_btn.on_click(move |_event, window, cx| {
+        react_btn = react_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             handler(&msg_id_react, window, cx);
         });
     }
 
-    let mut reply_btn = IconButton::new(format!("hover-reply-{}", message_id), "↩")
+    let mut reply_btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
         .size(px(28.0))
-        .icon_size(px(14.0))
-        .tooltip("Responder");
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
+        .text_color(text_muted())
+        .child(
+            div()
+                .text_size(px(14.0))
+                .child("↩"),
+        );
 
     if let Some(handler) = on_reply {
-        reply_btn = reply_btn.on_click(move |_event, window, cx| {
+        reply_btn = reply_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             handler(&msg_id_reply, window, cx);
         });
     }
 
-    let mut more_btn = IconButton::new(format!("hover-more-{}", message_id), "•••")
+    let mut more_btn = div()
+        .flex()
+        .items_center()
+        .justify_center()
         .size(px(28.0))
-        .icon_size(px(14.0))
-        .tooltip("Mais");
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
+        .text_color(text_muted())
+        .child(
+            div()
+                .text_size(px(14.0))
+                .child("•••"),
+        );
 
     if let Some(handler) = on_more {
-        more_btn = more_btn.on_click(move |event, window, cx| {
-            handler(&msg_id_more, event.position(), window, cx);
+        more_btn = more_btn.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+            handler(&msg_id_more, event.position, window, cx);
         });
     }
 
@@ -188,7 +218,7 @@ pub fn render_hover_action_bar(
         .bg(bg_chat())
         .border_1()
         .border_color(bg_user_bar())
-        .rounded(radius_md())
+        .rounded(px(6.0))
         .shadow_md()
         .p(px(2.0))
         .flex()
@@ -306,8 +336,10 @@ fn render_menu_item(
 
     if is_danger {
         item = item
-            .text_color(status_dnd())
-            .hover(|s| s.bg(status_dnd()).text_color(white()));
+            // TOKEN FALTANDO: --text-danger / COR ANTIGA SEM ORIGEM: 0xfa777c
+            .text_color(rgb(0xfa777c))
+            // TOKEN FALTANDO: --button-danger-background-hover / COR ANTIGA SEM ORIGEM: 0xda373c
+            .hover(|s| s.bg(rgb(0xda373c)).text_color(white()));
     } else {
         item = item
             .text_color(text_primary())

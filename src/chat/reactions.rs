@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use crate::components::button::IconButton;
 use crate::domain::message::Reaction;
-use crate::tokens::colors::white;
 use crate::tokens::colors::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
@@ -42,17 +41,19 @@ pub fn render_reaction_badge(
 
     let (bg_color, border_col, text_col, hover_bg, hover_border) = if is_me {
         (
-            mention_bg(),
+            with_alpha(HEX_BLURPLE, 0.15),
             blurple(),
-            white(),
-            mention_hover(),
+            // TOKEN FALTANDO: --mention-foreground / COR ANTIGA SEM ORIGEM: 0xc9cdfb
+            rgb(0xc9cdfb),
+            with_alpha(HEX_BLURPLE, 0.25),
             blurple(),
         )
     } else {
         (
             bg_channels(),
             bg_chat_hover(),
-            text_muted(),
+            // TOKEN FALTANDO: --text-muted / COR ANTIGA SEM ORIGEM: 0xb5bac1
+            rgb(0xb5bac1),
             channel_hover(),
             borders(),
         )
@@ -98,25 +99,46 @@ pub fn render_reaction_badge(
 // Add Reaction Button
 // ============================================================================
 
-/// Renders the "+" / smiley add-reaction button at the end of the reaction bar using IconButton.
+/// Renders the "+" / smiley add-reaction button at the end of the reaction bar.
 pub fn render_add_reaction_button(
     message_id: &str,
     on_add_click: Option<AddReactionCallback>,
 ) -> Div {
     let msg_id = message_id.to_string();
 
-    let mut btn = IconButton::new(format!("add-reaction-{}", message_id), "☺+")
-        .size(px(26.0))
-        .icon_size(font_size_xs())
-        .tooltip("Adicionar Reação");
+    let mut btn = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .h(px(26.0))
+        .px(space_3())
+        .bg(bg_channels())
+        .border_1()
+        .border_color(bg_chat_hover())
+        .rounded(radius_md())
+        .cursor_pointer()
+        .hover(|s| s.bg(channel_hover()).border_color(borders()))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .text_color(text_muted())
+                .text_size(font_size_xs())
+                .font_weight(WEIGHT_MEDIUM)
+                .child("☺")
+                .child("+"),
+        );
 
     if let Some(handler) = on_add_click {
-        btn = btn.on_click(move |_event, window, cx| {
+        btn = btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             handler(&msg_id, window, cx);
         });
     }
 
-    div().child(btn)
+    btn
 }
 
 // ============================================================================
