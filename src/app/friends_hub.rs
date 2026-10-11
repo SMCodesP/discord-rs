@@ -568,6 +568,7 @@ struct FriendRowData {
     username: String,
     avatar_text: String,
     avatar_url: Option<String>,
+    avatar_decoration_data: Option<AvatarDecorationData>,
     status: String,
     channel_id: String,
     presence: PresenceStatus,
@@ -633,6 +634,7 @@ fn collect_friend_rows(state: &AppState) -> Vec<FriendRowData> {
                 f.avatar_text.clone()
             },
             avatar_url: f.avatar_url.clone(),
+            avatar_decoration_data: f.avatar_decoration_data.clone(),
             status,
             channel_id: find_dm_for(state, &f.id, &f.username, &f.display_name),
             presence: f.presence,
@@ -674,6 +676,7 @@ fn collect_friend_rows(state: &AppState) -> Vec<FriendRowData> {
                     m.avatar_text.clone()
                 },
                 avatar_url: None,
+                avatar_decoration_data: None,
                 status,
                 channel_id: find_dm_for(state, &m.id, &m.name, &m.name),
                 presence: m.presence,
@@ -701,6 +704,7 @@ fn collect_friend_rows(state: &AppState) -> Vec<FriendRowData> {
                     .to_uppercase()
                     .to_string(),
                 avatar_url: dm.icon_url.clone(),
+                avatar_decoration_data: None,
                 status: dm.topic.clone().unwrap_or_else(|| "Disponível".into()),
                 channel_id: dm.id.clone(),
                 presence: PresenceStatus::Online,
@@ -996,6 +1000,7 @@ fn render_friend_row_left(
                         .opt_src(row.avatar_url.clone())
                         .size(AvatarSize::Px40)
                         .opt_status(show_status.then(|| domain_presence(row.presence)))
+                        .opt_decoration(row.avatar_decoration_data.clone())
                         .bg_color(blurple())
                         .cutout_color(bg_chat()),
                 ),
