@@ -1,23 +1,28 @@
+use gpui::component::menu::{ContextMenuExt, PopupMenuItem, PopupMenu};
+use gpui::component::tooltip::Tooltip;
+use gpui::prelude::*;
 use gpui::*;
+
+use super::state::{ActiveModal, ActiveVoiceCall, AppState, ChannelItemState, ChannelKind, CurrentUserProfile, FriendsTab};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::badge::MentionBadge;
 use crate::domain::user::{ActivityType, PresenceStatus};
-use crate::tokens::colors::text_muted;
+use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
-use super::state::{ActiveModal, AppState, ChannelKind, FriendsTab};
+use crate::tokens::spacing::*;
 
 #[inline]
 fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
     icon_headphones_off(size, color)
 }
 
-/// Channel sidebar (240px wide) containing:
-/// - Server header
-/// - Collapsible categories & channel lists
+/// Channel sidebar containing:
+/// - Server header / DM header
+/// - Collapsible categories & channel lists / DM list
 /// - Active voice status bar (when connected)
-/// - Bottom user profile & audio controls panel
+/// - Bottom user profile & audio controls panel (359x58px, 32x32 buttons)
 pub struct ChannelSidebar {
     state: Entity<AppState>,
-    context_menu_dm: Option<(String, Point<Pixels>)>,
     focus_handle: FocusHandle,
 }
 
@@ -37,14 +42,13 @@ impl ChannelSidebar {
 
         Self {
             state,
-            context_menu_dm: None,
             focus_handle: cx.focus_handle(),
         }
     }
 }
 
 impl Render for ChannelSidebar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let selected_guild = state.get_selected_guild().cloned();
         let selected_channel_id = state.selected_channel_id.clone();
@@ -52,138 +56,35 @@ impl Render for ChannelSidebar {
         let current_user = state.current_user.clone();
         let is_dm = state.selected_guild_id.is_none();
         let app_entity = self.state.clone();
-        let self_entity = cx.entity().clone();
-        let viewport = window.viewport_size();
 
-        let context_menu_overlay = if let Some((ref target_dm_id, click_pos)) = self.context_menu_dm {
-            let dm_id = target_dm_id.clone();
-            let is_pinned = state.dm_channels.iter().find(|d| d.id == dm_id).map(|d| d.is_pinned).unwrap_or(false)
-                || state.pinned_dms.contains(&dm_id);
-            let app_entity_menu = self.state.clone();
-            let self_close = cx.entity().clone();
-
-            let pin_label = if is_pinned {
-                "Desafixar conversa"
-            } else {
-                "Fixar conversa"
-            };
-
-            let self_close_left = self_close.clone();
-            let self_close_right = self_close.clone();
-
-            Some(
-                deferred(
-                    div()
-                        .child(
-                            // Full-window transparent backdrop to catch clicks outside and dismiss the context menu
-                            anchored()
-                                .position(point(px(0.0), px(0.0)))
-                                .child(
-                                    div()
-                                        .w(viewport.width)
-                                        .h(viewport.height)
-                                        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                                            self_close_left.update(cx, |this, cx| {
-                                                this.context_menu_dm = None;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .on_mouse_down(MouseButton::Right, move |_ev, _win, cx| {
-                                            self_close_right.update(cx, |this, cx| {
-                                                this.context_menu_dm = None;
-                                                cx.notify();
-                                            });
-                                        })
-                                )
-                        )
-                        .child(
-                            // Context menu anchored at the exact click position, snapping dynamically to window bounds
-                            anchored()
-                                .position(click_pos)
-                                .snap_to_window()
-                                .child(
-                                    div()
-                                        .w(px(180.0))
-                                        .bg(rgb(0x111214))
-                                        .border_1()
-                                        .border_color(rgb(0x232428))
-                                        .rounded(px(6.0))
-                                        .shadow_lg()
-                                        .p(px(6.0))
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(2.0))
-                                        .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .child(
-                                            div()
-                                                .h(px(32.0))
-                                                .px(px(8.0))
-                                                .rounded(px(4.0))
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(rgb(0x4752c4)).text_color(rgb(0xffffff)))
-                                                .text_color(rgb(0xdbdee1))
-                                                .text_size(px(13.0))
-                                                .on_mouse_down(MouseButton::Left, {
-                                                    let app = app_entity_menu.clone();
-                                                    let target_id = dm_id.clone();
-                                                    let self_close = cx.entity().clone();
-                                                    move |_ev, _win, cx| {
-                                                        app.update(cx, |state, cx| {
-                                                            state.toggle_pin_dm_channel(&target_id);
-                                                            cx.notify();
-                                                        });
-                                                        self_close.update(cx, |this, cx| {
-                                                            this.context_menu_dm = None;
-                                                            cx.notify();
-                                                        });
-                                                    }
-                                                })
-                                                .child(pin_label)
-                                                .child(icon_pin(px(14.0), rgb(0x949ba4)))
-                                        )
-                                )
-                        )
-                )
-            )
+        let header_el = if let Some(ref guild) = selected_guild {
+            render_server_header(&guild.name)
         } else {
-            None
+            render_dm_search_header()
+        };
+
+        let scroll_content: Vec<AnyElement> = if is_dm {
+            render_dm_section(state, selected_channel_id.as_deref(), &app_entity)
+        } else if let Some(ref guild) = selected_guild {
+            render_guild_channels_section(state, guild, selected_channel_id.as_deref(), &app_entity, &current_user)
+        } else {
+            Vec::new()
         };
 
         div()
             .track_focus(&self.focus_handle)
             .key_context("channel_sidebar")
-            .on_key_down({
-                let self_esc = cx.entity().clone();
-                move |ev: &KeyDownEvent, _window, cx| {
-                    if ev.keystroke.key == "escape" {
-                        self_esc.update(cx, |this, cx| {
-                            if this.context_menu_dm.is_some() {
-                                this.context_menu_dm = None;
-                                cx.notify();
-                            }
-                        });
-                    }
-                }
-            })
             .relative()
             .flex()
             .flex_col()
             .w(px(240.0))
             .h_full()
             .min_h(px(0.0))
-            .bg(rgb(0x2b2d31))
+            .bg(bg_channels())
             .justify_between()
             .flex_shrink_0()
             // =========================================================================
-            // TOP SECTION: Header + Scrollable Channels
+            // TOP SECTION: Header + Scrollable Channels / DMs
             // =========================================================================
             .child(
                 div()
@@ -192,74 +93,7 @@ impl Render for ChannelSidebar {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_hidden()
-                    // 1. Server Header (48px)
-                    .child(if let Some(guild) = selected_guild.as_ref() {
-                        div()
-                            .h(px(48.0))
-                            .px(px(16.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .border_b_1()
-                            .border_color(rgb(0x1f2023))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x35373c)))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0xf2f3f5))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(15.0))
-                                            .child(guild.name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .child(icon_check(px(14.0), rgb(0x5865f2))),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(0xdbdee1))
-                                    .text_size(px(12.0))
-                                    .child("⌵"),
-                            )
-                    } else {
-                        // Direct Messages Header
-                        div()
-                            .h(px(48.0))
-                            .px(px(12.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .border_b_1()
-                            .border_color(rgb(0x1f2023))
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(28.0))
-                                    .px(px(8.0))
-                                    .rounded(px(4.0))
-                                    .bg(rgb(0x1e1f22))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0x80848e))
-                                            .text_size(px(12.0))
-                                            .child("Encontre ou comece uma conversa"),
-                                    ),
-                            )
-                    })
-                    // 2. Channels List / DM List
+                    .child(header_el)
                     .child(
                         div()
                             .flex_1()
@@ -269,690 +103,7 @@ impl Render for ChannelSidebar {
                             .overflow_y_scroll()
                             .p(px(8.0))
                             .gap(px(2.0))
-                            .children(if is_dm {
-                                let is_amigos_active = selected_channel_id.is_none() && state.friends_tab != FriendsTab::MessageRequests;
-                                let is_msg_requests_active = selected_channel_id.is_none() && state.friends_tab == FriendsTab::MessageRequests;
-                                let pending_req_count = state.message_requests.iter().filter(|r| !r.is_spam).count();
-
-                                let mut dm_items = vec![
-                                    div()
-                                        .h(px(36.0))
-                                        .px(px(12.0))
-                                        .rounded(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(12.0))
-                                        .cursor_pointer()
-                                        .bg(if is_amigos_active { rgb(0x3f4248) } else { rgba(0x00000000) })
-                                        .hover(|s| s.bg(rgb(0x35373c)).text_color(rgb(0xdbdee1)))
-                                        .text_color(if is_amigos_active { rgb(0xffffff) } else { rgb(0x80848e) })
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .on_mouse_down(MouseButton::Left, {
-                                            let entity = app_entity.clone();
-                                            move |_ev, _window, cx| {
-                                                entity.update(cx, |s, cx| {
-                                                    s.selected_channel_id = None;
-                                                    s.friends_tab = FriendsTab::Online;
-                                                    cx.notify();
-                                                });
-                                            }
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(12.0))
-                                                .child(icon_friends(px(20.0), if is_amigos_active { rgb(0xffffff) } else { rgb(0x80848e) }))
-                                                .child("Amigos"),
-                                        ),
-                                    div()
-                                        .h(px(36.0))
-                                        .px(px(12.0))
-                                        .rounded(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .cursor_pointer()
-                                        .bg(if is_msg_requests_active { rgb(0x3f4248) } else { rgba(0x00000000) })
-                                        .hover(|s| s.bg(rgb(0x35373c)).text_color(rgb(0xdbdee1)))
-                                        .text_color(if is_msg_requests_active { rgb(0xffffff) } else { rgb(0x80848e) })
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .on_mouse_down(MouseButton::Left, {
-                                            let entity = app_entity.clone();
-                                            move |_ev, _window, cx| {
-                                                entity.update(cx, |s, cx| {
-                                                    s.selected_channel_id = None;
-                                                    s.friends_tab = FriendsTab::MessageRequests;
-                                                    cx.notify();
-                                                });
-                                            }
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(12.0))
-                                                .child(icon_inbox(px(20.0), if is_msg_requests_active { rgb(0xffffff) } else { rgb(0x80848e) }))
-                                                .child("Solicitações de mensagens"),
-                                        )
-                                        .children(if pending_req_count > 0 {
-                                            Some(
-                                                div()
-                                                    .px(px(6.0))
-                                                    .py(px(1.0))
-                                                    .rounded_full()
-                                                    .bg(rgb(0x5865f2))
-                                                    .text_size(px(11.0))
-                                                    .text_color(rgb(0xffffff))
-                                                    .child(pending_req_count.to_string())
-                                            )
-                                        } else {
-                                            None
-                                        }),
-                                    div()
-                                        .h(px(36.0))
-                                        .px(px(12.0))
-                                        .rounded(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(12.0))
-                                        .cursor_pointer()
-                                        .text_color(rgb(0x80848e))
-                                        .hover(|s| s.bg(rgb(0x35373c)).text_color(rgb(0xdbdee1)))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(12.0))
-                                                .child(icon_sparkles(px(20.0), rgb(0x80848e)))
-                                                .child("Nitro"),
-                                        ),
-                                    div()
-                                        .h(px(36.0))
-                                        .px(px(12.0))
-                                        .rounded(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(12.0))
-                                        .cursor_pointer()
-                                        .text_color(rgb(0x80848e))
-                                        .hover(|s| s.bg(rgb(0x35373c)).text_color(rgb(0xdbdee1)))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(12.0))
-                                                .child(icon_gift(px(20.0), rgb(0x80848e)))
-                                                .child("Loja"),
-                                        ),
-                                    div()
-                                        .pt(px(16.0))
-                                        .pb(px(4.0))
-                                        .px(px(8.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(
-                                            div()
-                                                .text_color(rgb(0x80848e))
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_size(px(11.0))
-                                                .child("MENSAGENS DIRETAS"),
-                                        )
-                                        .child({
-                                            let entity = app_entity.clone();
-                                            div()
-                                                .size(px(18.0))
-                                                .rounded(px(3.0))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .cursor_pointer()
-                                                .text_color(rgb(0x80848e))
-                                                .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x35373c)))
-                                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                    entity.update(cx, |s, cx| {
-                                                        s.open_modal(ActiveModal::CreateGroupDm);
-                                                        cx.notify();
-                                                    });
-                                                })
-                                                .child(icon_plus(px(12.0), rgb(0x80848e)))
-                                        }),
-                                ];
-
-                                if state.dm_channels.is_empty() {
-                                    dm_items.push(
-                                        div()
-                                            .px(px(8.0))
-                                            .py(px(12.0))
-                                            .text_color(rgb(0x80848e))
-                                            .text_size(px(12.0))
-                                            .child("Nenhuma conversa direta aberta."),
-                                    );
-                                } else {
-                                    for dm in &state.dm_channels {
-                                        let dm_id = dm.id.clone();
-                                        let dm_name = dm.name.clone();
-                                        let is_selected = selected_channel_id.as_deref() == Some(&dm_id);
-                                        let mention_count = dm.mention_count;
-                                        let unread = dm.unread;
-                                        let entity = app_entity.clone();
-                                        let is_group = dm.is_group_dm || dm.recipient_names.len() > 1;
-
-                                        // Resolver presença e status customizado do destinatário da DM
-                                        let recipient_id = dm.recipient_ids.first();
-                                        let recipient_friend = state.friends.iter().find(|f| {
-                                            if let Some(rid) = recipient_id {
-                                                f.id == *rid
-                                            } else {
-                                                f.username == dm_name || f.display_name == dm_name
-                                            }
-                                        });
-
-                                        let presence_info = recipient_id
-                                            .and_then(|rid| state.get_user_presence(rid))
-                                            .or_else(|| {
-                                                recipient_friend.and_then(|f| state.get_user_presence(&f.id))
-                                            });
-
-                                        let presence_status = presence_info
-                                            .map(|p| p.status)
-                                            .or_else(|| recipient_friend.map(|f| crate::domain::user::PresenceStatus::from(f.presence)))
-                                            .unwrap_or(PresenceStatus::Offline);
-
-                                        let custom_status = if let Some(p) = presence_info {
-                                            p.custom_status.clone()
-                                        } else {
-                                            recipient_friend.and_then(|f| {
-                                                f.custom_status
-                                                    .as_ref()
-                                                    .map(|text| crate::domain::user::CustomStatus::from_text(text.clone()))
-                                            })
-                                        };
-
-                                        let game_activity = presence_info
-                                            .and_then(|p| p.activity.as_ref())
-                                            .filter(|a| a.activity_type == ActivityType::Playing || (!a.name.is_empty() && a.name != "Custom Status"));
-
-                                        let avatar_el = render_dm_avatar(
-                                            is_group,
-                                            &dm_name,
-                                            &dm.recipient_names,
-                                            dm.icon_url.as_deref(),
-                                            recipient_friend.and_then(|f| f.avatar_url.as_deref()),
-                                            presence_status,
-                                        );
-
-                                        let subtitle_el = if is_group {
-                                            None
-                                        } else {
-                                            render_dm_subtitle(
-                                                custom_status.as_ref(),
-                                                game_activity,
-                                                presence_status == PresenceStatus::Offline,
-                                            )
-                                        };
-
-                                        let is_pinned = dm.is_pinned || dm.topic.as_deref().map_or(false, |t| t.contains("pin") || t.contains("fixad"));
-                                        let text_col_el = render_dm_text_column(
-                                            dm_name,
-                                            is_selected,
-                                            unread,
-                                            is_pinned,
-                                            subtitle_el,
-                                        );
-
-                                        let mut row = div()
-                                            .h(px(42.0))
-                                            .px(px(8.0))
-                                            .rounded(px(4.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .cursor_pointer()
-                                            .bg(if is_selected {
-                                                rgb(0x3f4248)
-                                            } else {
-                                                rgba(0x00000000)
-                                            })
-                                            .hover(|s| s.bg(rgb(0x35373c)))
-                                            .on_mouse_down(MouseButton::Left, {
-                                                let click_entity = entity.clone();
-                                                let click_cid = dm_id.clone();
-                                                move |_event, _window, cx| {
-                                                    let cid = click_cid.clone();
-                                                    click_entity.update(cx, |s, cx| {
-                                                        s.select_channel(cid);
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            })
-                                            .on_mouse_down(MouseButton::Right, {
-                                                let self_ctx = self_entity.clone();
-                                                let menu_cid = dm_id.clone();
-                                                move |event, window, cx| {
-                                                    let pos = event.position;
-                                                    self_ctx.update(cx, |this, cx| {
-                                                        this.context_menu_dm = Some((menu_cid.clone(), pos));
-                                                        window.focus(&this.focus_handle, cx);
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            })
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(10.0))
-                                                    .child({
-                                                        let mut av = div().child(avatar_el).cursor_pointer();
-                                                        if let Some(uid) = dm.recipient_ids.first().cloned() {
-                                                            let av_entity = entity.clone();
-                                                            av = av.on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                                                                let uid = uid.clone();
-                                                                av_entity.update(cx, |s, cx| {
-                                                                    s.open_user_profile(&uid);
-                                                                    cx.notify();
-                                                                });
-                                                            });
-                                                        }
-                                                        av
-                                                    })
-                                                    .child(text_col_el),
-                                            );
-
-                                        if mention_count > 0 {
-                                            row = row.child(
-                                                div()
-                                                    .min_w(px(16.0))
-                                                    .h(px(16.0))
-                                                    .px(px(4.0))
-                                                    .rounded_full()
-                                                    .bg(rgb(0xf23f43))
-                                                    .text_color(rgb(0xffffff))
-                                                    .text_size(px(10.0))
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .child(mention_count.to_string()),
-                                            );
-                                        }
-
-                                        row = row.child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(4.0))
-                                                .child({
-                                                    let add_entity = entity.clone();
-                                                    let add_cid = dm_id.clone();
-                                                    div()
-                                                        .size(px(20.0))
-                                                        .rounded(px(4.0))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .text_color(rgb(0x80848e))
-                                                        .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x35373c)))
-                                                        .cursor_pointer()
-                                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                            add_entity.update(cx, |s, cx| {
-                                                                s.open_modal(ActiveModal::AddFriendToGroup(add_cid.clone()));
-                                                                cx.notify();
-                                                            });
-                                                        })
-                                                        .child(icon_user(px(14.0), rgb(0x80848e)))
-                                                })
-                                                .child(
-                                                    div()
-                                                        .size(px(16.0))
-                                                        .rounded_full()
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .text_color(rgb(0x80848e))
-                                                        .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x1e1f22)))
-                                                        .child(icon_close(px(12.0), rgb(0x80848e))),
-                                                ),
-                                        );
-
-                                        dm_items.push(row);
-                                    }
-                                }
-                                dm_items
-                            } else if let Some(guild) = selected_guild.as_ref() {
-                                let mut category_elements = Vec::new();
-
-                                for category in &guild.categories {
-                                    let cat_id = category.id.clone();
-                                    let cat_name = category.name.clone();
-                                    let is_collapsed = state.is_category_collapsed(&cat_id);
-                                    let entity = app_entity.clone();
-
-                                    // Category Header
-                                    category_elements.push(
-                                        div()
-                                            .pt(px(12.0))
-                                            .pb(px(4.0))
-                                            .px(px(4.0))
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .justify_between()
-                                            .cursor_pointer()
-                                            .on_mouse_down(
-                                                MouseButton::Left,
-                                                move |_event, _window, cx| {
-                                                    let cid = cat_id.clone();
-                                                    entity.update(cx, |state, cx| {
-                                                        state.toggle_category(&cid);
-                                                        cx.notify();
-                                                    });
-                                                },
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap(px(4.0))
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(10.0))
-                                                            .text_color(rgb(0x80848e))
-                                                            .child(if is_collapsed { "›" } else { "⌵" }),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_color(rgb(0x80848e))
-                                                            .font_weight(FontWeight::BOLD)
-                                                            .text_size(px(11.0))
-                                                            .child(cat_name),
-                                                    ),
-                                            ),
-                                    );
-
-                                    // Channels in category
-                                    if !is_collapsed {
-                                        for channel in &category.channels {
-                                            let ch_id = channel.id.clone();
-                                            let ch_name = channel.name.clone();
-                                            let ch_kind = channel.kind;
-                                            let is_selected = selected_channel_id.as_deref() == Some(&ch_id);
-                                            let is_unread = channel.unread;
-                                            let mention_count = channel.mention_count;
-                                            let entity = app_entity.clone();
-
-                                            let is_voice = ch_kind == ChannelKind::Voice;
-                                            let voice_states = if is_voice {
-                                                state.voice_states_for_channel(&ch_id)
-                                            } else {
-                                                &[]
-                                            };
-
-                                            let capacity_badge = if is_voice {
-                                                let count = voice_states.len();
-                                                let limit = channel.user_limit.unwrap_or(0);
-                                                if limit > 0 {
-                                                    let is_full = count >= limit as usize;
-                                                    Some(
-                                                        div()
-                                                            .h(px(18.0))
-                                                            .px(px(6.0))
-                                                            .rounded(px(9.0))
-                                                            .bg(if is_full { rgb(0xda373c) } else { rgb(0x232428) })
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .text_size(px(11.0))
-                                                            .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
-                                                            .text_color(if is_full { rgb(0xffffff) } else { rgb(0x949ba4) })
-                                                            .child(format!("{}/{}", count, limit)),
-                                                    )
-                                                } else if count > 0 {
-                                                    Some(
-                                                        div()
-                                                            .h(px(18.0))
-                                                            .px(px(6.0))
-                                                            .rounded(px(9.0))
-                                                            .bg(rgb(0x232428))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .text_size(px(11.0))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_color(rgb(0x949ba4))
-                                                            .child(count.to_string()),
-                                                    )
-                                                } else {
-                                                    None
-                                                }
-                                            } else {
-                                                None
-                                            };
-
-                                            category_elements.push(
-                                                div()
-                                                    .h(px(34.0))
-                                                    .px(px(8.0))
-                                                    .rounded(px(4.0))
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .justify_between()
-                                                    .cursor_pointer()
-                                                    .bg(if is_selected {
-                                                        rgb(0x3f4248)
-                                                    } else {
-                                                        rgb(0x2b2d31)
-                                                    })
-                                                    .hover(|s| {
-                                                        s.bg(rgb(0x35373c))
-                                                    })
-                                                    .on_mouse_down(
-                                                        MouseButton::Left,
-                                                        move |_event, _window, cx| {
-                                                            let cid = ch_id.clone();
-                                                            entity.update(cx, |state, cx| {
-                                                                state.select_channel(cid);
-                                                                cx.notify();
-                                                            });
-                                                        },
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .gap(px(6.0))
-                                                            .child(
-                                                                div()
-                                                                    .text_size(px(14.0))
-                                                                    .text_color(if is_selected {
-                                                                        rgb(0xffffff)
-                                                                    } else {
-                                                                        rgb(0x80848e)
-                                                                    })
-                                                                    .child(ch_kind.symbol()),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .text_size(px(14.0))
-                                                                    .font_weight(if is_selected || is_unread {
-                                                                        FontWeight::BOLD
-                                                                    } else {
-                                                                        FontWeight::NORMAL
-                                                                    })
-                                                                    .text_color(if is_selected {
-                                                                        rgb(0xffffff)
-                                                                    } else if is_unread {
-                                                                        rgb(0xf2f3f5)
-                                                                    } else {
-                                                                        rgb(0x80848e)
-                                                                    })
-                                                                    .child(ch_name),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .flex()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .gap(px(4.0))
-                                                            .children(capacity_badge)
-                                                            .children(if mention_count > 0 {
-                                                                Some(
-                                                                    div()
-                                                                        .min_w(px(16.0))
-                                                                        .h(px(16.0))
-                                                                        .px(px(4.0))
-                                                                        .rounded_full()
-                                                                        .bg(rgb(0xf23f43))
-                                                                        .flex()
-                                                                        .items_center()
-                                                                        .justify_center()
-                                                                        .text_color(rgb(0xffffff))
-                                                                        .text_size(px(10.0))
-                                                                        .font_weight(FontWeight::BOLD)
-                                                                        .child(mention_count.to_string()),
-                                                                )
-                                                            } else {
-                                                                None
-                                                            })
-                                                    ),
-                                            );
-
-                                            // Membros conectados abaixo do canal de voz
-                                            if is_voice && !voice_states.is_empty() {
-                                                for vs in voice_states {
-                                                    let vs_uid = vs.user_id.clone();
-                                                    let display_name = if let Some(ref name) = vs.user_name {
-                                                        name.clone()
-                                                    } else if vs_uid == current_user.id {
-                                                        current_user.display_name.clone()
-                                                    } else if let Some(m) = state.members.iter().find(|m| m.id == vs_uid) {
-                                                        m.name.clone()
-                                                    } else if let Some(f) = state.friends.iter().find(|f| f.id == vs_uid) {
-                                                        f.display_name.clone()
-                                                    } else {
-                                                        String::new()
-                                                    };
-
-                                                    let avatar_url = vs.avatar_url.clone().or_else(|| {
-                                                        if vs_uid == current_user.id {
-                                                             current_user.avatar_url.clone()
-                                                        } else {
-                                                             state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
-                                                        }
-                                                    });
-
-                                                    let initial = display_name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
-
-                                                    let is_speaking = vs.is_speaking;
-                                                    let is_muted = vs.is_muted();
-                                                    let is_deafened = vs.is_deafened();
-                                                    let is_streaming = vs.self_stream;
-
-                                                    category_elements.push(
-                                                        div()
-                                                            .h(px(28.0))
-                                                            .pl(px(32.0))
-                                                            .pr(px(8.0))
-                                                            .rounded(px(4.0))
-                                                            .flex()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .justify_between()
-                                                            .cursor_pointer()
-                                                            .hover(|s| s.bg(rgb(0x35373c)))
-                                                            .child(
-                                                                div()
-                                                                    .flex()
-                                                                    .flex_row()
-                                                                    .items_center()
-                                                                    .gap(px(8.0))
-                                                                    .overflow_hidden()
-                                                                    // Mini-avatar 20x20 com anel verde se estiver falando
-                                                                    .child(
-                                                                        div()
-                                                                            .size(px(20.0))
-                                                                            .rounded_full()
-                                                                            .overflow_hidden()
-                                                                            .flex_shrink_0()
-                                                                            .border(if is_speaking { px(2.0) } else { px(0.0) })
-                                                                            .border_color(rgb(0x23a55a))
-                                                                            .child(if let Some(ref url) = avatar_url {
-                                                                                img(url.clone()).size_full().rounded_full().into_any_element()
-                                                                            } else {
-                                                                                div()
-                                                                                    .size_full()
-                                                                                    .rounded_full()
-                                                                                    .bg(rgb(0x5865f2))
-                                                                                    .flex()
-                                                                                    .items_center()
-                                                                                    .justify_center()
-                                                                                    .text_color(rgb(0xffffff))
-                                                                                    .text_size(px(10.0))
-                                                                                    .font_weight(FontWeight::BOLD)
-                                                                                    .child(initial)
-                                                                                    .into_any_element()
-                                                                            })
-                                                                    )
-                                                                    // Nome do usuário conectado
-                                                                    .child(
-                                                                        div()
-                                                                            .text_size(px(13.0))
-                                                                            .font_weight(FontWeight::MEDIUM)
-                                                                            .text_color(rgb(0x949ba4))
-                                                                            .overflow_hidden()
-                                                                            .child(display_name)
-                                                                    )
-                                                            )
-                                                            // Ícones de mudo, deafen e badge "AO VIVO"
-                                                            .child(
-                                                                div()
-                                                                    .flex()
-                                                                    .flex_row()
-                                                                    .items_center()
-                                                                    .gap(px(4.0))
-                                                                    .children(if is_streaming {
-                                                                        Some(
-                                                                            div()
-                                                                                .px(px(4.0))
-                                                                                .py(px(1.0))
-                                                                                .rounded(px(3.0))
-                                                                                .bg(rgb(0xf23f43))
-                                                                                .text_color(rgb(0xffffff))
-                                                                                .text_size(px(9.0))
-                                                                                .font_weight(FontWeight::BOLD)
-                                                                                .child("AO VIVO")
-                                                                        )
-                                                                    } else {
-                                                                        None
-                                                                    })
-                                                                    .children(if is_muted {
-                                                                        Some(icon_mic_off(px(14.0), rgb(0xf23f43)))
-                                                                    } else {
-                                                                        None
-                                                                    })
-                                                                    .children(if is_deafened {
-                                                                        Some(icon_speaker_off(px(14.0), rgb(0xf23f43)))
-                                                                    } else {
-                                                                        None
-                                                                    })
-                                                            )
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                category_elements
-                            } else {
-                                Vec::new()
-                            }),
+                            .children(scroll_content),
                     ),
             )
             // =========================================================================
@@ -963,249 +114,1005 @@ impl Render for ChannelSidebar {
                     .flex()
                     .flex_col()
                     .flex_shrink_0()
-                    // 1. Active Voice Bar (se conectada)
-                    .children(if let Some(voice) = active_voice {
-                        let entity = app_entity.clone();
-                        Some(
-                            div()
-                                .h(px(52.0))
-                                .px(px(12.0))
-                                .bg(rgb(0x232428))
-                                .border_b_1()
-                                .border_color(rgb(0x1e1f22))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(
-                                            icon_wifi(px(16.0), rgb(0x23a55a)),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .child(
-                                                    div()
-                                                        .text_color(rgb(0x23a55a))
-                                                        .font_weight(FontWeight::BOLD)
-                                                        .text_size(px(12.0))
-                                                        .child("Voz Conectada"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_color(rgb(0x80848e))
-                                                        .text_size(px(11.0))
-                                                        .child(format!("{} / {}ms", voice.channel_name, voice.ping_ms)),
-                                                ),
-                                        ),
-                                )
-                                // Disconnect button
-                                .child(
-                                    div()
-                                        .w(px(28.0))
-                                        .h(px(28.0))
-                                        .rounded(px(4.0))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .text_color(rgb(0x80848e))
-                                        .hover(|s| s.bg(rgb(0xf23f43)).text_color(rgb(0xffffff)))
-                                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                            entity.update(cx, |state, cx| {
-                                                state.disconnect_voice();
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_phone_hangup(px(16.0), rgb(0x80848e))),
-                                ),
-                        )
-                    } else {
-                        None
-                    })
-                    // 2. User Profile Bottom Panel (52px)
-                    .child({
-                        let entity = app_entity.clone();
-                        let is_muted = current_user.is_muted;
-                        let is_deafened = current_user.is_deafened;
-
-                        let user_tag = if let Some(ref d) = current_user.discriminator {
-                            if d != "0" && d != "0000" {
-                                format!("{}#{}", current_user.username, d)
-                            } else {
-                                format!("@{}", current_user.username)
-                            }
-                        } else {
-                            format!("@{}", current_user.username)
-                        };
-
-                        div()
-                            .h(px(52.0))
-                            .px(px(8.0))
-                            .bg(rgb(0x232428))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            // User Profile (Avatar + Name)
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .p(px(4.0))
-                                    .rounded(px(4.0))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x35373c)))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        {
-                                            let entity = entity.clone();
-                                            move |_event, _window, cx| {
-                                                entity.update(cx, |state, cx| {
-                                                    state.open_modal(ActiveModal::UserSettings);
-                                                    cx.notify();
-                                                });
-                                            }
-                                        },
-                                    )
-                                    // Avatar with Status Dot
-                                    .child({
-                                        let avatar_inner = if let Some(ref url) = current_user.avatar_url {
-                                            div()
-                                                .size_full()
-                                                .rounded_full()
-                                                .overflow_hidden()
-                                                .child(img(url.clone()).size_full().rounded_full())
-                                        } else {
-                                            div()
-                                                .size_full()
-                                                .rounded_full()
-                                                .bg(rgb(0x5865f2))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .text_color(rgb(0xffffff))
-                                                .font_weight(FontWeight::BOLD)
-                                                .text_size(px(14.0))
-                                                .child(current_user.avatar_text)
-                                        };
-
-                                        div()
-                                            .relative()
-                                            .size(px(32.0))
-                                            .rounded_full()
-                                            .flex_shrink_0()
-                                            .child(avatar_inner)
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom(px(-2.0))
-                                                    .right(px(-2.0))
-                                                    .size(px(10.0))
-                                                    .rounded_full()
-                                                    .bg(rgb(current_user.presence.color_rgb()))
-                                                    .border_2()
-                                                    .border_color(rgb(0x232428)),
-                                            )
-                                    })
-                                    // Display name (bold) & username (@tag or #tag)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0xf2f3f5))
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_size(px(13.0))
-                                                    .child(current_user.display_name),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x949ba4))
-                                                    .text_size(px(11.0))
-                                                    .child(user_tag),
-                                            ),
-                                    ),
-                            )
-                            // Action Buttons (Mute, Deafen, Settings)
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(2.0))
-                                    // Mute Button
-                                    .child({
-                                        let entity = entity.clone();
-                                        div()
-                                            .size(px(32.0))
-                                            .rounded(px(4.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(0x35373c)))
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                entity.update(cx, |state, cx| {
-                                                    state.toggle_mute();
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .child(icon_mic(px(18.0), if is_muted { rgb(0xf23f43) } else { rgb(0xdbdee1) }))
-                                    })
-                                    // Deafen Button
-                                    .child({
-                                        let entity = entity.clone();
-                                        div()
-                                            .size(px(32.0))
-                                            .rounded(px(4.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(0x35373c)))
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                entity.update(cx, |state, cx| {
-                                                    state.toggle_deafen();
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .child(icon_headphones(px(18.0), if is_deafened { rgb(0xf23f43) } else { rgb(0xdbdee1) }))
-                                    })
-                                    // Settings Button
-                                    .child({
-                                        let entity = entity.clone();
-                                        div()
-                                            .size(px(32.0))
-                                            .rounded(px(4.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(rgb(0x35373c)))
-                                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                                entity.update(cx, |state, cx| {
-                                                    state.open_modal(ActiveModal::UserSettings);
-                                                    cx.notify();
-                                                });
-                                            })
-                                            .child(icon_gear(px(18.0), rgb(0xdbdee1)))
-                                    })
-                            )
-                    })
+                    .children(active_voice.map(|v| render_voice_bar(&v, &app_entity)))
+                    .child(render_user_panel(&current_user, &app_entity)),
             )
-            .children(context_menu_overlay)
     }
 }
+
+// ============================================================================
+// Header elements
+// ============================================================================
+
+fn render_server_header(guild_name: &str) -> AnyElement {
+    div()
+        .h(px(49.0)) // 303x49 per channel-sidebar.md
+        .px(px(16.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .border_b_1()
+        .border_color(rgba(0x635a731f)) // TOKEN FALTANDO: --border-subtle
+        .cursor_pointer()
+        .hover(|s| s.bg(channel_hover()))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_color(text_header())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(15.0))
+                        .child(guild_name.to_string()),
+                )
+                .child(
+                    div().child(icon_check(px(14.0), blurple())),
+                ),
+        )
+        .child(
+            div()
+                .text_color(text_normal())
+                .text_size(px(12.0))
+                .child("⌵"),
+        )
+        .into_any_element()
+}
+
+fn render_dm_search_header() -> AnyElement {
+    div()
+        .h(px(48.0))
+        .px(px(12.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .border_b_1()
+        .border_color(rgba(0x635a731f)) // TOKEN FALTANDO: --border-subtle
+        .child(
+            div()
+                .w_full()
+                .h(px(28.0))
+                .px(px(8.0))
+                .rounded(radius_sm())
+                .bg(bg_server())
+                .flex()
+                .items_center()
+                .justify_between()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(12.0))
+                        .child("Encontre ou comece uma conversa"),
+                ),
+        )
+        .into_any_element()
+}
+
+// ============================================================================
+// Direct Messages Section
+// ============================================================================
+
+fn render_dm_section(
+    state: &AppState,
+    selected_channel_id: Option<&str>,
+    app_entity: &Entity<AppState>,
+) -> Vec<AnyElement> {
+    let is_amigos_active = selected_channel_id.is_none() && state.friends_tab != FriendsTab::MessageRequests;
+    let is_msg_requests_active = selected_channel_id.is_none() && state.friends_tab == FriendsTab::MessageRequests;
+    let pending_req_count = state.message_requests.iter().filter(|r| !r.is_spam).count();
+
+    let mut items = vec![
+        render_dm_nav_button(
+            "Amigos",
+            icon_friends(px(20.0), if is_amigos_active { white() } else { text_muted() }),
+            is_amigos_active,
+            None,
+            {
+                let entity = app_entity.clone();
+                move |_ev, _win, cx| {
+                    entity.update(cx, |s, cx| {
+                        s.selected_channel_id = None;
+                        s.friends_tab = FriendsTab::Online;
+                        cx.notify();
+                    });
+                }
+            },
+        ),
+        render_dm_nav_button(
+            "Solicitações de mensagens",
+            icon_inbox(px(20.0), if is_msg_requests_active { white() } else { text_muted() }),
+            is_msg_requests_active,
+            if pending_req_count > 0 { Some(pending_req_count) } else { None },
+            {
+                let entity = app_entity.clone();
+                move |_ev, _win, cx| {
+                    entity.update(cx, |s, cx| {
+                        s.selected_channel_id = None;
+                        s.friends_tab = FriendsTab::MessageRequests;
+                        cx.notify();
+                    });
+                }
+            },
+        ),
+        render_dm_nav_button(
+            "Nitro",
+            icon_sparkles(px(20.0), text_muted()),
+            false,
+            None,
+            |_ev, _win, _cx| {},
+        ),
+        render_dm_nav_button(
+            "Loja",
+            icon_gift(px(20.0), text_muted()),
+            false,
+            None,
+            |_ev, _win, _cx| {},
+        ),
+        render_dm_section_header(app_entity),
+    ];
+
+    if state.dm_channels.is_empty() {
+        items.push(
+            div()
+                .px(px(8.0))
+                .py(px(12.0))
+                .text_color(text_muted())
+                .text_size(px(12.0))
+                .child("Nenhuma conversa direta aberta.")
+                .into_any_element(),
+        );
+    } else {
+        for dm in &state.dm_channels {
+            items.push(render_dm_item(dm, state, selected_channel_id, app_entity));
+        }
+    }
+
+    items
+}
+
+fn render_dm_nav_button(
+    label: &'static str,
+    icon: Div,
+    is_active: bool,
+    badge_count: Option<usize>,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let mut row = div()
+        .h(px(36.0))
+        .px(px(12.0))
+        .rounded(radius_sm())
+        .flex()
+        .items_center()
+        .justify_between()
+        .cursor_pointer();
+
+    if is_active {
+        row = row.bg(channel_active()).text_color(white());
+    } else {
+        row = row
+            .hover(|s| s.bg(channel_hover()).text_color(text_normal()))
+            .text_color(text_muted());
+    }
+
+    row = row
+        .font_weight(FontWeight::SEMIBOLD)
+        .on_mouse_down(MouseButton::Left, move |ev, win, cx| on_click(ev, win, cx))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .child(icon)
+                .child(label),
+        );
+
+    if let Some(count) = badge_count {
+        row = row.child(MentionBadge::new(count as u32));
+    }
+
+    row.into_any_element()
+}
+
+fn render_dm_section_header(app_entity: &Entity<AppState>) -> AnyElement {
+    let entity = app_entity.clone();
+    div()
+        .pt(px(16.0))
+        .pb(px(4.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_color(text_muted())
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(11.0))
+                .child("MENSAGENS DIRETAS"),
+        )
+        .child(
+            div()
+                .id("dm-create-group-btn")
+                .size(px(18.0))
+                .rounded(px(3.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(text_muted())
+                .hover(|s| s.text_color(white()).bg(channel_hover()))
+                .tooltip(|window, cx| Tooltip::new("Criar DM").build(window, cx))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity.update(cx, |s, cx| {
+                        s.open_modal(ActiveModal::CreateGroupDm);
+                        cx.notify();
+                    });
+                })
+                .child(icon_plus(px(12.0), text_muted())),
+        )
+        .into_any_element()
+}
+
+fn render_dm_item(
+    dm: &ChannelItemState,
+    state: &AppState,
+    selected_channel_id: Option<&str>,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let dm_id = dm.id.clone();
+    let dm_name = dm.name.clone();
+    let is_selected = selected_channel_id == Some(&dm_id);
+    let mention_count = dm.mention_count;
+    let unread = dm.unread;
+    let entity = app_entity.clone();
+    let is_group = dm.is_group_dm || dm.recipient_names.len() > 1;
+
+    let recipient_id = dm.recipient_ids.first();
+    let recipient_friend = state.friends.iter().find(|f| {
+        if let Some(rid) = recipient_id {
+            f.id == *rid
+        } else {
+            f.username == dm_name || f.display_name == dm_name
+        }
+    });
+
+    let presence_info = recipient_id
+        .and_then(|rid| state.get_user_presence(rid))
+        .or_else(|| recipient_friend.and_then(|f| state.get_user_presence(&f.id)));
+
+    let presence_status = presence_info
+        .map(|p| p.status)
+        .or_else(|| recipient_friend.map(|f| crate::domain::user::PresenceStatus::from(f.presence)))
+        .unwrap_or(PresenceStatus::Offline);
+
+    let custom_status = if let Some(p) = presence_info {
+        p.custom_status.clone()
+    } else {
+        recipient_friend.and_then(|f| {
+            f.custom_status
+                .as_ref()
+                .map(|text| crate::domain::user::CustomStatus::from_text(text.clone()))
+        })
+    };
+
+    let game_activity = presence_info
+        .and_then(|p| p.activity.as_ref())
+        .filter(|a| a.activity_type == ActivityType::Playing || (!a.name.is_empty() && a.name != "Custom Status"));
+
+    let avatar_el = render_dm_avatar(
+        is_group,
+        &dm_name,
+        &dm.recipient_names,
+        dm.icon_url.as_deref(),
+        recipient_friend.and_then(|f| f.avatar_url.as_deref()),
+        presence_status,
+        dm.avatar_decoration_data.clone(),
+    );
+
+    let subtitle_el = if is_group {
+        None
+    } else {
+        render_dm_subtitle(custom_status.as_ref(), game_activity, presence_status == PresenceStatus::Offline)
+    };
+
+    let is_pinned = dm.is_pinned || dm.topic.as_deref().map_or(false, |t| t.contains("pin") || t.contains("fixad"));
+    let text_col_el = render_dm_text_column(dm_name, is_selected, unread, is_pinned, subtitle_el);
+
+    let click_entity = entity.clone();
+    let click_cid = dm_id.clone();
+
+    // DM row geometry: 258x42, padding-left 8px, gap 8px, radius 8px per dm-list.md
+    let mut row = div()
+        .id(ElementId::Name(format!("dm-item-{}", dm_id).into()))
+        .h(px(42.0))
+        .px(px(8.0))
+        .rounded(radius_md()) // 8px radius per dm-list.md
+        .flex()
+        .items_center()
+        .justify_between()
+        .cursor_pointer();
+
+    if is_selected {
+        row = row.bg(channel_active());
+    } else {
+        row = row.hover(|s| s.bg(channel_hover()));
+    }
+
+    row = row
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            let cid = click_cid.clone();
+            click_entity.update(cx, |s, cx| {
+                s.select_channel(cid);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.0)) // 8px gap per dm-list.md
+                .child({
+                    let mut av = div().child(avatar_el).cursor_pointer();
+                    if let Some(uid) = dm.recipient_ids.first().cloned() {
+                        let av_entity = entity.clone();
+                        av = av.on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                            let uid = uid.clone();
+                            av_entity.update(cx, |s, cx| {
+                                s.open_user_profile(&uid);
+                                cx.notify();
+                            });
+                        });
+                    }
+                    av
+                })
+                .child(text_col_el),
+        );
+
+    // Mention badge
+    if mention_count > 0 {
+        row = row.child(MentionBadge::new(mention_count));
+    }
+
+    // Action icons
+    let add_entity = entity.clone();
+    let add_cid = dm_id.clone();
+
+    row = row.child(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .id(ElementId::Name(format!("dm-add-friend-{}", dm_id).into()))
+                    .size(px(20.0))
+                    .rounded(radius_sm())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(text_muted())
+                    .hover(|s| s.text_color(white()).bg(channel_hover()))
+                    .cursor_pointer()
+                    .tooltip(|window, cx| Tooltip::new("Adicionar amigos à DM").build(window, cx))
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        let cid = add_cid.clone();
+                        add_entity.update(cx, |s, cx| {
+                            s.open_modal(ActiveModal::AddFriendToGroup(cid));
+                            cx.notify();
+                        });
+                    })
+                    .child(icon_user(px(14.0), text_muted())),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name(format!("dm-close-{}", dm_id).into()))
+                    .size(px(16.0))
+                    .rounded(radius_full())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(text_muted())
+                    .hover(|s| s.text_color(white()).bg(bg_server()))
+                    .cursor_pointer()
+                    .tooltip(|window, cx| Tooltip::new("Fechar DM").build(window, cx))
+                    .child(icon_close(px(12.0), text_muted())),
+            ),
+    );
+
+    // Context menu via gpui-kit ContextMenuExt & PopupMenu
+    let pin_entity = entity.clone();
+    let pin_cid = dm_id.clone();
+    let pin_label = if is_pinned { "Desafixar conversa" } else { "Fixar conversa" };
+
+    row.context_menu(move |menu: PopupMenu, _window, _cx| {
+        let p_app = pin_entity.clone();
+        let p_id = pin_cid.clone();
+        menu.item(
+            PopupMenuItem::new(pin_label).on_click(move |_ev, _win, cx| {
+                p_app.update(cx, |state, cx| {
+                    state.toggle_pin_dm_channel(&p_id);
+                    cx.notify();
+                });
+            }),
+        )
+    })
+    .into_any_element()
+}
+
+// ============================================================================
+// Guild Channels Section
+// ============================================================================
+
+fn render_guild_channels_section(
+    state: &AppState,
+    guild: &super::state::GuildItemState,
+    selected_channel_id: Option<&str>,
+    app_entity: &Entity<AppState>,
+    current_user: &CurrentUserProfile,
+) -> Vec<AnyElement> {
+    let mut category_elements = Vec::new();
+
+    for category in &guild.categories {
+        let cat_id = category.id.clone();
+        let cat_name = category.name.clone();
+        let is_collapsed = state.is_category_collapsed(&cat_id);
+
+        category_elements.push(render_category_header(&cat_id, &cat_name, is_collapsed, app_entity));
+
+        if !is_collapsed {
+            for channel in &category.channels {
+                category_elements.push(render_channel_entry(channel, state, selected_channel_id, app_entity, current_user));
+            }
+        }
+    }
+
+    category_elements
+}
+
+fn render_category_header(
+    cat_id: &str,
+    cat_name: &str,
+    is_collapsed: bool,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let entity = app_entity.clone();
+    let cid = cat_id.to_string();
+
+    div()
+        .pt(px(12.0))
+        .pb(px(4.0))
+        .px(px(4.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            let cid = cid.clone();
+            entity.update(cx, |state, cx| {
+                state.toggle_category(&cid);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(text_muted())
+                        .child(if is_collapsed { "›" } else { "⌵" }),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(11.0))
+                        .child(cat_name.to_string()),
+                ),
+        )
+        .into_any_element()
+}
+
+fn render_channel_entry(
+    channel: &ChannelItemState,
+    state: &AppState,
+    selected_channel_id: Option<&str>,
+    app_entity: &Entity<AppState>,
+    current_user: &CurrentUserProfile,
+) -> AnyElement {
+    let ch_id = channel.id.clone();
+    let ch_name = channel.name.clone();
+    let ch_kind = channel.kind;
+    let is_selected = selected_channel_id == Some(&ch_id);
+    let is_unread = channel.unread;
+    let mention_count = channel.mention_count;
+    let entity = app_entity.clone();
+
+    let is_voice = ch_kind == ChannelKind::Voice;
+    let voice_states = if is_voice {
+        state.voice_states_for_channel(&ch_id)
+    } else {
+        &[]
+    };
+
+    let capacity_badge = if is_voice {
+        let count = voice_states.len();
+        let limit = channel.user_limit.unwrap_or(0);
+        if limit > 0 {
+            let is_full = count >= limit as usize;
+            Some(
+                div()
+                    .h(px(18.0))
+                    .px(px(6.0))
+                    .rounded(px(9.0))
+                    .bg(if is_full { status_dnd() } else { bg_user_bar() })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.0))
+                    .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                    .text_color(if is_full { white() } else { rgb(0x9999b9) }) // TOKEN FALTANDO: --interactive-normal
+                    .child(format!("{}/{}", count, limit)),
+            )
+        } else if count > 0 {
+            Some(
+                div()
+                    .h(px(18.0))
+                    .px(px(6.0))
+                    .rounded(px(9.0))
+                    .bg(bg_user_bar())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
+                    .child(count.to_string()),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let click_cid = ch_id.clone();
+    let click_entity = entity.clone();
+
+    // Channel line geometry: 286x32 r8 per channel-sidebar.md
+    let mut row = div()
+        .id(ElementId::Name(format!("channel-row-{}", ch_id).into()))
+        .h(px(32.0)) // 32px per channel-sidebar.md
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(radius_md()) // 8px per channel-sidebar.md
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .cursor_pointer();
+
+    if is_selected {
+        row = row.bg(channel_active());
+    } else {
+        row = row.hover(|s| s.bg(channel_hover()));
+    }
+
+    row = row
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            let cid = click_cid.clone();
+            click_entity.update(cx, |state, cx| {
+                state.select_channel(cid);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .text_color(if is_selected { white() } else { text_muted() })
+                        .child(ch_kind.symbol()),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(if is_selected || is_unread { FontWeight::BOLD } else { FontWeight::NORMAL })
+                        .text_color(if is_selected { white() } else if is_unread { text_header() } else { text_muted() })
+                        .child(ch_name),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .children(capacity_badge)
+                .children(if mention_count > 0 {
+                    Some(MentionBadge::new(mention_count).into_any_element())
+                } else {
+                    None
+                }),
+        );
+
+    // Context menu via gpui-kit ContextMenuExt
+    let mut channel_container = div()
+        .flex()
+        .flex_col()
+        .child(
+            row.context_menu(|menu: PopupMenu, _window, _cx| {
+                menu
+                    .item(PopupMenuItem::new("Marcar como lido"))
+                    .item(PopupMenuItem::new("Silenciar canal"))
+                    .separator()
+                    .item(PopupMenuItem::new("Copiar link do canal"))
+            })
+        );
+
+    // Voice participants under channel
+    if is_voice && !voice_states.is_empty() {
+        for vs in voice_states {
+            channel_container = channel_container.child(render_voice_user_row(vs, state, current_user));
+        }
+    }
+
+    channel_container.into_any_element()
+}
+
+fn render_voice_user_row(
+    vs: &crate::domain::VoiceState,
+    state: &AppState,
+    current_user: &CurrentUserProfile,
+) -> AnyElement {
+    let vs_uid = vs.user_id.clone();
+    let display_name = if let Some(ref name) = vs.user_name {
+        name.clone()
+    } else if vs_uid == current_user.id {
+        current_user.display_name.clone()
+    } else if let Some(m) = state.members.iter().find(|m| m.id == vs_uid) {
+        m.name.clone()
+    } else if let Some(f) = state.friends.iter().find(|f| f.id == vs_uid) {
+        f.display_name.clone()
+    } else {
+        String::new()
+    };
+
+    let avatar_url = vs.avatar_url.clone().or_else(|| {
+        if vs_uid == current_user.id {
+            current_user.avatar_url.clone()
+        } else {
+            state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
+        }
+    });
+
+    let is_speaking = vs.is_speaking;
+    let is_muted = vs.is_muted();
+    let is_deafened = vs.is_deafened();
+    let is_streaming = vs.self_stream;
+
+    // Mini-avatar 24x24 using crate::components::Avatar (zero rounded_full)
+    let avatar_el = Avatar::new(display_name.clone())
+        .size(AvatarSize::Px24)
+        .opt_src(avatar_url)
+        .cutout_color(bg_channels())
+        .opt_decoration(vs.avatar_decoration_data.clone());
+
+    div()
+        .h(px(28.0))
+        .pl(px(32.0))
+        .pr(px(8.0))
+        .rounded(radius_sm())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .cursor_pointer()
+        .hover(|s| s.bg(channel_hover()))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .size(px(24.0))
+                        .rounded(radius_full())
+                        .border(if is_speaking { px(2.0) } else { px(0.0) })
+                        .border_color(status_online())
+                        .child(avatar_el),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
+                        .overflow_hidden()
+                        .child(display_name),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(4.0))
+                .children(if is_streaming {
+                    Some(
+                        div()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded_xs()
+                            .bg(status_dnd())
+                            .text_color(white())
+                            .text_size(px(9.0))
+                            .font_weight(FontWeight::BOLD)
+                            .child("AO VIVO"),
+                    )
+                } else {
+                    None
+                })
+                .children(if is_muted {
+                    Some(icon_mic_off(px(14.0), status_dnd()))
+                } else {
+                    None
+                })
+                .children(if is_deafened {
+                    Some(icon_speaker_off(px(14.0), status_dnd()))
+                } else {
+                    None
+                }),
+        )
+        .into_any_element()
+}
+
+// ============================================================================
+// Voice bar & User panel
+// ============================================================================
+
+fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> AnyElement {
+    let entity = app_entity.clone();
+    div()
+        .h(px(52.0))
+        .px(px(12.0))
+        .bg(bg_user_bar())
+        .border_b_1()
+        .border_color(bg_server())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(icon_wifi(px(16.0), status_online()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_color(status_online())
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(12.0))
+                                .child("Voz Conectada"),
+                        )
+                        .child(
+                            div()
+                                .text_color(text_muted())
+                                .text_size(px(11.0))
+                                .child(format!("{} / {}ms", voice.channel_name, voice.ping_ms)),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .id("voice-disconnect-btn")
+                .w(px(28.0))
+                .h(px(28.0))
+                .rounded(radius_sm())
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .text_color(text_muted())
+                .hover(|s| s.bg(status_dnd()).text_color(white()))
+                .tooltip(|window, cx| Tooltip::new("Desconectar").build(window, cx))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        state.disconnect_voice();
+                        cx.notify();
+                    });
+                })
+                .child(icon_phone_hangup(px(16.0), text_muted())),
+        )
+        .into_any_element()
+}
+
+fn render_user_panel(current_user: &CurrentUserProfile, app_entity: &Entity<AppState>) -> AnyElement {
+    let entity = app_entity.clone();
+    let is_muted = current_user.is_muted;
+    let is_deafened = current_user.is_deafened;
+
+    let user_tag = if let Some(ref d) = current_user.discriminator {
+        if d != "0" && d != "0000" {
+            format!("{}#{}", current_user.username, d)
+        } else {
+            format!("@{}", current_user.username)
+        }
+    } else {
+        format!("@{}", current_user.username)
+    };
+
+    // User Panel (359x58px r8 per user-panel.md)
+    div()
+        .h(px(58.0)) // 58px per user-panel.md
+        .px(px(8.0))
+        .bg(bg_user_bar())
+        .rounded(radius_md()) // 8px per user-panel.md
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        // User Profile (Avatar + Name)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .p(px(4.0))
+                .rounded(radius_sm())
+                .cursor_pointer()
+                .hover(|s| s.bg(channel_hover()))
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = entity.clone();
+                    move |_event, _window, cx| {
+                        entity.update(cx, |state, cx| {
+                            state.open_modal(ActiveModal::UserSettings);
+                            cx.notify();
+                        });
+                    }
+                })
+                .child(
+                    Avatar::new(current_user.display_name.clone())
+                        .size(AvatarSize::Px32)
+                        .opt_src(current_user.avatar_url.clone())
+                        .status(current_user.presence.into())
+                        .cutout_color(bg_user_bar())
+                        .opt_decoration(current_user.avatar_decoration_data.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_color(text_header())
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(13.0))
+                                .child(current_user.display_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
+                                .text_size(px(11.0))
+                                .child(user_tag),
+                        ),
+                ),
+        )
+        // 32x32 Action Buttons (per user-panel.md)
+        .child(render_user_audio_buttons(is_muted, is_deafened, app_entity))
+        .into_any_element()
+}
+
+fn render_user_audio_buttons(
+    is_muted: bool,
+    is_deafened: bool,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let entity = app_entity.clone();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        // Mute Button (32x32)
+        .child({
+            let entity = entity.clone();
+            let mute_tooltip = if is_muted { "Ativar microfone" } else { "Desativar microfone" };
+            div()
+                .id("user-panel-mute-btn")
+                .size(px(32.0)) // 32x32 per user-panel.md
+                .rounded(radius_md()) // 8px per user-panel.md
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(channel_hover()))
+                .tooltip(move |window, cx| Tooltip::new(mute_tooltip).build(window, cx))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        state.toggle_mute();
+                        cx.notify();
+                    });
+                })
+                .child(if is_muted {
+                    icon_mic_off(px(18.0), status_dnd())
+                } else {
+                    icon_mic(px(18.0), text_normal())
+                })
+        })
+        // Deafen Button (32x32)
+        .child({
+            let entity = entity.clone();
+            let deafen_tooltip = if is_deafened { "Desativar áudio" } else { "Ensordecer" };
+            div()
+                .id("user-panel-deafen-btn")
+                .size(px(32.0)) // 32x32 per user-panel.md
+                .rounded(radius_md()) // 8px per user-panel.md
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(channel_hover()))
+                .tooltip(move |window, cx| Tooltip::new(deafen_tooltip).build(window, cx))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        state.toggle_deafen();
+                        cx.notify();
+                    });
+                })
+                .child(if is_deafened {
+                    icon_headphones_off(px(18.0), status_dnd())
+                } else {
+                    icon_headphones(px(18.0), text_normal())
+                })
+        })
+        // Settings Button (32x32)
+        .child({
+            let entity = entity.clone();
+            div()
+                .id("user-panel-settings-btn")
+                .size(px(32.0)) // 32x32 per user-panel.md
+                .rounded(radius_md()) // 8px per user-panel.md
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(channel_hover()))
+                .tooltip(|window, cx| Tooltip::new("Configurações de Usuário").build(window, cx))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        state.open_modal(ActiveModal::UserSettings);
+                        cx.notify();
+                    });
+                })
+                .child(icon_gear(px(18.0), text_normal()))
+        })
+        .into_any_element()
+}
+
+// ============================================================================
+// DM Subtitle & Avatar helpers
+// ============================================================================
 
 fn render_dm_avatar(
     is_group: bool,
@@ -1214,6 +1121,7 @@ fn render_dm_avatar(
     icon_url: Option<&str>,
     recipient_friend_avatar: Option<&str>,
     presence_status: PresenceStatus,
+    avatar_decoration: Option<crate::domain::user::AvatarDecorationData>,
 ) -> AnyElement {
     if is_group {
         let names = if !recipient_names.is_empty() {
@@ -1239,7 +1147,7 @@ fn render_dm_avatar(
         };
 
         div()
-            .size(px(32.0))
+            .size(px(40.0)) // 40x40 per dm-list.md
             .relative()
             .flex_shrink_0()
             .child(
@@ -1247,16 +1155,16 @@ fn render_dm_avatar(
                     .absolute()
                     .top(px(0.0))
                     .left(px(0.0))
-                    .size(px(20.0))
-                    .rounded_full()
-                    .bg(rgb(0x5865f2))
+                    .size(px(24.0))
+                    .rounded(radius_full())
+                    .bg(blurple())
                     .border_2()
-                    .border_color(rgb(0x2b2d31))
+                    .border_color(bg_channels())
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(0xffffff))
-                    .text_size(px(10.0))
+                    .text_color(white())
+                    .text_size(px(11.0))
                     .font_weight(FontWeight::BOLD)
                     .child(first_initial),
             )
@@ -1265,16 +1173,16 @@ fn render_dm_avatar(
                     .absolute()
                     .bottom(px(0.0))
                     .right(px(0.0))
-                    .size(px(20.0))
-                    .rounded_full()
-                    .bg(rgb(0xeb459e))
+                    .size(px(24.0))
+                    .rounded(radius_full())
+                    .bg(rgb(0xeb459e)) // TOKEN FALTANDO: --badge-brand-bubble
                     .border_2()
-                    .border_color(rgb(0x2b2d31))
+                    .border_color(bg_channels())
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(0xffffff))
-                    .text_size(px(9.0))
+                    .text_color(white())
+                    .text_size(px(10.0))
                     .font_weight(FontWeight::BOLD)
                     .child(second_badge),
             )
@@ -1282,10 +1190,11 @@ fn render_dm_avatar(
     } else {
         let avatar_src = icon_url.or(recipient_friend_avatar).map(|s| s.to_string());
         Avatar::new(dm_name.to_string())
-            .size(AvatarSize::Px32)
+            .size(AvatarSize::Px32) // 32px photo inside 42px row
             .opt_src(avatar_src)
-            .status(presence_status)
-            .cutout_color(rgb(0x2b2d31))
+            .status(presence_status.into())
+            .cutout_color(bg_channels())
+            .opt_decoration(avatar_decoration)
             .into_any_element()
     }
 }
@@ -1379,11 +1288,11 @@ fn render_dm_text_column(
     subtitle_el: Option<AnyElement>,
 ) -> AnyElement {
     let title_color = if is_selected {
-        rgb(0xffffff)
+        white()
     } else if unread {
-        rgb(0xf2f3f5)
+        text_header()
     } else {
-        rgb(0x949ba4)
+        rgb(0x9999b9) // TOKEN FALTANDO: --interactive-normal
     };
     let font_weight = if is_selected || unread {
         FontWeight::SEMIBOLD
@@ -1404,7 +1313,7 @@ fn render_dm_text_column(
         );
 
     if is_pinned {
-        title_row = title_row.child(icon_pin(px(12.0), rgb(0x949ba4)));
+        title_row = title_row.child(icon_pin(px(12.0), text_muted()));
     }
 
     let mut col = div()
@@ -1419,4 +1328,22 @@ fn render_dm_text_column(
     }
 
     col.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn test_dm_text_column_creation() {
+        let el = render_dm_text_column("Alice".to_string(), false, false, true, None);
+        // Ensure it builds without panic
+        let _ = el;
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_server_header_creation() {
+        let el = render_server_header("Rust Server");
+        let _ = el;
+    }
 }
