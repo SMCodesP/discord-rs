@@ -5,10 +5,14 @@
 //!
 //! Features:
 //! - Popout opens anchored to the clicked element/position and snaps to window edges
+//! - Popout has NO close button (closes on click outside / Esc key)
 //! - Opens full modal when clicking avatar/name inside popout or "Ver perfil completo"
+//! - Modal is a single 1184x704 r12 box with a single close button (native DialogClose)
+//! - Bio text breaks lines smoothly within 300px width
+//! - Quick message input has show_paste(false) and ellipsis placeholder
 //! - Canonical Avatar component with decor & presence support throughout
 //! - Official Button and IconButton with icons
-//! - Zero fixed colors (all tokens via cx.theme() / cx.discord() / colors)
+//! - Legacy colors marked with // COR ANTIGA SEM ORIGEM per Adendo A
 //! - Zero fake mocks (empty when real data is absent, no fake fallback names)
 
 use chrono::{DateTime, Datelike, Utc};
@@ -17,9 +21,8 @@ use gpui::component::input::InputState;
 use gpui::*;
 
 use crate::app::state::{AppState, ProfileModalTab};
-use crate::chat::markdown::render_markdown;
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::button::{Button, ButtonSize, IconButton};
+use crate::components::button::{Button, ButtonSize};
 use crate::components::profile_effect::{
     render_profile_effect_for_user, ProfileEffectCatalog, UserProfileEffect,
 };
@@ -69,6 +72,182 @@ pub fn format_member_date(dt: DateTime<Utc>) -> String {
 }
 
 // ============================================================================
+// Shared Content Renderers (Popout & Modal Deduplication)
+// ============================================================================
+
+/// Renders bio text splitting by paragraphs and wrapping cleanly at word boundaries
+fn render_bio_content(bio: &str) -> AnyElement {
+    let paragraphs: Vec<_> = bio.split('\n').collect();
+    let mut bio_container = div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(4.0));
+
+    for p in paragraphs {
+        if !p.trim().is_empty() {
+            bio_container = bio_container.child(
+                div()
+                    .w_full()
+                    .text_size(px(13.0))
+                    .text_color(text_primary())
+                    .line_height(px(18.0))
+                    .child(p.to_string()),
+            );
+        }
+    }
+
+    bio_container.into_any_element()
+}
+
+/// Renders mutual guilds list shared between popout and modal tabs
+fn render_mutual_guilds_list(guilds: &[MutualGuild], is_modal: bool) -> AnyElement {
+    if guilds.is_empty() {
+        return div()
+            .py(if is_modal { px(0.0) } else { px(8.0) })
+            .text_size(if is_modal { px(14.0) } else { px(12.0) })
+            .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+            .child("Nenhum servidor em comum.")
+            .into_any_element();
+    }
+
+    let item_h = if is_modal { px(40.0) } else { px(32.0) };
+    let icon_sz = if is_modal { px(24.0) } else { px(20.0) };
+    let text_sz = if is_modal { px(13.0) } else { px(12.0) };
+
+    let mut list = div().flex().flex_col().gap(px(4.0));
+    for g in guilds {
+        // Zero dados inventados: sem nome real mostra vazio (zero fallback "Servidor {id}")
+        let display_nick = g.nick.clone().unwrap_or_default();
+        list = list.child(
+            div()
+                .h(item_h)
+                .px(px(6.0))
+                .rounded(px(4.0))
+                .bg(bg_server())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .size(icon_sz)
+                        .rounded(px(4.0))
+                        .bg(blurple())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(white())
+                        .child(g.id.chars().next().unwrap_or('S').to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(text_sz)
+                        .text_color(text_primary())
+                        .child(display_nick),
+                ),
+        );
+    }
+
+    list.into_any_element()
+}
+
+/// Renders mutual friends count summary shared between popout and modal tabs
+fn render_mutual_friends_content(count: u32, is_modal: bool) -> AnyElement {
+    if count == 0 {
+        return div()
+            .py(if is_modal { px(0.0) } else { px(8.0) })
+            .text_size(if is_modal { px(14.0) } else { px(12.0) })
+            .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+            .child("Nenhum amigo em comum.")
+            .into_any_element();
+    }
+
+    div()
+        .py(if is_modal { px(0.0) } else { px(8.0) })
+        .text_size(if is_modal { px(14.0) } else { px(12.0) })
+        .text_color(text_primary())
+        .child(format!("{} amigos em comum com este usuário.", count))
+        .into_any_element()
+}
+
+/// Renders member dates: snowflake-derived account creation date and joined server date
+fn render_member_dates_content(
+    created_at: Option<DateTime<Utc>>,
+    joined_server_at: Option<DateTime<Utc>>,
+) -> Option<AnyElement> {
+    if created_at.is_none() && joined_server_at.is_none() {
+        return None;
+    }
+
+    let mut dates_col = div().flex().flex_col().gap(px(8.0));
+
+    if let Some(created_at) = created_at {
+        dates_col = dates_col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                        .child(t("profile.discord_member_since").to_uppercase()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(icon_info(px(14.0), rgb(0x949ba4))) // COR ANTIGA SEM ORIGEM
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_primary())
+                                .child(format_member_date(created_at)),
+                        ),
+                ),
+        );
+    }
+
+    if let Some(joined_at) = joined_server_at {
+        dates_col = dates_col.child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                        .child(t("profile.server_member_since").to_uppercase()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(icon_hash(px(14.0), rgb(0x949ba4))) // COR ANTIGA SEM ORIGEM
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_primary())
+                                .child(format_member_date(joined_at)),
+                        ),
+                ),
+        );
+    }
+
+    Some(dates_col.into_any_element())
+}
+
+// ============================================================================
 // Component 1: Anchored User Profile Popout (300px)
 // ============================================================================
 
@@ -112,6 +291,7 @@ pub fn render_user_profile_popout(
         .absolute()
         .inset_0()
         // Transparent dismiss backdrop (sem backdrop escurecido, zero opacidade)
+        // Nota: O literal antigo rgba(0x00000077) foi removido pois o popout do Discord não tem backdrop escurecido
         .child(
             div()
                 .id("profile-popout-dismiss-backdrop")
@@ -163,13 +343,13 @@ fn render_profile_card(
         .rounded(px(8.0))
         .bg(bg_user_bar())
         .border_1()
-        .border_color(channel_hover())
+        .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
         .shadow_lg()
         .overflow_hidden()
         .flex()
         .flex_col();
 
-    card = card.child(render_popout_banner(app_entity.clone(), popout, catalog));
+    card = card.child(render_popout_banner(popout, catalog));
     card = card.child(render_popout_avatar_row(app_entity.clone(), popout, presence));
 
     if popout.is_loading && popout.data.is_none() {
@@ -207,7 +387,7 @@ fn render_profile_card(
                             div()
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(control_critical_secondary_text_default())
+                                .text_color(rgb(0xfa777c)) // COR ANTIGA SEM ORIGEM
                                 .child(t("profile.error")),
                         )
                         .child(
@@ -227,9 +407,9 @@ fn render_profile_card(
     card.into_any_element()
 }
 
-/// Renders the 105px top banner with profile effect and close button
+/// Renders the 105px top banner with profile effect (sem botão X no popout)
+/// Nota: O literal antigo rgba(0x00000088) do botão fechar foi removido pois o popout do Discord não tem botão X
 fn render_popout_banner(
-    app_entity: Entity<AppState>,
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
 ) -> AnyElement {
@@ -278,28 +458,6 @@ fn render_popout_banner(
         Some(px(300.0)),
     );
     banner = banner.child(effect_overlay);
-
-    let entity_close = app_entity;
-    banner = banner.child(
-        div()
-            .absolute()
-            .top(px(8.0))
-            .right(px(8.0))
-            .child(
-                IconButton::with_icon("popout-banner-close", |sz, col| {
-                    icon_close(sz, col).into_any_element()
-                })
-                .size(px(28.0))
-                .icon_size(px(14.0))
-                .rounded(px(4.0))
-                .on_click(move |_ev, _win, cx| {
-                    entity_close.update(cx, |s, cx| {
-                        s.close_profile_popout();
-                        cx.notify();
-                    });
-                }),
-            ),
-    );
 
     banner.into_any_element()
 }
@@ -367,7 +525,7 @@ fn render_popout_avatar_row(
                     div()
                         .size(px(20.0))
                         .rounded(px(4.0))
-                        .bg(opacity_white_8())
+                        .bg(rgba(0xffffff11)) // COR ANTIGA SEM ORIGEM
                         .flex()
                         .items_center()
                         .justify_center()
@@ -439,7 +597,7 @@ fn render_popout_body(
         .child(
             div()
                 .text_size(px(14.0))
-                .text_color(text_muted())
+                .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
                 .child(format!("@{}", username)),
         );
 
@@ -472,7 +630,14 @@ fn render_popout_body(
         body = body.child(div().h_px().bg(channel_hover()).my(px(2.0)));
     }
 
-    if let Some(dates_el) = render_popout_dates(popout) {
+    let created_at = popout
+        .data
+        .as_ref()
+        .and_then(|d| d.created_at)
+        .or_else(|| snowflake_to_datetime(&popout.user_id));
+    let joined_server_at = popout.data.as_ref().and_then(|d| d.joined_server_at);
+
+    if let Some(dates_el) = render_member_dates_content(created_at, joined_server_at) {
         body = body.child(dates_el);
         body = body.child(div().h_px().bg(channel_hover()).my(px(2.0)));
     }
@@ -593,14 +758,14 @@ fn render_popout_activity(
             .children(game.state.as_ref().map(|s| {
                 div()
                     .text_size(px(12.0))
-                    .text_color(text_muted())
+                    .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
                     .child(s.clone())
             }))
             .into_any_element(),
     )
 }
 
-/// Renders "Sobre mim" bio section via native markdown parser
+/// Renders "Sobre mim" bio section with automatic line wrapping within 300px popout
 fn render_popout_bio(popout: &ProfilePopoutState) -> Option<AnyElement> {
     let bio = popout.data.as_ref().and_then(|d| d.bio.as_ref())?;
     if bio.trim().is_empty() {
@@ -616,104 +781,22 @@ fn render_popout_bio(popout: &ProfilePopoutState) -> Option<AnyElement> {
                 div()
                     .text_size(px(11.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(text_muted())
+                    .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
                     .child(t("profile.about_me").to_uppercase()),
             )
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(text_primary())
-                    .child(render_markdown(bio)),
-            )
+            .child(render_bio_content(bio))
             .into_any_element(),
     )
 }
 
-/// Renders member dates: snowflake-derived account creation date and joined server date
-fn render_popout_dates(popout: &ProfilePopoutState) -> Option<AnyElement> {
-    let created_at = popout
-        .data
-        .as_ref()
-        .and_then(|d| d.created_at)
-        .or_else(|| snowflake_to_datetime(&popout.user_id));
-    let joined_server_at = popout.data.as_ref().and_then(|d| d.joined_server_at);
-
-    if created_at.is_none() && joined_server_at.is_none() {
-        return None;
-    }
-
-    let mut dates_col = div().flex().flex_col().gap(px(8.0));
-
-    if let Some(created_at) = created_at {
-        dates_col = dates_col.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(text_muted())
-                        .child(t("profile.discord_member_since").to_uppercase()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_info(px(14.0), text_muted()))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(text_primary())
-                                .child(format_member_date(created_at)),
-                        ),
-                ),
-        );
-    }
-
-    if let Some(joined_at) = joined_server_at {
-        dates_col = dates_col.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(text_muted())
-                        .child(t("profile.server_member_since").to_uppercase()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_hash(px(14.0), text_muted()))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(text_primary())
-                                .child(format_member_date(joined_at)),
-                        ),
-                ),
-        );
-    }
-
-    Some(dates_col.into_any_element())
-}
-
 /// Renders tabs and tab content in the popout
 fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState) -> AnyElement {
-    let mutual_guilds_count = popout
+    let mutual_guilds = popout
         .data
         .as_ref()
-        .map(|d| d.mutual_guilds.len())
-        .unwrap_or(0);
+        .map(|d| d.mutual_guilds.as_slice())
+        .unwrap_or(&[]);
+    let mutual_guilds_count = mutual_guilds.len();
     let mutual_friends_count = popout
         .data
         .as_ref()
@@ -736,7 +819,7 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_guilds_tab { white() } else { text_muted() })
+                .text_color(if is_guilds_tab { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
                 .border_b_2()
                 .border_color(if is_guilds_tab { blurple() } else { transparent() })
                 .pb(px(4.0))
@@ -755,7 +838,7 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if !is_guilds_tab { white() } else { text_muted() })
+                .text_color(if !is_guilds_tab { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
                 .border_b_2()
                 .border_color(if !is_guilds_tab { blurple() } else { transparent() })
                 .pb(px(4.0))
@@ -771,64 +854,9 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
         );
 
     let tab_content = if is_guilds_tab {
-        if mutual_guilds_count == 0 {
-            div()
-                .py(px(8.0))
-                .text_size(px(12.0))
-                .text_color(text_muted())
-                .child("Nenhum servidor em comum.")
-        } else {
-            let mut list = div().flex().flex_col().gap(px(4.0));
-            if let Some(data) = popout.data.as_ref() {
-                for g in &data.mutual_guilds {
-                    // Sem dado real mostra vazio (zero inventado "Servidor {id}")
-                    let display_nick = g.nick.clone().unwrap_or_default();
-                    list = list.child(
-                        div()
-                            .h(px(32.0))
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .bg(bg_server())
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .size(px(20.0))
-                                    .rounded(px(4.0))
-                                    .bg(blurple())
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_size(px(10.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(white())
-                                    .child(g.id.chars().next().unwrap_or('S').to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(text_primary())
-                                    .child(display_nick),
-                            ),
-                    );
-                }
-            }
-            list
-        }
-    } else if mutual_friends_count == 0 {
-        div()
-            .py(px(8.0))
-            .text_size(px(12.0))
-            .text_color(text_muted())
-            .child("Nenhum amigo em comum.")
+        render_mutual_guilds_list(mutual_guilds, false)
     } else {
-        div()
-            .py(px(8.0))
-            .text_size(px(12.0))
-            .text_color(text_primary())
-            .child(format!("{} amigos em comum com este usuário.", mutual_friends_count))
+        render_mutual_friends_content(mutual_friends_count, false)
     };
 
     div()
@@ -840,7 +868,7 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
         .into_any_element()
 }
 
-/// Renders quick direct message input field at the bottom of the popout
+/// Renders quick direct message input field at the bottom of the popout (show_paste(false) per Parity)
 fn render_popout_quick_input(
     popout: &ProfilePopoutState,
     quick_state: &Entity<InputState>,
@@ -854,11 +882,12 @@ fn render_popout_quick_input(
     div()
         .p(px(12.0))
         .border_t_1()
-        .border_color(channel_hover())
+        .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
         .bg(bg_server())
         .child(
             TextInput::new("profile-quick-message-input", quick_state)
-                .placeholder(format!("Conversar com @{}", target_uname))
+                .placeholder(format!("Conversar com @{}...", target_uname))
+                .show_paste(false)
                 .full_width(true),
         )
         .into_any_element()
@@ -869,6 +898,7 @@ fn render_popout_quick_input(
 // ============================================================================
 
 /// Builds the Dialog for the full User Profile Modal (opened exclusively from the popout)
+/// UMA caixa só (1184x704 r12 com backdrop e sem moldura dupla) e UM botão de fechar (DialogClose do kit)
 pub fn build_user_profile_modal_dialog(
     dialog: Dialog,
     entity: Entity<AppState>,
@@ -890,16 +920,11 @@ pub fn build_user_profile_modal_dialog(
     let margin_top = (vh - px(704.0)).max(px(20.0)) / 2.0;
 
     let content = div()
-        .w(px(1184.0))
-        .h(px(704.0))
-        .rounded(px(12.0))
-        .bg(bg_user_bar())
-        .border_1()
-        .border_color(channel_hover())
+        .size_full()
         .overflow_hidden()
         .flex()
         .flex_col()
-        .child(render_modal_banner(entity.clone(), &popout, &catalog))
+        .child(render_modal_banner(&popout, &catalog))
         .child(render_modal_header(&popout, presence.as_ref()))
         .child(render_modal_tabs_bar(entity.clone(), &popout, active_tab))
         .child(render_modal_tab_content(&popout, active_tab));
@@ -908,6 +933,13 @@ pub fn build_user_profile_modal_dialog(
         .w(px(1184.0))
         .h(px(704.0))
         .margin_top(margin_top)
+        .p_0()
+        .bg(bg_user_bar())
+        .rounded(px(12.0))
+        .border_1()
+        .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
+        .overflow_hidden()
+        .close_button(true)
         .on_close(move |_event, _window, cx| {
             entity_close.update(cx, |s, cx| {
                 s.close_user_profile_modal();
@@ -917,9 +949,8 @@ pub fn build_user_profile_modal_dialog(
         .child(content)
 }
 
-/// Renders the top modal banner with effect overlay and close button
+/// Renders the top modal banner with effect overlay (sem botão X duplicado; o X pertence ao Dialog)
 fn render_modal_banner(
-    app_entity: Entity<AppState>,
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
 ) -> AnyElement {
@@ -968,28 +999,6 @@ fn render_modal_banner(
         Some(px(1184.0)),
     );
     banner = banner.child(effect_overlay);
-
-    let entity_close = app_entity;
-    banner = banner.child(
-        div()
-            .absolute()
-            .top(px(16.0))
-            .right(px(16.0))
-            .child(
-                IconButton::with_icon("modal-banner-close", |sz, col| {
-                    icon_close(sz, col).into_any_element()
-                })
-                .size(px(32.0))
-                .icon_size(px(16.0))
-                .rounded(px(6.0))
-                .on_click(move |_ev, _win, cx| {
-                    entity_close.update(cx, |s, cx| {
-                        s.close_user_profile_modal();
-                        cx.notify();
-                    });
-                }),
-            ),
-    );
 
     banner.into_any_element()
 }
@@ -1061,7 +1070,7 @@ fn render_modal_header(popout: &ProfilePopoutState, presence: Option<&Presence>)
                         .child(
                             div()
                                 .text_size(px(14.0))
-                                .text_color(text_muted())
+                                .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
                                 .child(format!("@{}", username)),
                         ),
                 ),
@@ -1076,7 +1085,7 @@ fn render_modal_header(popout: &ProfilePopoutState, presence: Option<&Presence>)
                     div()
                         .size(px(24.0))
                         .rounded(px(4.0))
-                        .bg(opacity_white_8())
+                        .bg(rgba(0xffffff11)) // COR ANTIGA SEM ORIGEM
                         .flex()
                         .items_center()
                         .justify_center()
@@ -1124,7 +1133,7 @@ fn render_modal_tabs_bar(
                 .cursor_pointer()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_about { white() } else { text_muted() })
+                .text_color(if is_about { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
                 .border_b_2()
                 .border_color(if is_about { blurple() } else { transparent() })
                 .pb(px(8.0))
@@ -1141,7 +1150,7 @@ fn render_modal_tabs_bar(
                 .cursor_pointer()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_guilds { white() } else { text_muted() })
+                .text_color(if is_guilds { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
                 .border_b_2()
                 .border_color(if is_guilds { blurple() } else { transparent() })
                 .pb(px(8.0))
@@ -1158,7 +1167,7 @@ fn render_modal_tabs_bar(
                 .cursor_pointer()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_friends { white() } else { text_muted() })
+                .text_color(if is_friends { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
                 .border_b_2()
                 .border_color(if is_friends { blurple() } else { transparent() })
                 .pb(px(8.0))
@@ -1189,17 +1198,27 @@ fn render_modal_tab_content(
             container = container.child(render_modal_about_me(popout));
         }
         ProfileModalTab::MutualGuilds => {
-            container = container.child(render_modal_mutual_guilds(popout));
+            let guilds = popout
+                .data
+                .as_ref()
+                .map(|d| d.mutual_guilds.as_slice())
+                .unwrap_or(&[]);
+            container = container.child(render_mutual_guilds_list(guilds, true));
         }
         ProfileModalTab::MutualFriends => {
-            container = container.child(render_modal_mutual_friends(popout));
+            let count = popout
+                .data
+                .as_ref()
+                .map(|d| d.mutual_friends_count)
+                .unwrap_or(0);
+            container = container.child(render_mutual_friends_content(count, true));
         }
     }
 
     container.into_any_element()
 }
 
-/// Renders "Sobre mim" tab content (Bio markdown, Connected accounts, Member dates)
+/// Renders "Sobre mim" tab content (Bio, Connected accounts, Member dates)
 fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
     let mut col = div().flex().flex_col().gap(px(16.0));
 
@@ -1214,20 +1233,22 @@ fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
                         div()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(text_muted())
+                            .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
                             .child("BIOGRAFIA"),
                     )
-                    .child(
-                        div()
-                            .text_size(px(14.0))
-                            .text_color(text_primary())
-                            .child(render_markdown(bio)),
-                    ),
+                    .child(render_bio_content(bio)),
             );
         }
     }
 
-    if let Some(dates_el) = render_popout_dates(popout) {
+    let created_at = popout
+        .data
+        .as_ref()
+        .and_then(|d| d.created_at)
+        .or_else(|| snowflake_to_datetime(&popout.user_id));
+    let joined_server_at = popout.data.as_ref().and_then(|d| d.joined_server_at);
+
+    if let Some(dates_el) = render_member_dates_content(created_at, joined_server_at) {
         col = col.child(dates_el);
     }
 
@@ -1237,7 +1258,7 @@ fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
                 div()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(text_muted())
+                    .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
                     .child("CONTAS CONECTADAS"),
             );
             let mut acc_grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
@@ -1269,81 +1290,4 @@ fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
     }
 
     col.into_any_element()
-}
-
-/// Renders "Servidores em comum" tab content
-fn render_modal_mutual_guilds(popout: &ProfilePopoutState) -> AnyElement {
-    let guilds = popout
-        .data
-        .as_ref()
-        .map(|d| d.mutual_guilds.clone())
-        .unwrap_or_default();
-
-    if guilds.is_empty() {
-        return div()
-            .text_size(px(14.0))
-            .text_color(text_muted())
-            .child("Nenhum servidor em comum.")
-            .into_any_element();
-    }
-
-    let mut list = div().flex().flex_col().gap(px(6.0));
-    for g in guilds {
-        let display_name = g.nick.unwrap_or_default();
-        list = list.child(
-            div()
-                .h(px(40.0))
-                .px(px(10.0))
-                .rounded(px(6.0))
-                .bg(bg_server())
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .size(px(24.0))
-                        .rounded(px(4.0))
-                        .bg(blurple())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(white())
-                        .child(g.id.chars().next().unwrap_or('S').to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(text_primary())
-                        .child(display_name),
-                ),
-        );
-    }
-
-    list.into_any_element()
-}
-
-/// Renders "Amigos em comum" tab content
-fn render_modal_mutual_friends(popout: &ProfilePopoutState) -> AnyElement {
-    let count = popout
-        .data
-        .as_ref()
-        .map(|d| d.mutual_friends_count)
-        .unwrap_or(0);
-
-    if count == 0 {
-        return div()
-            .text_size(px(14.0))
-            .text_color(text_muted())
-            .child("Nenhum amigo em comum.")
-            .into_any_element();
-    }
-
-    div()
-        .text_size(px(14.0))
-        .text_color(text_primary())
-        .child(format!("{} amigos em comum com este usuário.", count))
-        .into_any_element()
 }

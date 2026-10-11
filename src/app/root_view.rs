@@ -320,7 +320,7 @@ impl Render for RootView {
                     .unwrap_or_else(|| p.user_id.clone());
                 (
                     p.quick_message.clone(),
-                    format!("Conversar com @{}", uname),
+                    format!("Conversar com @{}...", uname),
                 )
             });
         if let Some((ref want_val, ref want_ph)) = quick_sync {
