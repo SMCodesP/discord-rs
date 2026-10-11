@@ -10,7 +10,7 @@
 
 use gpui::component::tab::{Tab, TabBar};
 use gpui::component::tooltip::Tooltip;
-use gpui::component::{Size, Sizable};
+use gpui::component::{Selectable, Sizable, Size};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
@@ -298,7 +298,6 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
 
     let on_tab_change = config.on_tab_change.clone();
     let mut tab_bar = TabBar::new("media-picker-tabs")
-        .pill()
         .with_size(Size::Small)
         .selected_index(active_index);
 
@@ -312,10 +311,39 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
 
     for tab in tabs {
         let is_active = tab == config.active_tab;
-        let icon_col = if is_active { text_titles() } else { text_muted() };
+        let icon_col = if is_active { text_titles() } else { text_secondary() };
+        let text_col = if is_active { text_titles() } else { text_secondary() };
+        let tab_bg = if is_active { channel_active() } else { transparent() };
+
+        let tab_inner = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap(px(6.0))
+            .h(px(30.0))
+            .px(px(10.0))
+            .rounded(radius_pill())
+            .bg(tab_bg)
+            .hover(move |s| {
+                if !is_active {
+                    s.bg(channel_hover()).text_color(text_titles())
+                } else {
+                    s
+                }
+            })
+            .child(tab.render_icon(px(16.0), icon_col))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(if is_active { WEIGHT_SEMIBOLD } else { WEIGHT_MEDIUM })
+                    .text_color(text_col)
+                    .child(tab.label()),
+            );
+
         let kit_tab = Tab::new()
-            .label(tab.label())
-            .prefix(tab.render_icon(px(14.0), icon_col).into_any_element());
+            .selected(is_active)
+            .child(tab_inner);
         tab_bar = tab_bar.child(kit_tab);
     }
 
@@ -575,7 +603,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         .size(px(32.0))
         .min_h(px(32.0))
         .min_w(px(32.0))
-        .rounded(radius_md())
+        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
@@ -633,13 +661,13 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         let guild_icon_child = if let Some(ref url) = guild.icon_url {
             div()
                 .size_full()
-                .rounded(radius_md())
+                .rounded_full()
                 .overflow_hidden()
-                .child(img(url.clone()).size_full().rounded(radius_md()))
+                .child(img(url.clone()).size_full().rounded_full())
         } else {
             div()
                 .size_full()
-                .rounded(radius_md())
+                .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -662,7 +690,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
             .size(px(32.0))
             .min_h(px(32.0))
             .min_w(px(32.0))
-            .rounded(radius_md())
+            .rounded_full()
             .flex()
             .items_center()
             .justify_center()
@@ -731,7 +759,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         .size(px(32.0))
         .min_h(px(32.0))
         .min_w(px(32.0))
-        .rounded(radius_md())
+        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
@@ -842,7 +870,7 @@ pub fn emoji_matches_query(emoji: &str, cat_key: &str, cat_title: &str, query: &
     tags.iter().any(|t| t.contains(&q) || q.contains(*t))
 }
 
-pub const EMOJIS_PER_ROW: usize = 9;
+pub const EMOJIS_PER_ROW: usize = 8;
 
 #[derive(Clone, Debug)]
 pub enum EmojiVirtualItem {
@@ -1993,7 +2021,7 @@ fn render_gif_card(
                 .bottom_0()
                 .left_0()
                 .right_0()
-                .bg(modal_backdrop())
+                .bg(rgba(0x000000c0)) // COR ANTIGA SEM ORIGEM: rgba(0x000000c0) (fundo da legenda sobre a miniatura de GIF)
                 .px(px(6.0))
                 .py(px(4.0))
                 .child(
@@ -2413,8 +2441,8 @@ mod tests {
         };
 
         let rows = build_emoji_virtual_rows(&config, "", false);
-        // Expect FilterBanner, SectionHeader, and 3 GridRows (9 + 9 + 7 = 25 items)
-        assert_eq!(rows.len(), 5);
+        // Expect FilterBanner, SectionHeader, and 4 GridRows (8 + 8 + 8 + 1 = 25 items)
+        assert_eq!(rows.len(), 6);
         match &rows[0] {
             EmojiVirtualRow::FilterBanner { title } => assert_eq!(title, "Crab Guild"),
             _ => panic!("Expected FilterBanner"),
@@ -2427,16 +2455,20 @@ mod tests {
             _ => panic!("Expected SectionHeader"),
         }
         match &rows[2] {
-            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 9),
-            _ => panic!("Expected GridRow of 9 items"),
+            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 8),
+            _ => panic!("Expected GridRow of 8 items"),
         }
         match &rows[3] {
-            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 9),
-            _ => panic!("Expected GridRow of 9 items"),
+            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 8),
+            _ => panic!("Expected GridRow of 8 items"),
         }
         match &rows[4] {
-            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 7),
-            _ => panic!("Expected GridRow of 7 items"),
+            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 8),
+            _ => panic!("Expected GridRow of 8 items"),
+        }
+        match &rows[5] {
+            EmojiVirtualRow::GridRow { items } => assert_eq!(items.len(), 1),
+            _ => panic!("Expected GridRow of 1 items"),
         }
     }
 
@@ -2520,7 +2552,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_media_picker_measured_dimensions() {
         // Verifica constantes de layout do picker correspondentes às medições do Discord
-        assert_eq!(EMOJIS_PER_ROW, 9);
+        assert_eq!(EMOJIS_PER_ROW, 8);
         assert_eq!(STICKERS_PER_ROW, 4);
 
         // Verifica que render_emoji_item cria elemento com célula correta
