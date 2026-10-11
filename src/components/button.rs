@@ -33,11 +33,11 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::tokens::colors::{
-    blurple, blurple_active, blurple_hover, channel_active, channel_hover,
+    blurple, blurple_active, blurple_hover,
     control_critical_primary_bg_active, control_critical_primary_bg_default,
     control_critical_primary_bg_hover, control_critical_secondary_text_default,
     control_icon_only_icon_default, control_secondary_bg_active, control_secondary_bg_default,
-    control_secondary_bg_hover, opacity_white_8, text_normal, transparent,
+    control_secondary_bg_hover, opacity_white_20, opacity_white_8, text_normal, transparent,
     white, with_alpha, HEX_WHITE,
 };
 use crate::tokens::spacing::radius_md;
@@ -496,8 +496,8 @@ fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
         // Measured `critical-secondary` pattern: red text on translucent gray.
         (transparent(), secondary_bg_hover(), danger_text())
     } else if btn.active {
-        // Toggled active state: channel_hover background and white icon
-        (channel_hover(), channel_active(), white())
+        // Toggled state: translucent white background (0xffffff24 / 0xffffff33).
+        (with_alpha(HEX_WHITE, 36.0 / 255.0), opacity_white_20(), white())
     } else {
         (transparent(), secondary_bg_hover(), white())
     };
@@ -516,6 +516,8 @@ fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
         .rounded(radius)
         .w(btn.size)
         .h(btn.size)
+        .px(px(0.0))
+        .py(px(0.0))
         .font_weight(WEIGHT_MEDIUM)
         .bg(bg_normal)
         .text_color(icon_color);
@@ -540,17 +542,26 @@ fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
         el = el.child(
             div()
                 .flex()
+                .flex_none()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
                 .size(btn.icon_size)
+                .w(btn.icon_size)
+                .h(btn.icon_size)
                 .child((icon_renderer)(btn.icon_size, icon_color)),
         );
     } else if let Some(icon) = btn.icon {
         el = el.child(
             div()
                 .flex()
+                .flex_none()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
+                .size(btn.icon_size)
+                .w(btn.icon_size)
+                .h(btn.icon_size)
                 .text_size(btn.icon_size)
                 .child(icon),
         );
@@ -558,6 +569,7 @@ fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
 
     el.into_any_element()
 }
+
 
 #[cfg(test)]
 mod tests {
