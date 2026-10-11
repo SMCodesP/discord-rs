@@ -2,7 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::components::{Avatar, AvatarSize, IconButton};
-use crate::tokens::colors::{self, rgb};
+use crate::tokens::colors::{self, border_subtle};
 use crate::tokens::icons::*;
 use crate::tokens::kit_theme::DiscordTheme;
 use super::state::{ActiveModal, AppState, ChannelItemState};
@@ -46,8 +46,7 @@ impl Render for HeaderBar {
             .items_center()
             .justify_between()
             .border_b_1()
-            // TOKEN FALTANDO: --border-subtle
-            .border_color(rgb(0x1f2023))
+            .border_color(border_subtle())
             .flex_shrink_0()
             .child(render_channel_left_side(
                 selected_channel_opt.as_ref(),
@@ -126,11 +125,7 @@ fn render_dm_avatar(channel: &ChannelItemState, state: &AppState, cx: &App) -> A
 }
 
 fn render_guild_channel_icon(channel: &ChannelItemState, cx: &App) -> AnyElement {
-    div()
-        .text_color(cx.discord().text_secondary)
-        .text_size(px(20.0))
-        .child(channel.kind.symbol())
-        .into_any_element()
+    render_icon(channel.kind.discord_icon(), px(20.0), cx.discord().text_secondary).into_any_element()
 }
 
 fn render_title(name: &str, cx: &App) -> AnyElement {

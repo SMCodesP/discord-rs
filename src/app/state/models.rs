@@ -127,8 +127,17 @@ impl ChannelKind {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Text => "#",
-            Self::Voice => "🔊",
-            Self::Announcement => "📢",
+            Self::Voice => "",
+            Self::Announcement => "",
+        }
+    }
+
+    /// Discord vector icon token for the channel kind.
+    pub fn discord_icon(&self) -> crate::tokens::icons::DiscordIcon {
+        match self {
+            Self::Text => crate::tokens::icons::DiscordIcon::Hash,
+            Self::Voice => crate::tokens::icons::DiscordIcon::Speaker,
+            Self::Announcement => crate::tokens::icons::DiscordIcon::Megaphone,
         }
     }
 }
