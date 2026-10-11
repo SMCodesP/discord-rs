@@ -2,13 +2,18 @@
 
 extern crate gpui_kit as gpui;
 
+use discord_rs::app::state::{AppState, FriendItemState, PresenceStatus as AppPresenceStatus};
 use discord_rs::components::avatar::{Avatar, AvatarSize};
 use discord_rs::components::member_item::MemberItem;
 use discord_rs::components::profile_effect::{
     render_profile_effect, render_profile_effect_for_user, ProfileEffectCatalog,
     ProfileEffectConfig, ProfileEffectLayer, UserProfileEffect,
 };
-use discord_rs::domain::user::{AvatarDecorationData, PresenceStatus, User};
+use discord_rs::domain::channel::{Channel, ChannelType};
+use discord_rs::domain::message::{Author, Message};
+use discord_rs::domain::user::{Activity, ActivityType, AvatarDecorationData, PresenceStatus, User};
+use discord_rs::domain::voice::VoiceState;
+use discord_rs::protocol::transport::{Relationship, TransportEvent};
 use gpui::px;
 
 #[test]
@@ -218,4 +223,256 @@ fn test_profile_effect_render_fallback_zero_mocks() {
     };
     let rendered_config = render_profile_effect(Some(&config), px(120.0), Some(px(300.0)));
     let _ = rendered_config;
+}
+
+// =========================================================================
+// KAvatarData (Etapa 2, parte 1): decoration data reaches every UI model.
+// Synthetic IDs/names/assets only; no account data.
+// =========================================================================
+
+fn synth_decor(asset: &str) -> AvatarDecorationData {
+    AvatarDecorationData::with_sku(asset, "synth-sku-1")
+}
+
+#[test]
+fn test_kavatardata_ready_user_decoration_reaches_current_user() {
+    let mut state = AppState::new();
+
+    let mut decorated = User::new("synth-user-101", "synth_ready_user");
+    decorated.avatar_decoration_data = Some(synth_decor("a_synth_ready_deco"));
+    state.handle_transport_event(TransportEvent::Ready {
+        user: decorated,
+        guilds: Vec::new(),
+        guild_folders: Vec::new(),
+    });
+    let got = state.current_user.avatar_decoration_data.as_ref().expect("current user must carry decoration from READY");
+    assert_eq!(got.asset, "a_synth_ready_deco");
+
+    // Payload without decoration -> None (no stale data).
+    let plain = User::new("synth-user-102", "synth_plain_user");
+    state.handle_transport_event(TransportEvent::Ready {
+        user: plain,
+        guilds: Vec::new(),
+        guild_folders: Vec::new(),
+    });
+    assert_eq!(state.current_user.avatar_decoration_data, None);
+}
+
+#[test]
+fn test_kavatardata_dm_recipient_decoration_reaches_sidebar() {
+    let mut state = AppState::new();
+
+    let mut dm = Channel::new("synth-dm-201", "Synth Recip", ChannelType::Dm)
+        .with_recipient_ids(vec!["synth-user-103".to_string()]);
+    dm.recipient_names = vec!["Synth Recip".to_string()];
+    dm.recipient_avatar_decorations = vec![Some(synth_decor("a_synth_dm_deco"))];
+
+    state.handle_transport_event(TransportEvent::DmChannelsUpdated(vec![dm]));
+    let item = state.dm_channels.iter().find(|d| d.id == "synth-dm-201").expect("DM must exist");
+    let got = item.avatar_decoration_data.as_ref().expect("DM item must carry recipient decoration");
+    assert_eq!(got.asset, "a_synth_dm_deco");
+
+    // CHANNEL_CREATE path (real-time DM open).
+    let mut live = Channel::new("synth-dm-202", "Synth Live", ChannelType::Dm)
+        .with_recipient_ids(vec!["synth-user-104".to_string()]);
+    live.recipient_names = vec!["Synth Live".to_string()];
+    live.recipient_avatar_decorations = vec![Some(synth_decor("a_synth_live_deco"))];
+    state.handle_transport_event(TransportEvent::DmChannelCreated(live));
+    let live_item = state.dm_channels.iter().find(|d| d.id == "synth-dm-202").expect("live DM must exist");
+    assert_eq!(
+        live_item.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_live_deco")
+    );
+
+    // Channel without recipient data -> None.
+    let bare = Channel::new("synth-dm-203", "Synth Bare", ChannelType::Dm)
+        .with_recipient_ids(vec!["synth-user-105".to_string()]);
+    state.handle_transport_event(TransportEvent::DmChannelCreated(bare));
+    let bare_item = state.dm_channels.iter().find(|d| d.id == "synth-dm-203").expect("bare DM must exist");
+    assert_eq!(bare_item.avatar_decoration_data, None);
+}
+
+#[test]
+fn test_kavatardata_message_author_decoration_reaches_state() {
+    let mut state = AppState::new();
+
+    let mut author = Author::new("synth-user-106", "synth_msg_author");
+    author.avatar_decoration_data = Some(synth_decor("a_synth_author_deco"));
+    let msg = Message::new("synth-msg-301", "synth-chan-301", author, "synthetic hello");
+    state.handle_transport_event(TransportEvent::MessageCreate(msg));
+
+    let stored = state.messages_by_channel.get("synth-chan-301").expect("messages must exist");
+    let got = stored[0].author.avatar_decoration_data.as_ref().expect("author decoration must survive gateway event");
+    assert_eq!(got.asset, "a_synth_author_deco");
+
+    // Optimistic send carries the current user's decoration.
+    state.current_user.avatar_decoration_data = Some(synth_decor("a_synth_self_deco"));
+    state.send_message("synth-chan-301", "synthetic optimistic");
+    let stored = state.messages_by_channel.get("synth-chan-301").expect("messages must exist");
+    let own = stored.last().expect("optimistic message must exist");
+    assert_eq!(
+        own.author.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_self_deco")
+    );
+}
+
+#[test]
+fn test_kavatardata_voice_state_decoration_retained() {
+    let mut state = AppState::new();
+
+    let vs = VoiceState::new("synth-user-107", "synth-sess-1")
+        .with_channel_id("synth-voice-401")
+        .with_user_name("Synth Voicer")
+        .with_avatar_decoration(synth_decor("a_synth_voice_deco"));
+    state.handle_transport_event(TransportEvent::VoiceStateUpdate(vs));
+
+    let states = state.voice_states_for_channel("synth-voice-401");
+    assert_eq!(states.len(), 1);
+    assert_eq!(
+        states[0].avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_voice_deco")
+    );
+
+    // Voice state without member data -> None.
+    let bare = VoiceState::new("synth-user-108", "synth-sess-2").with_channel_id("synth-voice-402");
+    state.handle_transport_event(TransportEvent::VoiceStateUpdate(bare));
+    let bare_states = state.voice_states_for_channel("synth-voice-402");
+    assert_eq!(bare_states.len(), 1);
+    assert_eq!(bare_states[0].avatar_decoration_data, None);
+}
+
+#[test]
+fn test_kavatardata_active_now_inherits_friend_decoration() {
+    let mut state = AppState::new();
+    state.friends.clear();
+    state.active_now_items.clear();
+
+    state.friends.push(FriendItemState {
+        id: "synth-user-109".to_string(),
+        username: "synth_gamer".to_string(),
+        display_name: "Synth Gamer".to_string(),
+        avatar_url: None,
+        avatar_text: "S".to_string(),
+        presence: AppPresenceStatus::Offline,
+        custom_status: None,
+        relationship_type: 1,
+        avatar_decoration_data: Some(synth_decor("a_synth_active_deco")),
+    });
+
+    let mut activity = Activity::new("Synth Game", ActivityType::Playing);
+    activity.details = Some("In Lobby".to_string());
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "synth-user-109".to_string(),
+        status: PresenceStatus::Online,
+        activity: Some(activity),
+        custom_status: None,
+    });
+
+    assert_eq!(state.active_now_items.len(), 1);
+    assert_eq!(
+        state.active_now_items[0].avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_active_deco")
+    );
+}
+
+#[test]
+fn test_kavatardata_relationship_flow_decoration_pending_on_transport() {
+    // Relationship (src/protocol/transport.rs, out of this task's file scope) cannot
+    // carry avatar_decoration_data yet, so friends built from relationship events
+    // keep None here. Documents the blocked dependency instead of hiding it.
+    let mut state = AppState::new();
+    state.friends.clear();
+
+    state.handle_transport_event(TransportEvent::RelationshipAdd(Relationship {
+        id: "synth-user-110".to_string(),
+        rel_type: 1,
+        username: "synth_friend".to_string(),
+        global_name: Some("Synth Friend".to_string()),
+        avatar: None,
+    }));
+
+    let friend = state.friends.iter().find(|f| f.id == "synth-user-110").expect("friend must exist");
+    assert_eq!(friend.avatar_decoration_data, None);
+}
+
+#[test]
+fn test_kavatardata_struct_json_backward_shapes() {
+    // Author shape with decoration present / absent / null.
+    let author_json = r#"{
+        "id": "synth-user-111",
+        "username": "synth_json",
+        "avatar_decoration_data": { "asset": "a_synth_json_deco", "sku_id": "synth-sku-2" }
+    }"#;
+    let author: Author = serde_json::from_str(author_json).expect("author must deserialize");
+    assert_eq!(
+        author.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_json_deco")
+    );
+
+    let bare: Author = serde_json::from_str(r#"{"id": "synth-user-112", "username": "synth_bare"}"#)
+        .expect("legacy author must deserialize");
+    assert_eq!(bare.avatar_decoration_data, None);
+
+    let nulled: Author = serde_json::from_str(
+        r#"{"id": "synth-user-113", "username": "synth_null", "avatar_decoration_data": null}"#,
+    )
+    .expect("null decoration must deserialize");
+    assert_eq!(nulled.avatar_decoration_data, None);
+
+    // Message carrying a decorated author.
+    let msg_json = r#"{
+        "id": "synth-msg-302",
+        "channel_id": "synth-chan-302",
+        "content": "hi",
+        "timestamp": "2026-10-01T12:00:00.000Z",
+        "author": {
+            "id": "synth-user-114",
+            "username": "synth_msg_json",
+            "avatar_decoration_data": { "asset": "a_synth_msg_json" }
+        }
+    }"#;
+    let msg: Message = serde_json::from_str(msg_json).expect("message must deserialize");
+    assert_eq!(
+        msg.author.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_msg_json")
+    );
+
+    // DM channel with decorated recipient.
+    let chan_json = r#"{
+        "id": "synth-dm-204",
+        "name": "Synth Json",
+        "type": 1,
+        "recipient_ids": [],
+        "recipient_names": [],
+        "recipient_avatar_decorations": [{ "asset": "a_synth_chan_json" }]
+    }"#;
+    let chan: Channel = serde_json::from_str(chan_json).expect("channel must deserialize");
+    assert_eq!(
+        chan.recipient_avatar_decorations.first().and_then(|d| d.as_ref()).map(|d| d.asset.as_str()),
+        Some("a_synth_chan_json")
+    );
+
+    // Legacy channel payload without the new field still loads.
+    let legacy_chan: Channel = serde_json::from_str(
+        r#"{"id": "synth-dm-205", "name": "Legacy", "type": 1}"#,
+    )
+    .expect("legacy channel must deserialize");
+    assert!(legacy_chan.recipient_avatar_decorations.is_empty());
+
+    // Voice state with decoration present / absent.
+    let vs_json = r#"{
+        "user_id": "synth-user-115",
+        "session_id": "synth-sess-3",
+        "avatar_decoration_data": { "asset": "a_synth_vs_json" }
+    }"#;
+    let vs: VoiceState = serde_json::from_str(vs_json).expect("voice state must deserialize");
+    assert_eq!(
+        vs.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_vs_json")
+    );
+
+    let vs_bare: VoiceState =
+        serde_json::from_str(r#"{"user_id": "synth-user-116", "session_id": "s"}"#)
+            .expect("legacy voice state must deserialize");
+    assert_eq!(vs_bare.avatar_decoration_data, None);
 }

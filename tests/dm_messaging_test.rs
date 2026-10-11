@@ -122,6 +122,7 @@ fn test_app_state_dm_flow_and_migration() {
             global_name: Some(state.current_user.display_name.clone()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         },
         "E aí Alice, tudo bem?",
     );
@@ -182,6 +183,7 @@ fn test_no_hardcoded_ferris_dm_and_clean_state() {
         recipient_ids: vec!["user-ferris".into()],
         recipient_names: vec!["Ferris".into()],
         user_limit: None,
+        avatar_decoration_data: None,
     });
 
     // Legitimate temporary DM opened by user
@@ -225,6 +227,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         recipient_ids: vec!["user-bot-dyno".into()],
         recipient_names: vec!["Dyno".into()],
         user_limit: None,
+        avatar_decoration_data: None,
     });
 
     let friend_dm_id = "dm-chan-alice-888".to_string();
@@ -242,6 +245,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         recipient_ids: vec!["user-alice".into()],
         recipient_names: vec!["Alice".into()],
         user_limit: None,
+        avatar_decoration_data: None,
     });
 
     // Also open a pending temp DM with Carol
@@ -263,6 +267,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
             global_name: Some("Dyno".into()),
             avatar: None,
             bot: true,
+            avatar_decoration_data: None,
         },
         content: "Bot announcement in server #general channel!".into(),
         timestamp: chrono::Utc::now(),
@@ -314,6 +319,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
             global_name: Some("Alice".into()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         },
         content: "Hey everyone in the server!".into(),
         timestamp: chrono::Utc::now(),
@@ -343,6 +349,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
             global_name: Some("Carol".into()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         },
         content: "Check this meme in the server!".into(),
         timestamp: chrono::Utc::now(),
@@ -370,6 +377,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
             global_name: Some("Dyno".into()),
             avatar: None,
             bot: true,
+            avatar_decoration_data: None,
         },
         content: "Here is your private verification code: 123456".into(),
         timestamp: chrono::Utc::now(),

@@ -1495,7 +1495,7 @@ async fn handle_dispatch(
 
                 // Popula voice_states a partir do snapshot inicial de GUILD_CREATE
                 if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
-                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>)> = std::collections::HashMap::new();
+                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>, Option<AvatarDecorationData>)> = std::collections::HashMap::new();
                     if let Some(raw_members) = data.get("members").and_then(|v| v.as_array()) {
                         for m in raw_members {
                             if let Some(user) = m.get("user") {
@@ -1511,7 +1511,9 @@ async fn handle_dispatch(
                                             format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", uid, hash)
                                         }
                                     });
-                                    guild_members.insert(uid.to_string(), (name, avatar));
+                                    let decor = parse_avatar_decoration_data(m)
+                                        .or_else(|| parse_avatar_decoration_data(user));
+                                    guild_members.insert(uid.to_string(), (name, avatar, decor));
                                 }
                             }
                         }
@@ -1520,11 +1522,18 @@ async fn handle_dispatch(
                     for vs_val in raw_states {
                         if let Some(mut state) = parse_voice_state_from_json(vs_val, Some(id)) {
                             if state.user_name.is_none() {
-                                if let Some((name, avatar)) = guild_members.get(&state.user_id) {
+                                if let Some((name, avatar, decor)) = guild_members.get(&state.user_id) {
                                     state.user_name = name.clone();
                                     if state.avatar_url.is_none() {
                                         state.avatar_url = avatar.clone();
                                     }
+                                    if state.avatar_decoration_data.is_none() {
+                                        state.avatar_decoration_data = decor.clone();
+                                    }
+                                }
+                            } else if state.avatar_decoration_data.is_none() {
+                                if let Some((_, _, decor)) = guild_members.get(&state.user_id) {
+                                    state.avatar_decoration_data = decor.clone();
                                 }
                             }
                             let _ = event_tx.send(TransportEvent::VoiceStateUpdate(state));
@@ -1705,6 +1714,16 @@ async fn handle_dispatch(
                 let _ = event_tx.send(evt);
             }
         }
+        "USER_UPDATE" => {
+            // Current-user profile changed (e.g. new avatar decoration equipped).
+            // Persist to disk cache; live propagation to AppState::current_user
+            // requires a new TransportEvent variant in src/protocol/transport.rs,
+            // which is outside this task's file scope.
+            if let Some(user) = parse_user_from_json(&data) {
+                *current_user_id.write().await = Some(user.id.clone());
+                cache_engine.save_current_user(&user);
+            }
+        }
         _ => {}
     }
 }
@@ -1761,14 +1780,18 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
     user.global_name = val.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
     user.avatar = val.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
     user.bot = val.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
-    if let Some(decor_val) = val.get("avatar_decoration_data") {
-        if !decor_val.is_null() {
-            if let Ok(decor) = serde_json::from_value::<AvatarDecorationData>(decor_val.clone()) {
-                user.avatar_decoration_data = Some(decor);
-            }
-        }
-    }
+    user.avatar_decoration_data = parse_avatar_decoration_data(val);
     Some(user)
+}
+
+/// Parses an optional `avatar_decoration_data` object from any Discord user-like JSON value.
+/// Returns None when the field is absent, null, or malformed.
+fn parse_avatar_decoration_data(val: &serde_json::Value) -> Option<AvatarDecorationData> {
+    let decor_val = val.get("avatar_decoration_data")?;
+    if decor_val.is_null() {
+        return None;
+    }
+    serde_json::from_value::<AvatarDecorationData>(decor_val.clone()).ok()
 }
 
 pub fn parse_user_profile_from_json(val: &serde_json::Value) -> Option<UserProfileData> {
@@ -1930,6 +1953,13 @@ pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild
                     format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
                 }
             });
+            // Guild-level decoration overrides the global user one in guild context
+            // (see Guild Member Structure: `avatar_decoration_data` is "data for the
+            // member's guild avatar decoration").
+            state.avatar_decoration_data = parse_avatar_decoration_data(member)
+                .or_else(|| parse_avatar_decoration_data(user));
+        } else {
+            state.avatar_decoration_data = parse_avatar_decoration_data(member);
         }
     } else if let Some(user) = val.get("user") {
         state.user_name = user.get("global_name").and_then(|v| v.as_str())
@@ -1942,6 +1972,7 @@ pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild
                 format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
             }
         });
+        state.avatar_decoration_data = parse_avatar_decoration_data(user);
     }
     Some(state)
 }
@@ -1953,6 +1984,7 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
 
     let mut recipient_ids: Vec<String> = Vec::new();
     let mut recipient_names: Vec<String> = Vec::new();
+    let mut recipient_avatar_decorations: Vec<Option<AvatarDecorationData>> = Vec::new();
 
     if let Some(recipients) = val.get("recipients").and_then(|v| v.as_array()) {
         for r in recipients {
@@ -1966,6 +1998,7 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
             {
                 recipient_names.push(name.to_string());
             }
+            recipient_avatar_decorations.push(parse_avatar_decoration_data(r));
         }
     }
 
@@ -1980,6 +2013,7 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
     let mut ch = Channel::new(id, &name, channel_type);
     ch.recipient_ids = recipient_ids;
     ch.recipient_names = recipient_names;
+    ch.recipient_avatar_decorations = recipient_avatar_decorations;
     ch.guild_id = val
         .get("guild_id")
         .and_then(|v| v.as_str())
@@ -2167,6 +2201,7 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
     author.global_name = author_val.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
     author.avatar = author_val.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
     author.bot = author_val.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
+    author.avatar_decoration_data = parse_avatar_decoration_data(author_val);
 
     let mut message = Message::new(id, channel_id, author, content);
     message.guild_id = val.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
@@ -2438,5 +2473,141 @@ mod presence_tests {
             }
             _ => panic!("Expected PresenceUpdate"),
         }
+    }
+}
+
+#[cfg(test)]
+mod avatar_decoration_parsing_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_user_avatar_decoration_present_absent_null() {
+        let with = serde_json::json!({
+            "id": "100000000000000011",
+            "username": "synth_deco_user",
+            "avatar_decoration_data": { "asset": "a_synth_user_deco", "sku_id": "111" }
+        });
+        let user = parse_user_from_json(&with).expect("should parse user");
+        let decor = user.avatar_decoration_data.as_ref().expect("decoration must be present");
+        assert_eq!(decor.asset, "a_synth_user_deco");
+        assert_eq!(decor.sku_id.as_deref(), Some("111"));
+
+        let absent = serde_json::json!({ "id": "100000000000000012", "username": "synth_plain" });
+        let plain = parse_user_from_json(&absent).expect("should parse user");
+        assert_eq!(plain.avatar_decoration_data, None);
+
+        let null = serde_json::json!({
+            "id": "100000000000000013",
+            "username": "synth_null",
+            "avatar_decoration_data": null
+        });
+        let nulled = parse_user_from_json(&null).expect("should parse user");
+        assert_eq!(nulled.avatar_decoration_data, None);
+    }
+
+    #[test]
+    fn test_parse_message_author_avatar_decoration() {
+        let payload = serde_json::json!({
+            "id": "200000000000000021",
+            "channel_id": "300000000000000031",
+            "content": "hello",
+            "timestamp": "2026-10-01T12:00:00.000Z",
+            "author": {
+                "id": "100000000000000014",
+                "username": "synth_author",
+                "avatar_decoration_data": { "asset": "a_synth_msg_deco", "sku_id": "114" }
+            }
+        });
+        let msg = parse_message_from_json(&payload).expect("should parse message");
+        let decor = msg.author.avatar_decoration_data.as_ref().expect("author decoration must be present");
+        assert_eq!(decor.asset, "a_synth_msg_deco");
+        assert_eq!(decor.sku_id.as_deref(), Some("114"));
+
+        let bare = serde_json::json!({
+            "id": "200000000000000022",
+            "channel_id": "300000000000000031",
+            "content": "hi",
+            "author": { "id": "100000000000000015", "username": "synth_bare" }
+        });
+        let msg_bare = parse_message_from_json(&bare).expect("should parse message");
+        assert_eq!(msg_bare.author.avatar_decoration_data, None);
+    }
+
+    #[test]
+    fn test_parse_dm_channel_recipient_decorations() {
+        let payload = serde_json::json!({
+            "id": "300000000000000032",
+            "type": 1,
+            "recipients": [
+                {
+                    "id": "100000000000000016",
+                    "username": "synth_recip",
+                    "avatar_decoration_data": { "asset": "a_synth_dm_deco", "sku_id": "116" }
+                }
+            ]
+        });
+        let ch = parse_channel_from_json(&payload, None).expect("should parse DM channel");
+        assert_eq!(ch.recipient_avatar_decorations.len(), 1);
+        let decor = ch.recipient_avatar_decorations[0].as_ref().expect("recipient decoration must be present");
+        assert_eq!(decor.asset, "a_synth_dm_deco");
+
+        let bare = serde_json::json!({
+            "id": "300000000000000033",
+            "type": 1,
+            "recipients": [{ "id": "100000000000000017", "username": "synth_plain_recip" }]
+        });
+        let ch_bare = parse_channel_from_json(&bare, None).expect("should parse DM channel");
+        assert_eq!(ch_bare.recipient_avatar_decorations, vec![None]);
+    }
+
+    #[test]
+    fn test_parse_voice_state_guild_decoration_takes_precedence() {
+        // Guild-level member.avatar_decoration_data wins over member.user.avatar_decoration_data
+        // (Guild Member Structure: `avatar_decoration_data` is "data for the member's
+        // guild avatar decoration" — https://discord.com/developers/docs/resources/guild#guild-member-object).
+        let payload = serde_json::json!({
+            "user_id": "100000000000000018",
+            "session_id": "sess-synth-1",
+            "channel_id": "400000000000000041",
+            "member": {
+                "nick": "SynthMember",
+                "avatar_decoration_data": { "asset": "a_synth_guild_deco", "sku_id": "118" },
+                "user": {
+                    "id": "100000000000000018",
+                    "username": "synth_voice_user",
+                    "avatar_decoration_data": { "asset": "a_synth_global_deco", "sku_id": "218" }
+                }
+            }
+        });
+        let state = parse_voice_state_from_json(&payload, Some("500000000000000051"))
+            .expect("should parse voice state");
+        let decor = state.avatar_decoration_data.as_ref().expect("voice decoration must be present");
+        assert_eq!(decor.asset, "a_synth_guild_deco");
+
+        // Falls back to the nested user object when the member has no guild decoration.
+        let fallback = serde_json::json!({
+            "user_id": "100000000000000019",
+            "session_id": "sess-synth-2",
+            "member": {
+                "user": {
+                    "id": "100000000000000019",
+                    "username": "synth_fallback",
+                    "avatar_decoration_data": { "asset": "a_synth_user_deco", "sku_id": "119" }
+                }
+            }
+        });
+        let fb = parse_voice_state_from_json(&fallback, None).expect("should parse voice state");
+        assert_eq!(
+            fb.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+            Some("a_synth_user_deco")
+        );
+
+        // Absent everywhere -> None.
+        let bare = serde_json::json!({
+            "user_id": "100000000000000020",
+            "session_id": "sess-synth-3"
+        });
+        let bare_state = parse_voice_state_from_json(&bare, None).expect("should parse voice state");
+        assert_eq!(bare_state.avatar_decoration_data, None);
     }
 }

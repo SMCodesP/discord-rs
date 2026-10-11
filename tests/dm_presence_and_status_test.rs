@@ -92,6 +92,7 @@ fn test_app_state_presence_update_and_resolution() {
         is_group_dm: false,
         recipient_ids: vec![user_id.clone()],
         recipient_names: vec!["Amigo Teste".into()],
+        avatar_decoration_data: None,
     });
 
     let dm = state.dm_channels.first().unwrap();
