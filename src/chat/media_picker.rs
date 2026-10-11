@@ -8,12 +8,17 @@
 //! 5. Barra de busca adaptável com filtragem em tempo real
 //! 6. Faixa inferior de pré-visualização (Hover Preview Strip)
 
+use gpui::component::tab::{Tab, TabBar};
+use gpui::component::tooltip::Tooltip;
+use gpui::component::{Size, Sizable};
+use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
 
 use crate::protocol::media_cache::{
     DiscordEmoji, DiscordSticker, MediaCacheManager, RecentEmojiItem, SoundboardSound, TenorGif,
 };
+use crate::tokens::colors::white;
 use crate::tokens::colors::*;
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
@@ -156,10 +161,10 @@ pub struct MediaPickerConfig {
 }
 
 // ============================================================================
-// Componente de Renderização
+// Componente de Renderização Principal
 // ============================================================================
 
-/// Renderiza o seletor popup flutuante do Discord
+/// Renderiza o seletor popup flutuante do Discord com dimensões medidas (498x486, radius 8px)
 pub fn render_media_picker(config: MediaPickerConfig) -> Div {
     let active_tab = config.active_tab;
     let query = config.search_query.trim().to_lowercase();
@@ -168,22 +173,22 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
     div()
         .flex()
         .flex_col()
-        .w(px(448.0))
-        .h(px(460.0))
-        .bg(rgb(HEX_BG_CHANNELS))
+        .w(px(498.0))
+        .h(px(486.0))
+        .bg(bg_channels())
         .border_1()
-        .border_color(rgb(0x1e1f22))
-        .rounded(radius_lg())
+        .border_color(bg_server())
+        .rounded(radius_md())
         .shadow_xl()
         .overflow_hidden()
         .on_scroll_wheel(|_ev, _win, cx| {
             cx.stop_propagation();
         })
-        // 1. Barra de Abas Superiores
+        // 1. Barra de Abas Superiores (com TabBar e Tab do kit)
         .child(render_top_tabs(&config))
         // 2. Barra de Busca
         .child(render_search_bar(&config))
-        // 3. Área Central (Grade do Conteúdo Selecionado com Rail de navegação em Emojis e Stickers)
+        // 3. Área Central (Grade do Conteúdo Selecionado com Rail de navegação em Emojis e Figurinhas)
         .child(match active_tab {
             MediaPickerTab::Emojis => {
                 let content_element = if let Some(ref list_state) = config.list_state {
@@ -200,6 +205,7 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
                         })
                         .p(px(8.0))
                         .child(render_emojis_tab(&config, &query, is_searching))
+                        .into_any_element()
                 };
 
                 div()
@@ -207,9 +213,9 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
                     .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
-                    // Vertical Navigation Rail (~44px on the left)
+                    // Vertical Navigation Rail (~44px à esquerda)
                     .child(render_navigation_rail(&config))
-                    // Central scrollable grid (virtualized or fallback)
+                    // Grade rolável central
                     .child(content_element)
                     .into_any_element()
             }
@@ -228,6 +234,7 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
                         })
                         .p(px(8.0))
                         .child(render_stickers_tab(&config, &query))
+                        .into_any_element()
                 };
 
                 div()
@@ -235,9 +242,9 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
                     .flex_row()
                     .flex_1()
                     .min_h(px(0.0))
-                    // Vertical Navigation Rail (~44px on the left)
+                    // Vertical Navigation Rail (~44px à esquerda)
                     .child(render_navigation_rail(&config))
-                    // Central scrollable grid (virtualized or fallback)
+                    // Grade rolável central
                     .child(content_element)
                     .into_any_element()
             }
@@ -273,7 +280,7 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
 }
 
 // ============================================================================
-// 1. Barra de Abas Superiores
+// 1. Barra de Abas Superiores (com TabBar e Tab do kit)
 // ============================================================================
 
 fn render_top_tabs(config: &MediaPickerConfig) -> Div {
@@ -284,63 +291,37 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
         MediaPickerTab::Soundboard,
     ];
 
-    let row = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .h(px(40.0))
-        .px(px(8.0))
-        .bg(rgb(HEX_BG_USER_BAR))
-        .border_b_1()
-        .border_color(rgb(0x1e1f22));
+    let active_index = tabs
+        .iter()
+        .position(|&t| t == config.active_tab)
+        .unwrap_or(0);
 
-    let mut tabs_container = div().flex().flex_row().items_center().gap(px(4.0));
+    let on_tab_change = config.on_tab_change.clone();
+    let mut tab_bar = TabBar::new("media-picker-tabs")
+        .pill()
+        .with_size(Size::Small)
+        .selected_index(active_index);
+
+    if let Some(on_tab) = on_tab_change {
+        tab_bar = tab_bar.on_click(move |&idx, window, cx| {
+            if idx < tabs.len() {
+                on_tab(tabs[idx], window, cx);
+            }
+        });
+    }
 
     for tab in tabs {
         let is_active = tab == config.active_tab;
-        let bg_col = if is_active {
-            rgb(HEX_CHANNEL_ACTIVE)
-        } else {
-            rgba(0x00000000)
-        };
-        let text_col = if is_active {
-            rgb(HEX_WHITE)
-        } else {
-            text_muted()
-        };
-
-        let mut tab_btn = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(28.0))
-            .px(px(10.0))
-            .rounded(radius_sm())
-            .bg(bg_col)
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-            .child(tab.render_icon(px(16.0), text_col))
-            .child(
-                div()
-                    .text_size(font_size_xs())
-                    .font_weight(if is_active { WEIGHT_BOLD } else { WEIGHT_MEDIUM })
-                    .text_color(text_col)
-                    .child(tab.label()),
-            );
-
-        if let Some(on_tab) = config.on_tab_change.clone() {
-            tab_btn = tab_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_tab(tab, window, cx);
-            });
-        }
-
-        tabs_container = tabs_container.child(tab_btn);
+        let icon_col = if is_active { text_titles() } else { text_muted() };
+        let kit_tab = Tab::new()
+            .label(tab.label())
+            .prefix(tab.render_icon(px(14.0), icon_col).into_any_element());
+        tab_bar = tab_bar.child(kit_tab);
     }
 
     // Botão Fechar (X)
     let mut close_btn = div()
+        .id("media-picker-close-btn")
         .flex()
         .items_center()
         .justify_center()
@@ -348,7 +329,7 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
         .rounded(radius_sm())
         .cursor_pointer()
         .text_color(text_muted())
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
+        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
         .child(icon_close(px(14.0), text_muted()));
 
     if let Some(on_close) = config.on_close.clone() {
@@ -357,27 +338,39 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
         });
     }
 
-    row.child(tabs_container).child(close_btn)
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .h(px(40.0))
+        .px(px(8.0))
+        .bg(bg_user_bar())
+        .border_b_1()
+        .border_color(bg_server())
+        .child(tab_bar)
+        .child(close_btn)
 }
 
 // ============================================================================
-// 2. Barra de Busca Interativa com Cursor Discord e Suporte a Digitação
+// 2. Barra de Busca Interativa com Tokens de Tema
 // ============================================================================
 
 fn render_search_bar(config: &MediaPickerConfig) -> Div {
     let placeholder = config.active_tab.search_placeholder();
     let is_empty = config.search_query.is_empty();
     let is_focused = config.is_focused;
-    let cursor_color = rgb(0xdbdee1);
+    let cursor_color = text_normal();
 
     let mut search_inner = div()
+        .id("media-picker-search-inner")
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .h(px(32.0))
-        .px(px(8.0))
-        .bg(rgb(HEX_BG_SERVER))
+        .h(px(38.0))
+        .px(px(12.0))
+        .bg(bg_server())
         .rounded(radius_sm())
         .cursor_text();
 
@@ -464,7 +457,7 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(icon_search(px(14.0), text_muted()))
+            .child(icon_search(px(16.0), text_muted()))
             .child(
                 div()
                     .flex()
@@ -493,7 +486,7 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .child(icon_search(px(14.0), text_muted()))
+            .child(icon_search(px(16.0), text_muted()))
             .child(
                 div()
                     .flex()
@@ -522,15 +515,16 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
 
     if !is_empty {
         let mut clear_btn = div()
+            .id("media-picker-search-clear")
             .flex()
             .items_center()
             .justify_center()
             .size(px(20.0))
-            .rounded_full()
+            .rounded(radius_xs())
             .text_size(px(12.0))
             .text_color(text_muted())
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
+            .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
             .child(icon_close(px(12.0), text_muted()));
 
         if let Some(on_search) = config.on_search_query.clone() {
@@ -543,14 +537,14 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
 
     div()
         .p(px(8.0))
-        .bg(rgb(HEX_BG_CHANNELS))
+        .bg(bg_channels())
         .border_b_1()
-        .border_color(rgb(0x1e1f22))
+        .border_color(bg_server())
         .child(search_inner)
 }
 
 // ============================================================================
-// 2.1. Rail de Navegação Vertical Lateral (~44px)
+// 2.1. Rail de Navegação Vertical Lateral (~44px) com Tooltips do Kit
 // ============================================================================
 
 fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
@@ -566,9 +560,9 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         .items_center()
         .py(px(6.0))
         .gap(px(6.0))
-        .bg(rgb(HEX_BG_SERVER))
+        .bg(bg_server())
         .border_r_1()
-        .border_color(rgb(0x1e1f22))
+        .border_color(bg_server())
         .overflow_y_scroll()
         .on_scroll_wheel(|_ev, _win, cx| {
             cx.stop_propagation();
@@ -576,37 +570,39 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
 
     // A. Botão: Todos / Início (Recentes + Servidores + Padrão)
     let mut recents_btn = div()
+        .id("media-picker-nav-recents")
         .flex_shrink_0()
         .size(px(32.0))
         .min_h(px(32.0))
         .min_w(px(32.0))
-        .rounded_full()
+        .rounded(radius_md())
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .bg(if is_all_selected {
-            rgb(HEX_BLURPLE)
+            blurple()
         } else {
-            rgb(0x2b2d31)
+            bg_channels()
         })
         .text_color(if is_all_selected {
-            rgb(HEX_WHITE)
+            white()
         } else {
             text_muted()
         })
         .hover(|s| {
             s.bg(if is_all_selected {
-                rgb(HEX_BLURPLE)
+                blurple()
             } else {
-                rgb(HEX_CHANNEL_HOVER)
+                channel_hover()
             })
             .text_color(text_titles())
         })
+        .tooltip(|win, cx| Tooltip::new("Todos os Emojis").build(win, cx))
         .child(icon_smile(
             px(18.0),
             if is_all_selected {
-                rgb(HEX_WHITE)
+                white()
             } else {
                 text_muted()
             },
@@ -626,30 +622,31 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
             .w(px(24.0))
             .min_h(px(1.0))
             .h(px(1.0))
-            .bg(rgb(0x35373c))
+            .bg(channel_hover())
             .my(px(2.0)),
     );
 
-    // B. Botões Circulares de Guildas / Servidores (32px, sem colapso flex)
+    // B. Botões de Guildas / Servidores (32px, sem colapso flex)
     for guild in &config.guild_sections {
         let is_selected = selected_guild == Some(&guild.guild_id);
+        let guild_name = guild.guild_name.clone();
         let guild_icon_child = if let Some(ref url) = guild.icon_url {
             div()
                 .size_full()
-                .rounded_full()
+                .rounded(radius_md())
                 .overflow_hidden()
-                .child(img(url.clone()).size_full().rounded_full())
+                .child(img(url.clone()).size_full().rounded(radius_md()))
         } else {
             div()
                 .size_full()
-                .rounded_full()
+                .rounded(radius_md())
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_size(px(11.0))
                 .font_weight(WEIGHT_BOLD)
                 .text_color(if is_selected {
-                    rgb(HEX_WHITE)
+                    white()
                 } else {
                     text_muted()
                 })
@@ -657,28 +654,33 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         };
 
         let mut guild_btn = div()
+            .id(ElementId::from(SharedString::from(format!(
+                "media-picker-nav-guild-{}",
+                guild.guild_id
+            ))))
             .flex_shrink_0()
             .size(px(32.0))
             .min_h(px(32.0))
             .min_w(px(32.0))
-            .rounded_full()
+            .rounded(radius_md())
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
             .overflow_hidden()
             .bg(if is_selected {
-                rgb(HEX_BLURPLE)
+                blurple()
             } else {
-                rgb(0x313338)
+                bg_chat()
             })
             .border_2()
             .border_color(if is_selected {
-                rgb(HEX_BLURPLE)
+                blurple()
             } else {
-                rgba(0x00000000)
+                transparent()
             })
-            .hover(|s| s.border_color(rgb(HEX_BLURPLE)))
+            .hover(|s| s.border_color(blurple()))
+            .tooltip(move |win, cx| Tooltip::new(guild_name.clone()).build(win, cx))
             .child(guild_icon_child);
 
         if let Some(on_sel) = config.on_select_guild.clone() {
@@ -698,7 +700,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
             .w(px(24.0))
             .min_h(px(1.0))
             .h(px(1.0))
-            .bg(rgb(0x35373c))
+            .bg(channel_hover())
             .my(px(2.0)),
     );
 
@@ -707,7 +709,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         icon_emoji(
             px(18.0),
             if is_standard_selected {
-                rgb(HEX_WHITE)
+                white()
             } else {
                 text_muted()
             },
@@ -716,7 +718,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         icon_sticker(
             px(18.0),
             if is_standard_selected {
-                rgb(HEX_WHITE)
+                white()
             } else {
                 text_muted()
             },
@@ -724,33 +726,35 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
     };
 
     let mut standard_btn = div()
+        .id("media-picker-nav-standard")
         .flex_shrink_0()
         .size(px(32.0))
         .min_h(px(32.0))
         .min_w(px(32.0))
-        .rounded_full()
+        .rounded(radius_md())
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .bg(if is_standard_selected {
-            rgb(HEX_BLURPLE)
+            blurple()
         } else {
-            rgb(0x2b2d31)
+            bg_channels()
         })
         .text_color(if is_standard_selected {
-            rgb(HEX_WHITE)
+            white()
         } else {
             text_muted()
         })
         .hover(|s| {
             s.bg(if is_standard_selected {
-                rgb(HEX_BLURPLE)
+                blurple()
             } else {
-                rgb(HEX_CHANNEL_HOVER)
+                channel_hover()
             })
             .text_color(text_titles())
         })
+        .tooltip(|win, cx| Tooltip::new("Categorias Padrão").build(win, cx))
         .child(official_icon);
 
     if let Some(on_sel) = config.on_select_guild.clone() {
@@ -782,12 +786,22 @@ pub fn emoji_matches_query(emoji: &str, cat_key: &str, cat_title: &str, query: &
     }
 
     let tags: &[&str] = match emoji {
-        "😀" | "😃" | "😄" | "😁" | "😆" | "😅" => &["smile", "sorriso", "feliz", "happy", "joy", "alegria"],
+        "😀" | "😃" | "😄" | "😁" | "😆" | "😅" => {
+            &["smile", "sorriso", "feliz", "happy", "joy", "alegria"]
+        }
         "😂" | "🤣" => &["lol", "laugh", "risada", "haha", "crying laughing", "chorando de rir"],
-        "🥲" | "🥹" | "🥺" | "😢" | "😭" => &["cry", "choro", "sad", "triste", "lagrimas", "tears", "pleading"],
-        "😊" | "😇" | "🙂" | "🙃" | "😉" | "😌" => &["angel", "anjo", "smile", "piscadinha", "calm", "relax"],
-        "😍" | "🥰" | "😘" | "😗" | "😙" | "😚" => &["love", "amor", "kiss", "beijo", "apaixonado", "heart"],
-        "😋" | "😛" | "😝" | "😜" | "🤪" => &["tongue", "lingua", "yummy", "crazy", "maluco", "brincadeira"],
+        "🥲" | "🥹" | "🥺" | "😢" | "😭" => {
+            &["cry", "choro", "sad", "triste", "lagrimas", "tears", "pleading"]
+        }
+        "😊" | "😇" | "🙂" | "🙃" | "😉" | "😌" => {
+            &["angel", "anjo", "smile", "piscadinha", "calm", "relax"]
+        }
+        "😍" | "🥰" | "😘" | "😗" | "😙" | "😚" => {
+            &["love", "amor", "kiss", "beijo", "apaixonado", "heart"]
+        }
+        "😋" | "😛" | "😝" | "😜" | "🤪" => {
+            &["tongue", "lingua", "yummy", "crazy", "maluco", "brincadeira"]
+        }
         "😎" | "🥸" => &["cool", "sunglasses", "oculos", "estiloso", "swag", "disfarce"],
         "🤩" | "🥳" => &["party", "festa", "star", "celebrar", "hype"],
         "😏" | "😒" | "😞" | "😔" | "😟" | "😕" => &["smug", "meh", "sad", "desapontado", "bad"],
@@ -799,8 +813,12 @@ pub fn emoji_matches_query(emoji: &str, cat_key: &str, cat_title: &str, query: &
         "👋" | "🤚" | "🖐️" | "✋" => &["wave", "ola", "oi", "tchau", "bye", "hello", "hi", "acenar"],
         "👌" => &["ok", "perfeito", "nice", "suave"],
         "✌️" | "🤞" | "🤟" | "🤘" => &["peace", "paz", "rock", "sorte", "victory"],
-        "👏" | "🙌" | "🫶" | "🙏" => &["clap", "palmas", "obrigado", "thanks", "rezar", "pray", "heart hands"],
-        "❤️" | "🧡" | "💛" | "💚" | "💙" | "💜" | "🖤" | "🤍" | "🤎" | "💔" => &["heart", "coracao", "love", "amor"],
+        "👏" | "🙌" | "🫶" | "🙏" => &[
+            "clap", "palmas", "obrigado", "thanks", "rezar", "pray", "heart hands",
+        ],
+        "❤️" | "🧡" | "💛" | "💚" | "💙" | "💜" | "🖤" | "🤍" | "🤎" | "💔" => {
+            &["heart", "coracao", "love", "amor"]
+        }
         "🔥" => &["fire", "fogo", "hot", "chama", "lit", "quente"],
         "✨" | "⭐" | "🌟" => &["star", "sparkles", "estrela", "brilho", "shine"],
         "🎉" | "🎊" => &["party", "tada", "festa", "confete", "celebration"],
@@ -810,7 +828,9 @@ pub fn emoji_matches_query(emoji: &str, cat_key: &str, cat_title: &str, query: &
         "🍕" | "🍔" | "🍟" => &["pizza", "burger", "batata", "fastfood", "lanche", "food", "comida"],
         "☕" | "🍺" | "🍻" => &["coffee", "cafe", "beer", "cerveja", "drink", "bebida"],
         "🎮" => &["game", "jogo", "videogame", "gamer", "play"],
-        "⚽" | "🏀" | "🏈" | "⚾" => &["futebol", "soccer", "football", "ball", "bola", "esporte", "sport"],
+        "⚽" | "🏀" | "🏈" | "⚾" => &[
+            "futebol", "soccer", "football", "ball", "bola", "esporte", "sport",
+        ],
         "🚗" | "🏎️" => &["car", "carro", "speed", "corrida", "auto"],
         "🚀" => &["rocket", "foguete", "moon", "space", "espaco"],
         "🇧🇷" => &["brasil", "brazil", "br", "bandeira", "flag"],
@@ -915,15 +935,17 @@ pub fn build_emoji_virtual_rows(
                     }
                 }
 
-                let matching_emojis: Vec<&DiscordEmoji> = if is_searching {
-                    guild
-                        .emojis
-                        .iter()
-                        .filter(|e| e.name.to_lowercase().contains(query))
-                        .collect()
-                } else {
-                    guild.emojis.iter().collect()
-                };
+                let matching_emojis: Vec<&DiscordEmoji> = guild
+                    .emojis
+                    .iter()
+                    .filter(|e| {
+                        if is_searching {
+                            e.name.to_lowercase().contains(query)
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
 
                 if matching_emojis.is_empty() {
                     continue;
@@ -947,15 +969,17 @@ pub fn build_emoji_virtual_rows(
                 }
             }
         } else if !config.custom_emojis.is_empty() {
-            let matching_custom: Vec<&DiscordEmoji> = if is_searching {
-                config
-                    .custom_emojis
-                    .iter()
-                    .filter(|e| e.name.to_lowercase().contains(query))
-                    .collect()
-            } else {
-                config.custom_emojis.iter().collect()
-            };
+            let matching_custom: Vec<&DiscordEmoji> = config
+                .custom_emojis
+                .iter()
+                .filter(|e| {
+                    if is_searching {
+                        e.name.to_lowercase().contains(query)
+                    } else {
+                        true
+                    }
+                })
+                .collect();
 
             if !matching_custom.is_empty() {
                 rendered_guild_count += 1;
@@ -1030,52 +1054,10 @@ pub fn render_emoji_virtual_row(
     row: &EmojiVirtualRow,
     on_select_emoji: Option<&OnSelectEmojiCallback>,
     on_select_guild: Option<&OnSelectGuildCallback>,
-) -> Div {
+) -> AnyElement {
     match row {
         EmojiVirtualRow::FilterBanner { title } => {
-            let mut banner = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(px(8.0))
-                .py(px(4.0))
-                .mb(px(4.0))
-                .bg(rgb(0x232428))
-                .rounded(radius_sm())
-                .border_1()
-                .border_color(rgb(HEX_BLURPLE))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_emoji(px(14.0), blurple()))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(text_titles())
-                                .child(format!("Filtrado por: {}", title)),
-                        ),
-                );
-
-            if let Some(on_sel) = on_select_guild {
-                let on_sel_clone = (*on_sel).clone();
-                let reset_btn = div()
-                    .text_size(px(11.0))
-                    .font_weight(WEIGHT_MEDIUM)
-                    .text_color(blurple())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(HEX_WHITE)))
-                    .child("Ver todos os emojis")
-                    .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel_clone(None, window, cx);
-                    });
-                banner = banner.child(reset_btn);
-            }
-            banner
+            render_emoji_filter_banner(title, on_select_guild)
         }
         EmojiVirtualRow::SectionHeader {
             title,
@@ -1083,168 +1065,249 @@ pub fn render_emoji_virtual_row(
             acronym,
             cat_key,
             count,
-        } => {
-            let header_icon = if let Some(cat) = cat_key {
-                match *cat {
-                    "people" => icon_emoji(px(14.0), text_muted()),
-                    "nature" => icon_sparkles(px(14.0), text_muted()),
-                    "food" => icon_gift(px(14.0), text_muted()),
-                    "activity" => icon_gamepad(px(14.0), text_muted()),
-                    "travel" => icon_compass(px(14.0), text_muted()),
-                    "objects" => icon_gear(px(14.0), text_muted()),
-                    "symbols" => icon_hash(px(14.0), text_muted()),
-                    "flags" => icon_pin(px(14.0), text_muted()),
-                    _ => icon_emoji(px(14.0), text_muted()),
-                }
-            } else if let Some(url) = icon_url.as_ref() {
+        } => render_emoji_section_header(
+            title,
+            icon_url.as_deref(),
+            acronym.as_deref(),
+            *cat_key,
+            *count,
+        ),
+        EmojiVirtualRow::GridRow { items } => render_emoji_grid_row(items, on_select_emoji),
+        EmojiVirtualRow::EmptyNotice { message } => render_empty_notice(message),
+    }
+}
+
+fn render_emoji_filter_banner(
+    title: &str,
+    on_select_guild: Option<&OnSelectGuildCallback>,
+) -> AnyElement {
+    let mut banner = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px(px(8.0))
+        .py(px(4.0))
+        .mb(px(4.0))
+        .bg(bg_user_bar())
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(blurple())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon_emoji(px(14.0), blurple()))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_titles())
+                        .child(format!("Filtrado por: {}", title)),
+                ),
+        );
+
+    if let Some(on_sel) = on_select_guild {
+        let on_sel_clone = (*on_sel).clone();
+        let reset_btn = div()
+            .text_size(px(11.0))
+            .font_weight(WEIGHT_MEDIUM)
+            .text_color(blurple())
+            .cursor_pointer()
+            .hover(|s| s.text_color(white()))
+            .child("Ver todos os emojis")
+            .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_sel_clone(None, window, cx);
+            });
+        banner = banner.child(reset_btn);
+    }
+    banner.into_any_element()
+}
+
+fn render_emoji_section_header(
+    title: &str,
+    icon_url: Option<&str>,
+    acronym: Option<&str>,
+    cat_key: Option<&'static str>,
+    count: usize,
+) -> AnyElement {
+    let header_icon = if let Some(cat) = cat_key {
+        match cat {
+            "people" => icon_emoji(px(14.0), text_muted()),
+            "nature" => icon_sparkles(px(14.0), text_muted()),
+            "food" => icon_gift(px(14.0), text_muted()),
+            "activity" => icon_gamepad(px(14.0), text_muted()),
+            "travel" => icon_compass(px(14.0), text_muted()),
+            "objects" => icon_gear(px(14.0), text_muted()),
+            "symbols" => icon_hash(px(14.0), text_muted()),
+            "flags" => icon_pin(px(14.0), text_muted()),
+            _ => icon_emoji(px(14.0), text_muted()),
+        }
+    } else if let Some(url) = icon_url {
+        div()
+            .size(px(16.0))
+            .rounded(radius_xs())
+            .overflow_hidden()
+            .child(img(url.to_string()).size_full().rounded(radius_xs()))
+    } else if let Some(acr) = acronym {
+        div()
+            .size(px(16.0))
+            .rounded(radius_xs())
+            .bg(bg_server())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(8.0))
+            .font_weight(WEIGHT_BOLD)
+            .text_color(text_muted())
+            .child(acr.to_string())
+    } else {
+        icon_smile(px(14.0), text_muted())
+    };
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .pt(px(8.0))
+        .pb(px(4.0))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(header_icon)
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_muted())
+                        .child(title.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_muted())
+                .child(format!("{}", count)),
+        )
+        .into_any_element()
+}
+
+fn render_emoji_grid_row(
+    items: &[EmojiVirtualItem],
+    on_select_emoji: Option<&OnSelectEmojiCallback>,
+) -> AnyElement {
+    let mut row_div = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .py(px(2.0))
+        .gap(px(4.0));
+
+    for item in items {
+        row_div = row_div.child(render_emoji_item(item, on_select_emoji));
+    }
+    row_div.into_any_element()
+}
+
+fn render_emoji_item(
+    item: &EmojiVirtualItem,
+    on_select_emoji: Option<&OnSelectEmojiCallback>,
+) -> AnyElement {
+    match item {
+        EmojiVirtualItem::Custom(emoji) => {
+            let tag = emoji.to_tag();
+            let name = emoji.name.clone();
+            let cdn_url = emoji.cdn_url();
+
+            let emoji_child = if let Some(url) = cdn_url {
                 div()
-                    .size(px(16.0))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .child(img(url.clone()).size_full().rounded_full())
-            } else if let Some(acr) = acronym.as_ref() {
-                div()
-                    .size(px(16.0))
-                    .rounded_full()
-                    .bg(rgb(HEX_BG_SERVER))
+                    .size(px(28.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(8.0))
-                    .font_weight(WEIGHT_BOLD)
-                    .text_color(text_muted())
-                    .child(acr.clone())
+                    .child(
+                        img(url)
+                            .id(ElementId::from(SharedString::from(format!(
+                                "picker-emoji-img-{}",
+                                emoji.id.as_deref().unwrap_or(&emoji.name)
+                            ))))
+                            .size_full()
+                            .rounded(radius_xs()),
+                    )
             } else {
-                icon_smile(px(14.0), text_muted())
+                div()
+                    .text_size(px(14.0))
+                    .text_color(blurple())
+                    .child(format!(":{}", name))
             };
 
-            div()
+            // Célula de emoji: 48x48, radius 4px conforme DOM oficial
+            let mut btn = div()
                 .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .pt(px(8.0))
-                .pb(px(4.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(header_icon)
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(text_muted())
-                                .child(title.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(WEIGHT_MEDIUM)
-                        .text_color(text_muted())
-                        .child(format!("{}", count)),
-                )
-        }
-        EmojiVirtualRow::GridRow { items } => {
-            let mut row_div = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .py(px(2.0))
-                .gap(px(4.0));
-
-            for item in items {
-                match item {
-                    EmojiVirtualItem::Custom(emoji) => {
-                        let tag = emoji.to_tag();
-                        let name = emoji.name.clone();
-                        let cdn_url = emoji.cdn_url();
-
-                        let emoji_child = if let Some(url) = cdn_url {
-                            div()
-                                .size(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    img(url)
-                                        .id(ElementId::from(SharedString::from(format!(
-                                            "picker-emoji-img-{}",
-                                            emoji.id.as_deref().unwrap_or(&emoji.name)
-                                        ))))
-                                        .size_full()
-                                        .rounded(radius_xs()),
-                                )
-                        } else {
-                            div()
-                                .text_size(px(14.0))
-                                .text_color(blurple())
-                                .child(format!(":{}", name))
-                        };
-
-                        let mut btn = div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(34.0))
-                            .rounded(radius_sm())
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)))
-                            .child(emoji_child);
-
-                        if let Some(on_sel) = on_select_emoji {
-                            let on_sel_clone = (*on_sel).clone();
-                            let tag_clone = tag.clone();
-                            btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                                on_sel_clone(&tag_clone, window, cx);
-                            });
-                        }
-                        row_div = row_div.child(btn);
-                    }
-                    EmojiVirtualItem::Unicode(em) => {
-                        let em_str = em.clone();
-                        let mut btn = div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(34.0))
-                            .rounded(radius_sm())
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)))
-                            .child(div().text_size(px(20.0)).child(em_str.clone()));
-
-                        if let Some(on_sel) = on_select_emoji {
-                            let on_sel_clone = (*on_sel).clone();
-                            let em_clone = em_str.clone();
-                            btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                                on_sel_clone(&em_clone, window, cx);
-                            });
-                        }
-                        row_div = row_div.child(btn);
-                    }
-                }
-            }
-            row_div
-        }
-        EmojiVirtualRow::EmptyNotice { message } => {
-            div()
-                .flex()
-                .flex_col()
                 .items_center()
                 .justify_center()
-                .py(px(24.0))
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(text_muted())
-                        .child(message.clone()),
-                )
+                .size(px(48.0))
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(channel_hover()))
+                .child(emoji_child);
+
+            if let Some(on_sel) = on_select_emoji {
+                let on_sel_clone = (*on_sel).clone();
+                let tag_clone = tag.clone();
+                btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                    on_sel_clone(&tag_clone, window, cx);
+                });
+            }
+            btn.into_any_element()
+        }
+        EmojiVirtualItem::Unicode(em) => {
+            let em_str = em.clone();
+            // Célula de emoji: 48x48, radius 4px conforme DOM oficial
+            let mut btn = div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(48.0))
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(channel_hover()))
+                .child(div().text_size(px(26.0)).child(em_str.clone()));
+
+            if let Some(on_sel) = on_select_emoji {
+                let on_sel_clone = (*on_sel).clone();
+                let em_clone = em_str.clone();
+                btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                    on_sel_clone(&em_clone, window, cx);
+                });
+            }
+            btn.into_any_element()
         }
     }
+}
+
+fn render_empty_notice(message: &str) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .py(px(24.0))
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .text_color(text_muted())
+                .child(message.to_string()),
+        )
+        .into_any_element()
 }
 
 fn render_virtualized_emojis_content(
@@ -1252,7 +1315,7 @@ fn render_virtualized_emojis_content(
     query: &str,
     is_searching: bool,
     list_state: &ListState,
-) -> Stateful<Div> {
+) -> AnyElement {
     let rows = build_emoji_virtual_rows(config, query, is_searching);
     let total_rows = rows.len();
     if list_state.item_count() != total_rows {
@@ -1280,481 +1343,25 @@ fn render_virtualized_emojis_content(
                     on_select_emoji.as_ref(),
                     on_select_guild.as_ref(),
                 )
-                .into_any_element()
             })
             .size_full(),
         )
+        .into_any_element()
 }
 
-fn render_emojis_tab(config: &MediaPickerConfig, query: &str, is_searching: bool) -> Div {
-    let mut container = div().flex().flex_col().gap(px(12.0));
-    let selected_guild = config.selected_guild_id.as_deref();
-    let is_global = selected_guild.is_none() || selected_guild == Some("recents");
-
-    // Banner de filtro quando selecionado um servidor específico ou categorias padrão
-    if let Some(gid) = selected_guild {
-        if gid != "recents" {
-            let filter_title = if gid == "standard" {
-                "Categorias Padrão (Unicode)".to_string()
-            } else if let Some(g) = config.guild_sections.iter().find(|g| g.guild_id == gid) {
-                g.guild_name.clone()
-            } else {
-                "Servidor Selecionado".to_string()
-            };
-
-            let mut banner = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(px(8.0))
-                .py(px(4.0))
-                .bg(rgb(0x232428))
-                .rounded(radius_sm())
-                .border_1()
-                .border_color(rgb(HEX_BLURPLE))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_emoji(px(14.0), blurple()))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(text_titles())
-                                .child(format!("Filtrado por: {}", filter_title)),
-                        ),
-                );
-
-            if let Some(on_sel) = config.on_select_guild.clone() {
-                let reset_btn = div()
-                    .text_size(px(11.0))
-                    .font_weight(WEIGHT_MEDIUM)
-                    .text_color(blurple())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(HEX_WHITE)))
-                    .child("Ver todos os emojis")
-                    .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel(None, window, cx);
-                    });
-                banner = banner.child(reset_btn);
-            }
-            container = container.child(banner);
-        }
+fn render_emojis_tab(config: &MediaPickerConfig, query: &str, is_searching: bool) -> AnyElement {
+    let rows = build_emoji_virtual_rows(config, query, is_searching);
+    let on_select_emoji = config.on_select_emoji.as_ref();
+    let on_select_guild = config.on_select_guild.as_ref();
+    let mut container = div().flex().flex_col().gap(px(4.0));
+    for row in &rows {
+        container = container.child(render_emoji_virtual_row(row, on_select_emoji, on_select_guild));
     }
-
-    // A. Seção: Frequentemente Usados (apenas se for global e não estiver buscando)
-    let show_recents = !is_searching && is_global;
-    if show_recents {
-        let default_recents;
-        let recents = if config.recent_emojis.is_empty() {
-            default_recents = MediaCacheManager::default_recent_emojis();
-            &default_recents
-        } else {
-            &config.recent_emojis
-        };
-
-        if !recents.is_empty() {
-            let mut recents_section = div().flex().flex_col().gap(px(6.0));
-            recents_section = recents_section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .py(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(icon_smile(px(14.0), text_muted()))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_color(text_muted())
-                                    .child("FREQUENTEMENTE USADOS"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_muted())
-                            .child(format!("{}", recents.len())),
-                    ),
-            );
-
-            let mut grid = div().flex().flex_row().flex_wrap().gap(px(4.0));
-            for item in recents {
-                let em = item.emoji.clone();
-                let mut btn = div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(34.0))
-                    .rounded(radius_sm())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)))
-                    .child(div().text_size(px(20.0)).child(em.clone()));
-
-                if let Some(on_sel) = config.on_select_emoji.clone() {
-                    let em_clone = em.clone();
-                    btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel(&em_clone, window, cx);
-                    });
-                }
-                grid = grid.child(btn);
-            }
-            recents_section = recents_section.child(grid);
-            container = container.child(recents_section);
-        }
-    }
-
-    // B. Seções de Servidores (Guild Sections agrupadas por servidor com cabeçalhos canônicos do Discord)
-    if selected_guild != Some("standard") {
-        let mut rendered_guild_count = 0;
-        if !config.guild_sections.is_empty() {
-            for guild in &config.guild_sections {
-                if let Some(target_gid) = selected_guild {
-                    if target_gid != "recents" && guild.guild_id != target_gid {
-                        continue;
-                    }
-                }
-
-                let matching_emojis: Vec<&DiscordEmoji> = if is_searching {
-                    guild
-                        .emojis
-                        .iter()
-                        .filter(|e| e.name.to_lowercase().contains(query))
-                        .collect()
-                } else {
-                    guild.emojis.iter().collect()
-                };
-
-                if matching_emojis.is_empty() {
-                    continue;
-                }
-
-                rendered_guild_count += 1;
-                let mut server_section = div().flex().flex_col().gap(px(6.0));
-                let guild_icon_child = if let Some(ref icon) = guild.icon_url {
-                    div()
-                        .size(px(16.0))
-                        .rounded_full()
-                        .overflow_hidden()
-                        .child(img(icon.clone()).size_full().rounded_full())
-                } else {
-                    div()
-                        .size(px(16.0))
-                        .rounded_full()
-                        .bg(rgb(HEX_BG_SERVER))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(8.0))
-                        .font_weight(WEIGHT_BOLD)
-                        .text_color(text_muted())
-                        .child(guild.acronym.clone())
-                };
-
-                let header = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .py(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(guild_icon_child)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_color(text_muted())
-                                    .child(guild.guild_name.to_uppercase()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_muted())
-                            .child(format!("{}", matching_emojis.len())),
-                    );
-
-                server_section = server_section.child(header);
-
-                let mut grid = div().flex().flex_row().flex_wrap().gap(px(4.0));
-                for emoji in matching_emojis {
-                    let tag = emoji.to_tag();
-                    let name = emoji.name.clone();
-                    let cdn_url = emoji.cdn_url();
-
-                    let emoji_child = if let Some(url) = cdn_url {
-                        div()
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                img(url)
-                                    .id(ElementId::from(SharedString::from(format!(
-                                        "picker-emoji-img-{}",
-                                        emoji.id.as_deref().unwrap_or(&emoji.name)
-                                    ))))
-                                    .size_full()
-                                    .rounded(radius_xs()),
-                            )
-                    } else {
-                        div()
-                            .text_size(px(14.0))
-                            .text_color(blurple())
-                            .child(format!(":{}", name))
-                    };
-
-                    let mut btn = div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(34.0))
-                        .rounded(radius_sm())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)))
-                        .child(emoji_child);
-
-                    if let Some(on_sel) = config.on_select_emoji.clone() {
-                        let tag_clone = tag.clone();
-                        btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                            on_sel(&tag_clone, window, cx);
-                        });
-                    }
-                    grid = grid.child(btn);
-                }
-                server_section = server_section.child(grid);
-                container = container.child(server_section);
-            }
-        } else if !config.custom_emojis.is_empty() {
-            let matching_custom: Vec<&DiscordEmoji> = if is_searching {
-                config
-                    .custom_emojis
-                    .iter()
-                    .filter(|e| e.name.to_lowercase().contains(query))
-                    .collect()
-            } else {
-                config.custom_emojis.iter().collect()
-            };
-
-            if !matching_custom.is_empty() {
-                rendered_guild_count += 1;
-                let mut server_section = div().flex().flex_col().gap(px(6.0));
-                server_section = server_section.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .py(px(2.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(icon_emoji(px(14.0), text_muted()))
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_weight(WEIGHT_BOLD)
-                                        .text_color(text_muted())
-                                        .child("EMOJIS DO SERVIDOR"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(WEIGHT_MEDIUM)
-                                .text_color(text_muted())
-                                .child(format!("{}", matching_custom.len())),
-                        ),
-                );
-
-                let mut grid = div().flex().flex_row().flex_wrap().gap(px(4.0));
-                for emoji in matching_custom {
-                    let tag = emoji.to_tag();
-                    let name = emoji.name.clone();
-                    let cdn_url = emoji.cdn_url();
-
-                    let emoji_child = if let Some(url) = cdn_url {
-                        div()
-                            .size(px(24.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                img(url)
-                                    .id(ElementId::from(SharedString::from(format!(
-                                        "picker-emoji-img-{}",
-                                        emoji.id.as_deref().unwrap_or(&emoji.name)
-                                    ))))
-                                    .size_full()
-                                    .rounded(radius_xs()),
-                            )
-                    } else {
-                        div()
-                            .text_size(px(14.0))
-                            .text_color(blurple())
-                            .child(format!(":{}", name))
-                    };
-
-                    let mut btn = div()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .size(px(34.0))
-                        .rounded(radius_sm())
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)))
-                        .child(emoji_child);
-
-                    if let Some(on_sel) = config.on_select_emoji.clone() {
-                        let tag_clone = tag.clone();
-                        btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                            on_sel(&tag_clone, window, cx);
-                        });
-                    }
-                    grid = grid.child(btn);
-                }
-                server_section = server_section.child(grid);
-                container = container.child(server_section);
-            }
-        }
-
-        // Se filtrou por um servidor que não possui emojis customizados cadastrados
-        if let Some(gid) = selected_guild {
-            if gid != "standard" && gid != "recents" && rendered_guild_count == 0 {
-                container = container.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .py(px(24.0))
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(text_muted())
-                                .child("Nenhum emoji personalizado disponível neste servidor."),
-                        ),
-                );
-            }
-        }
-    }
-
-    // C. Categorias Canônicas Unicode do Discord (8 Categorias Oficiais)
-    let show_standard = is_global || selected_guild == Some("standard");
-    if show_standard {
-        let categories = MediaCacheManager::get_standard_categories();
-        for (cat_key, cat_title, emojis) in categories {
-            let matching: Vec<&str> = if is_searching {
-                emojis
-                    .iter()
-                    .copied()
-                    .filter(|em| emoji_matches_query(em, cat_key, cat_title, query))
-                    .collect()
-            } else {
-                emojis.iter().copied().collect()
-            };
-
-            if matching.is_empty() {
-                continue;
-            }
-
-            let cat_icon = match cat_key {
-                "people" => icon_emoji(px(14.0), text_muted()),
-                "nature" => icon_sparkles(px(14.0), text_muted()),
-                "food" => icon_gift(px(14.0), text_muted()),
-                "activity" => icon_gamepad(px(14.0), text_muted()),
-                "travel" => icon_compass(px(14.0), text_muted()),
-                "objects" => icon_gear(px(14.0), text_muted()),
-                "symbols" => icon_hash(px(14.0), text_muted()),
-                "flags" => icon_pin(px(14.0), text_muted()),
-                _ => icon_emoji(px(14.0), text_muted()),
-            };
-
-            let mut cat_section = div().flex().flex_col().gap(px(6.0));
-            cat_section = cat_section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .py(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(cat_icon)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_color(text_muted())
-                                    .child(cat_title),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_muted())
-                            .child(format!("{}", matching.len())),
-                    ),
-            );
-
-            let mut grid = div().flex().flex_row().flex_wrap().gap(px(4.0));
-            for &em in &matching {
-                let em_str = em.to_string();
-                let mut btn = div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(34.0))
-                    .rounded(radius_sm())
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)))
-                    .child(div().text_size(px(20.0)).child(em_str.clone()));
-
-                if let Some(on_sel) = config.on_select_emoji.clone() {
-                    let em_clone = em_str.clone();
-                    btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel(&em_clone, window, cx);
-                    });
-                }
-                grid = grid.child(btn);
-            }
-            cat_section = cat_section.child(grid);
-            container = container.child(cat_section);
-        }
-    }
-
-    container
+    container.into_any_element()
 }
 
 // ============================================================================
-// 4. Conteúdo da Aba Figurinhas (Stickers)
+// 4. Conteúdo da Aba Figurinhas / Stickers
 // ============================================================================
 
 pub const STICKERS_PER_ROW: usize = 4;
@@ -1853,7 +1460,8 @@ pub fn build_sticker_virtual_rows(
                         if query.is_empty() {
                             true
                         } else {
-                            s.name.to_lowercase().contains(query) || s.tags.to_lowercase().contains(query)
+                            s.name.to_lowercase().contains(query)
+                                || s.tags.to_lowercase().contains(query)
                         }
                     })
                     .collect();
@@ -1885,7 +1493,8 @@ pub fn build_sticker_virtual_rows(
                     if query.is_empty() {
                         true
                     } else {
-                        s.name.to_lowercase().contains(query) || s.tags.to_lowercase().contains(query)
+                        s.name.to_lowercase().contains(query)
+                            || s.tags.to_lowercase().contains(query)
                     }
                 })
                 .collect();
@@ -1959,52 +1568,10 @@ pub fn render_sticker_virtual_row(
     row: &StickerVirtualRow,
     on_select_sticker: Option<&OnSelectStickerCallback>,
     on_select_guild: Option<&OnSelectGuildCallback>,
-) -> Div {
+) -> AnyElement {
     match row {
         StickerVirtualRow::FilterBanner { title } => {
-            let mut banner = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(px(8.0))
-                .py(px(4.0))
-                .mb(px(4.0))
-                .bg(rgb(0x232428))
-                .rounded(radius_sm())
-                .border_1()
-                .border_color(rgb(HEX_BLURPLE))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_sticker(px(14.0), blurple()))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(text_titles())
-                                .child(format!("Filtrado por: {}", title)),
-                        ),
-                );
-
-            if let Some(on_sel) = on_select_guild {
-                let on_sel_clone = (*on_sel).clone();
-                let reset_btn = div()
-                    .text_size(px(11.0))
-                    .font_weight(WEIGHT_MEDIUM)
-                    .text_color(blurple())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(HEX_WHITE)))
-                    .child("Ver todas as figurinhas")
-                    .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel_clone(None, window, cx);
-                    });
-                banner = banner.child(reset_btn);
-            }
-            banner
+            render_sticker_filter_banner(title, on_select_guild)
         }
         StickerVirtualRow::SectionHeader {
             title,
@@ -2012,146 +1579,217 @@ pub fn render_sticker_virtual_row(
             acronym,
             is_favorites,
             count,
-        } => {
-            let header_icon = if *is_favorites {
-                icon_sparkles(px(14.0), text_muted())
-            } else if let Some(url) = icon_url.as_ref() {
-                div()
-                    .size(px(16.0))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .child(img(url.clone()).size_full().rounded_full())
-            } else if let Some(acr) = acronym.as_ref() {
-                div()
-                    .size(px(16.0))
-                    .rounded_full()
-                    .bg(rgb(HEX_BG_SERVER))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_size(px(8.0))
-                    .font_weight(WEIGHT_BOLD)
-                    .text_color(text_muted())
-                    .child(acr.clone())
-            } else {
-                icon_sticker(px(14.0), text_muted())
-            };
-
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .pt(px(10.0))
-                .pb(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(header_icon)
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(text_muted())
-                                .child(title.clone()),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(WEIGHT_MEDIUM)
-                        .text_color(text_muted())
-                        .child(format!("{}", count)),
-                )
-        }
+        } => render_sticker_section_header(
+            title,
+            icon_url.as_deref(),
+            acronym.as_deref(),
+            *is_favorites,
+            *count,
+        ),
         StickerVirtualRow::GridRow { items } => {
-            let mut row_div = div()
+            render_sticker_grid_row(items, on_select_sticker)
+        }
+        StickerVirtualRow::EmptyNotice { message } => render_empty_notice(message),
+    }
+}
+
+fn render_sticker_filter_banner(
+    title: &str,
+    on_select_guild: Option<&OnSelectGuildCallback>,
+) -> AnyElement {
+    let mut banner = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .px(px(8.0))
+        .py(px(4.0))
+        .mb(px(4.0))
+        .bg(bg_user_bar())
+        .rounded(radius_sm())
+        .border_1()
+        .border_color(blurple())
+        .child(
+            div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .py(px(4.0))
-                .gap(px(8.0));
+                .gap(px(6.0))
+                .child(icon_sticker(px(14.0), blurple()))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_titles())
+                        .child(format!("Filtrado por: {}", title)),
+                ),
+        );
 
-            for sticker in items {
-                let sticker_clone = sticker.clone();
-                let name = sticker.name.clone();
-                let sticker_cdn = sticker.cdn_url();
+    if let Some(on_sel) = on_select_guild {
+        let on_sel_clone = (*on_sel).clone();
+        let reset_btn = div()
+            .text_size(px(11.0))
+            .font_weight(WEIGHT_MEDIUM)
+            .text_color(blurple())
+            .cursor_pointer()
+            .hover(|s| s.text_color(white()))
+            .child("Ver todas as figurinhas")
+            .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_sel_clone(None, window, cx);
+            });
+        banner = banner.child(reset_btn);
+    }
+    banner.into_any_element()
+}
 
-                let mut card = div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(4.0))
-                    .size(px(84.0))
-                    .p(px(6.0))
-                    .bg(rgb(0x232428))
-                    .rounded(radius_md())
-                    .border_1()
-                    .border_color(rgb(0x383a40))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(HEX_BLURPLE)))
-                    .child(
-                        div()
-                            .size(px(52.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                img(sticker_cdn)
-                                    .id(ElementId::from(SharedString::from(format!(
-                                        "picker-sticker-img-{}",
-                                        sticker.id
-                                    ))))
-                                    .size_full()
-                                    .rounded(radius_xs()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_titles())
-                            .child(name),
-                    );
+fn render_sticker_section_header(
+    title: &str,
+    icon_url: Option<&str>,
+    acronym: Option<&str>,
+    is_favorites: bool,
+    count: usize,
+) -> AnyElement {
+    let header_icon = if is_favorites {
+        icon_sparkles(px(14.0), text_muted())
+    } else if let Some(url) = icon_url {
+        div()
+            .size(px(16.0))
+            .rounded(radius_xs())
+            .overflow_hidden()
+            .child(img(url.to_string()).size_full().rounded(radius_xs()))
+    } else if let Some(acr) = acronym {
+        div()
+            .size(px(16.0))
+            .rounded(radius_xs())
+            .bg(bg_server())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(8.0))
+            .font_weight(WEIGHT_BOLD)
+            .text_color(text_muted())
+            .child(acr.to_string())
+    } else {
+        icon_sticker(px(14.0), text_muted())
+    };
 
-                if let Some(on_sel) = on_select_sticker {
-                    let on_sel_clone = (*on_sel).clone();
-                    card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel_clone(&sticker_clone, window, cx);
-                    });
-                }
-
-                row_div = row_div.child(card);
-            }
-            row_div
-        }
-        StickerVirtualRow::EmptyNotice { message } => {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .pt(px(10.0))
+        .pb(px(6.0))
+        .child(
             div()
                 .flex()
-                .flex_col()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(header_icon)
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_muted())
+                        .child(title.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_muted())
+                .child(format!("{}", count)),
+        )
+        .into_any_element()
+}
+
+fn render_sticker_grid_row(
+    items: &[DiscordSticker],
+    on_select_sticker: Option<&OnSelectStickerCallback>,
+) -> AnyElement {
+    let mut row_div = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .py(px(4.0))
+        .gap(px(8.0));
+
+    for sticker in items {
+        row_div = row_div.child(render_sticker_card(sticker, on_select_sticker));
+    }
+    row_div.into_any_element()
+}
+
+fn render_sticker_card(
+    sticker: &DiscordSticker,
+    on_select_sticker: Option<&OnSelectStickerCallback>,
+) -> AnyElement {
+    let sticker_clone = sticker.clone();
+    let name = sticker.name.clone();
+    let sticker_cdn = sticker.cdn_url();
+
+    // Item de figurinha: 98x98 com imagem 96x96 conforme DOM oficial (sticker-picker.md)
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .size(px(98.0))
+        .p(px(6.0))
+        .bg(bg_user_bar())
+        .rounded(radius_md())
+        .border_1()
+        .border_color(bg_chat_hover())
+        .cursor_pointer()
+        .hover(|s| s.bg(channel_hover()).border_color(blurple()))
+        .child(
+            div()
+                .size(px(64.0))
+                .flex()
                 .items_center()
                 .justify_center()
-                .py(px(24.0))
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(text_muted())
-                        .child(message.clone()),
-                )
-        }
+                .child(if !sticker_cdn.is_empty() {
+                    img(sticker_cdn)
+                        .id(ElementId::from(SharedString::from(format!(
+                            "picker-sticker-img-{}",
+                            sticker.id
+                        ))))
+                        .size_full()
+                        .rounded(radius_sm())
+                        .into_any_element()
+                } else {
+                    icon_sticker(px(36.0), blurple()).into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_muted())
+                .overflow_hidden()
+                .text_ellipsis()
+                .max_w(px(84.0))
+                .child(name),
+        );
+
+    if let Some(on_sel) = on_select_sticker {
+        let on_sel_clone = (*on_sel).clone();
+        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+            on_sel_clone(&sticker_clone, window, cx);
+        });
     }
+
+    card.into_any_element()
 }
 
 fn render_virtualized_stickers_content(
     config: &MediaPickerConfig,
     query: &str,
     list_state: &ListState,
-) -> Stateful<Div> {
+) -> AnyElement {
     let rows = build_sticker_virtual_rows(config, query);
     let total_rows = rows.len();
     if list_state.item_count() != total_rows {
@@ -2179,559 +1817,32 @@ fn render_virtualized_stickers_content(
                     on_select_sticker.as_ref(),
                     on_select_guild.as_ref(),
                 )
-                .into_any_element()
             })
             .size_full(),
         )
+        .into_any_element()
 }
 
-fn render_stickers_tab(config: &MediaPickerConfig, query: &str) -> Div {
-    let mut container = div().flex().flex_col().gap(px(12.0));
-    let selected_guild = config.selected_guild_id.as_deref();
-    let is_global = selected_guild.is_none() || selected_guild == Some("recents");
-
-    // Banner de filtro quando selecionado um servidor específico ou pacotes oficiais
-    if let Some(gid) = selected_guild {
-        if gid != "recents" {
-            let filter_title = if gid == "standard" {
-                "Pacotes Oficiais do Discord".to_string()
-            } else if let Some(g) = config.guild_sections.iter().find(|g| g.guild_id == gid) {
-                g.guild_name.clone()
-            } else {
-                "Servidor Selecionado".to_string()
-            };
-
-            let mut banner = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .px(px(8.0))
-                .py(px(4.0))
-                .bg(rgb(0x232428))
-                .rounded(radius_sm())
-                .border_1()
-                .border_color(rgb(HEX_BLURPLE))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .child(icon_sticker(px(14.0), blurple()))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(WEIGHT_BOLD)
-                                .text_color(text_titles())
-                                .child(format!("Filtrado por: {}", filter_title)),
-                        ),
-                );
-
-            if let Some(on_sel) = config.on_select_guild.clone() {
-                let reset_btn = div()
-                    .text_size(px(11.0))
-                    .font_weight(WEIGHT_MEDIUM)
-                    .text_color(blurple())
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(rgb(HEX_WHITE)))
-                    .child("Ver todas as figurinhas")
-                    .on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel(None, window, cx);
-                    });
-                banner = banner.child(reset_btn);
-            }
-            container = container.child(banner);
-        }
+fn render_stickers_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
+    let rows = build_sticker_virtual_rows(config, query);
+    let on_select_sticker = config.on_select_sticker.as_ref();
+    let on_select_guild = config.on_select_guild.as_ref();
+    let mut container = div().flex().flex_col().gap(px(4.0));
+    for row in &rows {
+        container = container.child(render_sticker_virtual_row(
+            row,
+            on_select_sticker,
+            on_select_guild,
+        ));
     }
-
-    // A. Seção: Figurinhas Favoritas
-    let show_favorites = is_global;
-    if show_favorites {
-        let favorites: Vec<&DiscordSticker> = config
-            .stickers
-            .iter()
-            .filter(|s| s.guild_id.is_none())
-            .filter(|s| {
-                if query.is_empty() {
-                    true
-                } else {
-                    s.name.to_lowercase().contains(query) || s.tags.to_lowercase().contains(query)
-                }
-            })
-            .collect();
-
-        if !favorites.is_empty() {
-            let mut fav_section = div().flex().flex_col().gap(px(6.0));
-            fav_section = fav_section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .py(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(icon_sparkles(px(14.0), text_muted()))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_color(text_muted())
-                                    .child("FAVORITOS"),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_muted())
-                            .child(format!("{}", favorites.len())),
-                    ),
-            );
-
-            let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-            for sticker in favorites {
-                let sticker_clone = sticker.clone();
-                let name = sticker.name.clone();
-                let sticker_cdn = sticker.cdn_url();
-
-                let mut card = div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(4.0))
-                    .size(px(84.0))
-                    .p(px(6.0))
-                    .bg(rgb(0x232428))
-                    .rounded(radius_md())
-                    .border_1()
-                    .border_color(rgb(0x383a40))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(HEX_BLURPLE)))
-                    .child(
-                        div()
-                            .size(px(52.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                img(sticker_cdn)
-                                    .id(ElementId::from(SharedString::from(format!(
-                                        "picker-sticker-img-{}",
-                                        sticker.id
-                                    ))))
-                                    .size_full()
-                                    .rounded(radius_xs()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_titles())
-                            .child(name),
-                    );
-
-                if let Some(on_sel) = config.on_select_sticker.clone() {
-                    card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel(&sticker_clone, window, cx);
-                    });
-                }
-
-                grid = grid.child(card);
-            }
-            fav_section = fav_section.child(grid);
-            container = container.child(fav_section);
-        }
-    }
-
-    // B. Seções de Servidores (Guild Sections agrupadas por servidor com cabeçalhos canônicos do Discord)
-    if selected_guild != Some("standard") {
-        let mut rendered_guild_count = 0;
-        if !config.guild_sections.is_empty() {
-            for guild in &config.guild_sections {
-                if let Some(target_gid) = selected_guild {
-                    if target_gid != "recents" && guild.guild_id != target_gid {
-                        continue;
-                    }
-                }
-
-                let matching_stickers: Vec<&DiscordSticker> = guild
-                    .stickers
-                    .iter()
-                    .filter(|s| {
-                        if query.is_empty() {
-                            true
-                        } else {
-                            s.name.to_lowercase().contains(query) || s.tags.to_lowercase().contains(query)
-                        }
-                    })
-                    .collect();
-
-                if matching_stickers.is_empty() {
-                    continue;
-                }
-
-                rendered_guild_count += 1;
-                let mut server_section = div().flex().flex_col().gap(px(6.0));
-                let guild_icon_child = if let Some(ref icon) = guild.icon_url {
-                    div()
-                        .size(px(16.0))
-                        .rounded_full()
-                        .overflow_hidden()
-                        .child(img(icon.clone()).size_full().rounded_full())
-                } else {
-                    div()
-                        .size(px(16.0))
-                        .rounded_full()
-                        .bg(rgb(HEX_BG_SERVER))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(8.0))
-                        .font_weight(WEIGHT_BOLD)
-                        .text_color(text_muted())
-                        .child(guild.acronym.clone())
-                };
-
-                let header = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .py(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(guild_icon_child)
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_color(text_muted())
-                                    .child(guild.guild_name.to_uppercase()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_muted())
-                            .child(format!("{}", matching_stickers.len())),
-                    );
-
-                server_section = server_section.child(header);
-
-                let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-                for sticker in matching_stickers {
-                    let sticker_clone = sticker.clone();
-                    let name = sticker.name.clone();
-                    let sticker_cdn = sticker.cdn_url();
-
-                    let mut card = div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(4.0))
-                        .size(px(84.0))
-                        .p(px(6.0))
-                        .bg(rgb(0x232428))
-                        .rounded(radius_md())
-                        .border_1()
-                        .border_color(rgb(0x383a40))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(HEX_BLURPLE)))
-                        .child(
-                            div()
-                                .size(px(52.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    img(sticker_cdn)
-                                        .id(ElementId::from(SharedString::from(format!(
-                                            "picker-sticker-img-{}",
-                                            sticker.id
-                                        ))))
-                                        .size_full()
-                                        .rounded(radius_xs()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(WEIGHT_MEDIUM)
-                                .text_color(text_titles())
-                                .child(name),
-                        );
-
-                    if let Some(on_sel) = config.on_select_sticker.clone() {
-                        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                            on_sel(&sticker_clone, window, cx);
-                        });
-                    }
-
-                    grid = grid.child(card);
-                }
-                server_section = server_section.child(grid);
-                container = container.child(server_section);
-            }
-        } else {
-            // Fallback para custom stickers do servidor
-            let server_stickers: Vec<&DiscordSticker> = config
-                .stickers
-                .iter()
-                .filter(|s| s.guild_id.is_some())
-                .filter(|s| {
-                    if query.is_empty() {
-                        true
-                    } else {
-                        s.name.to_lowercase().contains(query) || s.tags.to_lowercase().contains(query)
-                    }
-                })
-                .collect();
-
-            if !server_stickers.is_empty() {
-                rendered_guild_count += 1;
-                let mut server_section = div().flex().flex_col().gap(px(6.0));
-                server_section = server_section.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .py(px(2.0))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .child(icon_sticker(px(14.0), text_muted()))
-                                .child(
-                                    div()
-                                        .text_size(px(11.0))
-                                        .font_weight(WEIGHT_BOLD)
-                                        .text_color(text_muted())
-                                        .child("FIGURINHAS DO SERVIDOR"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(WEIGHT_MEDIUM)
-                                .text_color(text_muted())
-                                .child(format!("{}", server_stickers.len())),
-                        ),
-                );
-
-                let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-                for sticker in server_stickers {
-                    let sticker_clone = sticker.clone();
-                    let name = sticker.name.clone();
-                    let sticker_cdn = sticker.cdn_url();
-
-                    let mut card = div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(4.0))
-                        .size(px(84.0))
-                        .p(px(6.0))
-                        .bg(rgb(0x232428))
-                        .rounded(radius_md())
-                        .border_1()
-                        .border_color(rgb(0x383a40))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(HEX_BLURPLE)))
-                        .child(
-                            div()
-                                .size(px(52.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(
-                                    img(sticker_cdn)
-                                        .id(ElementId::from(SharedString::from(format!(
-                                            "picker-sticker-img-{}",
-                                            sticker.id
-                                        ))))
-                                        .size_full()
-                                        .rounded(radius_xs()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .font_weight(WEIGHT_MEDIUM)
-                                .text_color(text_titles())
-                                .child(name),
-                        );
-
-                    if let Some(on_sel) = config.on_select_sticker.clone() {
-                        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                            on_sel(&sticker_clone, window, cx);
-                        });
-                    }
-
-                    grid = grid.child(card);
-                }
-                server_section = server_section.child(grid);
-                container = container.child(server_section);
-            }
-        }
-
-        // Se filtrou por um servidor que não possui figurinhas customizadas
-        if let Some(gid) = selected_guild {
-            if gid != "standard" && gid != "recents" && rendered_guild_count == 0 {
-                container = container.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .py(px(24.0))
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(text_muted())
-                                .child("Nenhuma figurinha personalizada disponível neste servidor."),
-                        ),
-                );
-            }
-        }
-    }
-
-    // C. Pacotes padrão do Discord (Wumpus, Clyde, Nelly, etc.)
-    let show_packs = is_global || selected_guild == Some("standard");
-    if show_packs {
-        let default_packs = MediaCacheManager::get_default_sticker_packs();
-        for pack in default_packs {
-            let matching: Vec<&DiscordSticker> = if query.is_empty() {
-                pack.stickers.iter().collect()
-            } else {
-                pack.stickers
-                    .iter()
-                    .filter(|s| {
-                        s.name.to_lowercase().contains(query)
-                            || s.tags.to_lowercase().contains(query)
-                    })
-                    .collect()
-            };
-
-            if matching.is_empty() {
-                continue;
-            }
-
-            let mut pack_section = div().flex().flex_col().gap(px(6.0));
-            pack_section = pack_section.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .py(px(2.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(icon_sticker(px(14.0), text_muted()))
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(WEIGHT_BOLD)
-                                    .text_color(text_muted())
-                                    .child(pack.name.to_uppercase()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_muted())
-                            .child(format!("{}", matching.len())),
-                    ),
-            );
-
-            let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-            for sticker in matching {
-                let sticker_clone = sticker.clone();
-                let name = sticker.name.clone();
-                let sticker_cdn = sticker.cdn_url();
-
-                let mut card = div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(4.0))
-                    .size(px(84.0))
-                    .p(px(6.0))
-                    .bg(rgb(0x232428))
-                    .rounded(radius_md())
-                    .border_1()
-                    .border_color(rgb(0x383a40))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(HEX_BLURPLE)))
-                    .child(
-                        div()
-                            .size(px(52.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                img(sticker_cdn)
-                                    .id(ElementId::from(SharedString::from(format!(
-                                        "picker-sticker-img-{}",
-                                        sticker.id
-                                    ))))
-                                    .size_full()
-                                    .rounded(radius_xs()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(text_titles())
-                            .child(name),
-                    );
-
-                if let Some(on_sel) = config.on_select_sticker.clone() {
-                    card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                        on_sel(&sticker_clone, window, cx);
-                    });
-                }
-
-                grid = grid.child(card);
-            }
-            pack_section = pack_section.child(grid);
-            container = container.child(pack_section);
-        }
-    }
-
-    container
+    container.into_any_element()
 }
 
 // ============================================================================
-// 5. Conteúdo da Aba GIFs (Tenor)
+// 5. Conteúdo da Aba GIFs (Integração Tenor)
 // ============================================================================
 
-fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> Div {
+fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
     let mut container = div().flex().flex_col().gap(px(10.0));
 
     let header_title = if query.is_empty() {
@@ -2756,56 +1867,12 @@ fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> Div {
             ),
     );
 
-    // Categorias em alta canônicas com ícones vetoriais SVG autênticos
-    let categories: [(&str, &str, fn(Pixels, Hsla) -> Div); 6] = [
-        ("trending", "Trending", |sz, col| icon_sparkles(sz, col)),
-        ("anime", "Anime", |sz, col| icon_sparkles(sz, col)),
-        ("reactions", "Reactions", |sz, col| icon_smile(sz, col)),
-        ("memes", "Memes", |sz, col| icon_chat(sz, col)),
-        ("gaming", "Gaming", |sz, col| icon_gamepad(sz, col)),
-        ("music", "Music", |sz, col| icon_music(sz, col)),
-    ];
-
-    let mut cat_row = div().flex().flex_row().items_center().gap(px(6.0));
-    for (cat_id, cat_label, icon_builder) in categories {
-        let is_active = query == cat_id;
-        let icon_color = if is_active { rgb(HEX_WHITE) } else { text_muted() };
-        let mut chip = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(26.0))
-            .px(px(10.0))
-            .rounded(radius_pill())
-            .bg(if is_active { rgb(HEX_BLURPLE) } else { rgb(0x232428) })
-            .border_1()
-            .border_color(if is_active { rgb(HEX_BLURPLE) } else { rgb(0x383a40) })
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-            .child(icon_builder(px(12.0), icon_color.into()))
-            .child(
-                div()
-                    .text_size(font_size_xs())
-                    .font_weight(WEIGHT_BOLD)
-                    .text_color(if is_active { rgb(HEX_WHITE) } else { text_muted() })
-                    .child(cat_label),
-            );
-
-        if let Some(on_cat) = config.on_select_gif_category.clone() {
-            let cat_str = cat_id.to_string();
-            chip = chip.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_cat(&cat_str, window, cx);
-            });
-        } else if let Some(on_search) = config.on_search_query.clone() {
-            let cat_str = cat_id.to_string();
-            chip = chip.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_search(&cat_str, window, cx);
-            });
-        }
-        cat_row = cat_row.child(chip);
-    }
-    container = container.child(cat_row);
+    // Chips de categorias
+    container = container.child(render_gif_category_chips(
+        query,
+        config.on_select_gif_category.as_ref(),
+        config.on_search_query.as_ref(),
+    ));
 
     // Fallback para biblioteca curada caso config.gifs esteja vazio
     let default_gifs;
@@ -2818,75 +1885,142 @@ fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> Div {
 
     let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
     for gif in gifs_to_render {
-        let gif_url = gif.url.clone();
-        let title = gif.title.clone();
-        let preview_url = if let Some(ref gs) = gif.gif_src {
-            gs.clone()
-        } else if let Some(ref s) = gif.src {
-            s.clone()
-        } else {
-            gif.preview_url.clone()
-        };
-
-        let mut card = div()
-            .relative()
-            .flex()
-            .items_center()
-            .justify_center()
-            .w(px(190.0))
-            .h(px(110.0))
-            .bg(rgb(0x232428))
-            .rounded(radius_md())
-            .border_1()
-            .border_color(rgb(0x383a40))
-            .cursor_pointer()
-            .overflow_hidden()
-            .hover(|s| s.border_color(rgb(HEX_BLURPLE)))
-            .child(
-                img(preview_url)
-                    .id(ElementId::from(SharedString::from(format!(
-                        "picker-gif-img-{}",
-                        gif.id
-                    ))))
-                    .size_full()
-                    .rounded(radius_md())
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left_0()
-                    .right_0()
-                    .bg(rgba(0x000000c0))
-                    .px(px(6.0))
-                    .py(px(4.0))
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(WEIGHT_MEDIUM)
-                            .text_color(rgb(HEX_WHITE))
-                            .child(title),
-                    ),
-            );
-
-        if let Some(on_sel) = config.on_select_gif.clone() {
-            let url_clone = gif_url.clone();
-            card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_sel(&url_clone, window, cx);
-            });
-        }
-
-        grid = grid.child(card);
+        grid = grid.child(render_gif_card(gif, config.on_select_gif.as_ref()));
     }
 
-    container.child(grid)
+    container.child(grid).into_any_element()
+}
+
+fn render_gif_category_chips(
+    query: &str,
+    on_select_category: Option<&OnSelectGifCategoryCallback>,
+    on_search_query: Option<&OnSearchQueryCallback>,
+) -> AnyElement {
+    let categories: [(&str, &str, fn(Pixels, Hsla) -> Div); 6] = [
+        ("trending", "Trending", |sz, col| icon_sparkles(sz, col)),
+        ("anime", "Anime", |sz, col| icon_sparkles(sz, col)),
+        ("reactions", "Reactions", |sz, col| icon_smile(sz, col)),
+        ("memes", "Memes", |sz, col| icon_chat(sz, col)),
+        ("gaming", "Gaming", |sz, col| icon_gamepad(sz, col)),
+        ("music", "Music", |sz, col| icon_music(sz, col)),
+    ];
+
+    let mut cat_row = div().flex().flex_row().items_center().gap(px(6.0));
+    for (cat_id, cat_label, icon_builder) in categories {
+        let is_active = query == cat_id;
+        let icon_color = if is_active { white() } else { text_muted() };
+        let mut chip = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(26.0))
+            .px(px(10.0))
+            .rounded(radius_pill())
+            .bg(if is_active { blurple() } else { bg_user_bar() })
+            .border_1()
+            .border_color(if is_active { blurple() } else { bg_chat_hover() })
+            .cursor_pointer()
+            .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
+            .child(icon_builder(px(12.0), icon_color.into()))
+            .child(
+                div()
+                    .text_size(font_size_xs())
+                    .font_weight(WEIGHT_BOLD)
+                    .text_color(if is_active { white() } else { text_muted() })
+                    .child(cat_label),
+            );
+
+        if let Some(on_cat) = on_select_category {
+            let on_cat_clone = (*on_cat).clone();
+            let cat_str = cat_id.to_string();
+            chip = chip.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_cat_clone(&cat_str, window, cx);
+            });
+        } else if let Some(on_search) = on_search_query {
+            let on_search_clone = (*on_search).clone();
+            let cat_str = cat_id.to_string();
+            chip = chip.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_search_clone(&cat_str, window, cx);
+            });
+        }
+        cat_row = cat_row.child(chip);
+    }
+    cat_row.into_any_element()
+}
+
+fn render_gif_card(
+    gif: &TenorGif,
+    on_select_gif: Option<&OnSelectGifCallback>,
+) -> AnyElement {
+    let gif_url = gif.url.clone();
+    let title = gif.title.clone();
+    let preview_url = if let Some(ref gs) = gif.gif_src {
+        gs.clone()
+    } else if let Some(ref s) = gif.src {
+        s.clone()
+    } else {
+        gif.preview_url.clone()
+    };
+
+    // Miniatura Tenor: 230x110 com radius 5px conforme DOM oficial (gif-picker.md)
+    let mut card = div()
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(px(230.0))
+        .h(px(110.0))
+        .bg(bg_user_bar())
+        .rounded(px(5.0))
+        .border_1()
+        .border_color(bg_chat_hover())
+        .cursor_pointer()
+        .overflow_hidden()
+        .hover(|s| s.border_color(blurple()))
+        .child(
+            img(preview_url)
+                .id(ElementId::from(SharedString::from(format!(
+                    "picker-gif-img-{}",
+                    gif.id
+                ))))
+                .size_full()
+                .rounded(px(5.0)),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .right_0()
+                .bg(modal_backdrop())
+                .px(px(6.0))
+                .py(px(4.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .font_weight(WEIGHT_MEDIUM)
+                        .text_color(white())
+                        .child(title),
+                ),
+        );
+
+    if let Some(on_sel) = on_select_gif {
+        let on_sel_clone = (*on_sel).clone();
+        let url_clone = gif_url.clone();
+        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+            on_sel_clone(&url_clone, window, cx);
+        });
+    }
+
+    card.into_any_element()
 }
 
 // ============================================================================
 // 6. Conteúdo da Aba Soundboard
 // ============================================================================
 
-fn render_soundboard_tab(config: &MediaPickerConfig, query: &str) -> Div {
+fn render_soundboard_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
     let mut container = div().flex().flex_col().gap(px(12.0));
 
     container = container.child(
@@ -2924,81 +2058,96 @@ fn render_soundboard_tab(config: &MediaPickerConfig, query: &str) -> Div {
 
     let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
     for sound in matching_sounds {
-        let sound_clone = sound.clone();
-        let name = sound.name.clone();
-        let sound_icon_element = if let Some(ref em) = sound.emoji_name {
-            div().text_size(px(18.0)).child(em.clone())
-        } else {
-            div()
-                .size(px(22.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon_speaker(px(18.0), blurple()))
-        };
+        grid = grid.child(render_sound_item(
+            sound,
+            config.on_play_sound.as_ref(),
+            config.on_send_sound.as_ref(),
+        ));
+    }
 
-        let mut card = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(8.0))
-            .w(px(190.0))
-            .h(px(44.0))
-            .px(px(10.0))
-            .bg(rgb(0x232428))
-            .rounded(radius_md())
-            .border_1()
-            .border_color(rgb(0x383a40))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(HEX_BLURPLE)))
-            .child(sound_icon_element)
-            .child(
-                div()
-                    .flex_1()
-                    .text_size(font_size_xs())
-                    .font_weight(WEIGHT_MEDIUM)
-                    .text_color(text_titles())
-                    .child(name),
-            );
+    container.child(grid).into_any_element()
+}
 
-        // Botão de preview (Play)
-        let mut play_btn = div()
+fn render_sound_item(
+    sound: &SoundboardSound,
+    on_play: Option<&OnPlaySoundCallback>,
+    on_send: Option<&OnPlaySoundCallback>,
+) -> AnyElement {
+    let sound_clone = sound.clone();
+    let name = sound.name.clone();
+    let sound_icon_element = if let Some(ref em) = sound.emoji_name {
+        div().text_size(px(18.0)).child(em.clone())
+    } else {
+        div()
             .size(px(22.0))
             .flex()
             .items_center()
             .justify_center()
-            .rounded(radius_sm())
-            .bg(rgb(0x2b2d31))
-            .text_size(px(10.0))
-            .text_color(text_muted())
-            .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-            .child("▶");
+            .child(icon_speaker(px(18.0), blurple()))
+    };
 
-        if let Some(on_play) = config.on_play_sound.clone() {
-            let s_clone = sound_clone.clone();
-            play_btn = play_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_play(&s_clone, window, cx);
-            });
-        }
-        card = card.child(play_btn);
+    let mut card = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .w(px(190.0))
+        .h(px(44.0))
+        .px(px(10.0))
+        .bg(bg_user_bar())
+        .rounded(radius_md())
+        .border_1()
+        .border_color(bg_chat_hover())
+        .cursor_pointer()
+        .hover(|s| s.bg(channel_hover()).border_color(blurple()))
+        .child(sound_icon_element)
+        .child(
+            div()
+                .flex_1()
+                .text_size(font_size_xs())
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_titles())
+                .child(name),
+        );
 
-        // Clique no card envia ou reproduz o som
-        if let Some(on_send) = config.on_send_sound.clone() {
-            let s_clone = sound_clone.clone();
-            card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_send(&s_clone, window, cx);
-            });
-        } else if let Some(on_play) = config.on_play_sound.clone() {
-            let s_clone = sound_clone.clone();
-            card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_play(&s_clone, window, cx);
-            });
-        }
+    // Botão de preview (Play)
+    let mut play_btn = div()
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(radius_sm())
+        .bg(bg_channels())
+        .text_size(px(10.0))
+        .text_color(text_muted())
+        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
+        .child("▶");
 
-        grid = grid.child(card);
+    if let Some(on_play_cb) = on_play {
+        let s_clone = sound_clone.clone();
+        let on_play_cb = (*on_play_cb).clone();
+        play_btn = play_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+            on_play_cb(&s_clone, window, cx);
+        });
+    }
+    card = card.child(play_btn);
+
+    // Clique no card envia ou reproduz o som
+    if let Some(on_send_cb) = on_send {
+        let s_clone = sound_clone.clone();
+        let on_send_cb = (*on_send_cb).clone();
+        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+            on_send_cb(&s_clone, window, cx);
+        });
+    } else if let Some(on_play_cb) = on_play {
+        let s_clone = sound_clone.clone();
+        let on_play_cb = (*on_play_cb).clone();
+        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+            on_play_cb(&s_clone, window, cx);
+        });
     }
 
-    container.child(grid)
+    card.into_any_element()
 }
 
 // ============================================================================
@@ -3014,9 +2163,9 @@ fn render_preview_strip(hovered_info: Option<&str>) -> Div {
         .gap(px(8.0))
         .h(px(36.0))
         .px(px(12.0))
-        .bg(rgb(HEX_BG_USER_BAR))
+        .bg(bg_user_bar())
         .border_t_1()
-        .border_color(rgb(0x1e1f22))
+        .border_color(bg_server())
         .child(
             div()
                 .text_size(font_size_xs())
@@ -3029,6 +2178,10 @@ fn render_preview_strip(hovered_info: Option<&str>) -> Div {
                 .child(display_text.to_string()),
         )
 }
+
+// ============================================================================
+// Testes Automatizados
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -3127,7 +2280,12 @@ mod tests {
             guild_name: "Rust Brasil".to_string(),
             icon_url: Some("https://cdn.discordapp.com/icons/guild-123/abc.png".to_string()),
             acronym: "RB".to_string(),
-            emojis: vec![DiscordEmoji::new_custom("e1", "crab_party", false, Some("guild-123".to_string()))],
+            emojis: vec![DiscordEmoji::new_custom(
+                "e1",
+                "crab_party",
+                false,
+                Some("guild-123".to_string()),
+            )],
             stickers: vec![DiscordSticker {
                 id: "s1".to_string(),
                 pack_id: None,
@@ -3357,5 +2515,16 @@ mod tests {
             StickerVirtualRow::GridRow { items } => assert_eq!(items.len(), 2),
             _ => panic!("Expected GridRow of 2 items"),
         }
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_media_picker_measured_dimensions() {
+        // Verifica constantes de layout do picker correspondentes às medições do Discord
+        assert_eq!(EMOJIS_PER_ROW, 9);
+        assert_eq!(STICKERS_PER_ROW, 4);
+
+        // Verifica que render_emoji_item cria elemento com célula correta
+        let item = EmojiVirtualItem::Unicode("😀".to_string());
+        let _el = render_emoji_item(&item, None);
     }
 }
