@@ -1,0 +1,54 @@
+{
+  "screen": "friends_pending",
+  "connected": true,
+  "connection_status": "Conectado (captura local)",
+  "selected_guild_id": null,
+  "selected_channel_id": null,
+  "show_members": false,
+  "friends_tab": "Pending",
+  "current_user": {
+    "id": "u-me",
+    "username": "usuario_a",
+    "display_name": "Usuário A",
+    "presence": "Online",
+    "custom_status": "Captura de exemplo"
+  },
+  "guilds": [],
+  "dm_channels": [],
+  "messages": {},
+  "members": [],
+  "friends": [
+    {
+      "id": "u-f",
+      "username": "usuario_f",
+      "display_name": "Usuário F",
+      "presence": "Online",
+      "custom_status": null,
+      "relationship_type": 3
+    },
+    {
+      "id": "u-g",
+      "username": "usuario_g",
+      "display_name": "Usuário G",
+      "presence": "Idle",
+      "custom_status": null,
+      "relationship_type": 3
+    },
+    {
+      "id": "u-h",
+      "username": "usuario_h",
+      "display_name": "Usuário H",
+      "presence": "Offline",
+      "custom_status": null,
+      "relationship_type": 4
+    }
+  ],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": null,
+  "is_search_open": false,
+  "search_query": "",
+  "search_results": [],
+  "media_picker": null,
+  "connections": []
+}
