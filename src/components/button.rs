@@ -33,7 +33,11 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::tokens::colors::{
-    blurple, blurple_active, blurple_hover, rgba, rgb, text_normal, white,
+    blurple, blurple_active, blurple_hover, control_critical_primary_bg_active,
+    control_critical_primary_bg_default, control_critical_primary_bg_hover,
+    control_critical_secondary_text_default, control_icon_only_icon_default,
+    control_secondary_bg_active, control_secondary_bg_default, control_secondary_bg_hover,
+    opacity_white_20, opacity_white_8, text_normal, transparent, white, with_alpha, HEX_WHITE,
 };
 use crate::tokens::spacing::radius_md;
 use crate::tokens::typography::WEIGHT_MEDIUM;
@@ -164,52 +168,52 @@ impl Button {
 /// `--control-secondary-background-default`, live `rgba(151, 151, 159, 0.12)`).
 #[inline]
 fn secondary_bg() -> Rgba {
-    rgba(0x97979f1f)
+    control_secondary_bg_default()
 }
 
 /// Discord secondary hover: same gray at 16% alpha (live hover match).
 #[inline]
 fn secondary_bg_hover() -> Rgba {
-    rgba(0x97979f29)
+    control_secondary_bg_hover()
 }
 
 /// Discord secondary active: same gray at 20% alpha
 /// (`--control-secondary-background-active`).
 #[inline]
 fn secondary_bg_active() -> Rgba {
-    rgba(0x97979f33)
+    control_secondary_bg_active()
 }
 
 /// Discord danger red: #D22D39 (measured live `rgb(210, 45, 57)`; the previous
 /// hardcoded #DA373C diverges).
 #[inline]
 fn danger_bg() -> Rgba {
-    rgb(0xd22d39)
+    control_critical_primary_bg_default()
 }
 
 /// Discord danger hover: #A9232E (measured live + CSS variable).
 #[inline]
 fn danger_bg_hover() -> Rgba {
-    rgb(0xa9232e)
+    control_critical_primary_bg_hover()
 }
 
 /// Discord danger active: #971D28 (`--control-critical-primary-…-active`).
 #[inline]
 fn danger_bg_active() -> Rgba {
-    rgb(0x971d28)
+    control_critical_primary_bg_active()
 }
 
 /// Discord critical-secondary text: #F87E7A (measured live).
 #[inline]
 fn danger_text() -> Rgba {
-    rgb(0xf87e7a)
+    control_critical_secondary_text_default()
 }
 
 /// Discord icon-only glyph color: #ABACB2 (measured live +
 /// `--control-icon-only-icon-default`).
 #[inline]
 fn icon_muted() -> Rgba {
-    rgb(0xabacb2)
+    control_icon_only_icon_default()
 }
 
 /// Builds a kit `Custom` variant carrying the exact Discord colors for the
@@ -274,9 +278,9 @@ fn render_button(btn: Button, cx: &mut App) -> AnyElement {
         ),
         // No measured Discord sample for a ghost button; values carried over.
         ButtonVariant::Ghost => (
-            rgba(0x00000000),
-            rgba(0xffffff14),
-            rgba(0xffffff24),
+            transparent(),
+            opacity_white_8(),
+            with_alpha(HEX_WHITE, 36.0 / 255.0),
             text_normal(),
         ),
     };
@@ -441,12 +445,12 @@ impl RenderOnce for IconButton {
 fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
     let (icon_normal, bg_normal, bg_hover, fg_hover) = if btn.danger {
         // Measured `critical-secondary` pattern: red text on translucent gray.
-        (danger_text(), rgba(0x00000000), secondary_bg_hover(), danger_text())
+        (danger_text(), transparent(), secondary_bg_hover(), danger_text())
     } else if btn.active {
         // Toggled state has no measured Discord sample; values carried over.
-        (white(), rgba(0xffffff24), rgba(0xffffff33), white())
+        (white(), with_alpha(HEX_WHITE, 36.0 / 255.0), opacity_white_20(), white())
     } else {
-        (icon_muted(), rgba(0x00000000), secondary_bg_hover(), white())
+        (icon_muted(), transparent(), secondary_bg_hover(), white())
     };
     let bg_active = if btn.danger || btn.active {
         bg_hover

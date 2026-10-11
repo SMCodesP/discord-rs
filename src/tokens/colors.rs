@@ -104,6 +104,68 @@ pub const HEX_MENTION_HOVER: u32 = 0x5865f240;
 pub const HEX_SCROLLBAR_THUMB: u32 = 0x1a1b1e;
 
 // ============================================================================
+// Parity Tokens (Direct from Discord CSS variables in tokens.md)
+// ============================================================================
+
+/// Neutral 67: Dark neutral surface / border (#35363c). Source: `--neutral-67`
+pub const HEX_NEUTRAL_67: u32 = 0x35363c;
+
+/// Transparent (#00000000). Source: `--transparent`
+pub const HEX_TRANSPARENT: u32 = 0x00000000;
+
+/// Opacity White 8%: White at ~8% opacity (#ffffff14). Source: `--opacity-white-8` / `--control-primary-border-default`
+pub const HEX_OPACITY_WHITE_8: u32 = 0xffffff14;
+pub const HEX_CONTROL_PRIMARY_BORDER: u32 = HEX_OPACITY_WHITE_8;
+
+/// Opacity White 20%: White at 20% opacity (#ffffff33). Source: `--opacity-white-20`
+pub const HEX_OPACITY_WHITE_20: u32 = 0xffffff33;
+
+/// Nitro Tier 2 Purple for gradients (#8547c6). Source: `--premium-tier-2-purple-for-gradients`
+pub const HEX_PREMIUM_TIER_2_PURPLE_FOR_GRADIENTS: u32 = 0x8547c6;
+pub const HEX_PREMIUM_TIER_2_PURPLE: u32 = HEX_PREMIUM_TIER_2_PURPLE_FOR_GRADIENTS;
+
+/// Animated gradient background pink stop (#eb459e). Source: `--bg-animated-gradient-background-pink-1`
+pub const HEX_BG_ANIMATED_GRADIENT_PINK_1: u32 = 0xeb459e;
+
+/// Platform Xbox brand green (#107c10). Source: `--platform-xbox`
+pub const HEX_PLATFORM_XBOX: u32 = 0x107c10;
+
+/// Platform Spotify brand green (#1db954). Source: `--platform-spotify`
+pub const HEX_PLATFORM_SPOTIFY: u32 = 0x1db954;
+
+/// Role color purple (#9b59b6). Source: `--role-purple`
+pub const HEX_ROLE_PURPLE: u32 = 0x9b59b6;
+
+/// Platform Reddit brand red/orange (#ff4500). Source: `--platform-reddit`
+pub const HEX_PLATFORM_REDDIT: u32 = 0xff4500;
+
+// Button control tokens:
+
+/// Control secondary background default (#97979f1f). Source: `--control-secondary-background-default`
+pub const HEX_CONTROL_SECONDARY_BG_DEFAULT: u32 = 0x97979f1f;
+
+/// Control secondary background hover (#97979f29). Source: `--control-secondary-background-hover`
+pub const HEX_CONTROL_SECONDARY_BG_HOVER: u32 = 0x97979f29;
+
+/// Control secondary background active (#97979f33). Source: `--control-secondary-background-active`
+pub const HEX_CONTROL_SECONDARY_BG_ACTIVE: u32 = 0x97979f33;
+
+/// Control critical primary background default (#d22d39). Source: `--control-critical-primary-background-default`
+pub const HEX_CONTROL_CRITICAL_PRIMARY_BG_DEFAULT: u32 = 0xd22d39;
+
+/// Control critical primary background hover (#a9232e). Source: `--control-critical-primary-background-hover`
+pub const HEX_CONTROL_CRITICAL_PRIMARY_BG_HOVER: u32 = 0xa9232e;
+
+/// Control critical primary background active (#971d28). Source: `--control-critical-primary-background-active`
+pub const HEX_CONTROL_CRITICAL_PRIMARY_BG_ACTIVE: u32 = 0x971d28;
+
+/// Control critical secondary text default (#f87e7a). Source: `--control-critical-secondary-text-default`
+pub const HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT: u32 = 0xf87e7a;
+
+/// Control icon-only icon default (#abacb2). Source: `--control-icon-only-icon-default`
+pub const HEX_CONTROL_ICON_ONLY_ICON_DEFAULT: u32 = 0xabacb2;
+
+// ============================================================================
 // Token Accessor Functions (Returning gpui::Rgba)
 // ============================================================================
 
@@ -279,6 +341,126 @@ pub fn modal_backdrop() -> Rgba {
 #[inline]
 pub fn scrollbar_thumb() -> Rgba {
     rgb(HEX_SCROLLBAR_THUMB)
+}
+
+/// Neutral 67 (#35363c)
+#[inline]
+pub fn neutral_67() -> Rgba {
+    rgb(HEX_NEUTRAL_67)
+}
+
+/// Fully transparent (#00000000)
+#[inline]
+pub fn transparent() -> Rgba {
+    rgba(HEX_TRANSPARENT)
+}
+
+/// Opacity White 8% (#ffffff14)
+#[inline]
+pub fn opacity_white_8() -> Rgba {
+    rgba(HEX_OPACITY_WHITE_8)
+}
+
+/// Control primary border alias (#ffffff14)
+#[inline]
+pub fn control_primary_border() -> Rgba {
+    opacity_white_8()
+}
+
+/// Opacity White 20% (#ffffff33)
+#[inline]
+pub fn opacity_white_20() -> Rgba {
+    rgba(HEX_OPACITY_WHITE_20)
+}
+
+/// Premium Tier 2 Purple for gradients (#8547c6)
+#[inline]
+pub fn premium_tier_2_purple_for_gradients() -> Rgba {
+    rgb(HEX_PREMIUM_TIER_2_PURPLE_FOR_GRADIENTS)
+}
+
+/// Alias for premium_tier_2_purple_for_gradients (#8547c6)
+#[inline]
+pub fn premium_tier_2_purple() -> Rgba {
+    premium_tier_2_purple_for_gradients()
+}
+
+/// Background animated gradient pink stop (#eb459e)
+#[inline]
+pub fn bg_animated_gradient_pink_1() -> Rgba {
+    rgb(HEX_BG_ANIMATED_GRADIENT_PINK_1)
+}
+
+/// Platform Xbox green (#107c10)
+#[inline]
+pub fn platform_xbox() -> Rgba {
+    rgb(HEX_PLATFORM_XBOX)
+}
+
+/// Platform Spotify green (#1db954)
+#[inline]
+pub fn platform_spotify() -> Rgba {
+    rgb(HEX_PLATFORM_SPOTIFY)
+}
+
+/// Role purple (#9b59b6)
+#[inline]
+pub fn role_purple() -> Rgba {
+    rgb(HEX_ROLE_PURPLE)
+}
+
+/// Platform Reddit red/orange (#ff4500)
+#[inline]
+pub fn platform_reddit() -> Rgba {
+    rgb(HEX_PLATFORM_REDDIT)
+}
+
+/// Control secondary background default (#97979f1f)
+#[inline]
+pub fn control_secondary_bg_default() -> Rgba {
+    rgba(HEX_CONTROL_SECONDARY_BG_DEFAULT)
+}
+
+/// Control secondary background hover (#97979f29)
+#[inline]
+pub fn control_secondary_bg_hover() -> Rgba {
+    rgba(HEX_CONTROL_SECONDARY_BG_HOVER)
+}
+
+/// Control secondary background active (#97979f33)
+#[inline]
+pub fn control_secondary_bg_active() -> Rgba {
+    rgba(HEX_CONTROL_SECONDARY_BG_ACTIVE)
+}
+
+/// Control critical primary background default (#d22d39)
+#[inline]
+pub fn control_critical_primary_bg_default() -> Rgba {
+    rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_DEFAULT)
+}
+
+/// Control critical primary background hover (#a9232e)
+#[inline]
+pub fn control_critical_primary_bg_hover() -> Rgba {
+    rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_HOVER)
+}
+
+/// Control critical primary background active (#971d28)
+#[inline]
+pub fn control_critical_primary_bg_active() -> Rgba {
+    rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_ACTIVE)
+}
+
+/// Control critical secondary text default (#f87e7a)
+#[inline]
+pub fn control_critical_secondary_text_default() -> Rgba {
+    rgb(HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT)
+}
+
+/// Control icon-only icon default (#abacb2)
+#[inline]
+pub fn control_icon_only_icon_default() -> Rgba {
+    rgb(HEX_CONTROL_ICON_ONLY_ICON_DEFAULT)
 }
 
 // ============================================================================

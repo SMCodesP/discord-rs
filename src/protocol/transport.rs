@@ -1,5 +1,6 @@
 use crate::domain::{
-    Activity, Channel, CustomStatus, Guild, Message, PresenceStatus, User, VoiceParticipant, VoiceState,
+    Activity, AvatarDecorationData, Channel, CustomStatus, Guild, Message, PresenceStatus, User,
+    VoiceParticipant, VoiceState,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -17,10 +18,16 @@ pub struct GuildFolder {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Relationship {
     pub id: String,
+    #[serde(alias = "type", default)]
     pub rel_type: u32,
     pub username: String,
     pub global_name: Option<String>,
     pub avatar: Option<String>,
+    /// Avatar decoration equipped by the related user, from the `user` object
+    /// of the relationship payload (READY / RELATIONSHIP_ADD / REST).
+    /// Absent or null in the payload -> None.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 impl Relationship {
@@ -171,6 +178,9 @@ pub enum TransportEvent {
         user_id: String,
         error: String,
     },
+    /// The current user object changed live (gateway USER_UPDATE dispatch).
+    /// Carries the updated user; AppState refreshes CurrentUserProfile from it.
+    CurrentUserUpdated(User),
 }
 
 /// Asynchronous transport abstraction for Discord communication.
