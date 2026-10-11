@@ -380,30 +380,35 @@ impl Render for RootView {
                 match modal {
                     ActiveModal::UserSettings => {}
                     ActiveModal::AddServer => {
-                        window.open_dialog(cx, move |dialog, _window, cx| {
-                            build_add_server_dialog(dialog, entity.clone(), cx)
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_add_server_dialog(dialog, entity.clone(), vh, cx)
                         });
                     }
                     ActiveModal::ExploreServers => {
-                        window.open_dialog(cx, move |dialog, _window, cx| {
-                            build_explore_dialog(dialog, entity.clone(), cx)
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_explore_dialog(dialog, entity.clone(), vh, cx)
                         });
                     }
                     ActiveModal::Login | ActiveModal::LoginDiscord => {
                         let token_state = self.token_modal_state.as_ref().expect("modal token state").clone();
-                        window.open_dialog(cx, move |dialog, _window, cx| {
-                            build_login_dialog(dialog, entity.clone(), &token_state, cx)
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_login_dialog(dialog, entity.clone(), &token_state, vh, cx)
                         });
                     }
                     ActiveModal::AddFriendToGroup(channel_id) => {
                         let cid = channel_id.clone();
-                        window.open_dialog(cx, move |dialog, _window, cx| {
-                            build_add_friend_to_group_dialog(dialog, entity.clone(), cid.clone(), cx)
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_add_friend_to_group_dialog(dialog, entity.clone(), cid.clone(), vh, cx)
                         });
                     }
                     ActiveModal::CreateGroupDm => {
-                        window.open_dialog(cx, move |dialog, _window, cx| {
-                            build_create_group_dm_dialog(dialog, entity.clone(), cx)
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_create_group_dm_dialog(dialog, entity.clone(), vh, cx)
                         });
                     }
                 }
@@ -771,6 +776,8 @@ fn render_login_screen(
                         .child(
                             div()
                                 .pt(space_2())
+                                .w_full()
+                                .max_w(px(456.0))
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -778,8 +785,18 @@ fn render_login_screen(
                                 .gap(px(6.0))
                                 .text_color(text_muted())
                                 .text_size(px(12.0))
-                                .child(icon_lock(px(14.0), text_muted()))
-                                .child("Armazenamento seguro de token com permissões restritas (0600) em ~/.config/discord-rs/auth.json"),
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(icon_lock(px(14.0), text_muted())),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .text_center()
+                                        .child("Armazenamento seguro de token com permissões restritas (0600) em ~/.config/discord-rs/auth.json"),
+                                ),
                         ),
                 ),
         )
@@ -790,6 +807,7 @@ fn build_login_dialog(
     dialog: Dialog,
     entity: Entity<AppState>,
     token_state: &Entity<InputState>,
+    vh: Pixels,
     cx: &mut App,
 ) -> Dialog {
     let entity_close = entity.clone();
@@ -822,8 +840,11 @@ fn build_login_dialog(
     let text_input = build_login_token_input(token_state, is_user, is_connecting);
     let actions = build_login_actions(entity.clone(), is_connecting);
 
+    let margin_top = (vh - px(411.0)).max(px(20.0)) / 2.0;
+
     dialog
         .w(px(520.0))
+        .margin_top(margin_top)
         .on_close(move |_event, _window, cx| {
             entity_close.update(cx, |s, cx| {
                 s.close_modal();
@@ -1019,13 +1040,17 @@ fn build_login_actions(entity: Entity<AppState>, is_connecting: bool) -> AnyElem
 fn build_add_server_dialog(
     dialog: Dialog,
     entity: Entity<AppState>,
+    vh: Pixels,
     _cx: &mut App,
 ) -> Dialog {
     let entity_close = entity.clone();
     let entity_back = entity;
 
+    let margin_top = (vh - px(196.0)).max(px(20.0)) / 2.0;
+
     dialog
         .w(px(440.0))
+        .margin_top(margin_top)
         .on_close(move |_event, _window, cx| {
             entity_close.update(cx, |s, cx| {
                 s.close_modal();
@@ -1076,13 +1101,17 @@ fn build_add_server_dialog(
 fn build_explore_dialog(
     dialog: Dialog,
     entity: Entity<AppState>,
+    vh: Pixels,
     _cx: &mut App,
 ) -> Dialog {
     let entity_close = entity.clone();
     let entity_btn = entity;
 
+    let margin_top = (vh - px(144.0)).max(px(20.0)) / 2.0;
+
     dialog
         .w(px(480.0))
+        .margin_top(margin_top)
         .on_close(move |_event, _window, cx| {
             entity_close.update(cx, |s, cx| {
                 s.close_modal();
@@ -1129,6 +1158,7 @@ fn build_add_friend_to_group_dialog(
     dialog: Dialog,
     entity: Entity<AppState>,
     channel_id: String,
+    vh: Pixels,
     cx: &mut App,
 ) -> Dialog {
     let entity_close = entity.clone();
@@ -1149,12 +1179,21 @@ fn build_add_friend_to_group_dialog(
         ));
     }
 
+    let friend_count = state.friends.len();
+    let list_h = if friend_count == 0 {
+        50.0
+    } else {
+        (friend_count as f32 * 46.0).min(260.0)
+    };
+    let approx_h = 98.0 + list_h;
+    let margin_top = (vh - px(approx_h)).max(px(20.0)) / 2.0;
+
     if friend_rows.is_empty() {
         friend_rows.push(
             div()
                 .p(space_4())
                 .text_center()
-                .text_color(text_muted())
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                 .text_size(px(13.0))
                 .child("Nenhum amigo disponível na sua lista para adicionar.")
                 .into_any_element(),
@@ -1181,13 +1220,14 @@ fn build_add_friend_to_group_dialog(
         )
         .child(
             div()
-                .text_color(text_muted())
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
                 .text_size(px(13.0))
                 .child("Selecione amigos para adicionar a este grupo de conversa direta."),
         );
 
     dialog
         .w(px(460.0))
+        .margin_top(margin_top)
         .on_close(move |_event, _window, cx| {
             entity_close.update(cx, |s, cx| {
                 s.close_modal();
@@ -1255,7 +1295,7 @@ fn render_add_friend_row(
                         )
                         .child(
                             div()
-                                .text_color(text_muted())
+                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                                 .text_size(px(11.0))
                                 .child(format!("@{}", fname)),
                         ),
@@ -1267,7 +1307,7 @@ fn render_add_friend_row(
                 .py(px(4.0))
                 .rounded(radius_sm())
                 .bg(channel_active())
-                .text_color(text_muted())
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                 .text_size(px(12.0))
                 .child("Já adicionado")
                 .into_any_element()
@@ -1291,6 +1331,7 @@ fn render_add_friend_row(
 fn build_create_group_dm_dialog(
     dialog: Dialog,
     entity: Entity<AppState>,
+    vh: Pixels,
     cx: &mut App,
 ) -> Dialog {
     let entity_close = entity.clone();
@@ -1306,12 +1347,21 @@ fn build_create_group_dm_dialog(
         ));
     }
 
+    let friend_count = state.friends.len();
+    let list_h = if friend_count == 0 {
+        50.0
+    } else {
+        (friend_count as f32 * 46.0).min(260.0)
+    };
+    let approx_h = 98.0 + list_h;
+    let margin_top = (vh - px(approx_h)).max(px(20.0)) / 2.0;
+
     if friend_rows.is_empty() {
         friend_rows.push(
             div()
                 .p(space_4())
                 .text_center()
-                .text_color(text_muted())
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                 .text_size(px(13.0))
                 .child("Nenhum amigo disponível na sua lista para criar grupo.")
                 .into_any_element(),
@@ -1338,13 +1388,14 @@ fn build_create_group_dm_dialog(
         )
         .child(
             div()
-                .text_color(text_muted())
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
                 .text_size(px(13.0))
                 .child("Selecione um amigo para iniciar um novo grupo de conversa."),
         );
 
     dialog
         .w(px(460.0))
+        .margin_top(margin_top)
         .on_close(move |_event, _window, cx| {
             entity_close.update(cx, |s, cx| {
                 s.close_modal();
@@ -1409,7 +1460,7 @@ fn render_create_group_dm_row(
                         )
                         .child(
                             div()
-                                .text_color(text_muted())
+                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                                 .text_size(px(11.0))
                                 .child(format!("@{}", fname)),
                         ),
