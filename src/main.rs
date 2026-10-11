@@ -27,6 +27,12 @@ fn main() {
         .with_http_client(Arc::new(ReqwestHttpClient::new()))
         .with_assets(discord_rs::tokens::icons::IconAssetSource)
         .run(move |cx: &mut App| {
+            // Inicializa o gpui-kit (tema, Root, overlays, keybindings) antes de abrir a janela.
+            gpui::init(cx);
+            // PONTO KTheme: outro agente criará `discord_rs::tokens::kit_theme::install(cx)`;
+            // chamar `crate::tokens::kit_theme::install(cx);` aqui, logo após `gpui::init(cx)`.
+            // (Não chamar agora: não existe nesta branch.)
+
             // Dynamically limit window bounds within primary display bounds to avoid Wayland compositor buffer crashes
             let (target_w, target_h) = if let Some(display) = cx.primary_display() {
                 let screen = display.bounds();
@@ -57,7 +63,7 @@ fn main() {
             };
 
             let tel = telemetry_handle.clone();
-            cx.open_window(window_options, move |_window, cx| {
+            gpui::open_window(window_options, cx, move |_window, cx| {
                 let tel = tel.clone();
                 cx.new(move |cx| RootView::new(tel, cx))
             })
