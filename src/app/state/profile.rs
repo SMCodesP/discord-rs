@@ -153,6 +153,7 @@ impl AppState {
             user.avatar = self.current_user.avatar_url.clone();
             user.discriminator = self.current_user.discriminator.clone();
             user.presence = to_domain_presence(self.current_user.presence);
+            user.avatar_decoration_data = self.current_user.avatar_decoration_data.clone();
             let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
             return Some(crate::domain::profile::UserProfileData {
                 user,
@@ -177,6 +178,7 @@ impl AppState {
             user.global_name = Some(m.name.clone());
             user.bot = m.is_bot;
             user.presence = to_domain_presence(m.presence);
+            user.avatar_decoration_data = m.avatar_decoration_data.clone();
             let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
             return Some(crate::domain::profile::UserProfileData {
                 user,
@@ -201,6 +203,7 @@ impl AppState {
             user.global_name = Some(f.display_name.clone());
             user.avatar = f.avatar_url.clone();
             user.presence = to_domain_presence(f.presence);
+            user.avatar_decoration_data = f.avatar_decoration_data.clone();
             let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
             return Some(crate::domain::profile::UserProfileData {
                 user,
@@ -229,6 +232,7 @@ impl AppState {
             let mut user = crate::domain::user::User::new(&recipient_id, &dm.name);
             user.global_name = Some(dm.name.clone());
             user.avatar = dm.icon_url.clone();
+            user.avatar_decoration_data = dm.avatar_decoration_data.clone();
             let created_at = crate::domain::profile::snowflake_to_datetime(&user.id);
             return Some(crate::domain::profile::UserProfileData {
                 user,
