@@ -395,3 +395,30 @@ fn test_guild_messages_do_not_leak_into_dms() {
     let bot_dm_after = state.dm_channels.iter().find(|d| d.id == bot_dm_id).unwrap();
     assert_eq!(bot_dm_after.last_message_id.as_deref(), Some("dm-msg-bot-real"), "Legitimate DM message must update DM last_message_id");
 }
+
+#[test]
+fn test_dm_welcome_header_presentation() {
+    let username = "Usuário B";
+    let dm_topic = format!(
+        "Este é o início do seu histórico de mensagens diretas com {}.",
+        username
+    );
+    assert_eq!(
+        dm_topic,
+        "Este é o início do seu histórico de mensagens diretas com Usuário B."
+    );
+
+    let dm_element = discord_rs::chat::message_list::render_welcome_banner(
+        username,
+        &dm_topic,
+        true,
+    );
+    drop(dm_element);
+
+    let guild_element = discord_rs::chat::message_list::render_welcome_banner(
+        "geral",
+        "Este é o início do canal #geral.",
+        false,
+    );
+    drop(guild_element);
+}

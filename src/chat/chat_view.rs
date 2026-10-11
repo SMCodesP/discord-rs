@@ -208,10 +208,21 @@ impl Render for ChatView {
             .map(|c| c.id.clone())
             .or_else(|| app_state.selected_channel_id.clone())
             .unwrap_or_else(|| "chan-general".to_string());
+        let is_dm = app_state.selected_guild_id.is_none()
+            || app_state.dm_channels.iter().any(|d| d.id == channel_id);
         let channel_topic = selected_channel_opt
             .as_ref()
             .and_then(|c| c.topic.clone())
-            .unwrap_or_else(|| format!("Este é o início do canal #{}.", channel_name));
+            .unwrap_or_else(|| {
+                if is_dm {
+                    format!(
+                        "Este é o início do seu histórico de mensagens diretas com {}.",
+                        channel_name
+                    )
+                } else {
+                    format!("Este é o início do canal #{}.", channel_name)
+                }
+            });
 
         // ZERO DEEP CLONES: borrow direct slice from AppState
         let all_messages = app_state.get_active_messages();
@@ -363,6 +374,7 @@ impl Render for ChatView {
         let items_arc = Arc::new(chat_items.clone());
         let ch_name = channel_name.clone();
         let ch_topic = channel_topic.clone();
+        let is_dm_welcome = is_dm;
         let app_entity_list = app_entity.clone();
         let on_react_item = on_react.clone();
         let on_reply_item = on_reply.clone();
@@ -377,7 +389,7 @@ impl Render for ChatView {
 
             match &items_arc[ix] {
                 ChatListItem::WelcomeHeader => {
-                    render_welcome_banner(&ch_name, &ch_topic).into_any_element()
+                    render_welcome_banner(&ch_name, &ch_topic, is_dm_welcome).into_any_element()
                 }
                 ChatListItem::DateSeparator(date) => {
                     render_date_separator_element(*date).into_any_element()

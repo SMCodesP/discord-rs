@@ -17,9 +17,11 @@ use std::sync::Arc;
 use crate::chat::markdown::render_markdown;
 use crate::chat::reactions::{render_reaction_bar, AddReactionCallback, ReactionActionCallback};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::button::IconButton;
 use crate::domain::message::{Attachment, Embed, Message};
 use crate::tokens::colors::white;
 use crate::tokens::colors::*;
+use crate::tokens::icons::icon_smile;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
 
@@ -115,8 +117,7 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
                 .absolute()
                 .w_full()
                 .h_px()
-                // TOKEN FALTANDO: --background-modifier-accent / COR ANTIGA SEM ORIGEM: 0x3f4147
-                .bg(rgb(0x3f4147)),
+                .bg(rgba(0x97979f1f)), // TOKEN FALTANDO: --border-subtle
         )
         .child(
             // Centered date pill
@@ -148,66 +149,48 @@ pub fn render_hover_action_bar(
     let msg_id_reply = message_id.to_string();
     let msg_id_more = message_id.to_string();
 
-    let mut react_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(28.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
-        .text_color(text_muted())
-        .child(
-            div()
-                .text_size(px(14.0))
-                .child("☺"),
-        );
+    let mut react_btn = IconButton::with_icon(
+        format!("hover-react-{}", message_id),
+        |sz, col| icon_smile(sz, col).into_any_element(),
+    )
+    .size(px(28.0))
+    .icon_size(px(16.0))
+    .rounded(radius_sm())
+    .tooltip("Adicionar reação");
 
     if let Some(handler) = on_react {
-        react_btn = react_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        react_btn = react_btn.on_click(move |_ev, window, cx| {
             handler(&msg_id_react, window, cx);
         });
     }
 
-    let mut reply_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(28.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
-        .text_color(text_muted())
-        .child(
-            div()
-                .text_size(px(14.0))
-                .child("↩"),
-        );
+    let mut reply_btn = IconButton::with_icon(
+        format!("hover-reply-{}", message_id),
+        |sz, col| svg().path("icons/undo-2.svg").size(sz).text_color(col).into_any_element(),
+    )
+    .size(px(28.0))
+    .icon_size(px(16.0))
+    .rounded(radius_sm())
+    .tooltip("Responder");
 
     if let Some(handler) = on_reply {
-        reply_btn = reply_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        reply_btn = reply_btn.on_click(move |_ev, window, cx| {
             handler(&msg_id_reply, window, cx);
         });
     }
 
-    let mut more_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(28.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
-        .text_color(text_muted())
-        .child(
-            div()
-                .text_size(px(14.0))
-                .child("•••"),
-        );
+    let mut more_btn = IconButton::with_icon(
+        format!("hover-more-{}", message_id),
+        |sz, col| svg().path("icons/ellipsis.svg").size(sz).text_color(col).into_any_element(),
+    )
+    .size(px(28.0))
+    .icon_size(px(16.0))
+    .rounded(radius_sm())
+    .tooltip("Mais");
 
     if let Some(handler) = on_more {
-        more_btn = more_btn.on_mouse_down(MouseButton::Left, move |event, window, cx| {
-            handler(&msg_id_more, event.position, window, cx);
+        more_btn = more_btn.on_click(move |event, window, cx| {
+            handler(&msg_id_more, event.position(), window, cx);
         });
     }
 
@@ -336,10 +319,8 @@ fn render_menu_item(
 
     if is_danger {
         item = item
-            // TOKEN FALTANDO: --text-danger / COR ANTIGA SEM ORIGEM: 0xfa777c
-            .text_color(rgb(0xfa777c))
-            // TOKEN FALTANDO: --button-danger-background-hover / COR ANTIGA SEM ORIGEM: 0xda373c
-            .hover(|s| s.bg(rgb(0xda373c)).text_color(white()));
+            .text_color(rgb(0xffa09b)) // TOKEN FALTANDO: --control-critical-secondary-text-default
+            .hover(|s| s.bg(rgb(0xda3e44)).text_color(white())); // TOKEN FALTANDO: --status-danger
     } else {
         item = item
             .text_color(text_primary())
@@ -984,8 +965,15 @@ pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
     items
 }
 
-/// Renders the channel welcome banner displayed at the beginning of chat history.
-pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
+/// Renders the channel or DM welcome banner displayed at the beginning of chat history.
+pub fn render_welcome_banner(channel_name: &str, channel_topic: &str, is_dm: bool) -> Div {
+    let icon_text = if is_dm { "@" } else { "#" };
+    let title_text = if is_dm {
+        channel_name.to_string()
+    } else {
+        format!("Bem-vindo(a) a #{}!", channel_name)
+    };
+
     div()
         .flex()
         .flex_col()
@@ -1004,14 +992,14 @@ pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
                 .text_color(white())
                 .text_size(px(36.0))
                 .font_weight(WEIGHT_BOLD)
-                .child("#"),
+                .child(icon_text),
         )
         .child(
             div()
                 .text_color(text_titles())
                 .font_weight(WEIGHT_BOLD)
                 .text_size(font_size_2xl())
-                .child(format!("Bem-vindo(a) a #{}!", channel_name)),
+                .child(title_text),
         )
         .child(
             div()
@@ -1270,5 +1258,22 @@ mod tests {
             on_close: None,
         });
         drop(menu);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_render_welcome_banner_dm_and_guild() {
+        let dm_banner = render_welcome_banner(
+            "Usuário B",
+            "Este é o início do seu histórico de mensagens diretas com Usuário B.",
+            true,
+        );
+        drop(dm_banner);
+
+        let guild_banner = render_welcome_banner(
+            "geral",
+            "Este é o início do canal #geral.",
+            false,
+        );
+        drop(guild_banner);
     }
 }
