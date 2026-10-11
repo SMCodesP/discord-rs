@@ -1,11 +1,11 @@
 use gpui::component::menu::{ContextMenuExt, PopupMenuItem, PopupMenu};
-use gpui::component::tooltip::Tooltip;
 use gpui::prelude::*;
 use gpui::*;
 
 use super::state::{ActiveModal, ActiveVoiceCall, AppState, ChannelItemState, ChannelKind, CurrentUserProfile, FriendsTab};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::badge::MentionBadge;
+use crate::components::button::IconButton;
 use crate::domain::user::{ActivityType, PresenceStatus};
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
@@ -155,10 +155,10 @@ fn render_server_header(guild_name: &str) -> AnyElement {
                 ),
         )
         .child(
-            div()
-                .text_color(text_normal())
-                .text_size(px(12.0))
-                .child("⌵"),
+            svg()
+                .path("icons/chevron-down.svg")
+                .size(px(16.0))
+                .text_color(text_normal()),
         )
         .into_any_element()
 }
@@ -307,8 +307,15 @@ fn render_dm_nav_button(
                 .flex()
                 .items_center()
                 .gap(px(12.0))
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child(icon)
-                .child(label),
+                .child(
+                    div()
+                        .truncate()
+                        .child(label),
+                ),
         );
 
     if let Some(count) = badge_count {
@@ -335,24 +342,19 @@ fn render_dm_section_header(app_entity: &Entity<AppState>) -> AnyElement {
                 .child("MENSAGENS DIRETAS"),
         )
         .child(
-            div()
-                .id("dm-create-group-btn")
-                .size(px(18.0))
-                .rounded(px(3.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .text_color(text_muted())
-                .hover(|s| s.text_color(white()).bg(channel_hover()))
-                .tooltip(|window, cx| Tooltip::new("Criar DM").build(window, cx))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    entity.update(cx, |s, cx| {
-                        s.open_modal(ActiveModal::CreateGroupDm);
-                        cx.notify();
-                    });
-                })
-                .child(icon_plus(px(12.0), text_muted())),
+            IconButton::with_icon("dm-create-group-btn", |sz, col| {
+                icon_plus(sz, col).into_any_element()
+            })
+            .size(px(18.0))
+            .icon_size(px(12.0))
+            .rounded(px(3.0))
+            .tooltip("Criar DM")
+            .on_click(move |_event, _window, cx| {
+                entity.update(cx, |s, cx| {
+                    s.open_modal(ActiveModal::CreateGroupDm);
+                    cx.notify();
+                });
+            }),
         )
         .into_any_element()
 }
@@ -455,6 +457,9 @@ fn render_dm_item(
                 .flex()
                 .items_center()
                 .gap(px(8.0)) // 8px gap per dm-list.md
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child({
                     let mut av = div().child(avatar_el).cursor_pointer();
                     if let Some(uid) = dm.recipient_ids.first().cloned() {
@@ -488,39 +493,29 @@ fn render_dm_item(
             .items_center()
             .gap(px(4.0))
             .child(
-                div()
-                    .id(ElementId::Name(format!("dm-add-friend-{}", dm_id).into()))
-                    .size(px(20.0))
-                    .rounded(radius_sm())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(text_muted())
-                    .hover(|s| s.text_color(white()).bg(channel_hover()))
-                    .cursor_pointer()
-                    .tooltip(|window, cx| Tooltip::new("Adicionar amigos à DM").build(window, cx))
-                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                        let cid = add_cid.clone();
-                        add_entity.update(cx, |s, cx| {
-                            s.open_modal(ActiveModal::AddFriendToGroup(cid));
-                            cx.notify();
-                        });
-                    })
-                    .child(icon_user(px(14.0), text_muted())),
+                IconButton::with_icon(format!("dm-add-friend-{}", dm_id), |sz, col| {
+                    icon_user(sz, col).into_any_element()
+                })
+                .size(px(20.0))
+                .icon_size(px(14.0))
+                .rounded(radius_sm())
+                .tooltip("Adicionar amigos à DM")
+                .on_click(move |_event, _window, cx| {
+                    let cid = add_cid.clone();
+                    add_entity.update(cx, |s, cx| {
+                        s.open_modal(ActiveModal::AddFriendToGroup(cid));
+                        cx.notify();
+                    });
+                }),
             )
             .child(
-                div()
-                    .id(ElementId::Name(format!("dm-close-{}", dm_id).into()))
-                    .size(px(16.0))
-                    .rounded(radius_full())
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(text_muted())
-                    .hover(|s| s.text_color(white()).bg(bg_server()))
-                    .cursor_pointer()
-                    .tooltip(|window, cx| Tooltip::new("Fechar DM").build(window, cx))
-                    .child(icon_close(px(12.0), text_muted())),
+                IconButton::with_icon(format!("dm-close-{}", dm_id), |sz, col| {
+                    icon_close(sz, col).into_any_element()
+                })
+                .size(px(16.0))
+                .icon_size(px(12.0))
+                .rounded(radius_full())
+                .tooltip("Fechar DM"),
             ),
     );
 
@@ -583,6 +578,28 @@ fn render_category_header(
     let entity = app_entity.clone();
     let cid = cat_id.to_string();
 
+    let toggle_entity = app_entity.clone();
+    let toggle_cid = cid.clone();
+
+    let chevron_btn = IconButton::with_icon(format!("cat-chevron-{}", cat_id), move |sz, col| {
+        let path = if is_collapsed {
+            "icons/chevron-right.svg"
+        } else {
+            "icons/chevron-down.svg"
+        };
+        svg().path(path).size(sz).text_color(col).into_any_element()
+    })
+    .size(px(16.0))
+    .icon_size(px(10.0))
+    .rounded(radius_xs())
+    .on_click(move |_event, _window, cx| {
+        let cid = toggle_cid.clone();
+        toggle_entity.update(cx, |state, cx| {
+            state.toggle_category(&cid);
+            cx.notify();
+        });
+    });
+
     div()
         .pt(px(12.0))
         .pb(px(4.0))
@@ -592,27 +609,23 @@ fn render_category_header(
         .items_center()
         .justify_between()
         .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            let cid = cid.clone();
-            entity.update(cx, |state, cx| {
-                state.toggle_category(&cid);
-                cx.notify();
-            });
-        })
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
+                .child(chevron_btn)
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .text_color(text_muted())
-                        .child(if is_collapsed { "›" } else { "⌵" }),
-                )
-                .child(
-                    div()
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let cid = cid.clone();
+                            entity.update(cx, |state, cx| {
+                                state.toggle_category(&cid);
+                                cx.notify();
+                            });
+                        })
                         .text_color(text_muted())
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(11.0))
@@ -721,8 +734,12 @@ fn render_channel_entry(
                 .flex_row()
                 .items_center()
                 .gap(px(6.0))
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_size(px(14.0))
                         .text_color(if is_selected { white() } else { text_muted() })
                         .child(ch_kind.symbol()),
@@ -732,6 +749,7 @@ fn render_channel_entry(
                         .text_size(px(14.0))
                         .font_weight(if is_selected || is_unread { FontWeight::BOLD } else { FontWeight::NORMAL })
                         .text_color(if is_selected { white() } else if is_unread { text_header() } else { text_muted() })
+                        .truncate()
                         .child(ch_name),
                 ),
         )
@@ -924,25 +942,20 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                 ),
         )
         .child(
-            div()
-                .id("voice-disconnect-btn")
-                .w(px(28.0))
-                .h(px(28.0))
-                .rounded(radius_sm())
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .text_color(text_muted())
-                .hover(|s| s.bg(status_dnd()).text_color(white()))
-                .tooltip(|window, cx| Tooltip::new("Desconectar").build(window, cx))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    entity.update(cx, |state, cx| {
-                        state.disconnect_voice();
-                        cx.notify();
-                    });
-                })
-                .child(icon_phone_hangup(px(16.0), text_muted())),
+            IconButton::with_icon("voice-disconnect-btn", |sz, col| {
+                icon_phone_hangup(sz, col).into_any_element()
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(radius_sm())
+            .danger(true)
+            .tooltip("Desconectar")
+            .on_click(move |_event, _window, cx| {
+                entity.update(cx, |state, cx| {
+                    state.disconnect_voice();
+                    cx.notify();
+                });
+            }),
         )
         .into_any_element()
 }
@@ -1039,74 +1052,64 @@ fn render_user_audio_buttons(
         .child({
             let entity = entity.clone();
             let mute_tooltip = if is_muted { "Ativar microfone" } else { "Desativar microfone" };
-            div()
-                .id("user-panel-mute-btn")
-                .size(px(32.0)) // 32x32 per user-panel.md
-                .rounded(radius_md()) // 8px per user-panel.md
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(channel_hover()))
-                .tooltip(move |window, cx| Tooltip::new(mute_tooltip).build(window, cx))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    entity.update(cx, |state, cx| {
-                        state.toggle_mute();
-                        cx.notify();
-                    });
-                })
-                .child(if is_muted {
-                    icon_mic_off(px(18.0), status_dnd())
+            IconButton::with_icon("user-panel-mute-btn", move |sz, _col| {
+                if is_muted {
+                    icon_mic_off(sz, status_dnd()).into_any_element()
                 } else {
-                    icon_mic(px(18.0), text_normal())
-                })
+                    icon_mic(sz, text_normal()).into_any_element()
+                }
+            })
+            .size(px(32.0))
+            .icon_size(px(18.0))
+            .rounded(radius_md())
+            .danger(is_muted)
+            .tooltip(mute_tooltip)
+            .on_click(move |_event, _window, cx| {
+                entity.update(cx, |state, cx| {
+                    state.toggle_mute();
+                    cx.notify();
+                });
+            })
         })
         // Deafen Button (32x32)
         .child({
             let entity = entity.clone();
             let deafen_tooltip = if is_deafened { "Desativar áudio" } else { "Ensordecer" };
-            div()
-                .id("user-panel-deafen-btn")
-                .size(px(32.0)) // 32x32 per user-panel.md
-                .rounded(radius_md()) // 8px per user-panel.md
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(channel_hover()))
-                .tooltip(move |window, cx| Tooltip::new(deafen_tooltip).build(window, cx))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    entity.update(cx, |state, cx| {
-                        state.toggle_deafen();
-                        cx.notify();
-                    });
-                })
-                .child(if is_deafened {
-                    icon_headphones_off(px(18.0), status_dnd())
+            IconButton::with_icon("user-panel-deafen-btn", move |sz, _col| {
+                if is_deafened {
+                    icon_headphones_off(sz, status_dnd()).into_any_element()
                 } else {
-                    icon_headphones(px(18.0), text_normal())
-                })
+                    icon_headphones(sz, text_normal()).into_any_element()
+                }
+            })
+            .size(px(32.0))
+            .icon_size(px(18.0))
+            .rounded(radius_md())
+            .danger(is_deafened)
+            .tooltip(deafen_tooltip)
+            .on_click(move |_event, _window, cx| {
+                entity.update(cx, |state, cx| {
+                    state.toggle_deafen();
+                    cx.notify();
+                });
+            })
         })
         // Settings Button (32x32)
         .child({
             let entity = entity.clone();
-            div()
-                .id("user-panel-settings-btn")
-                .size(px(32.0)) // 32x32 per user-panel.md
-                .rounded(radius_md()) // 8px per user-panel.md
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .hover(|s| s.bg(channel_hover()))
-                .tooltip(|window, cx| Tooltip::new("Configurações de Usuário").build(window, cx))
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    entity.update(cx, |state, cx| {
-                        state.open_modal(ActiveModal::UserSettings);
-                        cx.notify();
-                    });
-                })
-                .child(icon_gear(px(18.0), text_normal()))
+            IconButton::with_icon("user-panel-settings-btn", |sz, _col| {
+                icon_gear(sz, text_normal()).into_any_element()
+            })
+            .size(px(32.0))
+            .icon_size(px(18.0))
+            .rounded(radius_md())
+            .tooltip("Configurações de Usuário")
+            .on_click(move |_event, _window, cx| {
+                entity.update(cx, |state, cx| {
+                    state.open_modal(ActiveModal::UserSettings);
+                    cx.notify();
+                });
+            })
         })
         .into_any_element()
 }

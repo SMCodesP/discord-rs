@@ -185,6 +185,9 @@ fn render_member_row(item: MemberItem) -> AnyElement {
 
     let mut row = div()
         .id(item.id)
+        .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden()
         .flex()
         .items_center()
         .h(px(44.0))
@@ -260,6 +263,7 @@ fn render_member_row(item: MemberItem) -> AnyElement {
             div()
                 .text_size(font_size_xs())
                 .text_color(text_muted())
+                .w_full()
                 .min_w(px(0.0))
                 .truncate()
                 .child(act),
