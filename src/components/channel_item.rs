@@ -216,10 +216,12 @@ fn render_channel_row(item: ChannelItem) -> AnyElement {
     row = row.child(
         div()
             .flex_1()
+            .min_w(px(0.0))
             .text_size(font_size_sm())
             .font_weight(font_weight)
             .text_color(text_color)
             .overflow_hidden()
+            .truncate()
             .child(item.name),
     );
 
