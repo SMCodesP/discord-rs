@@ -12,12 +12,10 @@
 //! state they own (see `RootView`), instead of the old controlled
 //! `.value()/.on_change()/.on_enter()` props.
 
-use gpui::component::Theme;
 use gpui::component::input::{Input as KitInput, InputState};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
@@ -28,22 +26,6 @@ pub type TextInputChangeCallback = Arc<dyn Fn(String, &mut Window, &mut App) + S
 pub type TextInputActionCallback = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>;
 pub type TextInputMaskCallback = Arc<dyn Fn(bool, &mut Window, &mut App) + Send + Sync + 'static>;
 
-/// Activates the Discord kit theme once, so the kit engine draws text,
-/// placeholder, caret and selection with Discord colors instead of the kit
-/// light default. `main.rs` cannot be touched by the input wave, so the kit
-/// consumer does it here; a later `install` call from `main.rs` is idempotent
-/// and simply re-applies the same theme.
-fn ensure_discord_theme(cx: &mut App) {
-    static DONE: AtomicBool = AtomicBool::new(false);
-    if DONE.load(Ordering::Relaxed) {
-        return;
-    }
-    // Only when kit globals exist (production always; bare test contexts skip).
-    if cx.try_global::<Theme>().is_some() {
-        crate::tokens::kit_theme::install(cx);
-        DONE.store(true, Ordering::Relaxed);
-    }
-}
 
 /// Discord styled text input field over a caller-owned kit [`InputState`].
 #[derive(IntoElement)]
@@ -303,8 +285,6 @@ fn render_mask_button(state: &Entity<InputState>, masked: bool) -> AnyElement {
 
 impl RenderOnce for TextInput {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        ensure_discord_theme(cx);
-
         // Forward placeholder to the kit state when it differs.
         if let Some(ref ph) = self.placeholder {
             if self.state.read(cx).presentation().placeholder() != ph {

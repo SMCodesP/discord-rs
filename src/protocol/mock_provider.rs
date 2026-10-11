@@ -424,6 +424,7 @@ impl MockDiscordProvider {
                 username: "ferris_the_crab".to_string(),
                 global_name: Some("Ferris".to_string()),
                 avatar: None,
+                avatar_decoration_data: None,
             },
             Relationship {
                 id: "user-ana".to_string(),
@@ -431,6 +432,7 @@ impl MockDiscordProvider {
                 username: "ana_rust".to_string(),
                 global_name: Some("Ana Dev".to_string()),
                 avatar: None,
+                avatar_decoration_data: None,
             },
             Relationship {
                 id: "user-carlos".to_string(),
@@ -438,6 +440,7 @@ impl MockDiscordProvider {
                 username: "carlos_coder".to_string(),
                 global_name: Some("Carlos".to_string()),
                 avatar: None,
+                avatar_decoration_data: None,
             },
         ];
 
@@ -608,6 +611,7 @@ impl DiscordTransport for MockDiscordProvider {
             username: u.to_string(),
             global_name: Some(u.to_string()),
             avatar: None,
+            avatar_decoration_data: None,
         };
         {
             let mut state = self.state.write().await;

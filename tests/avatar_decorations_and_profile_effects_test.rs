@@ -376,23 +376,149 @@ fn test_kavatardata_active_now_inherits_friend_decoration() {
 }
 
 #[test]
-fn test_kavatardata_relationship_flow_decoration_pending_on_transport() {
-    // Relationship (src/protocol/transport.rs, out of this task's file scope) cannot
-    // carry avatar_decoration_data yet, so friends built from relationship events
-    // keep None here. Documents the blocked dependency instead of hiding it.
+fn test_krel_relationship_decoration_reaches_friend_state() {
+    use discord_rs::protocol::discord_api::parse_relationship_from_json;
+
+    // 1. Parse path (shared by READY relationships, RELATIONSHIP_ADD dispatch
+    // and REST list): decoration comes from the nested `user` object.
+    let with_decor = serde_json::json!({
+        "id": "synth-user-110",
+        "type": 1,
+        "user": {
+            "id": "synth-user-110",
+            "username": "synth_friend",
+            "global_name": "Synth Friend",
+            "avatar": "synth_hash_110",
+            "avatar_decoration_data": { "asset": "a_synth_rel_deco", "sku_id": "synth-sku-3" }
+        }
+    });
+    let rel = parse_relationship_from_json(&with_decor).expect("relationship must parse");
+    assert_eq!(
+        rel.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_rel_deco")
+    );
+
+    // Absent and null decoration -> None (no stale data).
+    let bare = serde_json::json!({
+        "id": "synth-user-111",
+        "type": 1,
+        "user": { "id": "synth-user-111", "username": "synth_bare" }
+    });
+    assert_eq!(
+        parse_relationship_from_json(&bare).expect("bare relationship must parse").avatar_decoration_data,
+        None
+    );
+    let nulled = serde_json::json!({
+        "id": "synth-user-112",
+        "type": 1,
+        "user": {
+            "id": "synth-user-112",
+            "username": "synth_null",
+            "avatar_decoration_data": null
+        }
+    });
+    assert_eq!(
+        parse_relationship_from_json(&nulled).expect("nulled relationship must parse").avatar_decoration_data,
+        None
+    );
+
+    // Flat structure (top-level decoration fallback)
+    let flat = serde_json::json!({
+        "id": "synth-user-112b",
+        "type": 1,
+        "username": "synth_flat",
+        "avatar_decoration_data": { "asset": "a_synth_flat_rel_deco" }
+    });
+    assert_eq!(
+        parse_relationship_from_json(&flat)
+            .expect("flat relationship must parse")
+            .avatar_decoration_data
+            .as_ref()
+            .map(|d| d.asset.as_str()),
+        Some("a_synth_flat_rel_deco")
+    );
+
+    // 2. Bulk path: RelationshipsUpdated carries the decoration into FriendItemState.
     let mut state = AppState::new();
     state.friends.clear();
-
-    state.handle_transport_event(TransportEvent::RelationshipAdd(Relationship {
-        id: "synth-user-110".to_string(),
-        rel_type: 1,
-        username: "synth_friend".to_string(),
-        global_name: Some("Synth Friend".to_string()),
-        avatar: None,
-    }));
-
+    state.handle_transport_event(TransportEvent::RelationshipsUpdated(vec![rel]));
     let friend = state.friends.iter().find(|f| f.id == "synth-user-110").expect("friend must exist");
-    assert_eq!(friend.avatar_decoration_data, None);
+    assert_eq!(
+        friend.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_rel_deco")
+    );
+
+    // 3. Live path: RelationshipAdd creates and later updates the same entry.
+    let mut live = Relationship {
+        id: "synth-user-113".to_string(),
+        rel_type: 1,
+        username: "synth_live".to_string(),
+        global_name: Some("Synth Live".to_string()),
+        avatar: None,
+        avatar_decoration_data: Some(synth_decor("a_synth_live_rel_deco")),
+    };
+    state.handle_transport_event(TransportEvent::RelationshipAdd(live.clone()));
+    let live_friend =
+        state.friends.iter().find(|f| f.id == "synth-user-113").expect("live friend must exist");
+    assert_eq!(
+        live_friend.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_live_rel_deco")
+    );
+    // Re-add without decoration clears it (payload is authoritative).
+    live.avatar_decoration_data = None;
+    state.handle_transport_event(TransportEvent::RelationshipAdd(live));
+    let cleared =
+        state.friends.iter().find(|f| f.id == "synth-user-113").expect("friend must still exist");
+    assert_eq!(cleared.avatar_decoration_data, None);
+
+    // 4. Bare relationship literal -> None.
+    state.handle_transport_event(TransportEvent::RelationshipAdd(Relationship {
+        id: "synth-user-114".to_string(),
+        rel_type: 1,
+        username: "synth_plain".to_string(),
+        global_name: None,
+        avatar: None,
+        avatar_decoration_data: None,
+    }));
+    let plain =
+        state.friends.iter().find(|f| f.id == "synth-user-114").expect("plain friend must exist");
+    assert_eq!(plain.avatar_decoration_data, None);
+}
+
+#[test]
+fn test_krel_user_update_refreshes_current_user_profile() {
+    // Live USER_UPDATE dispatch refreshes identity, avatar and decoration,
+    // and leaves presence / custom status untouched (not in the payload).
+    let mut state = AppState::new();
+    state.current_user.presence = AppPresenceStatus::Online;
+    state.current_user.custom_status = Some("synth status".to_string());
+
+    let mut updated = User::new("synth-user-115", "synth_renamed");
+    updated.global_name = Some("Synth Renamed".to_string());
+    updated.avatar = Some("synth_new_hash".to_string());
+    updated.avatar_decoration_data = Some(synth_decor("a_synth_self_update_deco"));
+    state.handle_transport_event(TransportEvent::CurrentUserUpdated(updated));
+
+    assert_eq!(state.current_user.id, "synth-user-115");
+    assert_eq!(state.current_user.username, "synth_renamed");
+    assert_eq!(state.current_user.display_name, "Synth Renamed");
+    assert_eq!(
+        state.current_user.avatar_url.as_deref(),
+        Some("https://cdn.discordapp.com/avatars/synth-user-115/synth_new_hash.png")
+    );
+    assert_eq!(
+        state.current_user.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_self_update_deco")
+    );
+    // Untouched by the payload.
+    assert_eq!(state.current_user.presence, AppPresenceStatus::Online);
+    assert_eq!(state.current_user.custom_status.as_deref(), Some("synth status"));
+
+    // Payload without decoration clears it (payload is authoritative).
+    let plain = User::new("synth-user-115", "synth_renamed");
+    state.handle_transport_event(TransportEvent::CurrentUserUpdated(plain));
+    assert_eq!(state.current_user.avatar_decoration_data, None);
+    assert_eq!(state.current_user.avatar_url, None);
 }
 
 #[test]
@@ -475,4 +601,29 @@ fn test_kavatardata_struct_json_backward_shapes() {
         serde_json::from_str(r#"{"user_id": "synth-user-116", "session_id": "s"}"#)
             .expect("legacy voice state must deserialize");
     assert_eq!(vs_bare.avatar_decoration_data, None);
+
+    // Relationship with decoration present / absent / null.
+    let rel_json = r#"{
+        "id": "synth-user-117",
+        "type": 1,
+        "username": "synth_rel_json",
+        "avatar_decoration_data": { "asset": "a_synth_rel_json" }
+    }"#;
+    let rel: Relationship = serde_json::from_str(rel_json).expect("relationship must deserialize");
+    assert_eq!(
+        rel.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_rel_json")
+    );
+
+    let rel_bare: Relationship = serde_json::from_str(
+        r#"{"id": "synth-user-118", "type": 1, "username": "synth_bare"}"#,
+    )
+    .expect("legacy relationship must deserialize");
+    assert_eq!(rel_bare.avatar_decoration_data, None);
+
+    let rel_null: Relationship = serde_json::from_str(
+        r#"{"id": "synth-user-119", "type": 1, "username": "synth_null", "avatar_decoration_data": null}"#,
+    )
+    .expect("null decoration relationship must deserialize");
+    assert_eq!(rel_null.avatar_decoration_data, None);
 }

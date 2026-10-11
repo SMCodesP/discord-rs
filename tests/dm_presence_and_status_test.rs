@@ -149,6 +149,7 @@ fn test_unknown_presence_defaults_to_offline_and_updates() {
         Relationship {
             id: friend_id.clone(),
             rel_type: 1, // Friend
+            avatar_decoration_data: None,
             username: "bob_dev".to_string(),
             global_name: Some("Bob".to_string()),
             avatar: None,
