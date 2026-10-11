@@ -598,6 +598,38 @@ impl AssetSource for IconAssetSource {
     }
 }
 
+/// Composite asset source: answers Discord icon paths first, then delegates to the
+/// kit's official bundle (`gpui_kit_assets::Assets`, via the `gpui::assets` re-export)
+/// so kit components resolve their Lucide icons too.
+///
+/// Precedence keeps every Discord icon byte-identical (Discord wins on colliding
+/// `icons/*.svg` names); unknown paths fall through to the kit, and paths neither
+/// source knows resolve to `Ok(None)`, preserving `IconAssetSource`'s contract.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AppAssetSource;
+
+impl AssetSource for AppAssetSource {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(bytes) = IconAssetSource.load(path)? {
+            return Ok(Some(bytes));
+        }
+        match gpui::assets::Assets.load(path) {
+            Ok(bytes) => Ok(bytes),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        let mut out = IconAssetSource.list(path)?;
+        for entry in gpui::assets::Assets.list(path)? {
+            if !out.iter().any(|existing| existing == &entry) {
+                out.push(entry);
+            }
+        }
+        Ok(out)
+    }
+}
+
 // ============================================================================
 // Reusable Component Helpers (Returning Div)
 // ============================================================================
@@ -860,4 +892,56 @@ pub fn icon_link(size: Pixels, color: impl Into<Hsla>) -> Div {
     render_icon(DiscordIcon::Link, size, color)
 }
 
+#[cfg(test)]
+mod tests {
+    // NOTE: import Kit types explicitly here, never `use super::*`:
+    // the `gpui::*` glob re-exports GPUI's `test` macro, which would shadow
+    // the builtin `#[test]` and send rustc into a stack overflow (SIGSEGV).
+    // (gpui-kit lib.rs docs: "Test modules should import their Kit types
+    // explicitly to avoid shadowing Rust's #[test]".)
+    use super::AppAssetSource;
+    use super::DiscordIcon;
+    use gpui::AssetSource;
 
+    #[test]
+    fn composite_asset_source_serves_discord_then_kit_icons() {
+        let source = AppAssetSource;
+
+        // (a) Existing Discord icon path resolves to non-empty bytes.
+        let discord_path: String = DiscordIcon::Gamepad.asset_path().to_string();
+        match source.load(&discord_path) {
+            Ok(Some(bytes)) => assert!(!bytes.is_empty(), "discord icon is empty"),
+            other => panic!("discord icon must resolve, got ok={}", other.is_ok()),
+        }
+
+        // (b) Real kit icon path (in gpui-kit-assets default-icons.txt, absent from
+        // the Discord catalog) resolves to non-empty bytes via delegation.
+        match source.load("icons/calendar.svg") {
+            Ok(Some(bytes)) => assert!(!bytes.is_empty(), "kit icon is empty"),
+            other => panic!("kit icon must resolve, got ok={}", other.is_ok()),
+        }
+
+        // (c) Unknown path resolves to no bytes and no error.
+        let unknown = source
+            .load("icons/nao-existe-xyz.svg")
+            .expect("unknown path must not error");
+        assert!(unknown.is_none(), "unknown path must not resolve to an icon");
+
+        // list() covers both catalogs without duplicates.
+        let listed = source.list("icons/").expect("asset listing works");
+        let paths: Vec<String> = listed.iter().map(|p| p.to_string()).collect();
+        assert!(
+            paths.iter().any(|p| *p == discord_path),
+            "listing must contain the discord icon",
+        );
+        assert!(
+            paths.iter().any(|p| p == "icons/calendar.svg"),
+            "listing must contain the kit icon",
+        );
+        let mut seen = std::collections::HashSet::new();
+        assert!(
+            paths.iter().all(|p| seen.insert(p.clone())),
+            "listing must not contain duplicates",
+        );
+    }
+}
