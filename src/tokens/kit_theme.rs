@@ -82,6 +82,39 @@ pub const CSS_SUCCESS_ACTIVE: &str = "#00562a";
 /// Light green. Source: `--green-330`.
 pub const CSS_GREEN_LIGHT: &str = "#65ba7f";
 
+/// Switch background default. Source: `--switch-background-default`
+/// `hsl(0 calc(1*0%) 0%/0.12156862745098039)`.
+pub const CSS_SWITCH_BG: &str = "#0000001f";
+
+/// Switch thumb background default. Source: `--switch-thumb-background-default`
+/// `hsl(0 calc(1*0%) 100%/1)`.
+pub const CSS_SWITCH_THUMB: &str = "#ffffff";
+
+/// Slider track background. Source: `--slider-track-background`
+/// `color-mix(in oklab,hsl(234 calc(1*6.579%) 29.804%/1) 100%,rgb(8,0,26) 50%)`.
+pub const CSS_SLIDER_TRACK: &str = "#302d3f";
+
+/// Chart categorical 1. Source: `--chart-categorical-1`.
+pub const CSS_CHART_1: &str = "#3c3da2";
+
+/// Chart categorical 2. Source: `--chart-categorical-2`.
+pub const CSS_CHART_2: &str = "#a05c40";
+
+/// Chart categorical 3. Source: `--chart-categorical-3`.
+pub const CSS_CHART_3: &str = "#6733a2";
+
+/// Chart categorical 4. Source: `--chart-categorical-4`.
+pub const CSS_CHART_4: &str = "#346f82";
+
+/// Chart categorical 5. Source: `--chart-categorical-5`.
+pub const CSS_CHART_5: &str = "#42735d";
+
+/// Chart bullish / positive. Source: `--chart-positive`.
+pub const CSS_CHART_BULLISH: &str = "#42735d";
+
+/// Chart bearish / negative. Source: `--chart-negative`.
+pub const CSS_CHART_BEARISH: &str = "#862035";
+
 // ============================================================================
 // JSON builders (pure: the exact payload `install` feeds the registry)
 // ============================================================================
@@ -211,6 +244,18 @@ pub fn discord_theme_json() -> String {
         "base.blue.light": CSS_BLUE_LIGHT,
         "base.yellow": hex6(colors::HEX_STATUS_IDLE),
         "base.yellow.light": CSS_WARNING_HOVER,
+        // --- switches / sliders ---
+        "switch.background": CSS_SWITCH_BG,
+        "switch.thumb.background": CSS_SWITCH_THUMB,
+        "slider.background": CSS_SLIDER_TRACK,
+        // --- charts ---
+        "chart.1": CSS_CHART_1,
+        "chart.2": CSS_CHART_2,
+        "chart.3": CSS_CHART_3,
+        "chart.4": CSS_CHART_4,
+        "chart.5": CSS_CHART_5,
+        "chart.bullish": CSS_CHART_BULLISH,
+        "chart.bearish": CSS_CHART_BEARISH,
     });
 
     serde_json::json!({
@@ -315,6 +360,44 @@ pub struct DiscordExtras {
     pub scrollbar_thumb: Rgba,
     /// Pure white (badges, pills).
     pub white: Rgba,
+    /// Neutral 67 surface / border (#35363c).
+    pub neutral_67: Rgba,
+    /// Transparent color (#00000000).
+    pub transparent: Rgba,
+    /// White at ~8% opacity (#ffffff14).
+    pub opacity_white_8: Rgba,
+    /// Control primary border alias (#ffffff14).
+    pub control_primary_border: Rgba,
+    /// White at 20% opacity (#ffffff33).
+    pub opacity_white_20: Rgba,
+    /// Nitro Tier 2 Purple for gradients (#8547c6).
+    pub premium_tier_2_purple: Rgba,
+    /// Animated gradient background pink stop (#eb459e).
+    pub bg_animated_gradient_pink_1: Rgba,
+    /// Platform Xbox brand green (#107c10).
+    pub platform_xbox: Rgba,
+    /// Platform Spotify brand green (#1db954).
+    pub platform_spotify: Rgba,
+    /// Role color purple (#9b59b6).
+    pub role_purple: Rgba,
+    /// Platform Reddit brand red/orange (#ff4500).
+    pub platform_reddit: Rgba,
+    /// Secondary control background default (#97979f1f).
+    pub control_secondary_bg_default: Rgba,
+    /// Secondary control background hover (#97979f29).
+    pub control_secondary_bg_hover: Rgba,
+    /// Secondary control background active (#97979f33).
+    pub control_secondary_bg_active: Rgba,
+    /// Control critical primary background default (#d22d39).
+    pub control_critical_primary_bg_default: Rgba,
+    /// Control critical primary background hover (#a9232e).
+    pub control_critical_primary_bg_hover: Rgba,
+    /// Control critical primary background active (#971d28).
+    pub control_critical_primary_bg_active: Rgba,
+    /// Control critical secondary text default (#f87e7a).
+    pub control_critical_secondary_text_default: Rgba,
+    /// Control icon-only icon default (#abacb2).
+    pub control_icon_only_icon_default: Rgba,
 }
 
 impl Global for DiscordExtras {}
@@ -348,6 +431,25 @@ impl DiscordExtras {
             modal_backdrop: colors::modal_backdrop(),
             scrollbar_thumb: colors::scrollbar_thumb(),
             white: colors::white(),
+            neutral_67: colors::neutral_67(),
+            transparent: colors::transparent(),
+            opacity_white_8: colors::opacity_white_8(),
+            control_primary_border: colors::control_primary_border(),
+            opacity_white_20: colors::opacity_white_20(),
+            premium_tier_2_purple: colors::premium_tier_2_purple(),
+            bg_animated_gradient_pink_1: colors::bg_animated_gradient_pink_1(),
+            platform_xbox: colors::platform_xbox(),
+            platform_spotify: colors::platform_spotify(),
+            role_purple: colors::role_purple(),
+            platform_reddit: colors::platform_reddit(),
+            control_secondary_bg_default: colors::control_secondary_bg_default(),
+            control_secondary_bg_hover: colors::control_secondary_bg_hover(),
+            control_secondary_bg_active: colors::control_secondary_bg_active(),
+            control_critical_primary_bg_default: colors::control_critical_primary_bg_default(),
+            control_critical_primary_bg_hover: colors::control_critical_primary_bg_hover(),
+            control_critical_primary_bg_active: colors::control_critical_primary_bg_active(),
+            control_critical_secondary_text_default: colors::control_critical_secondary_text_default(),
+            control_icon_only_icon_default: colors::control_icon_only_icon_default(),
         }
     }
 
