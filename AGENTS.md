@@ -6,7 +6,7 @@ aplica a você**: não delegue, não recrute, não mexa no canvas.
 
 O projeto é um cliente Discord em Rust com GPUI. A especificação está em
 `docs/ROADMAP_DISCORD_VOICE_AND_PARITY.md`; o estado atual e as pendências, em
-`docs/CONTINUACAO.md`.
+`docs/PENDENCIAS_POS_GPUI_KIT.md`.
 
 ## Onde trabalhar
 

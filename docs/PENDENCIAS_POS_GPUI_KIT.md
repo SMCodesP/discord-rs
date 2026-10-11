@@ -1,4 +1,10 @@
-# Discord RS — Documento de Continuação
+# Discord RS — Pendências para depois da migração ao gpui-kit
+
+> **Ordem de trabalho:** primeiro a migração descrita em
+> [`GPUI_KIT_MIGRATION_SCOPE.md`](GPUI_KIT_MIGRATION_SCOPE.md), inteira. Este
+> documento só é retomado depois dela. Os itens que a migração já cobre (popout
+> ancorado, decoração em todo avatar, palco de chamada) devem ser conferidos
+> aqui e riscados; o restante vira a fila seguinte.
 
 > Estado em 2026-10-10, `main` em `a68e0de`, 277 testes passando e 0 falhando
 > (`cargo test --no-fail-fast`). Escrito pelo orquestrador ao final da primeira

@@ -2,7 +2,7 @@
 
 > Para o próximo orquestrador. Escrito em 2026-10-10 pelo orquestrador da
 > primeira rodada, com base no que foi medido no código e no que deu errado na
-> orquestração de 12 agentes. Leia também [`CONTINUACAO.md`](CONTINUACAO.md).
+> orquestração de 12 agentes. Leia também [`PENDENCIAS_POS_GPUI_KIT.md`](PENDENCIAS_POS_GPUI_KIT.md).
 
 ---
 
@@ -344,7 +344,7 @@ telas reimplementam tudo embutido. A escolha para `channel_item`, `guild_item` e
 | `chat/search.rs` | 995 | 48 | 2 | Campo de busca e popover do kit |
 | `tokens/icons.rs` | 863 | — | — | Manter os ícones do Discord; avaliar o `Icon` do kit só como invólucro |
 | `chat/chat_view.rs` | 826 | — | — | Menus e popovers à mão |
-| `app/user_profile_popout.rs` | 784 | 48 | 2 | Popover ancorado + modal completo (ver `CONTINUACAO.md` 2.1) |
+| `app/user_profile_popout.rs` | 784 | 48 | 2 | Popover ancorado + modal completo (ver `PENDENCIAS_POS_GPUI_KIT.md` 2.1) |
 | `chat/editor.rs` | 638 | 9 | 5 | Campo de texto do kit como base do compositor de mensagem |
 | `app/guild_rail.rs` | 453 | 39 | 4 | Componente de item de guilda, tooltip do kit |
 | `app/voice_call_panel.rs` | 321 | 36 | 5 | Será reescrito no palco de chamada |
@@ -375,8 +375,10 @@ abre paralelo.
 `gpui-kit = "0.7"` (versão exata), tenta compilar e relata: quantos erros, de
 quais tipos, em quais arquivos, e uma estimativa de esforço por tipo.
 
-**Critério de saída:** um relatório. Decide se a migração segue. Não integra
-nada.
+**Critério de saída:** um relatório, usado para dimensionar e dividir a Etapa 1.
+Não integra nada. **A migração segue independentemente do resultado** (decisão
+do dono do projeto): se o volume de erros for grande, divida a Etapa 1 em mais
+agentes por arquivo, mas não pare nem volte ao GPUI antigo.
 
 ### Etapa 1 — Troca de dependência (1 agente)
 
@@ -400,7 +402,7 @@ principais sem diferença visível.
 **Agente `AvatarEverywhere`** (pode começar quando o item 4 acima terminar):
 
 1. Levar `avatar_decoration_data` a todos os modelos de interface e pontos de
-   parsing (ver `CONTINUACAO.md` 2.2).
+   parsing (ver `PENDENCIAS_POS_GPUI_KIT.md` 2.2).
 2. Trocar todo avatar feito à mão pelo componente `Avatar`.
 3. Critério do dono do projeto: onde aparece a foto de um usuário, aparece a
    decoração dele.
@@ -410,7 +412,7 @@ principais sem diferença visível.
 | Agente | Dono de | Entrega |
 |---|---|---|
 | `Inputs` | `components/text_input.rs`, `components/button.rs`, `chat/editor.rs`, `chat/search.rs` | Botão e campo de texto sobre o kit; compositor de mensagem e busca usando-os |
-| `Overlays` | `components/modal.rs`, `components/tooltip.rs`, `components/banner.rs`, menus de contexto, `app/user_profile_popout.rs` | Modal, tooltip, menu de contexto e popover sobre o kit; **popout de perfil ancorado + modal completo** (`CONTINUACAO.md` 2.1) |
+| `Overlays` | `components/modal.rs`, `components/tooltip.rs`, `components/banner.rs`, menus de contexto, `app/user_profile_popout.rs` | Modal, tooltip, menu de contexto e popover sobre o kit; **popout de perfil ancorado + modal completo** (`PENDENCIAS_POS_GPUI_KIT.md` 2.1) |
 
 ### Etapa 4 — Telas (3 ou 4 agentes em paralelo, arquivos disjuntos)
 
@@ -426,7 +428,7 @@ principais sem diferença visível.
 | Agente | Dono de | Observação |
 |---|---|---|
 | `Settings` | `app/user_settings.rs` | Fazer junto com a purga dos dados falsos de Nitro, boosts e conexões |
-| `Stage` | `app/voice_call_panel.rs`, `app/header_bar.rs` | Tarefa em `CONTINUACAO.md` seção 6. Só depois dos testes manuais de voz |
+| `Stage` | `app/voice_call_panel.rs`, `app/header_bar.rs` | Tarefa em `PENDENCIAS_POS_GPUI_KIT.md` seção 6. Só depois dos testes manuais de voz |
 
 ### Revisão
 
