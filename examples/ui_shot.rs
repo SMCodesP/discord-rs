@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use gpui::*;
+use gpui::component::input::InputState;
 use serde::Deserialize;
 
 use discord_rs::app::{
@@ -831,16 +832,16 @@ fn gallery_icon_buttons() -> AnyElement {
     gallery_section("IconButton — normal / active / danger / disabled", row.into_any_element())
 }
 
-fn gallery_text_inputs() -> AnyElement {
-    let empty = TextInput::new("gal-input-empty").placeholder("Placeholder de exemplo");
-    let with_text = TextInput::new("gal-input-text")
+fn gallery_text_inputs(
+    empty: &Entity<InputState>,
+    with_text: &Entity<InputState>,
+    masked: &Entity<InputState>,
+) -> AnyElement {
+    let empty = TextInput::new("gal-input-empty", empty).placeholder("Placeholder de exemplo");
+    let with_text = TextInput::new("gal-input-text", with_text).placeholder("Placeholder de exemplo");
+    let masked = TextInput::new("gal-input-masked", masked)
         .placeholder("Placeholder de exemplo")
-        .value("Texto de exemplo");
-    let masked = TextInput::new("gal-input-masked")
-        .placeholder("Placeholder de exemplo")
-        .value("segredo-exemplo")
-        .secret(true)
-        .masked(true);
+        .secret(true);
     let mut col = div().w_full().flex().flex_col().gap(space_4());
     col = col.child(gallery_labeled(
         "TextInput vazio com placeholder".to_string(),
@@ -901,9 +902,13 @@ fn gallery_banners() -> AnyElement {
     gallery_section("Banner — 4 variantes", col.into_any_element())
 }
 
-struct GalleryView;
+struct GalleryView {
+    input_empty: Entity<InputState>,
+    input_text: Entity<InputState>,
+    input_masked: Entity<InputState>,
+}
 
-fn gallery_content() -> AnyElement {
+fn gallery_content(gal: &GalleryView) -> AnyElement {
     div()
         .size_full()
         .bg(rgb(HEX_BG_CHAT))
@@ -922,7 +927,7 @@ fn gallery_content() -> AnyElement {
         )
         .child(gallery_buttons())
         .child(gallery_icon_buttons())
-        .child(gallery_text_inputs())
+        .child(gallery_text_inputs(&gal.input_empty, &gal.input_text, &gal.input_masked))
         .child(gallery_avatars())
         .child(gallery_banners())
         .into_any_element()
@@ -938,14 +943,14 @@ impl Render for ShotRoot {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         match self {
             ShotRoot::App(root) => root.clone().into_any_element(),
-            ShotRoot::Gallery(_) => gallery_content(),
+            ShotRoot::Gallery(gal) => gallery_content(gal),
         }
     }
 }
 
 impl Render for GalleryView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        gallery_content()
+        gallery_content(self)
     }
 }
 
@@ -1057,9 +1062,24 @@ fn main() {
             let moved_state = app_state;
             let moved_tab = media_tab;
             let is_gallery = fixture.screen == "gallery";
-            let (_handle, _view) = gpui::open_window(window_options, cx, |_window, cx| {
+            let (_handle, _view) = gpui::open_window(window_options, cx, |window, cx| {
                 if is_gallery {
-                    cx.new(|_cx| ShotRoot::Gallery(GalleryView))
+                    let input_empty = cx.new(|cx| InputState::new(window, cx));
+                    let input_text = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("Texto de exemplo")
+                    });
+                    let input_masked = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .default_value("segredo-exemplo")
+                            .masked(true)
+                    });
+                    cx.new(|_cx| {
+                        ShotRoot::Gallery(GalleryView {
+                            input_empty,
+                            input_text,
+                            input_masked,
+                        })
+                    })
                 } else {
                     let state_entity = cx.new(|_cx| moved_state);
                     let root = cx.new(|cx| RootView::with_state(state_entity, cx));
