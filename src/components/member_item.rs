@@ -10,7 +10,6 @@ use gpui::*;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::domain::user::{AvatarDecorationData, PresenceStatus, User};
 use crate::tokens::colors::*;
-use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
 
@@ -164,7 +163,6 @@ fn render_bot_tag() -> AnyElement {
     div()
         .flex()
         .items_center()
-        .gap(px(2.0))
         .px(px(4.0))
         .py(px(1.0))
         .rounded_xs()
@@ -172,7 +170,6 @@ fn render_bot_tag() -> AnyElement {
         .text_color(crate::tokens::colors::white())
         .text_size(font_size_xxs())
         .font_weight(FontWeight::BOLD)
-        .child(icon_check(px(10.0), crate::tokens::colors::white()))
         .child("BOT")
         .into_any_element()
 }
@@ -213,9 +210,9 @@ fn render_member_row(item: MemberItem) -> AnyElement {
         });
     }
 
-    // 40px Avatar with status indicator and optional decoration (per member-sidebar.md)
+    // 32px Avatar with status indicator and optional decoration (per member-sidebar.md)
     let mut avatar = Avatar::new(item.name.clone())
-        .size(AvatarSize::Px40)
+        .size(AvatarSize::Px32)
         .status(item.status)
         .cutout_color(bg_channels())
         .opt_decoration(item.avatar_decoration);
@@ -232,12 +229,14 @@ fn render_member_row(item: MemberItem) -> AnyElement {
         .flex_col()
         .justify_center()
         .flex_1()
+        .min_w(px(0.0))
         .overflow_hidden();
 
     // Top line: Name + Bot Tag
     let mut name_line = div()
         .flex()
         .items_center()
+        .min_w(px(0.0))
         .gap(space_1());
 
     name_line = name_line.child(
@@ -245,7 +244,7 @@ fn render_member_row(item: MemberItem) -> AnyElement {
             .text_size(font_size_sm())
             .font_weight(FontWeight::MEDIUM)
             .text_color(name_color)
-            .overflow_hidden()
+            .truncate()
             .child(item.name),
     );
 
@@ -261,7 +260,8 @@ fn render_member_row(item: MemberItem) -> AnyElement {
             div()
                 .text_size(font_size_xs())
                 .text_color(text_muted())
-                .overflow_hidden()
+                .min_w(px(0.0))
+                .truncate()
                 .child(act),
         );
     }

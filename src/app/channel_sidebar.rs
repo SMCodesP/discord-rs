@@ -133,7 +133,7 @@ fn render_server_header(guild_name: &str) -> AnyElement {
         .items_center()
         .justify_between()
         .border_b_1()
-        .border_color(bg_server()) // TOKEN FALTANDO: --border-subtle (using bg_server)
+        .border_color(rgba(0x635a731f)) // TOKEN FALTANDO: --border-subtle
         .cursor_pointer()
         .hover(|s| s.bg(channel_hover()))
         .child(
@@ -171,7 +171,7 @@ fn render_dm_search_header() -> AnyElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(bg_server()) // TOKEN FALTANDO: --border-subtle (using bg_server)
+        .border_color(rgba(0x635a731f)) // TOKEN FALTANDO: --border-subtle
         .child(
             div()
                 .w_full()
@@ -659,7 +659,7 @@ fn render_channel_entry(
                     .justify_center()
                     .text_size(px(11.0))
                     .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
-                    .text_color(if is_full { white() } else { text_muted() }) // TOKEN FALTANDO: --interactive-normal (using text_muted)
+                    .text_color(if is_full { white() } else { rgb(0x9999b9) }) // TOKEN FALTANDO: --interactive-normal
                     .child(format!("{}/{}", count, limit)),
             )
         } else if count > 0 {
@@ -674,7 +674,7 @@ fn render_channel_entry(
                     .justify_center()
                     .text_size(px(11.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(text_muted()) // TOKEN FALTANDO: --interactive-normal (using text_muted)
+                    .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
                     .child(count.to_string()),
             )
         } else {
@@ -840,7 +840,7 @@ fn render_voice_user_row(
                     div()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(text_muted()) // TOKEN FALTANDO: --interactive-normal (using text_muted)
+                        .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
                         .overflow_hidden()
                         .child(display_name),
                 ),
@@ -1012,7 +1012,7 @@ fn render_user_panel(current_user: &CurrentUserProfile, app_entity: &Entity<AppS
                         )
                         .child(
                             div()
-                                .text_color(text_muted()) // TOKEN FALTANDO: --interactive-normal (using text_muted)
+                                .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
                                 .text_size(px(11.0))
                                 .child(user_tag),
                         ),
@@ -1190,7 +1190,7 @@ fn render_dm_avatar(
     } else {
         let avatar_src = icon_url.or(recipient_friend_avatar).map(|s| s.to_string());
         Avatar::new(dm_name.to_string())
-            .size(AvatarSize::Px40) // 40x40 per dm-list.md
+            .size(AvatarSize::Px32) // 32px photo inside 42px row
             .opt_src(avatar_src)
             .status(presence_status.into())
             .cutout_color(bg_channels())
@@ -1292,7 +1292,7 @@ fn render_dm_text_column(
     } else if unread {
         text_header()
     } else {
-        text_muted() // TOKEN FALTANDO: --interactive-normal (using text_muted)
+        rgb(0x9999b9) // TOKEN FALTANDO: --interactive-normal
     };
     let font_weight = if is_selected || unread {
         FontWeight::SEMIBOLD

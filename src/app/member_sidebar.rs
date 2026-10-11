@@ -7,7 +7,6 @@ use std::rc::Rc;
 use super::state::{AppState, MemberItemState, PresenceStatus};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::tokens::colors::*;
-use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 
 /// An item row in the member sidebar virtual list
@@ -178,9 +177,9 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
             });
         });
 
-    // Avatar using crate::components::Avatar with status cutout & decoration
+    // Avatar using crate::components::Avatar with status cutout & decoration (32px photo inside 40px bounding box)
     let avatar = Avatar::new(member.name.clone())
-        .size(AvatarSize::Px40) // 40x40 per member-sidebar.md
+        .size(AvatarSize::Px32)
         .status(member.presence.into())
         .cutout_color(bg_channels())
         .opt_decoration(member.avatar_decoration_data.clone());
@@ -193,18 +192,21 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
         .flex_col()
         .justify_center()
         .flex_1()
+        .min_w(px(0.0))
         .overflow_hidden();
 
     let mut name_line = div()
         .flex()
         .flex_row()
         .items_center()
+        .min_w(px(0.0))
         .gap(px(4.0))
         .child(
             div()
                 .text_color(role_color)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(14.0))
+                .truncate()
                 .child(member.name.clone()),
         );
 
@@ -219,6 +221,8 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
             div()
                 .text_color(text_muted())
                 .text_size(px(11.0))
+                .min_w(px(0.0))
+                .truncate()
                 .child(act.clone()),
         );
     }
@@ -264,7 +268,6 @@ fn render_bot_tag() -> AnyElement {
     div()
         .flex()
         .items_center()
-        .gap(px(2.0))
         .px(px(4.0))
         .py(px(1.0))
         .rounded_xs()
@@ -272,7 +275,6 @@ fn render_bot_tag() -> AnyElement {
         .text_color(crate::tokens::colors::white())
         .text_size(px(9.0))
         .font_weight(FontWeight::BOLD)
-        .child(icon_check(px(10.0), crate::tokens::colors::white()))
         .child("BOT")
         .into_any_element()
 }
