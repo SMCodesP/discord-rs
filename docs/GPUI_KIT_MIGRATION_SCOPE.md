@@ -237,7 +237,12 @@ para ele.
 - **Onze agentes ao mesmo tempo foi demais.** As contas do Antigravity
   esgotaram a cota quatro vezes (por isso a troca para OpenCode; a cota dos
   provedores dele é desconhecida), a máquina (16 núcleos, 31 GB) ficou sem folga e
-  os merges se atropelaram. **Use três ou quatro por vez.**
+  os merges se atropelaram. Minha recomendação era três ou quatro por vez.
+  **O dono do projeto decidiu por 8 agentes ou mais** nas etapas paralelas.
+  Para isso funcionar: um lock de cargo por par de agentes (4 locks para 8
+  agentes, 16 núcleos / `-j 4`), arquivos estritamente disjuntos, o vigia de
+  `rustc` sempre ligado, e integração de uma branch por vez. Se o modelo
+  gratuito começar a recusar requisições, reduza o número em vez de insistir.
 - **Um `cargo` de cada agente compilando o app inteiro pesa.** Use lock com
   `flock`, um arquivo por par de agentes, e sempre `timeout` e `-j 4`:
   `flock /tmp/discord-rs-cargo-A.lock timeout 600 cargo check -j 4`.
@@ -366,8 +371,12 @@ temas do kit**, e de uma regra: cor fixa em tela não passa na revisão.
 
 ## 6. Frentes e agentes
 
-A ordem importa. As etapas 0 a 2 são sequenciais e de um agente só; só depois
-abre paralelo.
+A ordem importa. As etapas 0 e 1 e o começo da 2 são sequenciais, porque todo o
+resto depende de o projeto compilar no GPUI novo. A partir daí o dono do projeto
+quer **no mínimo 8 agentes em paralelo**: os números de agentes nos títulos
+abaixo são o piso original; subdivida as frentes por arquivo (seção 5) até
+chegar a 8 ou mais. Na Etapa 1, se a sondagem mostrar erros espalhados, já
+divida a correção por arquivo entre vários agentes.
 
 ### Etapa 0 — Sondagem (1 agente, sem integrar)
 
