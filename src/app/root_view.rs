@@ -1,4 +1,6 @@
 use gpui::*;
+use gpui::component::WindowExt;
+use gpui::component::dialog::Dialog;
 use gpui::component::input::{AnyInputState, InputEvent, InputState};
 use super::channel_sidebar::ChannelSidebar;
 use super::guild_rail::GuildRail;
@@ -8,7 +10,9 @@ use super::state::{ActiveModal, AppState, ChannelKind};
 use super::user_settings::UserSettingsModal;
 use super::voice_call_panel::VoiceCallPanel;
 use crate::chat::ChatView;
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::banner::Banner;
+use crate::components::button::{Button, ButtonSize};
 use crate::components::text_input::TextInput;
 use crate::tokens::colors::*;
 use crate::tokens::icons::*;
@@ -39,6 +43,7 @@ pub struct RootView {
     token_modal_sub: Option<Subscription>,
     quick_msg_state: Option<Entity<InputState>>,
     quick_msg_sub: Option<Subscription>,
+    active_modal_open: Option<ActiveModal>,
 }
 
 impl RootView {
@@ -113,6 +118,7 @@ impl RootView {
             token_modal_sub: None,
             quick_msg_state: None,
             quick_msg_sub: None,
+            active_modal_open: None,
         }
     }
 
@@ -149,6 +155,7 @@ impl RootView {
             token_modal_sub: None,
             quick_msg_state: None,
             quick_msg_sub: None,
+            active_modal_open: None,
         }
     }
 }
@@ -329,15 +336,16 @@ impl Render for RootView {
             self.quick_msg_sub = None;
         }
 
-        let state = self.state.read(cx);
+        let (is_connected_to_gateway, active_modal) = {
+            let s = self.state.read(cx);
+            (s.is_connected_to_gateway, s.active_modal.clone())
+        };
 
         // =========================================================================
         // MANDATORY INITIAL LOGIN SCREEN:
         // If not connected to the live Discord Gateway, show the full-screen login.
         // No chat background or sidebar is leaked.
         // =========================================================================
-        let state_snapshot = state.clone();
-        let is_connected_to_gateway = state_snapshot.is_connected_to_gateway;
         if !is_connected_to_gateway {
             // Autofocus the kit token field itself (its own focus handle).
             if let Some(st) = self.token_login_state.clone() {
@@ -346,6 +354,7 @@ impl Render for RootView {
                     window.focus(&fh, cx);
                 }
             }
+            let state_snapshot = self.state.read(cx).clone();
             return render_login_screen(
                 self.state.clone(),
                 &state_snapshot,
@@ -358,8 +367,68 @@ impl Render for RootView {
         // AUTHENTICATED APP SHELL:
         // Transition seamlessly to the full native Discord layout once connected.
         // =========================================================================
+
+        // Synchronize ActiveModal state with WindowState dialog layer
+        let current_modal = active_modal.clone();
+        if self.active_modal_open != current_modal {
+            if self.active_modal_open.is_some() {
+                window.close_all_dialogs(cx);
+            }
+            self.active_modal_open = current_modal.clone();
+            if let Some(ref modal) = current_modal {
+                let entity = self.state.clone();
+                match modal {
+                    ActiveModal::UserSettings => {}
+                    ActiveModal::AddServer => {
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_add_server_dialog(dialog, entity.clone(), vh, cx)
+                        });
+                    }
+                    ActiveModal::ExploreServers => {
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_explore_dialog(dialog, entity.clone(), vh, cx)
+                        });
+                    }
+                    ActiveModal::Login | ActiveModal::LoginDiscord => {
+                        let token_state = self.token_modal_state.as_ref().expect("modal token state").clone();
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_login_dialog(dialog, entity.clone(), &token_state, vh, cx)
+                        });
+                    }
+                    ActiveModal::AddFriendToGroup(channel_id) => {
+                        let cid = channel_id.clone();
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_add_friend_to_group_dialog(dialog, entity.clone(), cid.clone(), vh, cx)
+                        });
+                    }
+                    ActiveModal::CreateGroupDm => {
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_create_group_dm_dialog(dialog, entity.clone(), vh, cx)
+                        });
+                    }
+                }
+            }
+        } else if self.active_modal_open.is_some()
+            && self.active_modal_open != Some(ActiveModal::UserSettings)
+            && !window.has_active_dialog(cx)
+        {
+            self.active_modal_open = None;
+            let entity = self.state.clone();
+            entity.update(cx, |s, cx| {
+                if s.active_modal.is_some() && s.active_modal != Some(ActiveModal::UserSettings) {
+                    s.close_modal();
+                    cx.notify();
+                }
+            });
+        }
+
+        let state = self.state.read(cx);
         let show_members = state.show_members && state.selected_guild_id.is_some();
-        let active_modal = state.active_modal.clone();
         let selected_channel = state.get_selected_channel().map(|(_, ch)| ch.clone());
         let in_voice_channel = selected_channel
             .as_ref()
@@ -370,8 +439,8 @@ impl Render for RootView {
         div()
             .relative()
             .size_full()
-            .bg(rgb(0x313338))
-            .text_color(rgb(0xdbdee1))
+            .bg(bg_chat())
+            .text_color(text_primary())
             .overflow_hidden()
             .flex()
             .flex_row()
@@ -394,7 +463,7 @@ impl Render for RootView {
                     .min_w(px(0.0))
                     .flex()
                     .flex_col()
-                    .bg(rgb(0x313338))
+                    .bg(bg_chat())
                     .overflow_hidden()
                     // Top Header Bar (48px)
                     .child(self.header_bar.clone())
@@ -423,35 +492,16 @@ impl Render for RootView {
                 None
             })
             // =========================================================================
-            // MODAL OVERLAY LAYER (Settings, Add Server, Explore, Manage Connection)
+            // MODAL OVERLAY LAYER (User Settings is full-screen, others use Dialog)
             // =========================================================================
-            .children(if let Some(modal) = active_modal {
-                let entity = app_entity.clone();
+            .children(if let Some(ActiveModal::UserSettings) = active_modal {
                 Some(
                     div()
                         .absolute()
                         .top_0()
                         .left_0()
                         .size_full()
-                        .child(match modal {
-                            ActiveModal::UserSettings => self.user_settings.clone().into_any_element(),
-                            ActiveModal::AddServer => render_add_server_modal(entity).into_any_element(),
-                            ActiveModal::ExploreServers => render_explore_modal(entity).into_any_element(),
-                            ActiveModal::Login | ActiveModal::LoginDiscord => {
-                                render_login_modal(
-                                    entity,
-                                    &state,
-                                    self.token_modal_state.as_ref().expect("modal token state"),
-                                )
-                                .into_any_element()
-                            }
-                            ActiveModal::AddFriendToGroup(channel_id) => {
-                                render_add_friend_to_group_modal(entity, &state, channel_id).into_any_element()
-                            }
-                            ActiveModal::CreateGroupDm => {
-                                render_create_group_dm_modal(entity, &state).into_any_element()
-                            }
-                        }),
+                        .child(self.user_settings.clone()),
                 )
             } else {
                 None
@@ -726,6 +776,8 @@ fn render_login_screen(
                         .child(
                             div()
                                 .pt(space_2())
+                                .w_full()
+                                .max_w(px(456.0))
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -733,49 +785,200 @@ fn render_login_screen(
                                 .gap(px(6.0))
                                 .text_color(text_muted())
                                 .text_size(px(12.0))
-                                .child(icon_lock(px(14.0), text_muted()))
-                                .child("Armazenamento seguro de token com permissões restritas (0600) em ~/.config/discord-rs/auth.json"),
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .child(icon_lock(px(14.0), text_muted())),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .text_center()
+                                        .child("Armazenamento seguro de token com permissões restritas (0600) em ~/.config/discord-rs/auth.json"),
+                                ),
                         ),
                 ),
         )
 }
 
-/// Renders the "Conectar ao Discord" modal dialog (Bot / User Token) when opened inside the App Shell
-fn render_login_modal(
+/// Builds the Dialog for "Conectar ao Discord" (Bot / User Token modal inside App Shell)
+fn build_login_dialog(
+    dialog: Dialog,
     entity: Entity<AppState>,
-    state: &AppState,
     token_state: &Entity<InputState>,
-) -> impl IntoElement {
+    vh: Pixels,
+    cx: &mut App,
+) -> Dialog {
     let entity_close = entity.clone();
-    let entity_connect = entity.clone();
-    let entity_bot_toggle = entity.clone();
-    let entity_user_toggle = entity.clone();
-
+    let state = entity.read(cx);
     let is_user = state.is_user_token;
     let is_connecting = state.is_connecting;
 
-    // Top status banner
-    let banner = if let Some(ref err) = state.auth_error {
+    let header = div()
+        .flex()
+        .flex_col()
+        .gap(space_1())
+        .items_center()
+        .text_center()
+        .child(
+            div()
+                .text_color(text_titles())
+                .font_weight(FontWeight::BOLD)
+                .text_size(font_size_2xl())
+                .child("Gerenciar Conexão do Discord"),
+        )
+        .child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_sm())
+                .child("Acesse servidores, canais e mensagens em tempo real via Gateway v10"),
+        );
+
+    let banner = build_login_banner(state);
+    let toggle = build_login_mode_toggle(entity.clone(), is_user);
+    let text_input = build_login_token_input(token_state, is_user, is_connecting);
+    let actions = build_login_actions(entity.clone(), is_connecting);
+
+    let margin_top = (vh - px(411.0)).max(px(20.0)) / 2.0;
+
+    dialog
+        .w(px(520.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.close_modal();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space_4())
+                .child(header)
+                .child(banner)
+                .child(toggle)
+                .child(text_input)
+                .child(actions),
+        )
+}
+
+fn build_login_banner(state: &AppState) -> AnyElement {
+    if let Some(ref err) = state.auth_error {
         Banner::danger("login-err", err.clone())
             .title("Erro na Autenticação")
+            .into_any_element()
     } else if state.is_connected_to_gateway {
         Banner::success(
             "login-success",
             format!("Conectado como @{}", state.current_user.username),
         )
         .title("Conectado ao Discord")
-    } else if is_connecting {
+        .into_any_element()
+    } else if state.is_connecting {
         Banner::info("login-connecting", "Conectando ao Gateway WebSocket v10 e REST API...")
             .title("Autenticando")
+            .into_any_element()
     } else {
         Banner::info(
             "login-info",
             "Insira um Bot Token do Discord Developer Portal ou Token de Usuário para sincronizar mensagens em tempo real.",
         )
         .title("Gerenciar Conexão do Discord")
-    };
+        .into_any_element()
+    }
+}
 
-    let text_input = TextInput::new("discord-token-modal-input", token_state)
+fn build_login_mode_toggle(entity: Entity<AppState>, is_user: bool) -> AnyElement {
+    let entity_bot_toggle = entity.clone();
+    let entity_user_toggle = entity;
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_xs())
+                .font_weight(FontWeight::BOLD)
+                .child("TIPO DE CONTA"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(space_3())
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(40.0))
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(if !is_user { blurple() } else { borders() })
+                        .bg(if !is_user { with_alpha(HEX_BLURPLE, 0.15) } else { bg_chat() })
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(space_2())
+                        .hover(|s| s.opacity(0.85))
+                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                            entity_bot_toggle.update(cx, |s, cx| {
+                                s.is_user_token = false;
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_bot(px(18.0), if !is_user { text_titles() } else { text_muted() }))
+                        .child(
+                            div()
+                                .text_color(if !is_user { text_titles() } else { text_muted() })
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(font_size_sm())
+                                .child("Bot Token"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(40.0))
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(if is_user { blurple() } else { borders() })
+                        .bg(if is_user { with_alpha(HEX_BLURPLE, 0.15) } else { bg_chat() })
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(space_2())
+                        .hover(|s| s.opacity(0.85))
+                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                            entity_user_toggle.update(cx, |s, cx| {
+                                s.is_user_token = true;
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_user(px(18.0), if is_user { text_titles() } else { text_muted() }))
+                        .child(
+                            div()
+                                .text_color(if is_user { text_titles() } else { text_muted() })
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(font_size_sm())
+                                .child("Conta de Usuário"),
+                        ),
+                ),
+        )
+        .into_any_element()
+}
+
+fn build_login_token_input(
+    token_state: &Entity<InputState>,
+    is_user: bool,
+    is_connecting: bool,
+) -> AnyElement {
+    TextInput::new("discord-token-modal-input", token_state)
         .label("TOKEN DE AUTENTICAÇÃO DO DISCORD")
         .placeholder(if is_user {
             "Cole seu token de usuário aqui..."
@@ -784,512 +987,259 @@ fn render_login_modal(
         })
         .secret(true)
         .full_width(true)
-        .disabled(is_connecting);
+        .disabled(is_connecting)
+        .into_any_element()
+}
+
+fn build_login_actions(entity: Entity<AppState>, is_connecting: bool) -> AnyElement {
+    let entity_connect = entity.clone();
+    let entity_close = entity;
 
     div()
-        .size_full()
-        .bg(rgba(0x000000bb))
         .flex()
-        .items_center()
-        .justify_center()
+        .flex_col()
+        .gap(space_2())
+        .pt(space_2())
+        .child(
+            Button::blurple(
+                "login-connect-action-btn",
+                if is_connecting {
+                    "Conectando ao Discord..."
+                } else {
+                    "Conectar ao Discord"
+                },
+            )
+            .size(ButtonSize::Lg)
+            .full_width()
+            .disabled(is_connecting)
+            .on_click(move |_event, _window, cx| {
+                entity_connect.update(cx, |s, cx| {
+                    let token = s.token_input.clone();
+                    let is_u = s.is_user_token;
+                    s.authenticate(token, is_u);
+                    cx.notify();
+                });
+            }),
+        )
+        .child(
+            Button::ghost("login-back-action-btn", "Voltar")
+                .size(ButtonSize::Md)
+                .full_width()
+                .on_click(move |_event, window, cx| {
+                    window.close_dialog(cx);
+                    entity_close.update(cx, |s, cx| {
+                        s.close_modal();
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
+}
+
+/// Builds the Dialog for "Criar seu servidor"
+fn build_add_server_dialog(
+    dialog: Dialog,
+    entity: Entity<AppState>,
+    vh: Pixels,
+    _cx: &mut App,
+) -> Dialog {
+    let entity_close = entity.clone();
+    let entity_back = entity;
+
+    let margin_top = (vh - px(196.0)).max(px(20.0)) / 2.0;
+
+    dialog
+        .w(px(440.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.close_modal();
+                cx.notify();
+            });
+        })
         .child(
             div()
-                .w(px(520.0))
-                .p(px(28.0))
-                .rounded(radius_md())
-                .bg(bg_channels())
-                .border_1()
-                .border_color(borders())
                 .flex()
                 .flex_col()
                 .gap(space_4())
-                // Header
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space_1())
-                        .items_center()
-                        .text_center()
-                        .child(
-                            div()
-                                .text_color(text_titles())
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(font_size_2xl())
-                                .child("Gerenciar Conexão do Discord"),
-                        )
-                        .child(
-                            div()
-                                .text_color(text_muted())
-                                .text_size(font_size_sm())
-                                .child("Acesse servidores, canais e mensagens em tempo real via Gateway v10"),
-                        ),
-                )
-                // Status Banner
-                .child(banner)
-                // Mode Toggle: Bot vs User
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space_2())
-                        .child(
-                            div()
-                                .text_color(text_muted())
-                                .text_size(font_size_xs())
-                                .font_weight(FontWeight::BOLD)
-                                .child("TIPO DE CONTA"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(space_3())
-                                .w_full()
-                                // Bot Token button
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .h(px(40.0))
-                                        .rounded(radius_sm())
-                                        .border_1()
-                                        .border_color(if !is_user { blurple() } else { borders() })
-                                        .bg(if !is_user { with_alpha(HEX_BLURPLE, 0.15) } else { bg_chat() })
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(space_2())
-                                        .hover(|s| s.opacity(0.85))
-                                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                            entity_bot_toggle.update(cx, |s, cx| {
-                                                s.is_user_token = false;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_bot(px(18.0), if !is_user { text_titles() } else { text_muted() }))
-                                        .child(
-                                            div()
-                                                .text_color(if !is_user { text_titles() } else { text_muted() })
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_size(font_size_sm())
-                                                .child("Bot Token"),
-                                        ),
-                                )
-                                // User Token button
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .h(px(40.0))
-                                        .rounded(radius_sm())
-                                        .border_1()
-                                        .border_color(if is_user { blurple() } else { borders() })
-                                        .bg(if is_user { with_alpha(HEX_BLURPLE, 0.15) } else { bg_chat() })
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(space_2())
-                                        .hover(|s| s.opacity(0.85))
-                                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                            entity_user_toggle.update(cx, |s, cx| {
-                                                s.is_user_token = true;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_user(px(18.0), if is_user { text_titles() } else { text_muted() }))
-                                        .child(
-                                            div()
-                                                .text_color(if is_user { text_titles() } else { text_muted() })
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_size(font_size_sm())
-                                                .child("Conta de Usuário"),
-                                        ),
-                                ),
-                        ),
-                )
-                // Token TextInput
-                .child(text_input)
-                // Action Buttons
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space_2())
-                        .pt(space_2())
-                        // Connect button with loading feedback
-                        .child(if is_connecting {
-                            div()
-                                .w_full()
-                                .h(px(44.0))
-                                .rounded(radius_sm())
-                                .bg(blurple_hover())
-                                .opacity(0.85)
-                                .cursor_not_allowed()
-                                .text_color(crate::tokens::colors::white())
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(font_size_md())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .gap(space_2())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .child(div().size(px(6.0)).rounded_full().bg(crate::tokens::colors::white()))
-                                        .child(div().size(px(6.0)).rounded_full().bg(crate::tokens::colors::white()).opacity(0.7))
-                                        .child(div().size(px(6.0)).rounded_full().bg(crate::tokens::colors::white()).opacity(0.4)),
-                                )
-                                .child("Conectando ao Discord...")
-                        } else {
-                            div()
-                                .w_full()
-                                .h(px(44.0))
-                                .rounded(radius_sm())
-                                .bg(blurple())
-                                .text_color(crate::tokens::colors::white())
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(font_size_md())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(blurple_hover()))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    entity_connect.update(cx, |s, cx| {
-                                        let token = s.token_input.clone();
-                                        let is_u = s.is_user_token;
-                                        s.authenticate(token, is_u);
-                                        cx.notify();
-                                    });
-                                })
-                                .child("Conectar ao Discord")
-                        })
-                        // Voltar button
-                        .child(
-                            div()
-                                .w_full()
-                                .h(px(36.0))
-                                .rounded(radius_sm())
-                                .text_color(text_muted())
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_size(font_size_sm())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(text_titles()))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    entity_close.update(cx, |s, cx| {
-                                        s.close_modal();
-                                        cx.notify();
-                                    });
-                                })
-                                .child("Voltar"),
-                        ),
-                ),
-        )
-}
-
-/// Renders the "Criar um Servidor" modal overlay
-fn render_add_server_modal(entity: Entity<AppState>) -> impl IntoElement {
-    div()
-        .size_full()
-        .bg(rgba(0x000000bb))
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(
-            div()
-                .w(px(440.0))
-                .p(px(24.0))
-                .rounded(px(8.0))
-                .bg(rgb(0x313338))
-                .flex()
-                .flex_col()
-                .gap(px(16.0))
                 .items_center()
+                .text_center()
                 .child(
                     div()
-                        .text_color(rgb(0xf2f3f5))
+                        .text_color(text_titles())
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(22.0))
                         .child("Criar seu servidor"),
                 )
                 .child(
                     div()
-                        .text_color(rgb(0x80848e))
+                        .text_color(text_muted())
                         .text_size(px(13.0))
                         .child("Seu servidor é onde você e seus amigos se reúnem."),
                 )
                 .child(
-                    div()
-                        .w_full()
-                        .h(px(44.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x5865f2))
-                        .text_color(rgb(0xffffff))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0x4752c4)))
-                        .child("Criar o Meu Próprio"),
+                    Button::blurple("create-server-action", "Criar o Meu Próprio")
+                        .size(ButtonSize::Lg)
+                        .full_width(),
                 )
                 .child(
-                    div()
-                        .w_full()
-                        .h(px(40.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x3f4248))
-                        .text_color(rgb(0xffffff))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0x4e5058)))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            entity.update(cx, |state, cx| {
-                                state.close_modal();
+                    Button::gray("create-server-back", "Voltar")
+                        .size(ButtonSize::Md)
+                        .full_width()
+                        .on_click(move |_event, window, cx| {
+                            window.close_dialog(cx);
+                            entity_back.update(cx, |s, cx| {
+                                s.close_modal();
                                 cx.notify();
                             });
-                        })
-                        .child("Voltar"),
+                        }),
                 ),
         )
 }
 
-/// Renders the "Explorar Servidores Públicos" modal overlay
-fn render_explore_modal(entity: Entity<AppState>) -> impl IntoElement {
-    div()
-        .size_full()
-        .bg(rgba(0x000000bb))
-        .flex()
-        .items_center()
-        .justify_center()
+/// Builds the Dialog for "Descubra Comunidades"
+fn build_explore_dialog(
+    dialog: Dialog,
+    entity: Entity<AppState>,
+    vh: Pixels,
+    _cx: &mut App,
+) -> Dialog {
+    let entity_close = entity.clone();
+    let entity_btn = entity;
+
+    let margin_top = (vh - px(144.0)).max(px(20.0)) / 2.0;
+
+    dialog
+        .w(px(480.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.close_modal();
+                cx.notify();
+            });
+        })
         .child(
             div()
-                .w(px(480.0))
-                .p(px(24.0))
-                .rounded(px(8.0))
-                .bg(rgb(0x313338))
                 .flex()
                 .flex_col()
-                .gap(px(16.0))
+                .gap(space_4())
                 .items_center()
+                .text_center()
                 .child(
                     div()
-                        .text_color(rgb(0xf2f3f5))
+                        .text_color(text_titles())
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(22.0))
                         .child("Descubra Comunidades"),
                 )
                 .child(
                     div()
-                        .text_color(rgb(0x80848e))
+                        .text_color(text_muted())
                         .text_size(px(13.0))
                         .child("Encontre comunidades incríveis de Rust, GPUI, Gaming e Música."),
                 )
                 .child(
-                    div()
-                        .w_full()
-                        .h(px(40.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x5865f2))
-                        .text_color(rgb(0xffffff))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(0x4752c4)))
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            entity.update(cx, |state, cx| {
-                                state.close_modal();
+                    Button::blurple("explore-servers-close", "Fechar")
+                        .size(ButtonSize::Md)
+                        .full_width()
+                        .on_click(move |_event, window, cx| {
+                            window.close_dialog(cx);
+                            entity_btn.update(cx, |s, cx| {
+                                s.close_modal();
                                 cx.notify();
                             });
-                        })
-                        .child("Fechar"),
+                        }),
                 ),
         )
 }
 
-/// Renders modal to add friends to an existing DM channel / group DM
-fn render_add_friend_to_group_modal(
+/// Builds the Dialog to add friends to an existing DM channel / group DM
+fn build_add_friend_to_group_dialog(
+    dialog: Dialog,
     entity: Entity<AppState>,
-    state: &AppState,
     channel_id: String,
-) -> impl IntoElement {
+    vh: Pixels,
+    cx: &mut App,
+) -> Dialog {
     let entity_close = entity.clone();
+    let state = entity.read(cx);
     let current_dm = state.dm_channels.iter().find(|c| c.id == channel_id);
     let current_recipients = current_dm.map(|c| c.recipient_ids.clone()).unwrap_or_default();
 
     let mut friend_rows = Vec::new();
     for friend in &state.friends {
         let is_already_member = current_recipients.contains(&friend.id);
-        let fid = friend.id.clone();
-        let fname = friend.username.clone();
-        let dname = friend.display_name.clone();
-        let entity_add = entity.clone();
-        let cid = channel_id.clone();
-
-        friend_rows.push(
-            div()
-                .h(px(44.0))
-                .px(px(8.0))
-                .rounded(px(4.0))
-                .bg(rgb(0x2b2d31))
-                .hover(|s| s.bg(rgb(0x35373c)))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .size(px(32.0))
-                                .rounded_full()
-                                .bg(rgb(0x5865f2))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon_user(px(18.0), rgb(0xffffff))),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_color(rgb(0xf2f3f5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_size(px(14.0))
-                                        .child(dname),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(0x949ba4))
-                                        .text_size(px(11.0))
-                                        .child(format!("@{}", fname)),
-                                 ),
-                        ),
-                )
-                .child(if is_already_member {
-                    div()
-                        .px(px(10.0))
-                        .py(px(4.0))
-                        .rounded(px(3.0))
-                        .bg(rgb(0x3f4248))
-                        .text_color(rgb(0x949ba4))
-                        .text_size(px(12.0))
-                        .child("Já adicionado")
-                } else {
-                    div()
-                        .px(px(12.0))
-                        .py(px(5.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x5865f2))
-                        .hover(|s| s.bg(rgb(0x4752c4)))
-                        .cursor_pointer()
-                        .text_color(rgb(0xffffff))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(12.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                            entity_add.update(cx, |s, cx| {
-                                s.add_recipient_to_group(&cid, &fid, &fname);
-                                cx.notify();
-                            });
-                        })
-                        .child(icon_plus(px(12.0), rgb(0xffffff)))
-                        .child("Adicionar")
-                }),
-        );
+        friend_rows.push(render_add_friend_row(
+            entity.clone(),
+            channel_id.clone(),
+            friend.id.clone(),
+            friend.username.clone(),
+            friend.display_name.clone(),
+            is_already_member,
+        ));
     }
+
+    let friend_count = state.friends.len();
+    let list_h = if friend_count == 0 {
+        50.0
+    } else {
+        (friend_count as f32 * 46.0).min(260.0)
+    };
+    let approx_h = 98.0 + list_h;
+    let margin_top = (vh - px(approx_h)).max(px(20.0)) / 2.0;
 
     if friend_rows.is_empty() {
         friend_rows.push(
             div()
-                .p(px(16.0))
+                .p(space_4())
                 .text_center()
-                .text_color(rgb(0x949ba4))
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                 .text_size(px(13.0))
-                .child("Nenhum amigo disponível na sua lista para adicionar."),
+                .child("Nenhum amigo disponível na sua lista para adicionar.")
+                .into_any_element(),
         );
     }
 
-    div()
-        .size_full()
-        .bg(rgba(0x000000bb))
+    let header = div()
         .flex()
-        .items_center()
-        .justify_center()
+        .flex_col()
+        .gap(space_1())
         .child(
             div()
-                .w(px(460.0))
-                .p(px(24.0))
-                .rounded(px(8.0))
-                .bg(rgb(0x313338))
-                .border_1()
-                .border_color(rgb(0x1e1f22))
+                .flex()
+                .items_center()
+                .gap(space_2())
+                .child(icon_friends(px(20.0), blurple()))
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(20.0))
+                        .child("Adicionar amigos à conversa"),
+                ),
+        )
+        .child(
+            div()
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
+                .text_size(px(13.0))
+                .child("Selecione amigos para adicionar a este grupo de conversa direta."),
+        );
+
+    dialog
+        .w(px(460.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.close_modal();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
                 .flex()
                 .flex_col()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(icon_friends(px(20.0), rgb(0x5865f2)))
-                                .child(
-                                    div()
-                                        .text_color(rgb(0xf2f3f5))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_size(px(20.0))
-                                        .child("Adicionar amigos à conversa"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .size(px(24.0))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .text_color(rgb(0x949ba4))
-                                .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x35373c)))
-                                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                    entity_close.update(cx, |s, cx| {
-                                        s.close_modal();
-                                        cx.notify();
-                                    });
-                                })
-                                .child(icon_close(px(16.0), rgb(0x949ba4))),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(0x949ba4))
-                        .text_size(px(13.0))
-                        .child("Selecione amigos para adicionar a este grupo de conversa direta."),
-                )
+                .gap(space_4())
+                .child(header)
                 .child(
                     div()
                         .id("add-friend-scroll")
@@ -1303,163 +1253,161 @@ fn render_add_friend_to_group_modal(
         )
 }
 
-/// Renders modal to create a brand new Group DM
-fn render_create_group_dm_modal(
+fn render_add_friend_row(
     entity: Entity<AppState>,
-    state: &AppState,
-) -> impl IntoElement {
-    let entity_close = entity.clone();
+    channel_id: String,
+    fid: String,
+    fname: String,
+    dname: String,
+    is_already_member: bool,
+) -> AnyElement {
+    let entity_add = entity;
+    let cid = channel_id;
+    let friend_id = fid.clone();
+    let friend_name = fname.clone();
 
-    let mut friend_rows = Vec::new();
-    for friend in &state.friends {
-        let fid = friend.id.clone();
-        let fname = friend.username.clone();
-        let dname = friend.display_name.clone();
-        let entity_create = entity.clone();
-
-        friend_rows.push(
+    div()
+        .h(px(44.0))
+        .px(space_2())
+        .rounded(radius_sm())
+        .bg(bg_channels())
+        .hover(|s| s.bg(channel_hover()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
             div()
-                .h(px(44.0))
-                .px(px(8.0))
-                .rounded(px(4.0))
-                .bg(rgb(0x2b2d31))
-                .hover(|s| s.bg(rgb(0x35373c)))
                 .flex()
-                .flex_row()
                 .items_center()
-                .justify_between()
+                .gap(px(10.0))
+                .child(Avatar::new(dname.clone()).size(AvatarSize::Px32))
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(10.0))
+                        .flex_col()
                         .child(
                             div()
-                                .size(px(32.0))
-                                .rounded_full()
-                                .bg(rgb(0x5865f2))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon_user(px(18.0), rgb(0xffffff))),
+                                .text_color(text_titles())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(14.0))
+                                .child(dname),
                         )
                         .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .text_color(rgb(0xf2f3f5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_size(px(14.0))
-                                        .child(dname),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(0x949ba4))
-                                        .text_size(px(11.0))
-                                        .child(format!("@{}", fname)),
-                                ),
+                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                                .text_size(px(11.0))
+                                .child(format!("@{}", fname)),
                         ),
-                )
-                .child(
-                    div()
-                        .px(px(12.0))
-                        .py(px(5.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x5865f2))
-                        .hover(|s| s.bg(rgb(0x4752c4)))
-                        .cursor_pointer()
-                        .text_color(rgb(0xffffff))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(12.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                            entity_create.update(cx, |s, cx| {
-                                s.create_group_dm(vec![fid.clone()], vec![fname.clone()], None);
-                                cx.notify();
-                            });
-                        })
-                        .child(icon_plus(px(12.0), rgb(0xffffff)))
-                        .child("Criar Grupo")
                 ),
-        );
+        )
+        .child(if is_already_member {
+            div()
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(radius_sm())
+                .bg(channel_active())
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                .text_size(px(12.0))
+                .child("Já adicionado")
+                .into_any_element()
+        } else {
+            Button::blurple(format!("add-friend-btn-{}", fid), "Adicionar")
+                .size(ButtonSize::Sm)
+                .on_click(move |_ev, window, cx| {
+                    entity_add.update(cx, |s, cx| {
+                        s.add_recipient_to_group(&cid, &friend_id, &friend_name);
+                        s.close_modal();
+                        cx.notify();
+                    });
+                    window.close_dialog(cx);
+                })
+                .into_any_element()
+        })
+        .into_any_element()
+}
+
+/// Builds the Dialog to create a brand new Group DM
+fn build_create_group_dm_dialog(
+    dialog: Dialog,
+    entity: Entity<AppState>,
+    vh: Pixels,
+    cx: &mut App,
+) -> Dialog {
+    let entity_close = entity.clone();
+    let state = entity.read(cx);
+
+    let mut friend_rows = Vec::new();
+    for friend in &state.friends {
+        friend_rows.push(render_create_group_dm_row(
+            entity.clone(),
+            friend.id.clone(),
+            friend.username.clone(),
+            friend.display_name.clone(),
+        ));
     }
+
+    let friend_count = state.friends.len();
+    let list_h = if friend_count == 0 {
+        50.0
+    } else {
+        (friend_count as f32 * 46.0).min(260.0)
+    };
+    let approx_h = 98.0 + list_h;
+    let margin_top = (vh - px(approx_h)).max(px(20.0)) / 2.0;
 
     if friend_rows.is_empty() {
         friend_rows.push(
             div()
-                .p(px(16.0))
+                .p(space_4())
                 .text_center()
-                .text_color(rgb(0x949ba4))
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
                 .text_size(px(13.0))
-                .child("Nenhum amigo disponível na sua lista para criar grupo."),
+                .child("Nenhum amigo disponível na sua lista para criar grupo.")
+                .into_any_element(),
         );
     }
 
-    div()
-        .size_full()
-        .bg(rgba(0x000000bb))
+    let header = div()
         .flex()
-        .items_center()
-        .justify_center()
+        .flex_col()
+        .gap(space_1())
         .child(
             div()
-                .w(px(460.0))
-                .p(px(24.0))
-                .rounded(px(8.0))
-                .bg(rgb(0x313338))
-                .border_1()
-                .border_color(rgb(0x1e1f22))
+                .flex()
+                .items_center()
+                .gap(space_2())
+                .child(icon_friends(px(20.0), blurple()))
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(20.0))
+                        .child("Criar DM em Grupo"),
+                ),
+        )
+        .child(
+            div()
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
+                .text_size(px(13.0))
+                .child("Selecione um amigo para iniciar um novo grupo de conversa."),
+        );
+
+    dialog
+        .w(px(460.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.close_modal();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
                 .flex()
                 .flex_col()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(icon_friends(px(20.0), rgb(0x5865f2)))
-                                .child(
-                                    div()
-                                        .text_color(rgb(0xf2f3f5))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_size(px(20.0))
-                                        .child("Criar DM em Grupo"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .size(px(24.0))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .text_color(rgb(0x949ba4))
-                                .hover(|s| s.text_color(rgb(0xffffff)).bg(rgb(0x35373c)))
-                                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                    entity_close.update(cx, |s, cx| {
-                                        s.close_modal();
-                                        cx.notify();
-                                    });
-                                })
-                                .child(icon_close(px(16.0), rgb(0x949ba4))),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(0x949ba4))
-                        .text_size(px(13.0))
-                        .child("Selecione um amigo para iniciar um novo grupo de conversa."),
-                )
+                .gap(space_4())
+                .child(header)
                 .child(
                     div()
                         .id("create-group-scroll")
@@ -1471,6 +1419,66 @@ fn render_create_group_dm_modal(
                         .children(friend_rows),
                 ),
         )
+}
+
+fn render_create_group_dm_row(
+    entity: Entity<AppState>,
+    fid: String,
+    fname: String,
+    dname: String,
+) -> AnyElement {
+    let entity_create = entity;
+    let friend_id = fid.clone();
+    let friend_name = fname.clone();
+
+    div()
+        .h(px(44.0))
+        .px(space_2())
+        .rounded(radius_sm())
+        .bg(bg_channels())
+        .hover(|s| s.bg(channel_hover()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(Avatar::new(dname.clone()).size(AvatarSize::Px32))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_color(text_titles())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(14.0))
+                                .child(dname),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                                .text_size(px(11.0))
+                                .child(format!("@{}", fname)),
+                        ),
+                ),
+        )
+        .child(
+            Button::blurple(format!("create-dm-btn-{}", fid), "Criar Grupo")
+                .size(ButtonSize::Sm)
+                .on_click(move |_ev, window, cx| {
+                    entity_create.update(cx, |s, cx| {
+                        s.create_group_dm(vec![friend_id.clone()], vec![friend_name.clone()], None);
+                        s.close_modal();
+                        cx.notify();
+                    });
+                    window.close_dialog(cx);
+                }),
+        )
+        .into_any_element()
 }
 
 /// Renders the Friends list view ("Amigos") when on Home without an active DM channel.
