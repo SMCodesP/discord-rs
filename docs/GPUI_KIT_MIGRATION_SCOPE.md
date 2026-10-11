@@ -81,8 +81,8 @@ Verificado na máquina em 2026-10-10 (`opencode` v2.0.26):
 
 A confirmar antes de escalar:
 
-- **`AGENTS.md` e `opencode.json` precisam estar commitados** para existir nas
-  worktrees, que nascem do último commit.
+- **`AGENTS.md` e `opencode.json` já estão commitados** (`f1d96df`). Se você os
+  alterar, faça commit antes de criar layers: worktrees nascem do último commit.
 - **Limite de requisições do modelo gratuito.** É desconhecido. O motivo da
   troca foi cota: comece com um agente e meça antes de abrir três ou quatro. Se
   travar, a versão paga está uma linha de configuração adiante.

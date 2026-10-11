@@ -49,10 +49,9 @@
   `~/.local/state/relay/accounts/antigravity/smcodes003/.gemini/config/mcp_config.json.bak-before-shared-chrome`.
 - **OpenCode preparado em 2026-10-10:** modelo padrão
   `opencode/muse-spark-1.3-contributor-free`, MCP `chrome-devtools` global,
-  `AGENTS.md` e `opencode.json` na raiz do projeto. Falta commitar esses dois
-  arquivos e abrir o Chrome da porta 9222 (seções 3.0 e 3.6 do documento irmão).
-- **Nada deste documento foi commitado.** Os dois `.md` novos estão só no
-  working tree.
+  `AGENTS.md` e `opencode.json` na raiz do projeto. Tudo commitado em
+  `f1d96df`. Falta abrir o Chrome da porta 9222 (seções 3.0 e 3.6 do documento
+  irmão).
 
 ---
 
