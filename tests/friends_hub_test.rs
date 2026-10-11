@@ -363,6 +363,7 @@ fn test_tab_badge_counts_match_view_filters() {
             avatar_text: "U".into(),
             presence: PresenceStatus::Online,
             custom_status: None,
+            avatar_decoration_data: None,
             relationship_type: rel_type,
         });
     }

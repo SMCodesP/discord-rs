@@ -12,9 +12,9 @@
 //! `Input`, which requires an `Entity<InputState>` created via `cx` plus
 //! storage in `AppState` — both owned by other fronts (state/components).
 //! They stay static token-styled boxes with identical text/behavior.
-//! DECORAÇÃO PENDENTE: `FriendItemState`, `MessageRequestItem` and
-//! `ActiveNowItem` (src/app/state/models.rs) have no `avatar_decoration_data`
-//! yet (KAvatarData front), so `Avatar` gets no decoration.
+//! DECORAÇÃO: `FriendItemState.avatar_decoration_data` é repassado ao `Avatar`
+//! (quando presente no modelo). `MessageRequestItem` e `ActiveNowItem` não têm
+//! decoração na API atual.
 
 use gpui::component::Disableable as _;
 use gpui::component::button::{Button as KitButton, ButtonVariants as _};
@@ -23,7 +23,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use crate::app::state::*;
 use crate::components::{Avatar, AvatarSize, Button, ButtonSize};
-use crate::domain::user::PresenceStatus as DomainPresence;
+use crate::domain::user::{AvatarDecorationData, PresenceStatus as DomainPresence};
 use crate::tokens::colors::white;
 use crate::tokens::*;
 
@@ -222,38 +222,11 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
         .into_any_element()
 }
 
-/// Green "Adicionar amigo" button (TabBar suffix of the main tab bar).
-fn render_add_friend_tab_button(entity: Entity<AppState>, selected: bool) -> AnyElement {
-    let mut btn = KitButton::new("btn-add-friend")
-        .ghost()
-        .compact()
-        // TOKEN FALTANDO: verde do "Adicionar amigo", 0x248046 normal e
-        // 0x1a6334 selecionado/hover (mais próximo: status_online).
-        .bg(if selected {
-            rgb(0x1a6334)
-        } else {
-            rgb(0x248046)
-        })
-        .rounded(px(8.0))
-        .text_color(if selected {
-            status_online()
-        } else {
-            white()
-        })
-        .child(icon_plus(
-            px(14.0),
-            if selected {
-                status_online()
-            } else {
-                white()
-            },
-        ))
-        .child(
-            div()
-                .text_size(font_size_sm())
-                .font_weight(FontWeight::MEDIUM)
-                .child("Adicionar amigo"),
-        );
+/// "Adicionar amigo" brand button (TabBar suffix of the main tab bar).
+/// Uses `crate::components::Button` with Blurple styling matching modern Discord parity.
+fn render_add_friend_tab_button(entity: Entity<AppState>, _selected: bool) -> AnyElement {
+    let mut btn = Button::blurple("btn-add-friend", "Adicionar amigo")
+        .size(ButtonSize::Sm);
     btn = btn.on_click(move |_ev, _window, cx| {
         entity.update(cx, |s, cx| {
             s.select_friends_tab(FriendsTab::AddFriend);
@@ -322,10 +295,8 @@ fn render_header_actions() -> AnyElement {
         .flex_row()
         .items_center()
         .gap(px(16.0))
-        // TOKEN FALTANDO: cinza dos ícones inbox/help, 0xb5bac1 (×3 neste
-        // arquivo; mais próximo: text_primary).
-        .child(icon_inbox(px(20.0), rgb(0xb5bac1)))
-        .child(icon_help(px(20.0), rgb(0xb5bac1)))
+        .child(icon_inbox(px(20.0), text_muted()))
+        .child(icon_help(px(20.0), text_muted()))
         .into_any_element()
 }
 
