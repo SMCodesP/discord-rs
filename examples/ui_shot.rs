@@ -831,13 +831,16 @@ fn gallery_icon_buttons() -> AnyElement {
         ("Danger", false, true, false),
         ("Disabled", false, false, true),
     ];
-    let mut row = div().w_full().flex().flex_row().gap(space_4()).items_center();
+    let mut col = div().w_full().flex().flex_col().gap(space_2());
+
+    // Fileira 1: Ícone por glifo de texto
+    let mut row_glyph = div().w_full().flex().flex_row().gap(space_4()).items_center();
     for (i, (name, active, danger, disabled)) in states.iter().enumerate() {
         let btn = IconButton::new(format!("gal-iconbtn-{}", i), "✕")
             .active(*active)
             .danger(*danger)
             .disabled(*disabled);
-        row = row.child(
+        row_glyph = row_glyph.child(
             div()
                 .flex()
                 .flex_row()
@@ -852,7 +855,38 @@ fn gallery_icon_buttons() -> AnyElement {
                 ),
         );
     }
-    gallery_section("IconButton — normal / active / danger / disabled", row.into_any_element())
+    col = col.child(row_glyph);
+
+    // Fileira 2: Ícone por elemento SVG (with_icon)
+    let mut row_svg = div().w_full().flex().flex_row().gap(space_4()).items_center();
+    for (i, (name, active, danger, disabled)) in states.iter().enumerate() {
+        let btn = IconButton::with_icon(format!("gal-iconbtn-svg-{}", i), |sz, col| {
+            discord_rs::tokens::icons::icon_bell(sz, col).into_any_element()
+        })
+        .active(*active)
+        .danger(*danger)
+        .disabled(*disabled);
+        row_svg = row_svg.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space_2())
+                .child(btn)
+                .child(
+                    div()
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child(format!("{} (SVG)", name)),
+                ),
+        );
+    }
+    col = col.child(row_svg);
+
+    gallery_section(
+        "IconButton — normal / active / danger / disabled (glifo + SVG)",
+        col.into_any_element(),
+    )
 }
 
 fn gallery_text_inputs(

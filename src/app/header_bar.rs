@@ -226,32 +226,47 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
 
     // 1. Notifications / Bell button
     toolbar = toolbar.child(
-        IconButton::new("header-btn-notifications", "🔔")
-            .tooltip("Notification Settings"),
+        IconButton::with_icon("header-btn-notifications", |sz, col| {
+            icon_bell(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Notification Settings"),
     );
 
     // 2. Pinned messages button
     toolbar = toolbar.child(
-        IconButton::new("header-btn-pinned", "📌")
-            .tooltip("Pinned Messages"),
+        IconButton::with_icon("header-btn-pinned", |sz, col| {
+            icon_pin(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Pinned Messages"),
     );
 
     // 3. Member list toggle button
     let members_entity = app_entity.clone();
     toolbar = toolbar.child(
-        IconButton::new("header-btn-members", "👥")
-            .active(show_members)
-            .tooltip(if show_members {
-                "Hide Member List"
-            } else {
-                "Show Member List"
-            })
-            .on_click(move |_event, _window, cx| {
-                members_entity.update(cx, |state, cx| {
-                    state.toggle_members();
-                    cx.notify();
-                });
-            }),
+        IconButton::with_icon("header-btn-members", |sz, col| {
+            icon_members(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .active(show_members)
+        .tooltip(if show_members {
+            "Hide Member List"
+        } else {
+            "Show Member List"
+        })
+        .on_click(move |_event, _window, cx| {
+            members_entity.update(cx, |state, cx| {
+                state.toggle_members();
+                cx.notify();
+            });
+        }),
     );
 
     // 4. Search bar (Buscar)
@@ -264,14 +279,24 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
 
     // 5. Inbox button
     toolbar = toolbar.child(
-        IconButton::new("header-btn-inbox", "📥")
-            .tooltip("Inbox"),
+        IconButton::with_icon("header-btn-inbox", |sz, col| {
+            icon_inbox(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Inbox"),
     );
 
     // 6. Help button
     toolbar = toolbar.child(
-        IconButton::new("header-btn-help", "?")
-            .tooltip("Help"),
+        IconButton::with_icon("header-btn-help", |sz, col| {
+            icon_info(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Help"),
     );
 
     toolbar.into_any_element()

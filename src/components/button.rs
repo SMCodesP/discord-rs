@@ -33,11 +33,12 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::tokens::colors::{
-    blurple, blurple_active, blurple_hover, control_critical_primary_bg_active,
-    control_critical_primary_bg_default, control_critical_primary_bg_hover,
-    control_critical_secondary_text_default, control_icon_only_icon_default,
-    control_secondary_bg_active, control_secondary_bg_default, control_secondary_bg_hover,
-    opacity_white_20, opacity_white_8, text_normal, transparent, white, with_alpha, HEX_WHITE,
+    blurple, blurple_active, blurple_hover, channel_active, channel_hover,
+    control_critical_primary_bg_active, control_critical_primary_bg_default,
+    control_critical_primary_bg_hover, control_critical_secondary_text_default,
+    control_icon_only_icon_default, control_secondary_bg_active, control_secondary_bg_default,
+    control_secondary_bg_hover, opacity_white_8, text_normal, transparent,
+    white, with_alpha, HEX_WHITE,
 };
 use crate::tokens::spacing::radius_md;
 use crate::tokens::typography::WEIGHT_MEDIUM;
@@ -359,9 +360,11 @@ fn render_button(btn: Button, cx: &mut App) -> AnyElement {
 #[derive(IntoElement)]
 pub struct IconButton {
     id: ElementId,
-    icon: SharedString,
+    icon: Option<SharedString>,
+    icon_renderer: Option<Box<dyn Fn(Pixels, Rgba) -> AnyElement + 'static>>,
     size: Pixels,
     icon_size: Pixels,
+    radius: Option<Pixels>,
     active: bool,
     danger: bool,
     disabled: bool,
@@ -370,13 +373,35 @@ pub struct IconButton {
 }
 
 impl IconButton {
-    /// Creates a new icon button
+    /// Creates a new icon button with a string/glyph
     pub fn new(id: impl Into<ElementId>, icon: impl Into<SharedString>) -> Self {
         Self {
             id: id.into(),
-            icon: icon.into(),
+            icon: Some(icon.into()),
+            icon_renderer: None,
             size: px(32.0),
             icon_size: px(18.0),
+            radius: None,
+            active: false,
+            danger: false,
+            disabled: false,
+            tooltip_text: None,
+            on_click: None,
+        }
+    }
+
+    /// Creates a new icon button with a dynamic icon element renderer (e.g. SVG)
+    pub fn with_icon(
+        id: impl Into<ElementId>,
+        icon_fn: impl Fn(Pixels, Rgba) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            icon: None,
+            icon_renderer: Some(Box::new(icon_fn)),
+            size: px(32.0),
+            icon_size: px(18.0),
+            radius: None,
             active: false,
             danger: false,
             disabled: false,
@@ -391,9 +416,15 @@ impl IconButton {
         self
     }
 
-    /// Sets icon font size
+    /// Sets icon size
     pub fn icon_size(mut self, icon_size: Pixels) -> Self {
         self.icon_size = icon_size;
+        self
+    }
+
+    /// Sets explicit corner radius
+    pub fn rounded(mut self, radius: Pixels) -> Self {
+        self.radius = Some(radius);
         self
     }
 
@@ -421,13 +452,28 @@ impl IconButton {
         self
     }
 
-    /// Sets click handler
+    /// Attaches a click event handler
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Box::new(handler));
         self
+    }
+
+    /// Resolves the icon color corresponding to the current state
+    pub fn current_icon_color(&self) -> Rgba {
+        if self.disabled {
+            let mut col = icon_muted();
+            col.a *= 0.5;
+            col
+        } else if self.danger {
+            danger_text()
+        } else if self.active {
+            white()
+        } else {
+            icon_muted()
+        }
     }
 }
 
@@ -438,19 +484,22 @@ impl RenderOnce for IconButton {
 }
 
 /// Builds the kit button for [`IconButton`]. Discord icon-only buttons are
-/// 32x32 with radius 8px, transparent background, #ABACB2 glyph, 16%/20%
-/// translucent-gray hover/active backgrounds and a white glyph on hover.
-/// Same refinement rules as [`render_button`]: no `.hover()` on the kit
-/// button, hover/active colors via the `Custom` variant.
+/// 32x32 (or overridden size) with radius 8px (or overridden radius), transparent
+/// background, #ABACB2 glyph, 16%/20% translucent-gray hover/active backgrounds
+/// and a white glyph on hover. When toggled/active, background is channel_hover
+/// and icon is white (parity with Discord member toggle / active icon button).
 fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
-    let (icon_normal, bg_normal, bg_hover, fg_hover) = if btn.danger {
+    let icon_color = btn.current_icon_color();
+    let (bg_normal, bg_hover, fg_hover) = if btn.disabled {
+        (transparent(), transparent(), icon_color)
+    } else if btn.danger {
         // Measured `critical-secondary` pattern: red text on translucent gray.
-        (danger_text(), transparent(), secondary_bg_hover(), danger_text())
+        (transparent(), secondary_bg_hover(), danger_text())
     } else if btn.active {
-        // Toggled state has no measured Discord sample; values carried over.
-        (white(), with_alpha(HEX_WHITE, 36.0 / 255.0), opacity_white_20(), white())
+        // Toggled active state: channel_hover background and white icon
+        (channel_hover(), channel_active(), white())
     } else {
-        (icon_muted(), transparent(), secondary_bg_hover(), white())
+        (transparent(), secondary_bg_hover(), white())
     };
     let bg_active = if btn.danger || btn.active {
         bg_hover
@@ -458,16 +507,18 @@ fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
         secondary_bg_active()
     };
 
+    let radius = btn.radius.unwrap_or_else(radius_md);
+
     let mut el = KitButton::new(btn.id)
         .with_variant(kit_custom(cx, bg_normal, fg_hover, bg_hover, bg_active))
         .with_size(Size::Medium)
         .disabled(btn.disabled)
-        .rounded(radius_md())
+        .rounded(radius)
         .w(btn.size)
         .h(btn.size)
         .font_weight(WEIGHT_MEDIUM)
         .bg(bg_normal)
-        .text_color(icon_normal);
+        .text_color(icon_color);
 
     if btn.disabled {
         el = el.opacity(0.5);
@@ -485,13 +536,69 @@ fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
         el = el.tooltip(tooltip);
     }
 
-    el.child(
-        div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .text_size(btn.icon_size)
-            .child(btn.icon),
-    )
-    .into_any_element()
+    if let Some(icon_renderer) = btn.icon_renderer {
+        el = el.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(btn.icon_size)
+                .child((icon_renderer)(btn.icon_size, icon_color)),
+        );
+    } else if let Some(icon) = btn.icon {
+        el = el.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(btn.icon_size)
+                .child(icon),
+        );
+    }
+
+    el.into_any_element()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[::core::prelude::v1::test]
+    fn test_icon_button_state_colors() {
+        let normal = IconButton::new("btn-normal", "✕");
+        assert_eq!(normal.current_icon_color(), icon_muted());
+
+        let active = IconButton::new("btn-active", "✕").active(true);
+        assert_eq!(active.current_icon_color(), white());
+
+        let danger = IconButton::new("btn-danger", "✕").danger(true);
+        assert_eq!(danger.current_icon_color(), danger_text());
+
+        let disabled = IconButton::new("btn-disabled", "✕").disabled(true);
+        let mut expected_disabled = icon_muted();
+        expected_disabled.a *= 0.5;
+        assert_eq!(disabled.current_icon_color(), expected_disabled);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_icon_button_with_icon_builder() {
+        let btn = IconButton::with_icon("btn-custom", |size, color| {
+            div().size(size).text_color(color).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .active(true)
+        .tooltip("Custom Tooltip");
+
+        assert_eq!(btn.size, px(28.0));
+        assert_eq!(btn.icon_size, px(16.0));
+        assert_eq!(btn.radius, Some(px(4.0)));
+        assert!(btn.active);
+        assert_eq!(btn.tooltip_text.as_deref(), Some("Custom Tooltip"));
+        assert_eq!(btn.current_icon_color(), white());
+        assert!(btn.icon_renderer.is_some());
+    }
+}
+
+
