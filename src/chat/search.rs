@@ -528,15 +528,15 @@ pub fn render_search_flyout(
                         .cursor_text()
                         .on_mouse_down(MouseButton::Left, {
                             let fh = focus_handle.clone();
-                            move |_ev, window, _cx| {
-                                window.focus(&fh);
+                            move |_ev, window, cx| {
+                                window.focus(&fh, cx);
                             }
                         })
                         .on_key_down({
                             let entity = app_entity.clone();
                             let fh = focus_handle.clone();
                             move |ev: &KeyDownEvent, window, cx| {
-                                window.focus(&fh);
+                                window.focus(&fh, cx);
                                 let key = &ev.keystroke.key;
                                 let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
                                 if is_ctrl {

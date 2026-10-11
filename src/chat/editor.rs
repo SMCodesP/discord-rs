@@ -475,8 +475,8 @@ pub fn render_chat_editor(config: ChatEditorConfig) -> Div {
         main_input = main_input.track_focus(fh);
 
         let fh_click = fh.clone();
-        main_input = main_input.cursor_text().on_mouse_down(MouseButton::Left, move |_ev, window, _cx| {
-            window.focus(&fh_click);
+        main_input = main_input.cursor_text().on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+            window.focus(&fh_click, cx);
         });
 
         let on_text_change = config.on_text_change.clone();
@@ -486,7 +486,7 @@ pub fn render_chat_editor(config: ChatEditorConfig) -> Div {
         let fh_key = fh.clone();
 
         main_input = main_input.on_key_down(move |ev: &KeyDownEvent, window, cx| {
-            window.focus(&fh_key);
+            window.focus(&fh_key, cx);
             let key = &ev.keystroke.key;
             let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
             let is_paste = (is_ctrl && (key == "v" || key == "V"))
