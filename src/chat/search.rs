@@ -16,11 +16,16 @@
 //! `GET /api/v10/guilds/{guild_id}/messages/search`
 
 use chrono::NaiveDate;
+use gpui::component::popover::Popover;
+use gpui::component::Selectable;
 use gpui::*;
 use serde::{Deserialize, Serialize};
 
 use crate::app::state::AppState;
+use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::domain::Message;
+use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
 
 /// Filter for presence of attachments, links, or media types.
@@ -395,7 +400,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
 
     if terms.is_empty() || content.is_empty() {
         return div()
-            .text_color(rgb(0xdbdee1))
+            .text_color(text_primary())
             .text_size(px(14.0))
             .child(content.to_string());
     }
@@ -414,7 +419,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
 
     if matches.is_empty() {
         return div()
-            .text_color(rgb(0xdbdee1))
+            .text_color(text_primary())
             .text_size(px(14.0))
             .child(content.to_string());
     }
@@ -447,7 +452,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
             if let Some(sub) = content.get(last_idx..s) {
                 container = container.child(
                     div()
-                        .text_color(rgb(0xdbdee1))
+                        .text_color(text_primary())
                         .child(sub.to_string()),
                 );
             }
@@ -455,8 +460,8 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
         if let Some(sub) = content.get(s..e) {
             container = container.child(
                 div()
-                    .bg(rgb(0xfee75c))
-                    .text_color(rgb(0x1e1f22))
+                    .bg(rgb(0xfee75c)) // TOKEN FALTANDO: --text-warning
+                    .text_color(bg_server())
                     .font_weight(FontWeight::BOLD)
                     .rounded(px(2.0))
                     .px(px(2.0))
@@ -469,7 +474,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
         if let Some(sub) = content.get(last_idx..) {
             container = container.child(
                 div()
-                    .text_color(rgb(0xdbdee1))
+                    .text_color(text_primary())
                     .child(sub.to_string()),
             );
         }
@@ -478,7 +483,622 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
     container
 }
 
-/// Renders the complete Discord Search Flyout Panel (418px width, #2b2d31 background, #1e1f22 border)
+/// Selectable trigger wrapper for anchoring Popover to the search input pill
+#[derive(IntoElement)]
+pub struct SearchFieldTrigger {
+    pub query: String,
+    pub focus_handle: FocusHandle,
+    pub app_entity: Entity<AppState>,
+    pub is_open: bool,
+}
+
+impl Selectable for SearchFieldTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.is_open = selected;
+        self
+    }
+    fn is_selected(&self) -> bool {
+        self.is_open
+    }
+}
+
+impl RenderOnce for SearchFieldTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        render_search_input_box(self.app_entity, &self.query, &self.focus_handle)
+    }
+}
+
+/// Popover content showing Discord's 6 search filters (search-popover.md spec: 356x335, r8, padding 12px 8px)
+fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
+    let filters = [
+        ("from:", "de um usuário específico", "from: usuário"),
+        ("in:", "em um canal específico", "in: canal"),
+        ("has:", "contém link, anexo ou mídia", "has: link, embed, file..."),
+        ("mentions:", "menciona um usuário", "mentions: usuário"),
+        ("before:", "enviadas antes de uma data", "before: YYYY-MM-DD"),
+        ("after:", "enviadas após uma data", "after: YYYY-MM-DD"),
+    ];
+
+    div()
+        .w(px(356.0))
+        .p(px(8.0))
+        .py(px(12.0))
+        .rounded(px(8.0))
+        .bg(bg_floating())
+        .border_1()
+        .border_color(channel_hover())
+        .shadow_lg()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .px(px(8.0))
+                .pb(px(4.0))
+                .text_size(px(11.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(text_muted())
+                .child("OPÇÕES DE FILTRO"),
+        )
+        .children(filters.iter().map(|&(prefix, desc, example)| {
+            let entity = app_entity.clone();
+            div()
+                .h(px(28.0))
+                .px(px(8.0))
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .hover(|s| s.bg(channel_hover()))
+                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        let current = state.search_query.trim();
+                        if current.is_empty() {
+                            state.search_query = format!("{} ", prefix);
+                        } else if !current.ends_with(prefix) {
+                            state.search_query = format!("{} {} ", current, prefix);
+                        }
+                        let q = state.search_query.clone();
+                        state.execute_search(&q);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_color(blurple())
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(12.0))
+                                .child(prefix),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                                .text_size(px(12.0))
+                                .child(desc),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(10.0))
+                        .child(example),
+                )
+        }))
+        .into_any_element()
+}
+
+/// Renders the search input pill box inside the flyout header
+fn render_search_input_box(
+    app_entity: Entity<AppState>,
+    search_query: &str,
+    focus_handle: &FocusHandle,
+) -> Div {
+    let query_empty = search_query.is_empty();
+    let query_str = search_query.to_string();
+
+    div()
+        .flex_1()
+        .h(px(32.0))
+        .px(px(8.0))
+        .rounded(px(4.0))
+        .bg(bg_server())
+        .border_1()
+        .border_color(channel_hover())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(6.0))
+        .track_focus(focus_handle)
+        .cursor_text()
+        .on_mouse_down(MouseButton::Left, {
+            let fh = focus_handle.clone();
+            move |_ev, window, cx| {
+                window.focus(&fh, cx);
+            }
+        })
+        .on_key_down({
+            let entity = app_entity.clone();
+            let fh = focus_handle.clone();
+            move |ev: &KeyDownEvent, window, cx| {
+                window.focus(&fh, cx);
+                let key = &ev.keystroke.key;
+                let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
+                if is_ctrl {
+                    return;
+                }
+                entity.update(cx, |state, cx| {
+                    match key.as_str() {
+                        "backspace" => {
+                            state.search_query.pop();
+                            let q = state.search_query.clone();
+                            state.execute_search(&q);
+                            cx.notify();
+                        }
+                        "escape" => {
+                            state.close_search();
+                            cx.notify();
+                        }
+                        "enter" => {
+                            let q = state.search_query.clone();
+                            state.execute_search(&q);
+                            cx.notify();
+                        }
+                        k if k.chars().count() == 1 => {
+                            state.search_query.push_str(k);
+                            let q = state.search_query.clone();
+                            state.execute_search(&q);
+                            cx.notify();
+                        }
+                        _ => {}
+                    }
+                });
+            }
+        })
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .child(icon_search(px(14.0), text_muted()))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(if !query_empty {
+                            text_titles()
+                        } else {
+                            text_muted()
+                        })
+                        .child(if !query_empty {
+                            query_str
+                        } else {
+                            "Buscar".to_string()
+                        }),
+                ),
+        )
+        .children(if !query_empty {
+            let entity = app_entity.clone();
+            Some(
+                div()
+                    .size(px(16.0))
+                    .rounded(px(2.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(text_muted())
+                    .hover(|s| s.text_color(white()))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                        entity.update(cx, |state, cx| {
+                            state.clear_search();
+                            cx.notify();
+                        });
+                    })
+                    .child(icon_close(px(12.0), text_muted())),
+            )
+        } else {
+            None
+        })
+}
+
+/// Renders the close button (✕) for the flyout panel
+fn render_search_flyout_close_button(app_entity: Entity<AppState>) -> AnyElement {
+    div()
+        .size(px(28.0))
+        .rounded(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .text_color(text_muted())
+        .hover(|s| s.bg(channel_hover()).text_color(white()))
+        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+            app_entity.update(cx, |state, cx| {
+                state.close_search();
+                cx.notify();
+            });
+        })
+        .child(icon_close(px(14.0), text_muted()))
+        .into_any_element()
+}
+
+/// Renders the top header row of the search flyout: Popover-anchored input + close button
+fn render_search_flyout_header(
+    app_entity: Entity<AppState>,
+    search_query: &str,
+    focus_handle: &FocusHandle,
+) -> AnyElement {
+    let trigger = SearchFieldTrigger {
+        query: search_query.to_string(),
+        focus_handle: focus_handle.clone(),
+        app_entity: app_entity.clone(),
+        is_open: false,
+    };
+
+    let popover = Popover::new("search-flyout-popover")
+        .anchor(Anchor::BottomLeft)
+        .offset(px(6.0))
+        .trigger(trigger)
+        .content({
+            let entity = app_entity.clone();
+            move |_state, _window, _cx| {
+                render_search_popover_content(entity.clone())
+            }
+        });
+
+    div()
+        .h(px(48.0))
+        .px(px(12.0))
+        .border_b_1()
+        .border_color(bg_server())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex_1()
+                .child(popover),
+        )
+        .child(render_search_flyout_close_button(app_entity))
+        .into_any_element()
+}
+
+/// Renders a single filter chip button
+fn render_filter_chip(
+    app_entity: Entity<AppState>,
+    prefix: &'static str,
+    hint: &'static str,
+) -> AnyElement {
+    div()
+        .h(px(24.0))
+        .px(px(8.0))
+        .rounded(px(4.0))
+        .bg(bg_server())
+        .border_1()
+        .border_color(channel_hover())
+        .hover(|s| s.bg(channel_hover()).border_color(blurple()))
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+            app_entity.update(cx, |state, cx| {
+                let current = state.search_query.trim();
+                if current.is_empty() {
+                    state.search_query = format!("{} ", prefix);
+                } else if !current.ends_with(prefix) {
+                    state.search_query = format!("{} {} ", current, prefix);
+                }
+                let q = state.search_query.clone();
+                state.execute_search(&q);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .text_color(blurple())
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(11.0))
+                .child(prefix),
+        )
+        .child(
+            div()
+                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                .text_size(px(10.0))
+                .child(hint),
+        )
+        .into_any_element()
+}
+
+/// Renders results counter and interactive chips row
+fn render_search_chips_section(
+    app_entity: Entity<AppState>,
+    results_count: usize,
+    search_query: &str,
+) -> AnyElement {
+    let is_empty = search_query.trim().is_empty();
+    let counter_label = if is_empty {
+        "OPÇÕES DE PESQUISA".to_string()
+    } else {
+        format!("{} RESULTADOS ENCONTRADOS", results_count)
+    };
+
+    div()
+        .px(px(12.0))
+        .py(px(8.0))
+        .border_b_1()
+        .border_color(bg_server())
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(11.0))
+                        .child(counter_label),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .gap(px(6.0))
+                .children(
+                    DISCORD_SEARCH_CHIPS
+                        .iter()
+                        .map(|&(p, h)| render_filter_chip(app_entity.clone(), p, h)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// Renders the empty search guide state showing available filters
+fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
+    let mut guide = vec![
+        div()
+            .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
+            .font_weight(FontWeight::BOLD)
+            .text_size(px(12.0))
+            .child("EU ESTOU PROCURANDO POR...")
+            .into_any_element(),
+    ];
+
+    let filter_guides = [
+        ("from:", "procura mensagens de um usuário específico (ex: from:ferran)"),
+        ("has:", "filtra por mídias: link, embed, file, video, image, sound"),
+        ("in:", "filtra mensagens em um canal específico (ex: in:geral)"),
+        ("before:", "mensagens enviadas antes de uma data (YYYY-MM-DD)"),
+        ("after:", "mensagens enviadas após uma data (YYYY-MM-DD)"),
+        ("mentions:", "filtra mensagens que mencionam um usuário"),
+        ("pinned:", "mensagens fixadas: pinned:true ou pinned:false"),
+    ];
+
+    for (filter_key, desc) in filter_guides {
+        let entity = app_entity.clone();
+        guide.push(
+            div()
+                .p(px(8.0))
+                .rounded(px(4.0))
+                .bg(bg_user_bar())
+                .hover(|s| s.bg(channel_hover()))
+                .border_1()
+                .border_color(rgb(0x1f2023)) // TOKEN FALTANDO: --border-subtle
+                .cursor_pointer()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        state.search_query = format!("{} ", filter_key);
+                        let q = state.search_query.clone();
+                        state.execute_search(&q);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .text_color(blurple())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(12.0))
+                        .child(filter_key),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                        .text_size(px(11.0))
+                        .child(desc),
+                )
+                .into_any_element(),
+        );
+    }
+    guide
+}
+
+/// Renders empty state when query returns 0 hits
+fn render_no_results_state() -> Vec<AnyElement> {
+    vec![
+        div()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon_search(px(32.0), text_muted())),
+            )
+            .child(
+                div()
+                    .text_color(text_titles())
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(15.0))
+                    .child("Nenhum resultado encontrado"),
+            )
+            .child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(13.0))
+                    .child("Tente buscar com outros termos ou remover alguns filtros."),
+            )
+            .into_any_element(),
+    ]
+}
+
+/// Renders a single search result hit message card
+fn render_search_result_card(
+    app_entity: Entity<AppState>,
+    hit: &SearchResultGroup,
+    parsed_query: &SearchQuery,
+) -> AnyElement {
+    let entity = app_entity.clone();
+    let channel_id = hit.channel_id.clone();
+    let message_id = hit.hit_message.id.clone();
+    let channel_label = hit.channel_name.clone().unwrap_or_else(|| hit.channel_id.clone());
+    let author_name = hit.hit_message.author.display_name().to_string();
+    let timestamp_str = hit.hit_message.timestamp.format("%d/%m/%Y %H:%M").to_string();
+
+    let jump_cid = channel_id.clone();
+    let jump_mid = message_id.clone();
+    let jump_entity = entity.clone();
+
+    div()
+        .p(px(12.0))
+        .rounded(px(6.0))
+        .bg(bg_user_bar())
+        .border_1()
+        .border_color(rgb(0x1f2023)) // TOKEN FALTANDO: --border-subtle
+        .hover(|s| s.border_color(channel_hover()).bg(rgb(0x282a2e))) // TOKEN FALTANDO: --background-modifier-hover
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        // Top Row: Origin Channel + "Ir para mensagem" Button via crate::components::Button
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(icon_hash(px(14.0), blurple()))
+                        .child(
+                            div()
+                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --channels-default
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(px(12.0))
+                                .child(channel_label),
+                        ),
+                )
+                .child(
+                    Button::new(
+                        SharedString::from(format!("jump-to-msg-{}", message_id)),
+                        "Ir para mensagem",
+                    )
+                    .size(ButtonSize::Sm)
+                    .variant(ButtonVariant::Gray)
+                    .on_click(move |_ev, _window, cx| {
+                        jump_entity.update(cx, |state, cx| {
+                            state.jump_to_message(&jump_cid, &jump_mid);
+                            cx.notify();
+                        });
+                    }),
+                ),
+        )
+        // Author & Timestamp Row: using Avatar component!
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    Avatar::new(author_name.clone())
+                        .size(AvatarSize::Px24)
+                        .opt_src(hit.hit_message.author.avatar_url())
+                        .opt_decoration(hit.hit_message.author.avatar_decoration_data.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(13.0))
+                        .child(author_name),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(11.0))
+                        .child(timestamp_str),
+                ),
+        )
+        // Matched Hit Content (with Highlighted Terms in #fee75c / dark text)
+        .child(render_highlighted_text(&hit.hit_message.content, parsed_query))
+        .into_any_element()
+}
+
+/// Renders the scrollable results area or empty states
+fn render_search_results_scroll_area(
+    app_entity: Entity<AppState>,
+    state: &AppState,
+    parsed_query: &SearchQuery,
+) -> AnyElement {
+    let is_empty_query = state.search_query.trim().is_empty();
+    let has_no_results = state.search_results.is_empty();
+
+    let items: Vec<AnyElement> = if is_empty_query {
+        render_empty_guide_state(app_entity)
+    } else if has_no_results {
+        render_no_results_state()
+    } else {
+        state
+            .search_results
+            .iter()
+            .map(|hit| render_search_result_card(app_entity.clone(), hit, parsed_query))
+            .collect()
+    };
+
+    div()
+        .id("search-results-scroll")
+        .flex_1()
+        .overflow_y_scroll()
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .children(items)
+        .into_any_element()
+}
+
+/// Renders the complete Discord Search Flyout Panel (418px width, Discord dark channels background)
 pub fn render_search_flyout(
     app_entity: Entity<AppState>,
     state: &AppState,
@@ -491,447 +1111,25 @@ pub fn render_search_flyout(
         .h_full()
         .flex()
         .flex_col()
-        .bg(rgb(0x2b2d31))
+        .bg(bg_channels())
         .border_l_1()
-        .border_color(rgb(0x1e1f22))
+        .border_color(bg_server())
         .flex_shrink_0()
-        // =====================================================================
-        // 1. TOP HEADER: Search Box + Close Button
-        // =====================================================================
-        .child(
-            div()
-                .h(px(48.0))
-                .px(px(12.0))
-                .border_b_1()
-                .border_color(rgb(0x1e1f22))
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap(px(8.0))
-                // Search Input Box Pill
-                .child(
-                    div()
-                        .flex_1()
-                        .h(px(32.0))
-                        .px(px(8.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x1e1f22))
-                        .border_1()
-                        .border_color(rgb(0x35373c))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(6.0))
-                        .track_focus(focus_handle)
-                        .cursor_text()
-                        .on_mouse_down(MouseButton::Left, {
-                            let fh = focus_handle.clone();
-                            move |_ev, window, cx| {
-                                window.focus(&fh, cx);
-                            }
-                        })
-                        .on_key_down({
-                            let entity = app_entity.clone();
-                            let fh = focus_handle.clone();
-                            move |ev: &KeyDownEvent, window, cx| {
-                                window.focus(&fh, cx);
-                                let key = &ev.keystroke.key;
-                                let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
-                                if is_ctrl {
-                                    return;
-                                }
-                                entity.update(cx, |state, cx| {
-                                    match key.as_str() {
-                                        "backspace" => {
-                                            state.search_query.pop();
-                                            let q = state.search_query.clone();
-                                            state.execute_search(&q);
-                                            cx.notify();
-                                        }
-                                        "escape" => {
-                                            state.close_search();
-                                            cx.notify();
-                                        }
-                                        "enter" => {
-                                            let q = state.search_query.clone();
-                                            state.execute_search(&q);
-                                            cx.notify();
-                                        }
-                                        k if k.chars().count() == 1 => {
-                                            state.search_query.push_str(k);
-                                            let q = state.search_query.clone();
-                                            state.execute_search(&q);
-                                            cx.notify();
-                                        }
-                                        _ => {}
-                                    }
-                                });
-                            }
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .overflow_hidden()
-                                .child(icon_search(px(14.0), rgb(0x80848e)))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(if !state.search_query.is_empty() {
-                                            rgb(0xf2f3f5)
-                                        } else {
-                                            rgb(0x80848e)
-                                        })
-                                        .child(if !state.search_query.is_empty() {
-                                            state.search_query.clone()
-                                        } else {
-                                            "Buscar".to_string()
-                                        }),
-                                ),
-                        )
-                        .children(if !state.search_query.is_empty() {
-                            let entity = app_entity.clone();
-                            Some(
-                                div()
-                                    .size(px(16.0))
-                                    .rounded_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(rgb(0x80848e))
-                                    .hover(|s| s.text_color(rgb(0xffffff)))
-                                    .cursor_pointer()
-                                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                        entity.update(cx, |state, cx| {
-                                            state.clear_search();
-                                            cx.notify();
-                                        });
-                                    })
-                                    .child(icon_close(px(12.0), rgb(0x80848e))),
-                            )
-                        } else {
-                            None
-                        }),
-                )
-                // Close Flyout Button (✕)
-                .child(
-                    div()
-                        .size(px(28.0))
-                        .rounded(px(4.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .text_color(rgb(0x80848e))
-                        .hover(|s| s.bg(rgb(0x35373c)).text_color(rgb(0xffffff)))
-                        .on_mouse_down(MouseButton::Left, {
-                            let entity = app_entity.clone();
-                            move |_ev, _window, cx| {
-                                entity.update(cx, |state, cx| {
-                                    state.close_search();
-                                    cx.notify();
-                                });
-                            }
-                        })
-                        .child(icon_close(px(14.0), rgb(0x80848e))),
-                ),
-        )
-        // =====================================================================
-        // 2. CHIPS SECTION: Results count + Interactive filter chips
-        // =====================================================================
-        .child(
-            div()
-                .px(px(12.0))
-                .py(px(8.0))
-                .border_b_1()
-                .border_color(rgb(0x1e1f22))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                // Results Counter
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .text_color(rgb(0x80848e))
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(11.0))
-                                .child(if state.search_query.trim().is_empty() {
-                                    "OPÇÕES DE PESQUISA".to_string()
-                                } else {
-                                    format!("{} RESULTADOS ENCONTRADOS", state.search_results.len())
-                                }),
-                        ),
-                )
-                // Interactive Filter Chips Row
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap(px(6.0))
-                        .children(DISCORD_SEARCH_CHIPS.iter().map(|&(prefix, hint)| {
-                            let entity = app_entity.clone();
-                            div()
-                                .h(px(24.0))
-                                .px(px(8.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0x1e1f22))
-                                .border_1()
-                                .border_color(rgb(0x35373c))
-                                .hover(|s| s.bg(rgb(0x35373c)).border_color(rgb(0x5865f2)))
-                                .cursor_pointer()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(4.0))
-                                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                    entity.update(cx, |state, cx| {
-                                        let current = state.search_query.trim();
-                                        if current.is_empty() {
-                                            state.search_query = format!("{} ", prefix);
-                                        } else if !current.ends_with(prefix) {
-                                            state.search_query = format!("{} {} ", current, prefix);
-                                        }
-                                        let q = state.search_query.clone();
-                                        state.execute_search(&q);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(
-                                    div()
-                                        .text_color(rgb(0x5865f2))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_size(px(11.0))
-                                        .child(prefix),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(0x949ba4))
-                                        .text_size(px(10.0))
-                                        .child(hint),
-                                )
-                        })),
-                ),
-        )
-        // =====================================================================
-        // 3. RESULTS SCROLL AREA / EMPTY GUIDE STATE
-        // =====================================================================
-        .child(
-            div()
-                .id("search-results-scroll")
-                .flex_1()
-                .overflow_y_scroll()
-                .p(px(12.0))
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .children(if state.search_query.trim().is_empty() {
-                    // Empty Guide State: Show available filter descriptions
-                    let mut guide = vec![
-                        div()
-                            .text_color(rgb(0x949ba4))
-                            .font_weight(FontWeight::BOLD)
-                            .text_size(px(12.0))
-                            .child("EU ESTOU PROCURANDO POR..."),
-                    ];
-
-                    let filter_guides = [
-                        ("from:", "procura mensagens de um usuário específico (ex: from:ferran)"),
-                        ("has:", "filtra por mídias: link, embed, file, video, image, sound"),
-                        ("in:", "filtra mensagens em um canal específico (ex: in:geral)"),
-                        ("before:", "mensagens enviadas antes de uma data (YYYY-MM-DD)"),
-                        ("after:", "mensagens enviadas após uma data (YYYY-MM-DD)"),
-                        ("mentions:", "filtra mensagens que mencionam um usuário"),
-                        ("pinned:", "mensagens fixadas: pinned:true ou pinned:false"),
-                    ];
-
-                    for (filter_key, desc) in filter_guides {
-                        let entity = app_entity.clone();
-                        guide.push(
-                            div()
-                                .p(px(8.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0x232428))
-                                .hover(|s| s.bg(rgb(0x35373c)))
-                                .border_1()
-                                .border_color(rgb(0x1f2023))
-                                .cursor_pointer()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                    entity.update(cx, |state, cx| {
-                                        state.search_query = format!("{} ", filter_key);
-                                        let q = state.search_query.clone();
-                                        state.execute_search(&q);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(
-                                    div()
-                                        .text_color(rgb(0x5865f2))
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_size(px(12.0))
-                                        .child(filter_key),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(0x949ba4))
-                                        .text_size(px(11.0))
-                                        .child(desc),
-                                ),
-                        );
-                    }
-                    guide
-                } else if state.search_results.is_empty() {
-                    vec![
-                        div()
-                            .p(px(24.0))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .text_center()
-                            .gap(px(8.0))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(icon_search(px(32.0), rgb(0x80848e))),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(0xf2f3f5))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_size(px(15.0))
-                                    .child("Nenhum resultado encontrado"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(rgb(0x80848e))
-                                    .text_size(px(13.0))
-                                    .child("Tente buscar com outros termos ou remover alguns filtros."),
-                            ),
-                    ]
-                } else {
-                    // Result Cards
-                    state.search_results.iter().map(|hit| {
-                        let entity = app_entity.clone();
-                        let channel_id = hit.channel_id.clone();
-                        let message_id = hit.hit_message.id.clone();
-                        let channel_label = hit.channel_name.clone().unwrap_or_else(|| hit.channel_id.clone());
-                        let author_name = hit.hit_message.author.display_name().to_string();
-                        let author_char = author_name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                        let timestamp_str = hit.hit_message.timestamp.format("%d/%m/%Y %H:%M").to_string();
-
-                        div()
-                            .p(px(12.0))
-                            .rounded(px(6.0))
-                            .bg(rgb(0x232428))
-                            .border_1()
-                            .border_color(rgb(0x1f2023))
-                            .hover(|s| s.border_color(rgb(0x35373c)).bg(rgb(0x282a2e)))
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.0))
-                            // Top Row: Origin Channel + "Ir para mensagem" Button
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap(px(4.0))
-                                            .child(icon_hash(px(14.0), rgb(0x5865f2)))
-                                            .child(
-                                                div()
-                                                    .text_color(rgb(0x949ba4))
-                                                    .font_weight(FontWeight::BOLD)
-                                                    .text_size(px(12.0))
-                                                    .child(channel_label),
-                                            ),
-                                    )
-                                    // Button: 'Ir para mensagem'
-                                    .child(
-                                        div()
-                                            .px(px(8.0))
-                                            .py(px(4.0))
-                                            .rounded(px(4.0))
-                                            .bg(rgb(0x35373c))
-                                            .hover(|s| s.bg(rgb(0x5865f2)).text_color(rgb(0xffffff)))
-                                            .text_color(rgb(0xdbdee1))
-                                            .text_size(px(11.0))
-                                            .font_weight(FontWeight::BOLD)
-                                            .cursor_pointer()
-                                            .on_mouse_down(MouseButton::Left, {
-                                                let entity = entity.clone();
-                                                let cid = channel_id.clone();
-                                                let mid = message_id.clone();
-                                                move |_ev, _window, cx| {
-                                                    entity.update(cx, |state, cx| {
-                                                        state.jump_to_message(&cid, &mid);
-                                                        cx.notify();
-                                                    });
-                                                }
-                                            })
-                                            .child("Ir para mensagem"),
-                                    ),
-                            )
-                            // Author & Timestamp Row
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .size(px(24.0))
-                                            .rounded_full()
-                                            .bg(rgb(0x5865f2))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_color(rgb(0xffffff))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(11.0))
-                                            .child(author_char),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0xf2f3f5))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(13.0))
-                                            .child(author_name),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(rgb(0x80848e))
-                                            .text_size(px(11.0))
-                                            .child(timestamp_str),
-                                    ),
-                            )
-                            // Matched Hit Content (with Highlighted Terms in #fee75c / dark text)
-                            .child(
-                                render_highlighted_text(&hit.hit_message.content, &parsed_query),
-                            )
-                    }).collect()
-                }),
-        )
+        .child(render_search_flyout_header(
+            app_entity.clone(),
+            &state.search_query,
+            focus_handle,
+        ))
+        .child(render_search_chips_section(
+            app_entity.clone(),
+            state.search_results.len(),
+            &state.search_query,
+        ))
+        .child(render_search_results_scroll_area(
+            app_entity,
+            state,
+            &parsed_query,
+        ))
 }
 
 #[cfg(test)]
@@ -991,5 +1189,101 @@ mod tests {
         assert_eq!(hit.context_before[0].id, "m1");
         assert_eq!(hit.context_after.len(), 1);
         assert_eq!(hit.context_after[0].id, "m3");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_has_filter_parsing_all() {
+        assert_eq!(HasFilter::parse("link"), Some(HasFilter::Link));
+        assert_eq!(HasFilter::parse("url"), Some(HasFilter::Link));
+        assert_eq!(HasFilter::parse("embed"), Some(HasFilter::Embed));
+        assert_eq!(HasFilter::parse("file"), Some(HasFilter::File));
+        assert_eq!(HasFilter::parse("video"), Some(HasFilter::Video));
+        assert_eq!(HasFilter::parse("image"), Some(HasFilter::Image));
+        assert_eq!(HasFilter::parse("photo"), Some(HasFilter::Image));
+        assert_eq!(HasFilter::parse("sound"), Some(HasFilter::Sound));
+        assert_eq!(HasFilter::parse("audio"), Some(HasFilter::Sound));
+        assert_eq!(HasFilter::parse("unknown"), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_has_filter_matching_media() {
+        let author = Author::new("u1", "user1");
+        let mut msg = Message::new("m1", "c1", author, "Hello");
+
+        assert!(!HasFilter::File.matches(&msg));
+        assert!(!HasFilter::Link.matches(&msg));
+
+        // Link
+        msg.content = "Confira https://discord.com para mais".to_string();
+        assert!(HasFilter::Link.matches(&msg));
+
+        // Attachment
+        let att = crate::domain::message::Attachment {
+            id: "a1".to_string(),
+            filename: "audio.mp3".to_string(),
+            size: 1024,
+            url: "http://a.com/audio.mp3".to_string(),
+            proxy_url: None,
+            content_type: Some("audio/mpeg".to_string()),
+            width: None,
+            height: None,
+        };
+        msg.attachments.push(att);
+        assert!(HasFilter::File.matches(&msg));
+        assert!(HasFilter::Sound.matches(&msg));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_date_and_pinned_filters() {
+        let q = SearchQuery::parse("before:2026-02-01 after:2026-01-01 pinned:true");
+        assert_eq!(
+            q.before,
+            Some(NaiveDate::from_ymd_opt(2026, 2, 1).unwrap())
+        );
+        assert_eq!(
+            q.after,
+            Some(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+        );
+        assert_eq!(q.pinned, Some(true));
+
+        let author = Author::new("u1", "user1");
+        let mut msg = Message::new("m1", "c1", author, "pinned note");
+        msg.pinned = true;
+        // timestamp is set to now by Message::new, let's test matching
+        let query_pinned = SearchQuery::parse("pinned:true");
+        assert!(query_pinned.matches(&msg, None));
+
+        let query_not_pinned = SearchQuery::parse("pinned:false");
+        assert!(!query_not_pinned.matches(&msg, None));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_empty_query_behavior() {
+        let q = SearchQuery::parse("");
+        assert!(q.is_empty());
+
+        let author = Author::new("u1", "user1");
+        let msg = Message::new("m1", "c1", author, "content");
+        let results = LocalSearchEngine::search_channel_messages(
+            &[msg],
+            &q,
+            "c1",
+            None,
+            2,
+        );
+        assert!(results.is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mentions_filter() {
+        let q = SearchQuery::parse("mentions:ferran");
+        assert_eq!(q.mentions.as_deref(), Some("ferran"));
+
+        let author = Author::new("u1", "user1");
+        let msg_match = Message::new("m1", "c1", author.clone(), "Ei @ferran você viu isso?");
+        assert!(q.matches(&msg_match, None));
+
+        let msg_no_match = Message::new("m2", "c1", author, "Mensagem sem menção");
+        assert!(!q.matches(&msg_no_match, None));
     }
 }
