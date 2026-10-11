@@ -8,14 +8,15 @@
 //! - Modular components over gpui-kit Textarea / TextareaState with zero fixed colors
 
 use gpui::component::input::{Textarea as KitTextarea, TextareaState};
-use gpui::component::tooltip::Tooltip;
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
 
+use crate::components::button::IconButton;
+
 use crate::chat::media_picker::MediaPickerTab;
 use crate::domain::message::Message;
-use crate::tokens::colors::{white, *};
+use crate::tokens::colors::*;
 use crate::tokens::icons::{
     icon_close, icon_emoji, icon_gif, icon_gift, icon_plus, icon_send, icon_sticker,
 };
@@ -81,25 +82,19 @@ fn render_reply_mention_button(
 }
 
 /// Dismiss button on the reply banner using SVG icon and kit tooltip.
-// TROCAR por IconButton::with_icon
 fn render_reply_close_button(
     on_cancel_reply: Option<EditorActionCallback>,
 ) -> AnyElement {
-    let mut btn = div()
-        .id("reply-banner-close")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(20.0))
-        .rounded(radius_xs())
-        .text_color(text_muted())
-        .cursor_pointer()
-        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-        .tooltip(|window, cx| Tooltip::new("Cancelar resposta").build(window, cx))
-        .child(icon_close(px(12.0), text_muted()));
+    let mut btn = IconButton::with_icon("reply-banner-close", |size, color| {
+        icon_close(size, color).into_any_element()
+    })
+    .size(px(20.0))
+    .icon_size(px(12.0))
+    .rounded(radius_xs())
+    .tooltip("Cancelar resposta");
 
     if let Some(handler) = on_cancel_reply {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(window, cx);
         });
     }
@@ -108,24 +103,17 @@ fn render_reply_close_button(
 }
 
 /// Plus (+) attachment button using SVG icon and kit tooltip.
-// TROCAR por IconButton::with_icon
 fn render_attach_button(on_attachment: Option<EditorActionCallback>) -> AnyElement {
-    let mut btn = div()
-        .id("chat-attach-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(24.0))
-        .rounded_full()
-        .bg(channel_active())
-        .cursor_pointer()
-        .hover(|s| s.bg(channel_hover()))
-        .text_color(text_muted())
-        .tooltip(|window, cx| Tooltip::new("Adicionar anexo").build(window, cx))
-        .child(icon_plus(px(16.0), text_muted()));
+    let mut btn = IconButton::with_icon("chat-attach-btn", |size, color| {
+        icon_plus(size, color).into_any_element()
+    })
+    .size(px(24.0))
+    .icon_size(px(16.0))
+    .rounded(radius_full())
+    .tooltip("Adicionar anexo");
 
     if let Some(handler) = on_attachment {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(window, cx);
         });
     }
@@ -134,42 +122,30 @@ fn render_attach_button(on_attachment: Option<EditorActionCallback>) -> AnyEleme
 }
 
 /// Nitro gift button using SVG icon and kit tooltip.
-// TROCAR por IconButton::with_icon
 fn render_gift_button() -> AnyElement {
-    div()
-        .id("chat-gift-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-        .text_color(text_muted())
-        .tooltip(|window, cx| Tooltip::new("Dar Nitro de presente").build(window, cx))
-        .child(icon_gift(px(20.0), text_muted()))
-        .into_any_element()
+    IconButton::with_icon("chat-gift-btn", |size, color| {
+        icon_gift(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .tooltip("Dar Nitro de presente")
+    .into_any_element()
 }
 
 /// GIF picker button using SVG icon, active state & kit tooltip.
-// TROCAR por IconButton::with_icon
 fn render_gif_button(is_active: bool, on_gif: Option<EditorActionCallback>) -> AnyElement {
-    let mut btn = div()
-        .id("chat-gif-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(if is_active { channel_active() } else { transparent() })
-        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-        .text_color(if is_active { white() } else { text_muted() })
-        .tooltip(|window, cx| Tooltip::new("Abrir seletor de GIFs").build(window, cx))
-        .child(icon_gif(px(20.0), if is_active { white() } else { text_muted() }));
+    let mut btn = IconButton::with_icon("chat-gif-btn", |size, color| {
+        icon_gif(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .active(is_active)
+    .tooltip("Abrir seletor de GIFs");
 
     if let Some(handler) = on_gif {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(window, cx);
         });
     }
@@ -178,24 +154,18 @@ fn render_gif_button(is_active: bool, on_gif: Option<EditorActionCallback>) -> A
 }
 
 /// Sticker picker button using SVG icon, active state & kit tooltip.
-// TROCAR por IconButton::with_icon
 fn render_sticker_button(is_active: bool, on_sticker: Option<EditorActionCallback>) -> AnyElement {
-    let mut btn = div()
-        .id("chat-sticker-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(if is_active { channel_active() } else { transparent() })
-        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-        .text_color(if is_active { white() } else { text_muted() })
-        .tooltip(|window, cx| Tooltip::new("Abrir seletor de figurinhas").build(window, cx))
-        .child(icon_sticker(px(20.0), if is_active { white() } else { text_muted() }));
+    let mut btn = IconButton::with_icon("chat-sticker-btn", |size, color| {
+        icon_sticker(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .active(is_active)
+    .tooltip("Abrir seletor de figurinhas");
 
     if let Some(handler) = on_sticker {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(window, cx);
         });
     }
@@ -204,24 +174,18 @@ fn render_sticker_button(is_active: bool, on_sticker: Option<EditorActionCallbac
 }
 
 /// Emoji picker button using SVG icon, active state & kit tooltip.
-// TROCAR por IconButton::with_icon
 fn render_emoji_button(is_active: bool, on_emoji: Option<EditorActionCallback>) -> AnyElement {
-    let mut btn = div()
-        .id("chat-emoji-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(if is_active { channel_active() } else { transparent() })
-        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-        .text_color(if is_active { white() } else { text_muted() })
-        .tooltip(|window, cx| Tooltip::new("Selecionar emoji").build(window, cx))
-        .child(icon_emoji(px(20.0), if is_active { white() } else { text_muted() }));
+    let mut btn = IconButton::with_icon("chat-emoji-btn", |size, color| {
+        icon_emoji(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .active(is_active)
+    .tooltip("Selecionar emoji");
 
     if let Some(handler) = on_emoji {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(window, cx);
         });
     }
@@ -230,7 +194,6 @@ fn render_emoji_button(is_active: bool, on_emoji: Option<EditorActionCallback>) 
 }
 
 /// Send message button (paper plane / arrow) shown when text is not empty.
-// TROCAR por IconButton::with_icon
 fn render_send_button(
     text: String,
     reply_msg_id: Option<String>,
@@ -240,21 +203,16 @@ fn render_send_button(
         return None;
     }
 
-    let mut btn = div()
-        .id("chat-send-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(blurple())
-        .hover(|s| s.bg(blurple_hover()))
-        .tooltip(|window, cx| Tooltip::new("Enviar mensagem").build(window, cx))
-        .child(icon_send(px(16.0), white()));
+    let mut btn = IconButton::with_icon("chat-send-btn", |size, color| {
+        icon_send(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(16.0))
+    .rounded(radius_sm())
+    .tooltip("Enviar mensagem");
 
     if let Some(handler) = on_send {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(&text, reply_msg_id.as_deref(), window, cx);
         });
     }
