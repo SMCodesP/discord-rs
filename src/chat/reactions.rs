@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::components::button::IconButton;
 use crate::domain::message::Reaction;
 use crate::tokens::colors::*;
+use crate::tokens::icons::icon_smile;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
 
@@ -43,8 +44,7 @@ pub fn render_reaction_badge(
         (
             with_alpha(HEX_BLURPLE, 0.15),
             blurple(),
-            // TOKEN FALTANDO: --mention-foreground / COR ANTIGA SEM ORIGEM: 0xc9cdfb
-            rgb(0xc9cdfb),
+            rgb(0xb2bbff), // TOKEN FALTANDO: --reaction-text-reacted-default
             with_alpha(HEX_BLURPLE, 0.25),
             blurple(),
         )
@@ -52,8 +52,7 @@ pub fn render_reaction_badge(
         (
             bg_channels(),
             bg_chat_hover(),
-            // TOKEN FALTANDO: --text-muted / COR ANTIGA SEM ORIGEM: 0xb5bac1
-            rgb(0xb5bac1),
+            rgb(0xa8a8c8), // TOKEN FALTANDO: --reaction-text-default
             channel_hover(),
             borders(),
         )
@@ -103,42 +102,25 @@ pub fn render_reaction_badge(
 pub fn render_add_reaction_button(
     message_id: &str,
     on_add_click: Option<AddReactionCallback>,
-) -> Div {
+) -> AnyElement {
     let msg_id = message_id.to_string();
 
-    let mut btn = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .h(px(26.0))
-        .px(space_3())
-        .bg(bg_channels())
-        .border_1()
-        .border_color(bg_chat_hover())
-        .rounded(radius_md())
-        .cursor_pointer()
-        .hover(|s| s.bg(channel_hover()).border_color(borders()))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .text_color(text_muted())
-                .text_size(font_size_xs())
-                .font_weight(WEIGHT_MEDIUM)
-                .child("☺")
-                .child("+"),
-        );
+    let mut btn = IconButton::with_icon(
+        format!("add-reaction-{}", message_id),
+        |sz, col| icon_smile(sz, col).into_any_element(),
+    )
+    .size(px(26.0))
+    .icon_size(px(14.0))
+    .rounded(radius_md())
+    .tooltip("Adicionar reação");
 
     if let Some(handler) = on_add_click {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(&msg_id, window, cx);
         });
     }
 
-    btn
+    btn.into_any_element()
 }
 
 // ============================================================================

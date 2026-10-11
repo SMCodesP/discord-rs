@@ -194,7 +194,7 @@ fn render_emoji_button(is_active: bool, on_emoji: Option<EditorActionCallback>) 
 }
 
 /// Send message button (paper plane / arrow) shown when text is not empty.
-fn render_send_button(
+pub fn render_send_button(
     text: String,
     reply_msg_id: Option<String>,
     on_send: Option<EditorSendCallback>,
