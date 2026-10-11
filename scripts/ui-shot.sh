@@ -30,8 +30,15 @@ SIZE="${3:-1280x800}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURE="$REPO_DIR/tests/fixtures/ui_shot/$SCREEN.json"
-LOCK="${UI_SHOT_CARGO_LOCK:-/tmp/discord-rs-cargo-C.lock}"
-BIN="$REPO_DIR/target/debug/examples/ui_shot"
+LOCK="${UI_SHOT_CARGO_LOCK:-/tmp/discord-rs-cargo-B.lock}"
+TARGET_DIR="$REPO_DIR/target"
+if [[ -L "$TARGET_DIR" ]]; then
+  RESOLVED_TARGET="$(readlink -f "$TARGET_DIR")"
+  BIN="$TARGET_DIR/debug/examples/ui_shot"
+else
+  RESOLVED_TARGET="$TARGET_DIR"
+  BIN="$TARGET_DIR/debug/examples/ui_shot"
+fi
 
 if [[ ! -f "$FIXTURE" ]]; then
   echo "ui-shot: ERRO: fixture inexistente: $FIXTURE" >&2
@@ -88,6 +95,9 @@ echo "ui-shot: tela=$SCREEN size=${W}x${H} out=$OUT"
 # 1. Build the capture example (offline fixture loader, not production code).
 echo "ui-shot: compilando examples/ui_shot..."
 flock "$LOCK" timeout 900 cargo build -j 4 --example ui_shot --manifest-path "$REPO_DIR/Cargo.toml"
+if [[ ! -x "$BIN" && -x "$RESOLVED_TARGET/debug/examples/ui_shot" ]]; then
+  BIN="$RESOLVED_TARGET/debug/examples/ui_shot"
+fi
 [[ -x "$BIN" ]] || { echo "ui-shot: ERRO: binário não gerado: $BIN" >&2; exit 1; }
 
 # 2. Display: private Xvfb unless the caller forces one.
@@ -110,6 +120,15 @@ else
   done
   DISPLAY="$CAP_DISPLAY" xdpyinfo >/dev/null 2>&1 \
     || { echo "ui-shot: ERRO: Xvfb não responde em $CAP_DISPLAY" >&2; exit 1; }
+  # The display may belong to a stale/foreign Xvfb (shared machine): require
+  # room for the requested window, else fail instead of a clamped capture.
+  DSIZE="$(DISPLAY="$CAP_DISPLAY" xdpyinfo 2>/dev/null | awk '/dimensions:/ {if (!seen) {print $2; seen=1}}')"
+  [[ -z "$DSIZE" ]] && DSIZE="0x0"
+  DW="${DSIZE%x*}"; DH="${DSIZE#*x}"
+  if [[ "$DW" -lt "$W" || "$DH" -lt "$H" ]]; then
+    echo "ui-shot: ERRO: display $CAP_DISPLAY tem ${DW}x${DH}, menor que o pedido ${W}x${H} (Xvfb de outro dono?)" >&2
+    exit 1
+  fi
 fi
 
 # 3. Launch the app with a unique window title.
