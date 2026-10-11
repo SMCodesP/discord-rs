@@ -18,6 +18,7 @@
 
 use chrono::{DateTime, Datelike, Utc};
 use gpui::*;
+use gpui::component::input::InputState;
 
 use crate::chat::markdown::render_markdown;
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -78,6 +79,7 @@ pub fn render_user_profile_popout(
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
     presence: Option<&Presence>,
+    quick_state: &Entity<InputState>,
 ) -> impl IntoElement {
     let entity_close = app_entity.clone();
     let entity_key = app_entity.clone();
@@ -105,7 +107,13 @@ pub fn render_user_profile_popout(
                 cx.notify();
             });
         })
-        .child(render_profile_card(app_entity, popout, catalog, presence))
+        .child(render_profile_card(
+            app_entity,
+            popout,
+            catalog,
+            presence,
+            quick_state,
+        ))
 }
 
 /// Renders the 300px Popout Card container
@@ -114,6 +122,7 @@ fn render_profile_card(
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
     presence: Option<&Presence>,
+    quick_state: &Entity<InputState>,
 ) -> impl IntoElement {
     let entity_card = app_entity.clone();
     let entity_close_btn = app_entity.clone();
@@ -748,9 +757,6 @@ fn render_profile_card(
     // 5. QUICK DIRECT MESSAGE INPUT (Functional real message dispatch)
     // -------------------------------------------------------------------------
     let target_uname = username.clone();
-    let entity_quick_msg = entity_card.clone();
-    let entity_quick_enter = entity_card.clone();
-    let quick_val = popout.quick_message.clone();
 
     let quick_input = div()
         .p(px(12.0))
@@ -758,24 +764,9 @@ fn render_profile_card(
         .border_color(rgb(0x1f2023))
         .bg(rgb(0x1e1f22))
         .child(
-            TextInput::new("profile-quick-message-input")
+            TextInput::new("profile-quick-message-input", quick_state)
                 .placeholder(format!("Conversar com @{}", target_uname))
-                .value(quick_val)
-                .full_width(true)
-                .on_change(move |val, _window, cx| {
-                    entity_quick_msg.update(cx, |s, cx| {
-                        if let Some(ref mut p) = s.profile_popout {
-                            p.quick_message = val;
-                        }
-                        cx.notify();
-                    });
-                })
-                .on_enter(move |_window, cx| {
-                    entity_quick_enter.update(cx, |s, cx| {
-                        s.send_profile_popout_quick_message();
-                        cx.notify();
-                    });
-                })
+                .full_width(true),
         );
 
     card = card.child(quick_input);
