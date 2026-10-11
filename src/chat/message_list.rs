@@ -117,7 +117,7 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
                 .absolute()
                 .w_full()
                 .h_px()
-                .bg(rgba(0x97979f1f)), // TOKEN FALTANDO: --border-subtle
+                .bg(border_subtle()),
         )
         .child(
             // Centered date pill
@@ -319,8 +319,8 @@ fn render_menu_item(
 
     if is_danger {
         item = item
-            .text_color(rgb(0xffa09b)) // TOKEN FALTANDO: --control-critical-secondary-text-default
-            .hover(|s| s.bg(rgb(0xda3e44)).text_color(white())); // TOKEN FALTANDO: --status-danger
+            .text_color(control_critical_secondary_text_default())
+            .hover(|s| s.bg(status_danger()).text_color(white()));
     } else {
         item = item
             .text_color(text_primary())
@@ -966,12 +966,38 @@ pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
 }
 
 /// Renders the channel or DM welcome banner displayed at the beginning of chat history.
-pub fn render_welcome_banner(channel_name: &str, channel_topic: &str, is_dm: bool) -> Div {
-    let icon_text = if is_dm { "@" } else { "#" };
+pub fn render_welcome_banner(
+    channel_name: &str,
+    channel_topic: &str,
+    is_dm: bool,
+    avatar_src: Option<SharedString>,
+    avatar_decoration: Option<crate::domain::user::AvatarDecorationData>,
+) -> Div {
     let title_text = if is_dm {
         channel_name.to_string()
     } else {
         format!("Bem-vindo(a) a #{}!", channel_name)
+    };
+
+    let icon_element = if is_dm {
+        Avatar::new(channel_name.to_string())
+            .size(AvatarSize::Px80)
+            .opt_src(avatar_src)
+            .opt_decoration(avatar_decoration)
+            .into_any_element()
+    } else {
+        div()
+            .size(px(68.0))
+            .rounded(radius_full())
+            .bg(channel_active())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(white())
+            .text_size(px(36.0))
+            .font_weight(WEIGHT_BOLD)
+            .child("#")
+            .into_any_element()
     };
 
     div()
@@ -981,19 +1007,7 @@ pub fn render_welcome_banner(channel_name: &str, channel_topic: &str, is_dm: boo
         .px(space_8())
         .pt(space_8())
         .pb(space_4())
-        .child(
-            div()
-                .size(px(64.0))
-                .rounded_full()
-                .bg(channel_active())
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(white())
-                .text_size(px(36.0))
-                .font_weight(WEIGHT_BOLD)
-                .child(icon_text),
-        )
+        .child(icon_element)
         .child(
             div()
                 .text_color(text_titles())
@@ -1266,6 +1280,11 @@ mod tests {
             "Usuário B",
             "Este é o início do seu histórico de mensagens diretas com Usuário B.",
             true,
+            Some("https://cdn.discordapp.com/avatars/123/abc.png".into()),
+            Some(crate::domain::user::AvatarDecorationData {
+                asset: "synth_decor".to_string(),
+                sku_id: None,
+            }),
         );
         drop(dm_banner);
 
@@ -1273,6 +1292,8 @@ mod tests {
             "geral",
             "Este é o início do canal #geral.",
             false,
+            None,
+            None,
         );
         drop(guild_banner);
     }

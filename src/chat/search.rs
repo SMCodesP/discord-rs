@@ -580,7 +580,7 @@ fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
                         )
                         .child(
                             div()
-                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                                .text_color(legacy_949ba4())
                                 .text_size(px(12.0))
                                 .child(desc),
                         ),
@@ -816,7 +816,7 @@ fn render_filter_chip(
         )
         .child(
             div()
-                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                .text_color(legacy_949ba4())
                 .text_size(px(10.0))
                 .child(hint),
         )
@@ -902,7 +902,7 @@ fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
                 .bg(bg_user_bar())
                 .hover(|s| s.bg(channel_hover()))
                 .border_1()
-                .border_color(rgb(0x1f2023)) // TOKEN FALTANDO: --border-subtle
+                .border_color(border_subtle())
                 .cursor_pointer()
                 .flex()
                 .flex_col()
@@ -924,7 +924,7 @@ fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
                 )
                 .child(
                     div()
-                        .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                        .text_color(legacy_949ba4())
                         .text_size(px(11.0))
                         .child(desc),
                 )
@@ -1012,7 +1012,7 @@ fn render_search_result_card(
                         .child(icon_hash(px(14.0), blurple()))
                         .child(
                             div()
-                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --channels-default
+                                .text_color(channels_default())
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
                                 .child(channel_label),

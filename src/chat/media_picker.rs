@@ -8,9 +8,7 @@
 //! 5. Barra de busca adaptável com filtragem em tempo real
 //! 6. Faixa inferior de pré-visualização (Hover Preview Strip)
 
-use gpui::component::tab::{Tab, TabBar};
 use gpui::component::tooltip::Tooltip;
-use gpui::component::{Selectable, Sizable, Size};
 use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
@@ -184,7 +182,7 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
         .on_scroll_wheel(|_ev, _win, cx| {
             cx.stop_propagation();
         })
-        // 1. Barra de Abas Superiores (com TabBar e Tab do kit)
+        // 1. Barra de Abas Superiores (sem moldura e sem divisórias verticais)
         .child(render_top_tabs(&config))
         // 2. Barra de Busca
         .child(render_search_bar(&config))
@@ -280,7 +278,7 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
 }
 
 // ============================================================================
-// 1. Barra de Abas Superiores (com TabBar e Tab do kit)
+// 1. Barra de Abas Superiores (sem moldura e sem divisórias verticais)
 // ============================================================================
 
 fn render_top_tabs(config: &MediaPickerConfig) -> Div {
@@ -291,43 +289,35 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
         MediaPickerTab::Soundboard,
     ];
 
-    let active_index = tabs
-        .iter()
-        .position(|&t| t == config.active_tab)
-        .unwrap_or(0);
-
-    let on_tab_change = config.on_tab_change.clone();
-    let mut tab_bar = TabBar::new("media-picker-tabs")
-        .with_size(Size::Small)
-        .selected_index(active_index);
-
-    if let Some(on_tab) = on_tab_change {
-        tab_bar = tab_bar.on_click(move |&idx, window, cx| {
-            if idx < tabs.len() {
-                on_tab(tabs[idx], window, cx);
-            }
-        });
-    }
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(40.0))
+        .px(px(12.0));
 
     for tab in tabs {
         let is_active = tab == config.active_tab;
         let icon_col = if is_active { text_titles() } else { text_secondary() };
         let text_col = if is_active { text_titles() } else { text_secondary() };
-        let tab_bg = if is_active { channel_active() } else { transparent() };
+        let tab_bg = if is_active { control_secondary_bg_active() } else { transparent() };
 
-        let tab_inner = div()
+        let mut item = div()
+            .id(ElementId::from(SharedString::from(format!("media-tab-{}", tab.label()))))
             .flex()
             .flex_row()
             .items_center()
             .justify_center()
             .gap(px(6.0))
             .h(px(30.0))
-            .px(px(10.0))
-            .rounded(radius_pill())
+            .px(px(12.0))
+            .rounded(px(8.0))
+            .cursor_pointer()
             .bg(tab_bg)
             .hover(move |s| {
                 if !is_active {
-                    s.bg(channel_hover()).text_color(text_titles())
+                    s.bg(control_secondary_bg_default()).text_color(text_titles())
                 } else {
                     s
                 }
@@ -341,43 +331,17 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
                     .child(tab.label()),
             );
 
-        let kit_tab = Tab::new()
-            .selected(is_active)
-            .child(tab_inner);
-        tab_bar = tab_bar.child(kit_tab);
+        if let Some(ref on_tab) = config.on_tab_change {
+            let on_tab = on_tab.clone();
+            item = item.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_tab(tab, window, cx);
+            });
+        }
+
+        row = row.child(item);
     }
 
-    // Botão Fechar (X)
-    let mut close_btn = div()
-        .id("media-picker-close-btn")
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(24.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .text_color(text_muted())
-        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-        .child(icon_close(px(14.0), text_muted()));
-
-    if let Some(on_close) = config.on_close.clone() {
-        close_btn = close_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-            on_close(window, cx);
-        });
-    }
-
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .h(px(40.0))
-        .px(px(8.0))
-        .bg(bg_user_bar())
-        .border_b_1()
-        .border_color(bg_server())
-        .child(tab_bar)
-        .child(close_btn)
+    row
 }
 
 // ============================================================================
@@ -926,13 +890,7 @@ pub fn build_emoji_virtual_rows(
     // 2. Seção Frequentemente Usados
     let show_recents = !is_searching && is_global;
     if show_recents {
-        let default_recents;
-        let recents = if config.recent_emojis.is_empty() {
-            default_recents = MediaCacheManager::default_recent_emojis();
-            &default_recents
-        } else {
-            &config.recent_emojis
-        };
+        let recents = &config.recent_emojis;
 
         if !recents.is_empty() {
             rows.push(EmojiVirtualRow::SectionHeader {
@@ -1159,7 +1117,7 @@ fn render_emoji_section_header(
     icon_url: Option<&str>,
     acronym: Option<&str>,
     cat_key: Option<&'static str>,
-    count: usize,
+    _count: usize,
 ) -> AnyElement {
     let header_icon = if let Some(cat) = cat_key {
         match cat {
@@ -1199,7 +1157,7 @@ fn render_emoji_section_header(
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
+        .justify_start()
         .pt(px(8.0))
         .pb(px(4.0))
         .child(
@@ -1216,13 +1174,6 @@ fn render_emoji_section_header(
                         .text_color(text_muted())
                         .child(title.to_string()),
                 ),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_weight(WEIGHT_MEDIUM)
-                .text_color(text_muted())
-                .child(format!("{}", count)),
         )
         .into_any_element()
 }
@@ -1589,6 +1540,12 @@ pub fn build_sticker_virtual_rows(
         }
     }
 
+    if rows.is_empty() {
+        rows.push(StickerVirtualRow::EmptyNotice {
+            message: "Nenhuma figurinha disponível.".to_string(),
+        });
+    }
+
     rows
 }
 
@@ -1675,7 +1632,7 @@ fn render_sticker_section_header(
     icon_url: Option<&str>,
     acronym: Option<&str>,
     is_favorites: bool,
-    count: usize,
+    _count: usize,
 ) -> AnyElement {
     let header_icon = if is_favorites {
         icon_sparkles(px(14.0), text_muted())
@@ -1705,7 +1662,7 @@ fn render_sticker_section_header(
         .flex()
         .flex_row()
         .items_center()
-        .justify_between()
+        .justify_start()
         .pt(px(10.0))
         .pb(px(6.0))
         .child(
@@ -1722,13 +1679,6 @@ fn render_sticker_section_header(
                         .text_color(text_muted())
                         .child(title.to_string()),
                 ),
-        )
-        .child(
-            div()
-                .text_size(px(10.0))
-                .font_weight(WEIGHT_MEDIUM)
-                .text_color(text_muted())
-                .child(format!("{}", count)),
         )
         .into_any_element()
 }
@@ -1911,12 +1861,17 @@ fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
         &config.gifs
     };
 
-    let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-    for gif in gifs_to_render {
-        grid = grid.child(render_gif_card(gif, config.on_select_gif.as_ref()));
+    if gifs_to_render.is_empty() {
+        container = container.child(render_empty_notice("Nenhum GIF disponível."));
+    } else {
+        let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
+        for gif in gifs_to_render {
+            grid = grid.child(render_gif_card(gif, config.on_select_gif.as_ref()));
+        }
+        container = container.child(grid);
     }
 
-    container.child(grid).into_any_element()
+    container.into_any_element()
 }
 
 fn render_gif_category_chips(
@@ -2021,7 +1976,7 @@ fn render_gif_card(
                 .bottom_0()
                 .left_0()
                 .right_0()
-                .bg(rgba(0x000000c0)) // COR ANTIGA SEM ORIGEM: rgba(0x000000c0) (fundo da legenda sobre a miniatura de GIF)
+                .bg(rgba(0x000000c0)) // TOKEN FALTANDO: --background-scrim
                 .px(px(6.0))
                 .py(px(4.0))
                 .child(
@@ -2084,16 +2039,21 @@ fn render_soundboard_tab(config: &MediaPickerConfig, query: &str) -> AnyElement 
             .collect()
     };
 
-    let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-    for sound in matching_sounds {
-        grid = grid.child(render_sound_item(
-            sound,
-            config.on_play_sound.as_ref(),
-            config.on_send_sound.as_ref(),
-        ));
+    if matching_sounds.is_empty() {
+        container = container.child(render_empty_notice("Nenhum som disponível."));
+    } else {
+        let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
+        for sound in matching_sounds {
+            grid = grid.child(render_sound_item(
+                sound,
+                config.on_play_sound.as_ref(),
+                config.on_send_sound.as_ref(),
+            ));
+        }
+        container = container.child(grid);
     }
 
-    container.child(grid).into_any_element()
+    container.into_any_element()
 }
 
 fn render_sound_item(
@@ -2278,27 +2238,19 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_official_sticker_packs_presence() {
         let packs = MediaCacheManager::get_default_sticker_packs();
-        assert!(packs.len() >= 3);
-        let names: Vec<&str> = packs.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"Wumpus Adventures"));
-        assert!(names.contains(&"Clyde Classic"));
-        assert!(names.contains(&"Nelly the Hamster"));
-
-        for pack in &packs {
-            assert!(!pack.stickers.is_empty());
-            for sticker in &pack.stickers {
-                assert!(!sticker.name.is_empty());
-                assert_eq!(sticker.format_type, StickerFormatType::Png);
-            }
-        }
+        assert!(
+            packs.is_empty(),
+            "Sem resposta da rede/API, pacotes de figurinhas devem vir vazios (zero mocks)"
+        );
     }
 
     #[::core::prelude::v1::test]
     fn test_soundboard_sounds_and_icons() {
         let sounds = MediaCacheManager::get_default_soundboard_sounds();
-        assert!(!sounds.is_empty());
-        assert!(sounds.iter().any(|s| s.name == "Quack"));
-        assert!(sounds.iter().any(|s| s.name == "Airhorn"));
+        assert!(
+            sounds.is_empty(),
+            "Sem resposta da rede/API, sons da soundboard devem vir vazios (zero mocks)"
+        );
     }
 
     #[::core::prelude::v1::test]

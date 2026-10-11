@@ -412,13 +412,29 @@ fn test_dm_welcome_header_presentation() {
         username,
         &dm_topic,
         true,
+        Some("https://cdn.discordapp.com/avatars/user-b/avatar.png".into()),
+        Some(discord_rs::domain::user::AvatarDecorationData {
+            asset: "a_synth_dm_banner_decor".to_string(),
+            sku_id: None,
+        }),
     );
     drop(dm_element);
+
+    let dm_element_bare = discord_rs::chat::message_list::render_welcome_banner(
+        username,
+        &dm_topic,
+        true,
+        None,
+        None,
+    );
+    drop(dm_element_bare);
 
     let guild_element = discord_rs::chat::message_list::render_welcome_banner(
         "geral",
         "Este é o início do canal #geral.",
         false,
+        None,
+        None,
     );
     drop(guild_element);
 }
