@@ -281,4 +281,21 @@ fn discord_extras_match_token_accessors() {
     assert_eq!(ex.control_critical_primary_bg_active, tokens::control_critical_primary_bg_active());
     assert_eq!(ex.control_critical_secondary_text_default, tokens::control_critical_secondary_text_default());
     assert_eq!(ex.control_icon_only_icon_default, tokens::control_icon_only_icon_default());
+    assert_eq!(ex.mention_foreground, tokens::mention_foreground());
+    assert_eq!(ex.border_subtle, tokens::border_subtle());
+    assert_eq!(ex.channels_default, tokens::channels_default());
+    assert_eq!(ex.interactive_normal, tokens::interactive_normal());
+    assert_eq!(ex.reaction_text_default, tokens::reaction_text_default());
+    assert_eq!(ex.reaction_text_reacted_default, tokens::reaction_text_reacted_default());
+    assert_eq!(ex.status_danger, tokens::status_danger());
+    assert_eq!(ex.status_positive, tokens::status_positive());
+    assert_eq!(ex.status_warning, tokens::status_warning());
+    assert_eq!(ex.badge_brand_bubble, tokens::badge_brand_bubble());
+    assert_eq!(ex.legacy_949ba4, tokens::legacy_949ba4());
+    assert_eq!(ex.legacy_282a2e, tokens::legacy_282a2e());
+    assert_eq!(ex.legacy_3f4147, tokens::legacy_3f4147());
+    assert_eq!(ex.legacy_fa777c, tokens::legacy_fa777c());
+    assert_eq!(ex.legacy_da373c, tokens::legacy_da373c());
+    assert_eq!(ex.legacy_fee75c, tokens::legacy_fee75c());
+    assert_eq!(ex.text_muted, tokens::text_muted());
 }

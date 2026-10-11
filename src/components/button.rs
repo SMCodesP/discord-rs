@@ -55,6 +55,8 @@ pub enum ButtonVariant {
     Danger,
     /// Ghost transparent button
     Ghost,
+    /// Transparent text link button
+    Link,
 }
 
 /// Sizing options for Discord buttons
@@ -117,6 +119,11 @@ impl Button {
     /// Transparent ghost button
     pub fn ghost(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
         Self::new(id, label).variant(ButtonVariant::Ghost)
+    }
+
+    /// Transparent text link button
+    pub fn link(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self::new(id, label).variant(ButtonVariant::Link)
     }
 
     /// Sets button variant
@@ -251,8 +258,18 @@ fn render_button(btn: Button, cx: &mut App) -> AnyElement {
     // Kit text sizes line up via Size::Small (14px) and Size::Large (16px);
     // heights/padding are overridden below.
     let (height, pad_x, min_w, kit_size) = match btn.size {
-        ButtonSize::Sm => (px(32.0), px(11.0), Some(px(60.0)), Size::Small),
-        ButtonSize::Md => (px(40.0), px(15.0), Some(px(100.0)), Size::Large),
+        ButtonSize::Sm => (
+            px(32.0),
+            if btn.variant == ButtonVariant::Link { px(4.0) } else { px(11.0) },
+            if btn.variant == ButtonVariant::Link { None } else { Some(px(60.0)) },
+            Size::Small,
+        ),
+        ButtonSize::Md => (
+            px(40.0),
+            if btn.variant == ButtonVariant::Link { px(4.0) } else { px(15.0) },
+            if btn.variant == ButtonVariant::Link { None } else { Some(px(100.0)) },
+            Size::Large,
+        ),
         // Lg has no measured Discord counterpart in the inspected surfaces;
         // values carried over from the previous implementation.
         ButtonSize::Lg => (px(44.0), px(24.0), None, Size::Large),
@@ -284,13 +301,24 @@ fn render_button(btn: Button, cx: &mut App) -> AnyElement {
             with_alpha(HEX_WHITE, 36.0 / 255.0),
             text_normal(),
         ),
+        ButtonVariant::Link => (
+            transparent(),
+            transparent(),
+            transparent(),
+            rgb(0x76aff6),
+        ),
+    };
+
+    let fg_hover = match btn.variant {
+        ButtonVariant::Link => rgb(0x76aff6),
+        _ => white(),
     };
 
     let mut el = KitButton::new(btn.id)
         .with_variant(kit_custom(
             cx,
             bg_normal,
-            white(),
+            fg_hover,
             bg_hover,
             bg_active,
         ))

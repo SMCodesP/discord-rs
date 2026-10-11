@@ -282,13 +282,8 @@ pub fn discord_theme_json() -> String {
 // install()
 // ============================================================================
 
-/// Registers the dark `"Discord"` theme through the kit's official path
-/// (`ThemeRegistry::load_themes_from_str`) and activates it
-/// (`Theme::apply_config`, which also switches the mode to dark), then
-/// installs the [`DiscordExtras`] global.
-///
-/// Must be called after `gpui::init(cx)`.
-pub fn install(cx: &mut App) {
+/// Registers the dark `"Discord"` theme with the given palette.
+pub fn install_with_palette(cx: &mut App, palette: &colors::DiscordPalette) {
     let json = discord_theme_json();
     ThemeRegistry::global_mut(cx)
         .load_themes_from_str(&json)
@@ -304,7 +299,15 @@ pub fn install(cx: &mut App) {
         theme.apply_config(&config);
     });
 
-    cx.set_global(DiscordExtras::current());
+    cx.set_global(DiscordExtras::from_palette(palette));
+}
+
+/// Registers the dark `"Discord"` theme through the kit's official path
+/// (`ThemeRegistry::load_themes_from_str`) with the standard dark palette.
+/// Must be called after `gpui::init(cx)`.
+pub fn install(cx: &mut App) {
+    let palette = colors::DiscordPalette::dark();
+    install_with_palette(cx, &palette);
 }
 
 // ============================================================================
@@ -398,59 +401,115 @@ pub struct DiscordExtras {
     pub control_critical_secondary_text_default: Rgba,
     /// Control icon-only icon default (#abacb2).
     pub control_icon_only_icon_default: Rgba,
+    /// Mention foreground (#cdd7ff).
+    pub mention_foreground: Rgba,
+    /// Border subtle (#97979f1f).
+    pub border_subtle: Rgba,
+    /// Channels default text (#999aa1).
+    pub channels_default: Rgba,
+    /// Interactive normal text (#c5c6ca).
+    pub interactive_normal: Rgba,
+    /// Reaction text default (#c5c6ca).
+    pub reaction_text_default: Rgba,
+    /// Reaction text reacted (#dfe4ff).
+    pub reaction_text_reacted_default: Rgba,
+    /// Status danger red (#da3e44).
+    pub status_danger: Rgba,
+    /// Status positive green (#3d9e60).
+    pub status_positive: Rgba,
+    /// Status warning yellow (#fdb833).
+    pub status_warning: Rgba,
+    /// Badge brand bubble pink stop (#eb459e).
+    pub badge_brand_bubble: Rgba,
+    /// Muted text alias (#80848e).
+    pub text_muted: Rgba,
+    /// COR ANTIGA SEM ORIGEM no Discord atual: header secondary (#949ba4).
+    pub legacy_949ba4: Rgba,
+    /// COR ANTIGA SEM ORIGEM no Discord atual: background modifier hover (#282a2e).
+    pub legacy_282a2e: Rgba,
+    /// COR ANTIGA SEM ORIGEM no Discord atual: background modifier accent (#3f4147).
+    pub legacy_3f4147: Rgba,
+    /// COR ANTIGA SEM ORIGEM no Discord atual: text danger (#fa777c).
+    pub legacy_fa777c: Rgba,
+    /// COR ANTIGA SEM ORIGEM no Discord atual: button danger background hover (#da373c).
+    pub legacy_da373c: Rgba,
+    /// COR ANTIGA SEM ORIGEM no Discord atual: text warning (#fee75c).
+    pub legacy_fee75c: Rgba,
 }
 
 impl Global for DiscordExtras {}
 
 impl DiscordExtras {
-    /// Builds the extras from the canonical token accessors.
-    pub fn current() -> Self {
+    /// Builds the extras from a given palette.
+    pub fn from_palette(p: &colors::DiscordPalette) -> Self {
         Self {
-            bg_server: colors::bg_server(),
-            bg_channels: colors::bg_channels(),
-            bg_chat: colors::bg_chat(),
-            bg_chat_hover: colors::bg_chat_hover(),
-            bg_user_bar: colors::bg_user_bar(),
-            bg_input: colors::bg_input(),
-            bg_floating: colors::bg_floating(),
-            blurple: colors::blurple(),
-            blurple_hover: colors::blurple_hover(),
-            blurple_active: colors::blurple_active(),
-            status_online: colors::status_online(),
-            status_idle: colors::status_idle(),
-            status_dnd: colors::status_dnd(),
-            status_offline: colors::status_offline(),
-            text_primary: colors::text_primary(),
-            text_secondary: colors::text_secondary(),
-            text_titles: colors::text_titles(),
-            borders: colors::borders(),
-            channel_hover: colors::channel_hover(),
-            channel_active: colors::channel_active(),
-            mention_bg: colors::mention_bg(),
-            mention_hover: colors::mention_hover(),
-            modal_backdrop: colors::modal_backdrop(),
-            scrollbar_thumb: colors::scrollbar_thumb(),
-            white: colors::white(),
-            neutral_67: colors::neutral_67(),
-            transparent: colors::transparent(),
-            opacity_white_8: colors::opacity_white_8(),
-            control_primary_border: colors::control_primary_border(),
-            opacity_white_20: colors::opacity_white_20(),
-            premium_tier_2_purple: colors::premium_tier_2_purple(),
-            bg_animated_gradient_pink_1: colors::bg_animated_gradient_pink_1(),
-            platform_xbox: colors::platform_xbox(),
-            platform_spotify: colors::platform_spotify(),
-            role_purple: colors::role_purple(),
-            platform_reddit: colors::platform_reddit(),
-            control_secondary_bg_default: colors::control_secondary_bg_default(),
-            control_secondary_bg_hover: colors::control_secondary_bg_hover(),
-            control_secondary_bg_active: colors::control_secondary_bg_active(),
-            control_critical_primary_bg_default: colors::control_critical_primary_bg_default(),
-            control_critical_primary_bg_hover: colors::control_critical_primary_bg_hover(),
-            control_critical_primary_bg_active: colors::control_critical_primary_bg_active(),
-            control_critical_secondary_text_default: colors::control_critical_secondary_text_default(),
-            control_icon_only_icon_default: colors::control_icon_only_icon_default(),
+            bg_server: p.bg_server,
+            bg_channels: p.bg_channels,
+            bg_chat: p.bg_chat,
+            bg_chat_hover: p.bg_chat_hover,
+            bg_user_bar: p.bg_user_bar,
+            bg_input: p.bg_input,
+            bg_floating: p.bg_floating,
+            blurple: p.blurple,
+            blurple_hover: p.blurple_hover,
+            blurple_active: p.blurple_active,
+            status_online: p.status_online,
+            status_idle: p.status_ausente,
+            status_dnd: p.status_dnd,
+            status_offline: p.status_offline,
+            text_primary: p.text_primary,
+            text_secondary: p.text_secondary,
+            text_titles: p.text_titles,
+            borders: p.borders,
+            channel_hover: p.channel_hover,
+            channel_active: p.channel_active,
+            mention_bg: p.mention_bg,
+            mention_hover: p.mention_hover,
+            modal_backdrop: p.modal_backdrop,
+            scrollbar_thumb: p.scrollbar_thumb,
+            white: p.white,
+            neutral_67: p.neutral_67,
+            transparent: p.transparent,
+            opacity_white_8: p.opacity_white_8,
+            control_primary_border: p.control_primary_border,
+            opacity_white_20: p.opacity_white_20,
+            premium_tier_2_purple: p.premium_tier_2_purple,
+            bg_animated_gradient_pink_1: p.bg_animated_gradient_pink_1,
+            platform_xbox: p.platform_xbox,
+            platform_spotify: p.platform_spotify,
+            role_purple: p.role_purple,
+            platform_reddit: p.platform_reddit,
+            control_secondary_bg_default: p.control_secondary_bg_default,
+            control_secondary_bg_hover: p.control_secondary_bg_hover,
+            control_secondary_bg_active: p.control_secondary_bg_active,
+            control_critical_primary_bg_default: p.control_critical_primary_bg_default,
+            control_critical_primary_bg_hover: p.control_critical_primary_bg_hover,
+            control_critical_primary_bg_active: p.control_critical_primary_bg_active,
+            control_critical_secondary_text_default: p.control_critical_secondary_text_default,
+            control_icon_only_icon_default: p.control_icon_only_icon_default,
+            mention_foreground: p.mention_foreground,
+            border_subtle: p.border_subtle,
+            channels_default: p.channels_default,
+            interactive_normal: p.interactive_normal,
+            reaction_text_default: p.reaction_text_default,
+            reaction_text_reacted_default: p.reaction_text_reacted_default,
+            status_danger: p.status_danger,
+            status_positive: p.status_positive,
+            status_warning: p.status_warning,
+            badge_brand_bubble: p.badge_brand_bubble,
+            legacy_949ba4: p.legacy_949ba4,
+            legacy_282a2e: p.legacy_282a2e,
+            legacy_3f4147: p.legacy_3f4147,
+            legacy_fa777c: p.legacy_fa777c,
+            legacy_da373c: p.legacy_da373c,
+            legacy_fee75c: p.legacy_fee75c,
+            text_muted: p.text_muted,
         }
+    }
+
+    /// Builds the extras from the active canonical token palette.
+    pub fn current() -> Self {
+        Self::from_palette(&colors::active_palette())
     }
 
     /// Reads the extras installed by [`install`].
