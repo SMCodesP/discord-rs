@@ -30,8 +30,11 @@ O projeto é um cliente Discord em Rust com GPUI. A especificação está em
   `flock /tmp/discord-rs-cargo-A.lock timeout 600 cargo check -j 4`.
 - Nunca rode `cargo` em segundo plano.
 - Rode os testes com a configuração isolada:
-  `XDG_CONFIG_HOME=$(mktemp -d) cargo test --no-fail-fast -j 4`.
+  `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent/discord-rs-test-bus XDG_CONFIG_HOME=$(mktemp -d) cargo test --no-fail-fast -j 4`.
   Teste nenhum pode gravar em `~/.config/discord-rs`.
+- O `DBUS_SESSION_BUS_ADDRESS` inválido é obrigatório: sem ele,
+  `tests/video_capture_test.rs` chama o portal de captura de tela de verdade e
+  abre o diálogo "Share your screen" na frente do dono do projeto a cada rodada.
 - Os testes regeneram `docs/PARITY_AUDIT.md` e `docs/VISUAL_PARITY_DIFF.md`.
   Antes do commit: `git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md`.
 - Em GPUI, quebre a interface em funções pequenas que devolvem `AnyElement`.
