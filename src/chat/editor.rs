@@ -227,7 +227,7 @@ fn render_typing_dot(id: &'static str, phase_offset: f32) -> AnyElement {
 
     div()
         .size(px(4.0))
-        .rounded_full()
+        .rounded(radius_full())
         .bg(blurple())
         .with_animation(
             id,

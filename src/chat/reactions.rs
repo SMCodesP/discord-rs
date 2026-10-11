@@ -44,7 +44,7 @@ pub fn render_reaction_badge(
         (
             with_alpha(HEX_BLURPLE, 0.15),
             blurple(),
-            rgb(0xdfe4ff), // TOKEN FALTANDO: --reaction-text-reacted-default
+            reaction_text_reacted_default(),
             with_alpha(HEX_BLURPLE, 0.25),
             blurple(),
         )
@@ -52,7 +52,7 @@ pub fn render_reaction_badge(
         (
             bg_channels(),
             bg_chat_hover(),
-            rgb(0xc5c6ca), // TOKEN FALTANDO: --reaction-text-default
+            reaction_text_default(),
             channel_hover(),
             borders(),
         )

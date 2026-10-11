@@ -223,8 +223,44 @@ impl Render for ChatView {
                 }
             });
 
-        // ZERO DEEP CLONES: borrow direct slice from AppState
+        // Resolve DM recipient avatar and decoration if this is a DM channel
+        let dm_channel_state = if is_dm {
+            app_state.dm_channels.iter().find(|d| d.id == channel_id)
+        } else {
+            None
+        };
+        let recipient_friend = if let Some(dm) = dm_channel_state {
+            dm.recipient_ids.first().and_then(|rid| {
+                app_state.friends.iter().find(|f| &f.id == rid)
+            })
+        } else {
+            None
+        };
         let all_messages = app_state.get_active_messages();
+        let recipient_msg_author = if is_dm {
+            all_messages.iter().find(|m| m.author.id != app_state.current_user.id).map(|m| &m.author)
+        } else {
+            None
+        };
+        let dm_avatar_src: Option<SharedString> = if is_dm {
+            dm_channel_state
+                .and_then(|d| d.icon_url.as_ref())
+                .or_else(|| recipient_friend.and_then(|f| f.avatar_url.as_ref()))
+                .or_else(|| recipient_msg_author.and_then(|a| a.avatar.as_ref()))
+                .map(|s| SharedString::from(s.clone()))
+        } else {
+            None
+        };
+        let dm_avatar_decoration = if is_dm {
+            dm_channel_state
+                .and_then(|d| d.avatar_decoration_data.clone())
+                .or_else(|| recipient_friend.and_then(|f| f.avatar_decoration_data.clone()))
+                .or_else(|| recipient_msg_author.and_then(|a| a.avatar_decoration_data.clone()))
+        } else {
+            None
+        };
+
+        // ZERO DEEP CLONES: borrow direct slice from AppState
         let message_count = all_messages.len();
 
         // Build flattened virtual item list with zero message cloning (O(N) index mapping)
@@ -374,6 +410,8 @@ impl Render for ChatView {
         let ch_name = channel_name.clone();
         let ch_topic = channel_topic.clone();
         let is_dm_welcome = is_dm;
+        let dm_avatar_src_item = dm_avatar_src.clone();
+        let dm_avatar_deco_item = dm_avatar_decoration.clone();
         let app_entity_list = app_entity.clone();
         let on_react_item = on_react.clone();
         let on_reply_item = on_reply.clone();
@@ -388,7 +426,13 @@ impl Render for ChatView {
 
             match &items_arc[ix] {
                 ChatListItem::WelcomeHeader => {
-                    render_welcome_banner(&ch_name, &ch_topic, is_dm_welcome).into_any_element()
+                    render_welcome_banner(
+                        &ch_name,
+                        &ch_topic,
+                        is_dm_welcome,
+                        dm_avatar_src_item.clone(),
+                        dm_avatar_deco_item.clone(),
+                    ).into_any_element()
                 }
                 ChatListItem::DateSeparator(date) => {
                     render_date_separator_element(*date).into_any_element()
