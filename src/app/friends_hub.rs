@@ -1,10 +1,11 @@
 //! Discord RS - Friends Hub & Message Requests View
 //!
 //! Home "Amigos" view on kit components + theme tokens:
-//! - Tab bar: kit `tab::TabBar`/`Tab` (Pill)
+//! - Tab bar: styled tab items matching Discord parity (32px h, 8px radius,
+//!   `control_secondary_bg_active` selected bg, `text_primary` unselected fg)
 //! - Text buttons: `crate::components::Button` (kit wrapper); circular icon
 //!   buttons: kit `Button` (ghost) with kit tooltip
-//! - Avatars: `crate::components::Avatar` (status overlay)
+//! - Avatars: `crate::components::Avatar` (status overlay + decoration)
 //! - Colors: `crate::tokens` accessors only; literals kept are inventoried as
 //!   TOKEN FALTANDO in the task report (untouchable `src/tokens`).
 //!
@@ -18,7 +19,6 @@
 
 use gpui::component::Disableable as _;
 use gpui::component::button::{Button as KitButton, ButtonVariants as _};
-use gpui::component::tab::{Tab, TabBar};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use crate::app::state::*;
@@ -151,8 +151,63 @@ fn tab_count_badge(count: usize, bg: Rgba) -> AnyElement {
         .into_any_element()
 }
 
-/// Main tabs: Disponível, Todos, Pendente, Bloqueado, Solicitações.
-/// "Adicionar amigo" rides as TabBar suffix (green kit button, see below).
+/// Renders an individual tab item matching measured Discord parity (DOM/CSS):
+/// - 32px height, padding 4px 12px, radius 8px, 16px/20px w400.
+/// - Selected: bg rgba(151,151,159,0.2) (`control_secondary_bg_active()`), text white.
+/// - Unselected: bg transparent, text `text_primary()` (oklab 0.7419... / #dbdee1),
+///   hover bg `control_secondary_bg_default()` (0x97979f1f) and text white.
+///
+/// NOTE on gpui-kit `TabBar`/`Tab`:
+/// `TabBar::pill` hardcodes `cx.theme().radius_full()` (tab_bar.rs:266, tab.rs:348)
+/// and indicator background `cx.theme().tokens.primary` (tab_bar.rs:265),
+/// rendering an unstyleable, fully-rounded black pill instead of Discord's 8px-rounded
+/// `rgba(151,151,159,0.2)` surface. Hence individual styled tab items are used.
+fn render_tab_item(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    icon: Option<AnyElement>,
+    badge: Option<AnyElement>,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let mut tab = div()
+        .id(id)
+        .h(px(32.0))
+        .px(px(12.0))
+        .py(px(4.0))
+        .rounded(px(8.0))
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .text_size(px(16.0))
+        .line_height(px(20.0))
+        .font_weight(FontWeight::NORMAL);
+
+    if selected {
+        tab = tab
+            .bg(control_secondary_bg_active())
+            .text_color(white());
+    } else {
+        tab = tab
+            .bg(transparent())
+            .text_color(text_primary())
+            .hover(|s| s.bg(control_secondary_bg_default()).text_color(white()));
+    }
+
+    if let Some(ic) = icon {
+        tab = tab.child(ic);
+    }
+    tab = tab.child(label);
+    if let Some(b) = badge {
+        tab = tab.child(b);
+    }
+    tab.on_click(move |ev, window, cx| on_click(ev, window, cx))
+        .into_any_element()
+}
+
+/// Main tabs: Disponível, Todos, Pendente, Bloqueado, Solicitações + Adicionar amigo.
 fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElement {
     let pending_friends = state
         .friends
@@ -165,60 +220,99 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
         .filter(|r| !r.is_spam)
         .count();
 
-    // AddFriend has no tab in this bar (it is the suffix button): select
-    // nothing instead of falling through to Disponível.
-    let selected_index = match state.friends_tab {
-        FriendsTab::Online => 0,
-        FriendsTab::All => 1,
-        FriendsTab::Pending => 2,
-        FriendsTab::Blocked => 3,
-        FriendsTab::MessageRequests => 4,
-        FriendsTab::AddFriend => usize::MAX,
-    };
+    let e_online = entity.clone();
+    let e_all = entity.clone();
+    let e_pending = entity.clone();
+    let e_blocked = entity.clone();
+    let e_req = entity.clone();
 
-    let mut tabs = vec![
-        Tab::new().label("Disponível"),
-        Tab::new().label("Todos"),
-        Tab::new().label("Pendente"),
-    ];
-    if pending_friends > 0 {
-        // TOKEN FALTANDO: badge vermelha das pendentes, 0xda373c
-        // (mais próximo: status_dnd 0xf23f43).
-        tabs[2] = Tab::new()
-            .label("Pendente")
-            .child(tab_count_badge(pending_friends, rgb(0xda373c)));
-    }
-    tabs.push(Tab::new().label("Bloqueado"));
-    let mut req_tab = Tab::new().label("Solicitações");
-    if pending_req > 0 {
-        req_tab = Tab::new()
-            .label("Solicitações")
-            .child(tab_count_badge(pending_req, blurple()));
-    }
-    tabs.push(req_tab);
+    let is_req_selected = state.friends_tab == FriendsTab::MessageRequests;
 
-    let entity_cb = entity.clone();
-    TabBar::new("friends-tabbar")
-        .pill()
-        .selected_index(selected_index)
-        .children(tabs)
-        .suffix(render_add_friend_tab_button(
+    div()
+        .id("friends-tabbar")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(16.0))
+        .child(render_tab_item(
+            "tab-online",
+            "Disponível",
+            None,
+            None,
+            state.friends_tab == FriendsTab::Online,
+            move |_ev, _window, cx| {
+                e_online.update(cx, |s, cx| {
+                    s.select_friends_tab(FriendsTab::Online);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_tab_item(
+            "tab-all",
+            "Todos",
+            None,
+            None,
+            state.friends_tab == FriendsTab::All,
+            move |_ev, _window, cx| {
+                e_all.update(cx, |s, cx| {
+                    s.select_friends_tab(FriendsTab::All);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_tab_item(
+            "tab-pending",
+            "Pendente",
+            None,
+            (pending_friends > 0).then(|| tab_count_badge(pending_friends, rgb(0xda373c))),
+            state.friends_tab == FriendsTab::Pending,
+            move |_ev, _window, cx| {
+                e_pending.update(cx, |s, cx| {
+                    s.select_friends_tab(FriendsTab::Pending);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_tab_item(
+            "tab-blocked",
+            "Bloqueado",
+            None,
+            None,
+            state.friends_tab == FriendsTab::Blocked,
+            move |_ev, _window, cx| {
+                e_blocked.update(cx, |s, cx| {
+                    s.select_friends_tab(FriendsTab::Blocked);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_tab_item(
+            "tab-msg-requests",
+            "Solicitações",
+            Some(
+                icon_inbox(
+                    px(16.0),
+                    if is_req_selected {
+                        white()
+                    } else {
+                        text_primary()
+                    },
+                )
+                .into_any_element(),
+            ),
+            (pending_req > 0).then(|| tab_count_badge(pending_req, blurple())),
+            is_req_selected,
+            move |_ev, _window, cx| {
+                e_req.update(cx, |s, cx| {
+                    s.select_friends_tab(FriendsTab::MessageRequests);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_add_friend_tab_button(
             entity.clone(),
             state.friends_tab == FriendsTab::AddFriend,
         ))
-        .on_click(move |ix, _window, cx| {
-            let tab = match *ix {
-                0 => FriendsTab::Online,
-                1 => FriendsTab::All,
-                2 => FriendsTab::Pending,
-                3 => FriendsTab::Blocked,
-                _ => FriendsTab::MessageRequests,
-            };
-            entity_cb.update(cx, |s, cx| {
-                s.select_friends_tab(tab);
-                cx.notify();
-            });
-        })
         .into_any_element()
 }
 
@@ -249,42 +343,55 @@ fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
         .filter(|r| r.is_spam)
         .count();
 
-    let selected_index = match state.message_requests_subtab {
-        MessageRequestsSubTab::YouMayKnow => 0,
-        MessageRequestsSubTab::Spam => 1,
-    };
+    let e_you_may_know = entity.clone();
+    let e_spam = entity.clone();
+    let e_back = entity.clone();
 
-    let mut tabs = vec![Tab::new().label("Você pode conhecer")];
-    if pending_req > 0 {
-        tabs[0] = Tab::new()
-            .label("Você pode conhecer")
-            .child(tab_count_badge(pending_req, blurple()));
-    }
-    let mut spam_tab = Tab::new().label("Spam");
-    if spam_count > 0 {
-        // TOKEN FALTANDO: badge vermelha do spam, 0xda373c.
-        spam_tab = Tab::new()
-            .label("Spam")
-            .child(tab_count_badge(spam_count, rgb(0xda373c)));
-    }
-    tabs.push(spam_tab);
-    tabs.push(Tab::new().label("Voltar para Amigos"));
-
-    let entity_cb = entity.clone();
-    TabBar::new("msgreq-tabbar")
-        .pill()
-        .selected_index(selected_index)
-        .children(tabs)
-        .on_click(move |ix, _window, cx| {
-            entity_cb.update(cx, |s, cx| {
-                match *ix {
-                    0 => s.select_message_requests_subtab(MessageRequestsSubTab::YouMayKnow),
-                    1 => s.select_message_requests_subtab(MessageRequestsSubTab::Spam),
-                    _ => s.friends_tab = FriendsTab::Online,
-                }
-                cx.notify();
-            });
-        })
+    div()
+        .id("msgreq-tabbar")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(16.0))
+        .child(render_tab_item(
+            "subtab-you-may-know",
+            "Você pode conhecer",
+            None,
+            (pending_req > 0).then(|| tab_count_badge(pending_req, blurple())),
+            state.message_requests_subtab == MessageRequestsSubTab::YouMayKnow,
+            move |_ev, _window, cx| {
+                e_you_may_know.update(cx, |s, cx| {
+                    s.select_message_requests_subtab(MessageRequestsSubTab::YouMayKnow);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_tab_item(
+            "subtab-spam",
+            "Spam",
+            None,
+            (spam_count > 0).then(|| tab_count_badge(spam_count, rgb(0xda373c))),
+            state.message_requests_subtab == MessageRequestsSubTab::Spam,
+            move |_ev, _window, cx| {
+                e_spam.update(cx, |s, cx| {
+                    s.select_message_requests_subtab(MessageRequestsSubTab::Spam);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(render_tab_item(
+            "subtab-back",
+            "Voltar para Amigos",
+            None,
+            None,
+            false,
+            move |_ev, _window, cx| {
+                e_back.update(cx, |s, cx| {
+                    s.friends_tab = FriendsTab::Online;
+                    cx.notify();
+                });
+            },
+        ))
         .into_any_element()
 }
 
