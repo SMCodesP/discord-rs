@@ -1,13 +1,18 @@
 //! Discord RS - Chat Input Editor & Typing Indicator
 //! Implements canonical Discord text input:
-//! - Channel-specific placeholder ("Conversar em #canal")
-//! - Attachment button (+)
-//! - Rich media buttons (GIF, Emoji, Stickers, Gift)
+//! - Channel-specific placeholder ("Conversar em #canal" / "Conversar com @usuario")
+//! - Attachment button (+) with SVG icon and kit tooltip
+//! - Rich media buttons (GIF, Emoji, Stickers, Gift) with SVG icons and kit tooltips
 //! - Active reply banner with mention toggle and dismiss
 //! - Real-time typing indicator with animated dot simulation
+//! - Modular components over gpui-kit Textarea / TextareaState with zero fixed colors
 
+use gpui::component::input::{Textarea as KitTextarea, TextareaState};
+use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
+
+use crate::components::button::IconButton;
 
 use crate::chat::media_picker::MediaPickerTab;
 use crate::domain::message::Message;
@@ -27,19 +32,15 @@ pub type EditorActionCallback = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync 
 pub type EditorTextChangeCallback = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
 
 // ============================================================================
-// Active Reply Banner Component
+// Subcomponent Helpers (Small Functions Returning AnyElement)
 // ============================================================================
 
-/// Renders the active reply banner above the text input when replying to a message.
-pub fn render_active_reply_banner(
-    replying_to: &Message,
+/// Mention toggle button on the reply banner ("@ Ligado" / "@ Desligado").
+fn render_reply_mention_button(
     mention_author: bool,
     on_toggle_mention: Option<EditorActionCallback>,
-    on_cancel_reply: Option<EditorActionCallback>,
-) -> Div {
-    let author_name = replying_to.author.display_name().to_string();
-
-    let mut mention_btn = if mention_author {
+) -> AnyElement {
+    let mut btn = if mention_author {
         div()
             .flex()
             .items_center()
@@ -62,46 +63,204 @@ pub fn render_active_reply_banner(
             .px(space_2())
             .py(px(2.0))
             .rounded(radius_xs())
-            .bg(rgb(HEX_CHANNEL_HOVER))
+            .bg(channel_hover())
             .text_color(text_muted())
             .text_size(font_size_xs())
             .font_weight(WEIGHT_BOLD)
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)))
+            .hover(|s| s.bg(bg_chat_hover()))
             .child("@ Desligado")
     };
 
     if let Some(handler) = on_toggle_mention {
-        mention_btn = mention_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        btn = btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             handler(window, cx);
         });
     }
 
-    let mut close_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(20.0))
-        .rounded_full()
-        .text_color(text_muted())
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-        .child(icon_close(px(12.0), text_muted()));
+    btn.into_any_element()
+}
+
+/// Dismiss button on the reply banner using SVG icon and kit tooltip.
+fn render_reply_close_button(
+    on_cancel_reply: Option<EditorActionCallback>,
+) -> AnyElement {
+    let mut btn = IconButton::with_icon("reply-banner-close", |size, color| {
+        icon_close(size, color).into_any_element()
+    })
+    .size(px(20.0))
+    .icon_size(px(12.0))
+    .rounded(radius_xs())
+    .tooltip("Cancelar resposta");
 
     if let Some(handler) = on_cancel_reply {
-        close_btn = close_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        btn = btn.on_click(move |_ev, window, cx| {
             handler(window, cx);
         });
     }
+
+    btn.into_any_element()
+}
+
+/// Plus (+) attachment button using SVG icon and kit tooltip.
+fn render_attach_button(on_attachment: Option<EditorActionCallback>) -> AnyElement {
+    let mut btn = IconButton::with_icon("chat-attach-btn", |size, color| {
+        icon_plus(size, color).into_any_element()
+    })
+    .size(px(24.0))
+    .icon_size(px(16.0))
+    .rounded(radius_full())
+    .tooltip("Adicionar anexo");
+
+    if let Some(handler) = on_attachment {
+        btn = btn.on_click(move |_ev, window, cx| {
+            handler(window, cx);
+        });
+    }
+
+    btn.into_any_element()
+}
+
+/// Nitro gift button using SVG icon and kit tooltip.
+fn render_gift_button() -> AnyElement {
+    IconButton::with_icon("chat-gift-btn", |size, color| {
+        icon_gift(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .tooltip("Dar Nitro de presente")
+    .into_any_element()
+}
+
+/// GIF picker button using SVG icon, active state & kit tooltip.
+fn render_gif_button(is_active: bool, on_gif: Option<EditorActionCallback>) -> AnyElement {
+    let mut btn = IconButton::with_icon("chat-gif-btn", |size, color| {
+        icon_gif(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .active(is_active)
+    .tooltip("Abrir seletor de GIFs");
+
+    if let Some(handler) = on_gif {
+        btn = btn.on_click(move |_ev, window, cx| {
+            handler(window, cx);
+        });
+    }
+
+    btn.into_any_element()
+}
+
+/// Sticker picker button using SVG icon, active state & kit tooltip.
+fn render_sticker_button(is_active: bool, on_sticker: Option<EditorActionCallback>) -> AnyElement {
+    let mut btn = IconButton::with_icon("chat-sticker-btn", |size, color| {
+        icon_sticker(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .active(is_active)
+    .tooltip("Abrir seletor de figurinhas");
+
+    if let Some(handler) = on_sticker {
+        btn = btn.on_click(move |_ev, window, cx| {
+            handler(window, cx);
+        });
+    }
+
+    btn.into_any_element()
+}
+
+/// Emoji picker button using SVG icon, active state & kit tooltip.
+fn render_emoji_button(is_active: bool, on_emoji: Option<EditorActionCallback>) -> AnyElement {
+    let mut btn = IconButton::with_icon("chat-emoji-btn", |size, color| {
+        icon_emoji(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(20.0))
+    .rounded(radius_sm())
+    .active(is_active)
+    .tooltip("Selecionar emoji");
+
+    if let Some(handler) = on_emoji {
+        btn = btn.on_click(move |_ev, window, cx| {
+            handler(window, cx);
+        });
+    }
+
+    btn.into_any_element()
+}
+
+/// Send message button (paper plane / arrow) shown when text is not empty.
+fn render_send_button(
+    text: String,
+    reply_msg_id: Option<String>,
+    on_send: Option<EditorSendCallback>,
+) -> Option<AnyElement> {
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let mut btn = IconButton::with_icon("chat-send-btn", |size, color| {
+        icon_send(size, color).into_any_element()
+    })
+    .size(px(32.0))
+    .icon_size(px(16.0))
+    .rounded(radius_sm())
+    .tooltip("Enviar mensagem");
+
+    if let Some(handler) = on_send {
+        btn = btn.on_click(move |_ev, window, cx| {
+            handler(&text, reply_msg_id.as_deref(), window, cx);
+        });
+    }
+
+    Some(btn.into_any_element())
+}
+
+/// Single animated typing indicator dot.
+fn render_typing_dot(id: &'static str, phase_offset: f32) -> AnyElement {
+    use gpui::AnimationExt as _;
+    use std::time::Duration;
+
+    div()
+        .size(px(4.0))
+        .rounded_full()
+        .bg(blurple())
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(1000)).repeat(),
+            move |dot, delta| {
+                let phase = ((delta + phase_offset) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+                dot.opacity(0.3 + 0.7 * phase)
+            },
+        )
+        .into_any_element()
+}
+
+// ============================================================================
+// Active Reply Banner Component
+// ============================================================================
+
+/// Renders the active reply banner above the text input when replying to a message.
+pub fn render_active_reply_banner(
+    replying_to: &Message,
+    mention_author: bool,
+    on_toggle_mention: Option<EditorActionCallback>,
+    on_cancel_reply: Option<EditorActionCallback>,
+) -> Div {
+    let author_name = replying_to.author.display_name().to_string();
 
     div()
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .bg(rgb(HEX_BG_CHANNELS))
+        .bg(bg_channels())
         .border_b_1()
-        .border_color(rgb(0x35373c))
+        .border_color(channel_hover())
         .rounded_t(radius_md())
         .px(space_4())
         .py(space_2())
@@ -142,8 +301,8 @@ pub fn render_active_reply_banner(
                 .flex_row()
                 .items_center()
                 .gap(space_3())
-                .child(mention_btn)
-                .child(close_btn),
+                .child(render_reply_mention_button(mention_author, on_toggle_mention))
+                .child(render_reply_close_button(on_cancel_reply)),
         )
 }
 
@@ -164,9 +323,6 @@ pub fn render_typing_indicator(typing_users: &[String]) -> Div {
         _ => "Várias pessoas estão digitando...".to_string(),
     };
 
-    use gpui::AnimationExt as _;
-    use std::time::Duration;
-
     div()
         .flex()
         .flex_row()
@@ -175,54 +331,14 @@ pub fn render_typing_indicator(typing_users: &[String]) -> Div {
         .h(px(20.0))
         .px(space_4())
         .child(
-            // Animated typing dots with 3 blinking/pulsing dots
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(3.0))
-                .child(
-                    div()
-                        .size(px(4.0))
-                        .rounded_full()
-                        .bg(blurple())
-                        .with_animation(
-                            "typing-dot-1",
-                            Animation::new(Duration::from_millis(1000)).repeat(),
-                            |dot, delta| {
-                                let phase = (delta * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                                dot.opacity(0.3 + 0.7 * phase)
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .size(px(4.0))
-                        .rounded_full()
-                        .bg(blurple())
-                        .with_animation(
-                            "typing-dot-2",
-                            Animation::new(Duration::from_millis(1000)).repeat(),
-                            |dot, delta| {
-                                let phase = ((delta + 0.25) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                                dot.opacity(0.3 + 0.7 * phase)
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .size(px(4.0))
-                        .rounded_full()
-                        .bg(blurple())
-                        .with_animation(
-                            "typing-dot-3",
-                            Animation::new(Duration::from_millis(1000)).repeat(),
-                            |dot, delta| {
-                                let phase = ((delta + 0.50) * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-                                dot.opacity(0.3 + 0.7 * phase)
-                            },
-                        ),
-                ),
+                .child(render_typing_dot("typing-dot-1", 0.0))
+                .child(render_typing_dot("typing-dot-2", 0.25))
+                .child(render_typing_dot("typing-dot-3", 0.50)),
         )
         .child(
             div()
@@ -234,397 +350,234 @@ pub fn render_typing_indicator(typing_users: &[String]) -> Div {
 }
 
 // ============================================================================
-// Chat Editor Component
+// Kit-Based Multi-Line Chat Composer Component
 // ============================================================================
 
-/// Configuration parameters for rendering the chat editor.
-pub struct ChatEditorConfig {
-    pub channel_name: String,
-    pub text: String,
-    pub replying_to: Option<Message>,
-    pub mention_author: bool,
-    pub typing_users: Vec<String>,
-    pub focus_handle: Option<FocusHandle>,
-    pub is_focused: bool,
-    pub on_text_change: Option<EditorTextChangeCallback>,
-    pub on_send: Option<EditorSendCallback>,
-    pub on_attachment: Option<EditorActionCallback>,
-    pub on_gif: Option<EditorActionCallback>,
-    pub on_sticker: Option<EditorActionCallback>,
-    pub on_emoji: Option<EditorActionCallback>,
-    pub on_toggle_mention: Option<EditorActionCallback>,
-    pub on_cancel_reply: Option<EditorActionCallback>,
-    pub active_media_tab: Option<MediaPickerTab>,
+/// Canonical Discord multi-line message composer built over the gpui-kit [`KitTextarea`]
+/// and [`TextareaState`]. Provides auto-growth, Enter-to-send (`submit_on_enter`),
+/// Shift+Enter for newline insertion, native selection/clipboard/IME, active reply banner,
+/// and Discord icon buttons.
+#[derive(IntoElement)]
+pub struct ChatComposer {
+    id: ElementId,
+    state: Entity<TextareaState>,
+    channel_name: SharedString,
+    placeholder: Option<SharedString>,
+    replying_to: Option<Message>,
+    mention_author: bool,
+    typing_users: Vec<String>,
+    active_media_tab: Option<MediaPickerTab>,
+    disabled: bool,
+    on_toggle_mention: Option<EditorActionCallback>,
+    on_cancel_reply: Option<EditorActionCallback>,
+    on_attachment: Option<EditorActionCallback>,
+    on_gif: Option<EditorActionCallback>,
+    on_sticker: Option<EditorActionCallback>,
+    on_emoji: Option<EditorActionCallback>,
+    on_send: Option<EditorSendCallback>,
 }
 
-/// Renders the complete bottom chat editor box.
-pub fn render_chat_editor(config: ChatEditorConfig) -> Div {
-    let has_reply = config.replying_to.is_some();
-    let reply_msg_id = config.replying_to.as_ref().map(|m| m.id.clone());
-
-    // 1. Reply banner (if active)
-    let reply_banner = config.replying_to.as_ref().map(|msg| {
-        render_active_reply_banner(
-            msg,
-            config.mention_author,
-            config.on_toggle_mention,
-            config.on_cancel_reply,
-        )
-    });
-
-    // 2. Attachment Plus (+) Button
-    let mut plus_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(24.0))
-        .rounded_full()
-        .bg(rgb(0x3f4147))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0x4e5058)))
-        .text_color(rgb(0xb5bac1))
-        .child(icon_plus(px(16.0), rgb(0xb5bac1)));
-
-    if let Some(handler) = config.on_attachment {
-        plus_btn = plus_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            handler(window, cx);
-        });
-    }
-
-    // 3. Right Action Buttons (Gift, GIF, Sticker, Emoji)
-    let gift_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-        .text_color(text_muted())
-        .child(icon_gift(px(20.0), text_muted()));
-
-    let is_gif_active = config.active_media_tab == Some(MediaPickerTab::Gifs);
-    let mut gif_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(if is_gif_active { rgb(HEX_CHANNEL_ACTIVE) } else { rgba(0x00000000) })
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-        .text_color(if is_gif_active { rgb(HEX_WHITE) } else { text_muted() })
-        .child(icon_gif(px(20.0), if is_gif_active { rgb(HEX_WHITE) } else { text_muted() }));
-
-    if let Some(handler) = config.on_gif {
-        gif_btn = gif_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            handler(window, cx);
-        });
-    }
-
-    let is_sticker_active = config.active_media_tab == Some(MediaPickerTab::Stickers);
-    let mut sticker_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(if is_sticker_active { rgb(HEX_CHANNEL_ACTIVE) } else { rgba(0x00000000) })
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-        .text_color(if is_sticker_active { rgb(HEX_WHITE) } else { text_muted() })
-        .child(icon_sticker(px(20.0), if is_sticker_active { rgb(HEX_WHITE) } else { text_muted() }));
-
-    if let Some(handler) = config.on_sticker {
-        sticker_btn = sticker_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            handler(window, cx);
-        });
-    }
-
-    let is_emoji_active = config.active_media_tab == Some(MediaPickerTab::Emojis);
-    let mut emoji_btn = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(px(32.0))
-        .rounded(radius_sm())
-        .cursor_pointer()
-        .bg(if is_emoji_active { rgb(HEX_CHANNEL_ACTIVE) } else { rgba(0x00000000) })
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).text_color(text_titles()))
-        .text_color(if is_emoji_active { rgb(HEX_WHITE) } else { text_muted() })
-        .child(icon_emoji(px(20.0), if is_emoji_active { rgb(HEX_WHITE) } else { text_muted() }));
-
-    if let Some(handler) = config.on_emoji {
-        emoji_btn = emoji_btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            handler(window, cx);
-        });
-    }
-
-    // Send button if text is not empty
-    let send_btn = if !config.text.trim().is_empty() {
-        let text_to_send = config.text.clone();
-        let reply_id = reply_msg_id.clone();
-        let mut btn = div()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(32.0))
-            .rounded(radius_sm())
-            .cursor_pointer()
-            .bg(blurple())
-            .hover(|s| s.bg(blurple_hover()))
-            .child(icon_send(px(16.0), rgb(HEX_WHITE)));
-
-        if let Some(ref handler) = config.on_send {
-            let h = handler.clone();
-            btn = btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                h(&text_to_send, reply_id.as_deref(), window, cx);
-            });
-        }
-        Some(btn)
-    } else {
-        None
-    };
-
-    // 4. Center text input area with authentic Discord caret cursor
-    let placeholder = if config.channel_name.starts_with('@') {
-        format!("Conversar com {}", config.channel_name)
-    } else {
-        format!("Conversar em #{}", config.channel_name)
-    };
-
-    let is_focused = config.is_focused;
-    let cursor_color = rgb(0xdbdee1);
-
-    let text_area = if config.text.is_empty() {
-        div()
-            .flex_1()
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(if is_focused {
-                div()
-                    .w(px(2.0))
-                    .h(px(18.0))
-                    .bg(cursor_color)
-                    .rounded(px(1.0))
-                    .mr(px(2.0))
-            } else {
-                div()
-            })
-            .child(
-                div()
-                    .text_size(font_size_base())
-                    .text_color(text_muted())
-                    .child(placeholder),
-            )
-    } else {
-        div()
-            .flex_1()
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(
-                div()
-                    .text_size(font_size_base())
-                    .text_color(text_primary())
-                    .child(config.text.clone()),
-            )
-            .child(if is_focused {
-                div()
-                    .w(px(2.0))
-                    .h(px(18.0))
-                    .bg(cursor_color)
-                    .rounded(px(1.0))
-                    .ml(px(2.0))
-            } else {
-                div()
-            })
-    };
-
-    // Main input pill
-    let mut main_input = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(space_4())
-        .min_h(chat_input_height())
-        .px(space_4())
-        .py(space_2())
-        .bg(rgb(HEX_BG_INPUT));
-
-    if has_reply {
-        main_input = main_input.rounded_b(radius_md());
-    } else {
-        main_input = main_input.rounded(radius_md());
-    }
-
-    main_input = main_input
-        .child(plus_btn)
-        .child(text_area)
-        .child(gift_btn)
-        .child(gif_btn)
-        .child(sticker_btn)
-        .child(emoji_btn);
-
-    if let Some(send) = send_btn {
-        main_input = main_input.child(send);
-    }
-
-    if let Some(ref fh) = config.focus_handle {
-        main_input = main_input.track_focus(fh);
-
-        let fh_click = fh.clone();
-        main_input = main_input.cursor_text().on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-            window.focus(&fh_click, cx);
-        });
-
-        let on_text_change = config.on_text_change.clone();
-        let on_send = config.on_send.clone();
-        let current_text = config.text.clone();
-        let reply_id = reply_msg_id.clone();
-        let fh_key = fh.clone();
-
-        main_input = main_input.on_key_down(move |ev: &KeyDownEvent, window, cx| {
-            window.focus(&fh_key, cx);
-            let key = &ev.keystroke.key;
-            let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
-            let is_paste = (is_ctrl && (key == "v" || key == "V"))
-                || (ev.keystroke.modifiers.shift && key == "insert");
-
-            // Paste from clipboard (Ctrl+V, Command+V, Shift+Insert)
-            if is_paste {
-                if let Some(clipboard) = cx.read_from_clipboard() {
-                    if let Some(text) = clipboard.text() {
-                        if let Some(ref change_cb) = on_text_change {
-                            let mut new_str = current_text.clone();
-                            new_str.push_str(&text);
-                            change_cb(&new_str, window, cx);
-                        }
-                    }
-                }
-                return;
-            }
-
-            // Ignore other Ctrl/Cmd shortcuts so control sequences aren't typed into chat
-            if is_ctrl {
-                return;
-            }
-
-            match key.as_str() {
-                "enter" => {
-                    if !current_text.trim().is_empty() {
-                        if let Some(ref send_cb) = on_send {
-                            send_cb(&current_text, reply_id.as_deref(), window, cx);
-                        }
-                    }
-                }
-                "backspace" => {
-                    if let Some(ref change_cb) = on_text_change {
-                        let mut new_str = current_text.clone();
-                        new_str.pop();
-                        change_cb(&new_str, window, cx);
-                    }
-                }
-                "space" | " " => {
-                    if let Some(ref change_cb) = on_text_change {
-                        let mut new_str = current_text.clone();
-                        new_str.push(' ');
-                        change_cb(&new_str, window, cx);
-                    }
-                }
-                k if k.chars().count() == 1 => {
-                    if let Some(ref change_cb) = on_text_change {
-                        let mut new_str = current_text.clone();
-                        new_str.push_str(k);
-                        change_cb(&new_str, window, cx);
-                    }
-                }
-                _ => {}
-            }
-        });
-    }
-
-    // 5. Compose editor container with reply banner, input pill, and typing indicator
-    let mut container = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .px(space_4())
-        .pb(space_4());
-
-    if let Some(banner) = reply_banner {
-        container = container.child(banner);
-    }
-
-    container = container.child(main_input);
-    container = container.child(render_typing_indicator(&config.typing_users));
-
-    container
-}
-
-// ============================================================================
-// GPUI View Component for Chat Editor
-// ============================================================================
-
-/// GPUI View component managing interactive chat input state.
-pub struct ChatEditorView {
-    pub channel_name: String,
-    pub text: String,
-    pub replying_to: Option<Message>,
-    pub mention_author: bool,
-    pub typing_users: Vec<String>,
-}
-
-impl ChatEditorView {
-    pub fn new(channel_name: impl Into<String>) -> Self {
+impl ChatComposer {
+    /// Creates a new multi-line chat composer bound to a caller-owned [`TextareaState`].
+    pub fn new(id: impl Into<ElementId>, state: &Entity<TextareaState>) -> Self {
         Self {
-            channel_name: channel_name.into(),
-            text: String::new(),
+            id: id.into(),
+            state: state.clone(),
+            channel_name: "chat".into(),
+            placeholder: None,
             replying_to: None,
             mention_author: true,
             typing_users: Vec::new(),
-        }
-    }
-
-    pub fn set_replying_to(&mut self, message: Option<Message>) {
-        self.replying_to = message;
-    }
-
-    pub fn set_typing_users(&mut self, users: Vec<String>) {
-        self.typing_users = users;
-    }
-
-    pub fn set_text(&mut self, text: impl Into<String>) {
-        self.text = text.into();
-    }
-}
-
-impl Render for ChatEditorView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        render_chat_editor(ChatEditorConfig {
-            channel_name: self.channel_name.clone(),
-            text: self.text.clone(),
-            replying_to: self.replying_to.clone(),
-            mention_author: self.mention_author,
-            typing_users: self.typing_users.clone(),
-            focus_handle: None,
-            is_focused: false,
-            on_text_change: None,
-            on_send: None,
+            active_media_tab: None,
+            disabled: false,
+            on_toggle_mention: None,
+            on_cancel_reply: None,
             on_attachment: None,
             on_gif: None,
             on_sticker: None,
             on_emoji: None,
-            on_toggle_mention: None,
-            on_cancel_reply: None,
-            active_media_tab: None,
-        })
+            on_send: None,
+        }
+    }
+
+    pub fn channel_name(mut self, name: impl Into<SharedString>) -> Self {
+        self.channel_name = name.into();
+        self
+    }
+
+    pub fn placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
+        self.placeholder = Some(placeholder.into());
+        self
+    }
+
+    pub fn replying_to(mut self, message: Option<Message>) -> Self {
+        self.replying_to = message;
+        self
+    }
+
+    pub fn mention_author(mut self, mention: bool) -> Self {
+        self.mention_author = mention;
+        self
+    }
+
+    pub fn typing_users(mut self, users: Vec<String>) -> Self {
+        self.typing_users = users;
+        self
+    }
+
+    pub fn active_media_tab(mut self, tab: Option<MediaPickerTab>) -> Self {
+        self.active_media_tab = tab;
+        self
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn on_attachment(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_attachment = handler;
+        self
+    }
+
+    pub fn on_gif(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_gif = handler;
+        self
+    }
+
+    pub fn on_sticker(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_sticker = handler;
+        self
+    }
+
+    pub fn on_emoji(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_emoji = handler;
+        self
+    }
+
+    pub fn on_send(mut self, handler: Option<EditorSendCallback>) -> Self {
+        self.on_send = handler;
+        self
+    }
+
+    pub fn on_toggle_mention(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_toggle_mention = handler;
+        self
+    }
+
+    pub fn on_cancel_reply(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_cancel_reply = handler;
+        self
+    }
+}
+
+impl RenderOnce for ChatComposer {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let has_reply = self.replying_to.is_some();
+        let reply_msg_id = self.replying_to.as_ref().map(|m| m.id.clone());
+
+        let ph = self.placeholder.unwrap_or_else(|| {
+            if self.channel_name.starts_with('@') {
+                format!("Conversar com {}", self.channel_name).into()
+            } else {
+                format!("Conversar em #{}", self.channel_name).into()
+            }
+        });
+
+        if self.state.read(cx).presentation().placeholder() != ph.as_ref() {
+            let ph_str = ph.clone();
+            self.state.update(cx, |s, cx| {
+                s.set_placeholder(ph_str, window, cx);
+            });
+        }
+
+        let is_empty = self.state.read(cx).value().is_empty();
+
+        let reply_banner = self.replying_to.as_ref().map(|msg| {
+            render_active_reply_banner(
+                msg,
+                self.mention_author,
+                self.on_toggle_mention.clone(),
+                self.on_cancel_reply.clone(),
+            )
+        });
+
+        let attach_btn = render_attach_button(self.on_attachment.clone());
+        let gift_btn = render_gift_button();
+        let is_gif_active = self.active_media_tab == Some(MediaPickerTab::Gifs);
+        let gif_btn = render_gif_button(is_gif_active, self.on_gif.clone());
+        let is_sticker_active = self.active_media_tab == Some(MediaPickerTab::Stickers);
+        let sticker_btn = render_sticker_button(is_sticker_active, self.on_sticker.clone());
+        let is_emoji_active = self.active_media_tab == Some(MediaPickerTab::Emojis);
+        let emoji_btn = render_emoji_button(is_emoji_active, self.on_emoji.clone());
+
+        let current_text = self.state.read(cx).value().to_string();
+        let send_btn = if !is_empty {
+            render_send_button(current_text, reply_msg_id, self.on_send.clone())
+        } else {
+            None
+        };
+
+        let kit_textarea = KitTextarea::new(&self.state)
+            .appearance(false)
+            .bordered(false)
+            .disabled(self.disabled)
+            .w_full()
+            .flex_1()
+            .min_h(px(22.0))
+            .text_size(font_size_base());
+
+        let mut main_input = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(space_4())
+            .min_h(chat_input_height())
+            .px(space_4())
+            .py(space_2())
+            .bg(bg_input());
+
+        if has_reply {
+            main_input = main_input.rounded_b(radius_md());
+        } else {
+            main_input = main_input.rounded(radius_md());
+        }
+
+        main_input = main_input
+            .child(attach_btn)
+            .child(kit_textarea)
+            .child(gift_btn)
+            .child(gif_btn)
+            .child(sticker_btn)
+            .child(emoji_btn);
+
+        if let Some(send) = send_btn {
+            main_input = main_input.child(send);
+        }
+
+        let mut container = div()
+            .id(self.id)
+            .flex()
+            .flex_col()
+            .w_full()
+            .px(space_4())
+            .pb(space_4());
+
+        if let Some(banner) = reply_banner {
+            container = container.child(banner);
+        }
+
+        container = container.child(main_input);
+        container = container.child(render_typing_indicator(&self.typing_users));
+
+        container
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[::core::prelude::v1::test]
     fn test_typing_indicator_text() {
         let users1 = vec!["Alice".to_string()];
@@ -634,5 +587,23 @@ mod tests {
         assert_eq!(users1.len(), 1);
         assert_eq!(users2.len(), 2);
         assert_eq!(users3.len(), 3);
+
+        let div1 = render_typing_indicator(&users1);
+        let div2 = render_typing_indicator(&users2);
+        let div3 = render_typing_indicator(&users3);
+        let div_empty = render_typing_indicator(&[]);
+        let _ = (div1, div2, div3, div_empty);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_render_active_reply_banner() {
+        use crate::domain::message::Author;
+
+        let author = Author::new("u1", "tester");
+        let msg = Message::new("m1", "c1", author, "Hello world");
+
+        let banner_on = render_active_reply_banner(&msg, true, None, None);
+        let banner_off = render_active_reply_banner(&msg, false, None, None);
+        let _ = (banner_on, banner_off);
     }
 }

@@ -2,14 +2,14 @@
 //! Complete reactive chat stream combining kit v_virtual_list message stream,
 //! welcome header, hover actions, active replies, popover media picker, and message editor.
 
+use gpui::component::input::{InputEvent, TextareaState};
 use gpui::component::popover::Popover;
 use gpui::*;
 use std::sync::Arc;
 
 use crate::app::state::AppState;
 use crate::chat::editor::{
-    render_chat_editor, ChatEditorConfig, EditorActionCallback, EditorSendCallback,
-    EditorTextChangeCallback,
+    ChatComposer, EditorActionCallback, EditorSendCallback,
 };
 use crate::chat::media_picker::{
     MediaPickerConfig, MediaPickerGuildSection, MediaPickerModal, MediaPickerTab,
@@ -47,6 +47,8 @@ pub struct ChatView {
     pub media_picker_selected_guild_id: Option<String>,
     pub media_picker_list_state: ListState,
     pub active_context_menu: Option<(String, Point<Pixels>)>,
+    pub composer_state: Option<Entity<TextareaState>>,
+    pub composer_sub: Option<Subscription>,
 }
 
 impl ChatView {
@@ -83,6 +85,8 @@ impl ChatView {
             media_picker_selected_guild_id: None,
             media_picker_list_state,
             active_context_menu: None,
+            composer_state: None,
+            composer_sub: None,
         }
     }
 
@@ -97,10 +101,90 @@ impl ChatView {
     pub fn set_typing_users(&mut self, users: Vec<String>) {
         self.typing_users = users;
     }
+
+    pub fn ensure_composer_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextareaState> {
+        if let Some(ref st) = self.composer_state {
+            return st.clone();
+        }
+
+        let st = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 8)
+                .submit_on_enter(true)
+        });
+
+        if !self.typed_text.is_empty() {
+            let initial = self.typed_text.clone();
+            st.update(cx, |s, cx| {
+                s.set_value(initial, window, cx);
+            });
+        }
+
+        let st_for_sub = st.clone();
+        let sub = cx.subscribe_in(
+            &st,
+            window,
+            move |this, _textarea, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { shift: false, .. } => {
+                    let content = st_for_sub.read(cx).value().to_string();
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        let text = trimmed.to_string();
+                        let app_state = this.state.read(cx);
+                        let cid = if let Some((_, ch)) = app_state.get_selected_channel() {
+                            ch.id.clone()
+                        } else if let Some(ref cid) = app_state.selected_channel_id {
+                            cid.clone()
+                        } else {
+                            "chan-general".to_string()
+                        };
+
+                        this.state.update(cx, |state, cx| {
+                            state.send_message(&cid, &text);
+                            cx.notify();
+                        });
+
+                        st_for_sub.update(cx, |s, cx| {
+                            s.set_value("", window, cx);
+                        });
+
+                        this.typed_text.clear();
+                        this.replying_to = None;
+                        this.scroll_handle.scroll_to_bottom();
+                        let cnt = this.list_state.item_count();
+                        if cnt > 0 {
+                            this.list_state.scroll_to_reveal_item(cnt.saturating_sub(1));
+                        }
+                        cx.notify();
+                    }
+                }
+                InputEvent::Change => {
+                    let v = st_for_sub.read(cx).value().to_string();
+                    this.typed_text = v;
+                }
+                _ => {}
+            },
+        );
+
+        self.composer_state = Some(st.clone());
+        self.composer_sub = Some(sub);
+        st
+    }
 }
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let composer_state = self.ensure_composer_state(window, cx);
+        if !self.typed_text.is_empty() && composer_state.read(cx).value() != self.typed_text.as_str() {
+            let t = self.typed_text.clone();
+            composer_state.update(cx, |s, cx| {
+                s.set_value(t, window, cx);
+            });
+        }
         let app_state = self.state.read(cx);
         let selected_channel_opt = if let Some((_, ch)) = app_state.get_selected_channel() {
             Some(ch.clone())
@@ -235,8 +319,9 @@ impl Render for ChatView {
         let cid_for_send = channel_id.clone();
         let app_for_send = app_entity.clone();
         let self_for_send = self_entity.clone();
+        let st_for_send = composer_state.clone();
 
-        let on_send: Option<EditorSendCallback> = Some(Arc::new(move |content: &str, _reply_id: Option<&str>, _window: &mut Window, cx: &mut App| {
+        let on_send: Option<EditorSendCallback> = Some(Arc::new(move |content: &str, _reply_id: Option<&str>, window: &mut Window, cx: &mut App| {
             let trimmed = content.trim();
             if trimmed.is_empty() {
                 return;
@@ -247,6 +332,10 @@ impl Render for ChatView {
             app_for_send.update(cx, |state, cx| {
                 state.send_message(&cid, &text);
                 cx.notify();
+            });
+
+            st_for_send.update(cx, |s, cx| {
+                s.set_value("", window, cx);
             });
 
             self_for_send.update(cx, |this, cx| {
@@ -266,16 +355,6 @@ impl Render for ChatView {
         let on_cancel_reply: Option<EditorActionCallback> = Some(Arc::new(move |_window: &mut Window, cx: &mut App| {
             self_for_cancel.update(cx, |this, cx| {
                 this.replying_to = None;
-                cx.notify();
-            });
-        }));
-
-        // 8. Text change (live typing synchronization)
-        let self_for_text_change = self_entity.clone();
-        let on_text_change: Option<EditorTextChangeCallback> = Some(Arc::new(move |new_text: &str, _window: &mut Window, cx: &mut App| {
-            let t = new_text.to_string();
-            self_for_text_change.update(cx, |this, cx| {
-                this.typed_text = t;
                 cx.notify();
             });
         }));
@@ -461,6 +540,12 @@ impl Render for ChatView {
                         this.media_picker_open = false;
                     } else {
                         this.typed_text.push_str(&em);
+                        if let Some(ref st) = this.composer_state {
+                            let new_val = format!("{}{}", st.read(cx).value(), em);
+                            st.update(cx, |s, cx| {
+                                s.set_value(new_val, _win, cx);
+                            });
+                        }
                         let em_clone = em.clone();
                         app_emoji.update(cx, |state, _cx| {
                             state.record_emoji_usage(&em_clone);
@@ -782,24 +867,19 @@ impl Render for ChatView {
                     .child(virtual_list),
             )
             // 2. Chat Input Editor Bar
-            .child(render_chat_editor(ChatEditorConfig {
-                channel_name,
-                text: self.typed_text.clone(),
-                replying_to: self.replying_to.clone(),
-                mention_author: true,
-                typing_users,
-                focus_handle: Some(self.focus_handle.clone()),
-                is_focused: self.focus_handle.is_focused(window),
-                on_text_change,
-                on_send,
-                on_attachment: None,
-                on_gif,
-                on_sticker,
-                on_emoji,
-                on_toggle_mention: None,
-                on_cancel_reply,
-                active_media_tab: if self.media_picker_open { Some(self.media_picker_tab) } else { None },
-            }))
+            .child(
+                ChatComposer::new("chat-composer", &composer_state)
+                    .channel_name(channel_name)
+                    .replying_to(self.replying_to.clone())
+                    .mention_author(true)
+                    .typing_users(typing_users)
+                    .active_media_tab(if self.media_picker_open { Some(self.media_picker_tab) } else { None })
+                    .on_gif(on_gif)
+                    .on_sticker(on_sticker)
+                    .on_emoji(on_emoji)
+                    .on_cancel_reply(on_cancel_reply)
+                    .on_send(on_send),
+            )
             .children(media_picker_overlay)
             .children(context_menu_overlay);
 
