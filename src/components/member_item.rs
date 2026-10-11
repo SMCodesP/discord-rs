@@ -273,7 +273,7 @@ fn render_member_row(item: MemberItem) -> AnyElement {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_member_item_builder() {
         let m = MemberItem::new("m-1", "Alice")
             .status(PresenceStatus::Online)
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(m.activity_text.as_deref(), Some("Coding Rust"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_member_item_bot() {
         let bot = MemberItem::new("bot-1", "MusicBot")
             .status(PresenceStatus::Idle)

@@ -8,7 +8,7 @@ use gpui::*;
 
 use crate::components::badge::{MentionBadge, UnreadMarker, UnreadMarkerState};
 use crate::domain::channel::ChannelType;
-use crate::tokens::colors::{channel_active, channel_hover, text_muted, text_normal, white};
+use crate::tokens::colors::{channel_active, channel_hover, opacity_white_8, text_muted, text_normal, white};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
@@ -239,7 +239,7 @@ fn render_channel_row(item: ChannelItem) -> AnyElement {
                 .px(px(6.0))
                 .py(px(1.0))
                 .rounded_xs()
-                .bg(rgba(0xffffff14)) // TOKEN FALTANDO: --background-mod-subtle
+                .bg(opacity_white_8())
                 .text_size(font_size_xxs())
                 .text_color(text_muted())
                 .child(format!("{}", item.connected_users)),
@@ -262,7 +262,7 @@ fn render_channel_row(item: ChannelItem) -> AnyElement {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_channel_item_builder() {
         let ch = ChannelItem::new("ch-1", "general")
             .channel_type(ChannelType::Text)
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(ch.get_mention_count(), 3);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_channel_item_voice_users() {
         let voice = ChannelItem::new("vc-1", "Voice Lounge")
             .channel_type(ChannelType::Voice)

@@ -659,7 +659,7 @@ fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_compute_initials() {
         assert_eq!(GuildItem::compute_initials("Rust Brasil"), "RB");
         assert_eq!(GuildItem::compute_initials("Rust"), "Rus");
@@ -670,7 +670,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_guild_item_builder() {
         let item = GuildItem::new("item-1", "Rust Lang")
             .selected(true)
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(item.get_icon_url(), Some("https://example.com/icon.png"));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_guild_folder_item() {
         let child1 = GuildFolderChild::new("child-1", "Child One")
             .unread(true)
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(folder.get_mention_count(), 5);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_guild_folder_explicit_mention_count() {
         let child1 = GuildFolderChild::new("c1", "G1").mention_count(2);
         let folder = GuildFolderItem::new("f1", "Folder")

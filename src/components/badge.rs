@@ -171,7 +171,7 @@ impl RenderOnce for MentionBadge {
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_unread_marker_states() {
         assert_eq!(UnreadMarkerState::Hidden.height(), px(0.0));
         assert_eq!(UnreadMarkerState::Unread.height(), px(8.0));
@@ -181,7 +181,7 @@ mod tests {
         assert!(UnreadMarkerState::Unread.is_visible());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_mention_badge_builder() {
         let b = MentionBadge::new(5);
         assert_eq!(b.count, 5);

@@ -807,7 +807,8 @@ fn render_voice_user_row(
     let avatar_el = Avatar::new(display_name.clone())
         .size(AvatarSize::Px24)
         .opt_src(avatar_url)
-        .cutout_color(bg_channels());
+        .cutout_color(bg_channels())
+        .opt_decoration(vs.avatar_decoration_data.clone());
 
     div()
         .h(px(28.0))
@@ -1333,14 +1334,14 @@ fn render_dm_text_column(
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_dm_text_column_creation() {
         let el = render_dm_text_column("Alice".to_string(), false, false, true, None);
         // Ensure it builds without panic
         let _ = el;
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_server_header_creation() {
         let el = render_server_header("Rust Server");
         let _ = el;
