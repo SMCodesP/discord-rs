@@ -1,11 +1,13 @@
 //! Discord RS - Reaction Bar & Reaction Badges
 //! Implements reaction list, individual reaction counters, active user indicator,
-//! and the add reaction button (+ / smiley).
+//! and the add reaction button (+ / smiley) with kit IconButton and zero fixed colors.
 
 use gpui::*;
 use std::sync::Arc;
 
+use crate::components::button::IconButton;
 use crate::domain::message::Reaction;
+use crate::tokens::colors::white;
 use crate::tokens::colors::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
@@ -40,19 +42,19 @@ pub fn render_reaction_badge(
 
     let (bg_color, border_col, text_col, hover_bg, hover_border) = if is_me {
         (
-            crate::tokens::colors::with_alpha(0x5865f2, 0.15),
-            rgb(0x5865f2), // Borda destacada em Blurple oficial
-            rgb(0xc9cdfb),
-            crate::tokens::colors::with_alpha(0x5865f2, 0.25),
-            rgb(0x5865f2),
+            mention_bg(),
+            blurple(),
+            white(),
+            mention_hover(),
+            blurple(),
         )
     } else {
         (
-            rgb(0x2b2d31),
-            rgb(0x383a40),
-            rgb(0xb5bac1),
-            rgb(0x35373c),
-            rgb(0x4e5058),
+            bg_channels(),
+            bg_chat_hover(),
+            text_muted(),
+            channel_hover(),
+            borders(),
         )
     };
 
@@ -96,46 +98,25 @@ pub fn render_reaction_badge(
 // Add Reaction Button
 // ============================================================================
 
-/// Renders the "+" / smiley add-reaction button at the end of the reaction bar.
+/// Renders the "+" / smiley add-reaction button at the end of the reaction bar using IconButton.
 pub fn render_add_reaction_button(
     message_id: &str,
     on_add_click: Option<AddReactionCallback>,
 ) -> Div {
     let msg_id = message_id.to_string();
 
-    let mut btn = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .h(px(26.0))
-        .px(space_3())
-        .bg(rgb(HEX_BG_CHANNELS))
-        .border_1()
-        .border_color(rgb(0x383a40))
-        .rounded(radius_md())
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_CHANNEL_HOVER)).border_color(rgb(0x4e5058)))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .text_color(text_muted())
-                .text_size(font_size_xs())
-                .font_weight(WEIGHT_MEDIUM)
-                .child("☺")
-                .child("+"),
-        );
+    let mut btn = IconButton::new(format!("add-reaction-{}", message_id), "☺+")
+        .size(px(26.0))
+        .icon_size(font_size_xs())
+        .tooltip("Adicionar Reação");
 
     if let Some(handler) = on_add_click {
-        btn = btn.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+        btn = btn.on_click(move |_event, window, cx| {
             handler(&msg_id, window, cx);
         });
     }
 
-    btn
+    div().child(btn)
 }
 
 // ============================================================================
@@ -174,7 +155,7 @@ pub fn render_reaction_bar(
 // Quick Reaction Picker Overlay (Hover Toolbar / Popover)
 // ============================================================================
 
-/// Renders a row of quick emoji reaction shortcuts.
+/// Renders a row of quick emoji reaction shortcuts with kit IconButton.
 pub fn render_quick_reaction_picker(
     message_id: &str,
     on_select_emoji: Option<ReactionActionCallback>,
@@ -184,9 +165,9 @@ pub fn render_quick_reaction_picker(
         .flex_row()
         .items_center()
         .gap(space_1())
-        .bg(rgb(HEX_BG_USER_BAR))
+        .bg(bg_user_bar())
         .border_1()
-        .border_color(rgb(HEX_BORDERS))
+        .border_color(borders())
         .rounded(radius_md())
         .p(space_1())
         .shadow_md();
@@ -195,23 +176,14 @@ pub fn render_quick_reaction_picker(
         let msg_id = message_id.to_string();
         let em = emoji.to_string();
 
-        let mut item = div()
-            .flex()
-            .items_center()
-            .justify_center()
+        let mut item = IconButton::new(format!("quick-rx-{}-{}", message_id, emoji), emoji)
             .size(px(28.0))
-            .rounded(radius_sm())
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)))
-            .child(
-                div()
-                    .text_size(px(16.0))
-                    .child(emoji),
-            );
+            .icon_size(px(16.0))
+            .tooltip(format!("Reagir com {}", emoji));
 
         if let Some(handler) = on_select_emoji.as_ref() {
             let h = handler.clone();
-            item = item.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            item = item.on_click(move |_event, window, cx| {
                 h(&msg_id, &em, window, cx);
             });
         }
@@ -230,5 +202,26 @@ mod tests {
     fn test_reaction_emojis_available() {
         assert_eq!(DEFAULT_REACTION_EMOJIS.len(), 8);
         assert!(DEFAULT_REACTION_EMOJIS.contains(&"🦀"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_reaction_badge_and_button_rendering() {
+        let rx_me = Reaction {
+            emoji: "👍".into(),
+            count: 3,
+            me: true,
+        };
+        let _badge_me = render_reaction_badge(&rx_me, "m1", None);
+
+        let rx_other = Reaction {
+            emoji: "🔥".into(),
+            count: 1,
+            me: false,
+        };
+        let _badge_other = render_reaction_badge(&rx_other, "m1", None);
+
+        let _add_btn = render_add_reaction_button("m1", None);
+        let _bar = render_reaction_bar(&[rx_me, rx_other], "m1", None, None);
+        let _picker = render_quick_reaction_picker("m1", None);
     }
 }
