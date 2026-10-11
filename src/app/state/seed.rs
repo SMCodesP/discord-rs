@@ -32,6 +32,7 @@ pub(super) fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
         global_name: Some("Rust Bot".into()),
         avatar: None,
         bot: true,
+        avatar_decoration_data: None,
     };
 
     // chan-general
@@ -188,6 +189,7 @@ pub(super) fn organize_channels_into_categories(
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),
             user_limit: c.user_limit,
+            avatar_decoration_data: None,
         }
     };
 
@@ -257,6 +259,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                         ChannelItemState {
                             id: "chan-announcements".into(),
@@ -272,6 +275,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                     ],
                 },
@@ -293,6 +297,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                         ChannelItemState {
                             id: "chan-help".into(),
@@ -308,6 +313,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                         ChannelItemState {
                             id: "chan-showcase".into(),
@@ -323,6 +329,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                     ],
                 },
@@ -344,6 +351,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                         ChannelItemState {
                             id: "chan-voice-pair".into(),
@@ -359,6 +367,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                     ],
                 },
@@ -421,6 +430,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                         ChannelItemState {
                             id: "chan-gpui-showcase".into(),
@@ -436,6 +446,7 @@ impl AppState {
                             recipient_ids: Vec::new(),
                             recipient_names: Vec::new(),
                             user_limit: None,
+                            avatar_decoration_data: None,
                         },
                     ],
                 },
@@ -456,6 +467,7 @@ impl AppState {
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
                         user_limit: None,
+                        avatar_decoration_data: None,
                     }],
                 },
             ],
@@ -488,6 +500,7 @@ impl AppState {
                 role_group: "ADMINISTRADOR".into(),
                 role_color: 0x5865f2,
                 is_bot: false,
+                avatar_decoration_data: None,
                 activity: Some("Codando discord-rs".into()),
             },
             MemberItemState {
@@ -498,6 +511,7 @@ impl AppState {
                 role_group: "MODERADOR".into(),
                 role_color: 0x23a55a,
                 is_bot: false,
+                avatar_decoration_data: None,
                 activity: Some("Jogando cargo run".into()),
             },
             MemberItemState {
@@ -508,6 +522,7 @@ impl AppState {
                 role_group: "BOTS".into(),
                 role_color: 0x5865f2,
                 is_bot: true,
+                avatar_decoration_data: None,
                 activity: Some("/help para comandos".into()),
             },
             MemberItemState {
@@ -518,6 +533,7 @@ impl AppState {
                 role_group: "MEMBROS".into(),
                 role_color: 0xdbdee1,
                 is_bot: false,
+                avatar_decoration_data: None,
                 activity: Some("Compilando crates".into()),
             },
             MemberItemState {
@@ -528,6 +544,7 @@ impl AppState {
                 role_group: "MEMBROS".into(),
                 role_color: 0xdbdee1,
                 is_bot: false,
+                avatar_decoration_data: None,
                 activity: Some("Rejeitando referências".into()),
             },
             MemberItemState {
@@ -538,6 +555,7 @@ impl AppState {
                 role_group: "MEMBROS".into(),
                 role_color: 0x80848e,
                 is_bot: false,
+                avatar_decoration_data: None,
                 activity: None,
             },
         ];
@@ -608,6 +626,7 @@ impl AppState {
                 presence: PresenceStatus::Online,
                 is_muted: false,
                 is_deafened: false,
+                avatar_decoration_data: None,
             },
             guilds,
             members: if has_token { Vec::new() } else { members },
@@ -650,6 +669,7 @@ impl AppState {
                         presence: PresenceStatus::Online,
                         custom_status: Some("Testando GPUI".into()),
                         relationship_type: 1,
+                        avatar_decoration_data: None,
                     },
                 ]
             },

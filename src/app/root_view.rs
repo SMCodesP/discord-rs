@@ -1,4 +1,5 @@
 use gpui::*;
+use gpui::component::input::{AnyInputState, InputEvent, InputState};
 use super::channel_sidebar::ChannelSidebar;
 use super::guild_rail::GuildRail;
 use super::header_bar::HeaderBar;
@@ -32,7 +33,12 @@ pub struct RootView {
     voice_panel: Entity<VoiceCallPanel>,
     user_settings: Entity<UserSettingsModal>,
     pub chat_view: Entity<ChatView>,
-    login_focus_handle: FocusHandle,
+    token_login_state: Option<Entity<InputState>>,
+    token_login_sub: Option<Subscription>,
+    token_modal_state: Option<Entity<InputState>>,
+    token_modal_sub: Option<Subscription>,
+    quick_msg_state: Option<Entity<InputState>>,
+    quick_msg_sub: Option<Subscription>,
 }
 
 impl RootView {
@@ -85,7 +91,6 @@ impl RootView {
         let voice_panel = cx.new(|cx| VoiceCallPanel::new(state.clone(), cx));
         let user_settings = cx.new(|cx| UserSettingsModal::new(state.clone(), cx));
         let chat_view = cx.new(|cx| ChatView::new(state.clone(), cx));
-        let login_focus_handle = cx.focus_handle();
 
         cx.observe(&state, |_this, _state, cx| {
             cx.notify();
@@ -102,7 +107,12 @@ impl RootView {
             voice_panel,
             user_settings,
             chat_view,
-            login_focus_handle,
+            token_login_state: None,
+            token_login_sub: None,
+            token_modal_state: None,
+            token_modal_sub: None,
+            quick_msg_state: None,
+            quick_msg_sub: None,
         }
     }
 
@@ -115,7 +125,6 @@ impl RootView {
         let voice_panel = cx.new(|cx| VoiceCallPanel::new(state.clone(), cx));
         let user_settings = cx.new(|cx| UserSettingsModal::new(state.clone(), cx));
         let chat_view = cx.new(|cx| ChatView::new(state.clone(), cx));
-        let login_focus_handle = cx.focus_handle();
 
         cx.observe(&state, |_this, _state, cx| {
             cx.notify();
@@ -134,13 +143,192 @@ impl RootView {
             voice_panel,
             user_settings,
             chat_view,
-            login_focus_handle,
+            token_login_state: None,
+            token_login_sub: None,
+            token_modal_state: None,
+            token_modal_sub: None,
+            quick_msg_state: None,
+            quick_msg_sub: None,
         }
+    }
+}
+
+/// Creates a token field kit state once, with a `Change` subscription that
+/// mirrors the kit text back into `AppState::token_input`.
+fn ensure_token_input(
+    slot: &mut Option<Entity<InputState>>,
+    sub: &mut Option<Subscription>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let initial = app_state.read(cx).token_input.clone();
+    let st = cx.new(|cx| {
+        InputState::new(window, cx)
+            .default_value(initial)
+            .masked(true)
+    });
+    let app = app_state.clone();
+    let sub_new = cx.subscribe_in(&st, window, move |_view, st, event: &InputEvent, _window, cx| {
+        if matches!(event, InputEvent::Change) {
+            let v = st.read(cx).value().to_string();
+            app.update(cx, |s, cx| {
+                s.token_input = v;
+                cx.notify();
+            });
+        }
+    });
+    *slot = Some(st);
+    *sub = Some(sub_new);
+}
+
+/// Caller-to-kit sync for token fields (placeholder + value).
+/// Kit-to-caller flows through the subscription; `set_value` emits no event.
+fn sync_token_input(
+    st: &Entity<InputState>,
+    app_state: &Entity<AppState>,
+    placeholder: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if st.read(cx).presentation().placeholder() != &placeholder {
+        let ph = placeholder.clone();
+        st.update(cx, |s, cx| s.set_placeholder(ph, window, cx));
+    }
+    let want: SharedString = app_state.read(cx).token_input.clone().into();
+    if st.read(cx).value() != want {
+        st.update(cx, |s, cx| s.set_value(want.clone(), window, cx));
+    }
+}
+
+/// Creates the popout quick-message kit state once, with `Change` (mirror to
+/// `popout.quick_message`) and `PressEnter` (send) subscriptions.
+fn ensure_quick_input(
+    slot: &mut Option<Entity<InputState>>,
+    sub: &mut Option<Subscription>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let st = cx.new(|cx| InputState::new(window, cx));
+    let app = app_state.clone();
+    let sub_new = cx.subscribe_in(
+        &st,
+        window,
+        move |_view, st, event: &InputEvent, _window, cx| match event {
+            InputEvent::Change => {
+                let v = st.read(cx).value().to_string();
+                app.update(cx, |s, cx| {
+                    if let Some(ref mut p) = s.profile_popout {
+                        p.quick_message = v;
+                    }
+                    cx.notify();
+                });
+            }
+            InputEvent::PressEnter { .. } => {
+                app.update(cx, |s, cx| {
+                    s.send_profile_popout_quick_message();
+                    cx.notify();
+                });
+            }
+            _ => {}
+        },
+    );
+    *slot = Some(st);
+    *sub = Some(sub_new);
+}
+
+/// Caller-to-kit sync for the quick message (value + placeholder).
+fn sync_quick_input(
+    st: &Entity<InputState>,
+    want_value: String,
+    want_placeholder: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let want_ph: SharedString = want_placeholder.into();
+    if st.read(cx).presentation().placeholder() != &want_ph {
+        let ph = want_ph.clone();
+        st.update(cx, |s, cx| s.set_placeholder(ph, window, cx));
+    }
+    let want: SharedString = want_value.into();
+    if st.read(cx).value() != want {
+        st.update(cx, |s, cx| s.set_value(want.clone(), window, cx));
     }
 }
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Kit input states live on this view (never in AppState). Ensure +
+        // caller-to-kit sync before borrowing AppState for the tree.
+        let app = self.state.clone();
+        ensure_token_input(
+            &mut self.token_login_state,
+            &mut self.token_login_sub,
+            &app,
+            window,
+            cx,
+        );
+        ensure_token_input(
+            &mut self.token_modal_state,
+            &mut self.token_modal_sub,
+            &app,
+            window,
+            cx,
+        );
+        let is_user_account = self.state.read(cx).is_user_token;
+        let login_placeholder: SharedString = if is_user_account {
+            "Cole seu token de usuário aqui...".into()
+        } else {
+            "Cole o token do Bot (ex: MTI0...)".into()
+        };
+        if let Some(st) = self.token_login_state.clone() {
+            sync_token_input(&st, &app, login_placeholder.clone(), window, cx);
+        }
+        if let Some(st) = self.token_modal_state.clone() {
+            sync_token_input(&st, &app, login_placeholder.clone(), window, cx);
+        }
+
+        // Quick-message state: sync while a popout is open, drop on close so
+        // no text leaks between users.
+        let quick_sync: Option<(String, String)> = self
+            .state
+            .read(cx)
+            .profile_popout
+            .as_ref()
+            .map(|p| {
+                let uname = p
+                    .data
+                    .as_ref()
+                    .map(|d| d.user.username.clone())
+                    .unwrap_or_else(|| p.user_id.clone());
+                (
+                    p.quick_message.clone(),
+                    format!("Conversar com @{}", uname),
+                )
+            });
+        if let Some((ref want_val, ref want_ph)) = quick_sync {
+            ensure_quick_input(
+                &mut self.quick_msg_state,
+                &mut self.quick_msg_sub,
+                &app,
+                window,
+                cx,
+            );
+            if let Some(st) = self.quick_msg_state.clone() {
+                sync_quick_input(&st, want_val.clone(), want_ph.clone(), window, cx);
+            }
+        } else {
+            self.quick_msg_state = None;
+            self.quick_msg_sub = None;
+        }
+
         let state = self.state.read(cx);
 
         // =========================================================================
@@ -151,10 +339,19 @@ impl Render for RootView {
         let state_snapshot = state.clone();
         let is_connected_to_gateway = state_snapshot.is_connected_to_gateway;
         if !is_connected_to_gateway {
-            if !self.login_focus_handle.is_focused(window) {
-                window.focus(&self.login_focus_handle, cx);
+            // Autofocus the kit token field itself (its own focus handle).
+            if let Some(st) = self.token_login_state.clone() {
+                let fh = AnyInputState::from(st).focus_handle(cx);
+                if !fh.is_focused(window) {
+                    window.focus(&fh, cx);
+                }
             }
-            return render_login_screen(self.state.clone(), &state_snapshot, &self.login_focus_handle).into_any_element();
+            return render_login_screen(
+                self.state.clone(),
+                &state_snapshot,
+                self.token_login_state.as_ref().expect("login token state"),
+            )
+            .into_any_element();
         }
 
         // =========================================================================
@@ -169,7 +366,6 @@ impl Render for RootView {
             .map(|ch| ch.kind == ChannelKind::Voice)
             .unwrap_or(false);
         let app_entity = self.state.clone();
-        let login_focus = self.login_focus_handle.clone();
 
         div()
             .relative()
@@ -231,7 +427,6 @@ impl Render for RootView {
             // =========================================================================
             .children(if let Some(modal) = active_modal {
                 let entity = app_entity.clone();
-                let lf = login_focus.clone();
                 Some(
                     div()
                         .absolute()
@@ -243,7 +438,12 @@ impl Render for RootView {
                             ActiveModal::AddServer => render_add_server_modal(entity).into_any_element(),
                             ActiveModal::ExploreServers => render_explore_modal(entity).into_any_element(),
                             ActiveModal::Login | ActiveModal::LoginDiscord => {
-                                render_login_modal(entity, &state, &lf).into_any_element()
+                                render_login_modal(
+                                    entity,
+                                    &state,
+                                    self.token_modal_state.as_ref().expect("modal token state"),
+                                )
+                                .into_any_element()
                             }
                             ActiveModal::AddFriendToGroup(channel_id) => {
                                 render_add_friend_to_group_modal(entity, &state, channel_id).into_any_element()
@@ -275,6 +475,7 @@ impl Render for RootView {
                             &popout_state,
                             &catalog,
                             presence.as_ref(),
+                            self.quick_msg_state.as_ref().expect("quick message state"),
                         )),
                 )
             } else {
@@ -289,15 +490,13 @@ impl Render for RootView {
 fn render_login_screen(
     entity: Entity<AppState>,
     state: &AppState,
-    focus_handle: &FocusHandle,
+    token_state: &Entity<InputState>,
 ) -> impl IntoElement {
     let entity_connect = entity.clone();
     let entity_bot_toggle = entity.clone();
     let entity_user_toggle = entity.clone();
-    let entity_input = entity.clone();
 
     let is_user = state.is_user_token;
-    let token_val = state.token_input.clone();
     let is_connecting = state.is_connecting;
 
     // Status banner
@@ -318,24 +517,16 @@ fn render_login_screen(
         .title("Autenticação Necessária")
     };
 
-    let text_input = TextInput::new("discord-token-input")
+    let text_input = TextInput::new("discord-token-input", token_state)
         .label("TOKEN DE AUTENTICAÇÃO DO DISCORD")
         .placeholder(if is_user {
             "Cole seu token de usuário aqui..."
         } else {
             "Cole o token do Bot (ex: MTI0...)"
         })
-        .value(token_val)
         .secret(true)
         .full_width(true)
-        .track_focus(focus_handle)
-        .disabled(is_connecting)
-        .on_change(move |new_val, _window, cx| {
-            entity_input.update(cx, |s, cx| {
-                s.token_input = new_val;
-                cx.notify();
-            });
-        });
+        .disabled(is_connecting);
 
     div()
         .size_full()
@@ -553,16 +744,14 @@ fn render_login_screen(
 fn render_login_modal(
     entity: Entity<AppState>,
     state: &AppState,
-    focus_handle: &FocusHandle,
+    token_state: &Entity<InputState>,
 ) -> impl IntoElement {
     let entity_close = entity.clone();
     let entity_connect = entity.clone();
     let entity_bot_toggle = entity.clone();
     let entity_user_toggle = entity.clone();
-    let entity_input = entity.clone();
 
     let is_user = state.is_user_token;
-    let token_val = state.token_input.clone();
     let is_connecting = state.is_connecting;
 
     // Top status banner
@@ -586,24 +775,16 @@ fn render_login_modal(
         .title("Gerenciar Conexão do Discord")
     };
 
-    let text_input = TextInput::new("discord-token-modal-input")
+    let text_input = TextInput::new("discord-token-modal-input", token_state)
         .label("TOKEN DE AUTENTICAÇÃO DO DISCORD")
         .placeholder(if is_user {
             "Cole seu token de usuário aqui..."
         } else {
             "Cole o token do Bot (ex: MTI0...)"
         })
-        .value(token_val)
         .secret(true)
         .full_width(true)
-        .track_focus(focus_handle)
-        .disabled(is_connecting)
-        .on_change(move |new_val, _window, cx| {
-            entity_input.update(cx, |s, cx| {
-                s.token_input = new_val;
-                cx.notify();
-            });
-        });
+        .disabled(is_connecting);
 
     div()
         .size_full()

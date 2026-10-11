@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::domain::user::AvatarDecorationData;
+
 /// Status presence for users
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PresenceStatus {
@@ -145,6 +147,9 @@ pub struct ChannelItemState {
     pub recipient_names: Vec<String>,
     #[serde(default)]
     pub user_limit: Option<u32>,
+    /// Avatar decoration of the DM recipient (first recipient for group DMs).
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 /// Category grouping in channel sidebar
@@ -200,6 +205,9 @@ pub struct FriendItemState {
     pub presence: PresenceStatus,
     pub custom_status: Option<String>,
     pub relationship_type: u32,
+    /// Avatar decoration equipped by the friend, when the relationship payload carries it.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 /// Navigation tabs in Friends Hub
@@ -271,6 +279,9 @@ pub struct ActiveNowItem {
     pub spotify_progress_text: Option<(String, String)>,
     pub spotify_progress_pct: Option<f32>,
     pub button_text: Option<String>,
+    /// Avatar decoration equipped by the user, copied from the friend entry.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 
@@ -283,6 +294,8 @@ pub struct VoiceParticipantState {
     pub is_speaking: bool,
     pub is_muted: bool,
     pub is_deafened: bool,
+    /// Avatar decoration equipped by the participant, when known.
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 /// Active voice call session
@@ -311,6 +324,8 @@ pub struct CurrentUserProfile {
     pub presence: PresenceStatus,
     pub is_muted: bool,
     pub is_deafened: bool,
+    /// Avatar decoration equipped by the current user (from READY / /users/@me).
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 /// Member displayed in the member sidebar
@@ -324,4 +339,6 @@ pub struct MemberItemState {
     pub role_color: u32,
     pub is_bot: bool,
     pub activity: Option<String>,
+    /// Avatar decoration equipped by the member, when the member payload carries it.
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }

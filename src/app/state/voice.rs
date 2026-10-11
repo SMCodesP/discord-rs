@@ -20,6 +20,7 @@ impl AppState {
                     is_speaking: false,
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
+                    avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
                 },
             ],
         });

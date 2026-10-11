@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::user::AvatarDecorationData;
+
 /// Represents Discord voice state data received from gateway events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoiceState {
@@ -39,6 +41,10 @@ pub struct VoiceState {
     /// Optional member avatar URL / hash
     #[serde(default)]
     pub avatar_url: Option<String>,
+    /// Avatar decoration equipped by the user (guild-level `member.avatar_decoration_data`
+    /// takes precedence over `member.user.avatar_decoration_data` when present).
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
     // Fed by voice gateway WebRTC / RTP connection opcode 5 Speaking
     #[serde(skip)]
     pub is_speaking: bool,
@@ -60,6 +66,7 @@ impl VoiceState {
             suppress: false,
             user_name: None,
             avatar_url: None,
+            avatar_decoration_data: None,
             is_speaking: false,
         }
     }
@@ -81,6 +88,11 @@ impl VoiceState {
 
     pub fn with_avatar_url(mut self, url: impl Into<String>) -> Self {
         self.avatar_url = Some(url.into());
+        self
+    }
+
+    pub fn with_avatar_decoration(mut self, decor: AvatarDecorationData) -> Self {
+        self.avatar_decoration_data = Some(decor);
         self
     }
 
@@ -130,6 +142,9 @@ pub struct VoiceParticipant {
     pub username: String,
     /// Avatar hash or URL.
     pub avatar: Option<String>,
+    /// Avatar decoration equipped by the participant, when known.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
     /// Whether participant's microphone is muted.
     #[serde(default)]
     pub mute: bool,
@@ -153,6 +168,7 @@ impl VoiceParticipant {
             user_id: user_id.into(),
             username: username.into(),
             avatar: None,
+            avatar_decoration_data: None,
             mute: false,
             deaf: false,
             talking: false,
