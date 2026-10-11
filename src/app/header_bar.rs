@@ -1,8 +1,13 @@
+use gpui::prelude::*;
 use gpui::*;
-use crate::tokens::icons::*;
-use super::state::AppState;
 
-/// Chat and channel top header bar (48px high)
+use crate::components::{Avatar, AvatarSize, IconButton};
+use crate::tokens::colors::{self, rgb};
+use crate::tokens::icons::*;
+use crate::tokens::kit_theme::DiscordTheme;
+use super::state::{ActiveModal, AppState, ChannelItemState};
+
+/// Chat and channel top header bar (49px high: 48px content + 1px subtle bottom border)
 pub struct HeaderBar {
     state: Entity<AppState>,
 }
@@ -27,253 +32,359 @@ impl Render for HeaderBar {
         } else {
             None
         };
-        let show_members = state.show_members;
         let is_dm = state.selected_guild_id.is_none();
         let app_entity = self.state.clone();
 
         div()
-            .h(px(48.0))
+            .h(px(49.0))
             .w_full()
-            .bg(rgb(0x313338))
-            .px(px(16.0))
+            .bg(cx.discord().bg_chat)
+            .pl(px(16.0))
+            .pr(px(8.0))
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
             .border_b_1()
+            // TOKEN FALTANDO: --border-subtle
             .border_color(rgb(0x1f2023))
             .flex_shrink_0()
-            // =========================================================================
-            // LEFT SIDE: Channel icon + Name + Divider + Topic
-            // =========================================================================
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .overflow_hidden()
-                    .children(if let Some(channel) = selected_channel_opt.as_ref() {
-                        let mut left_items = vec![
-                            // Icon
-                            div()
-                                .text_color(rgb(0x80848e))
-                                .text_size(px(20.0))
-                                .child(channel.kind.symbol()),
-                            // Name
-                            div()
-                                .text_color(rgb(0xf2f3f5))
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(16.0))
-                                .child(channel.name.clone()),
-                        ];
-
-                        // Divider & Topic if available
-                        if let Some(topic) = channel.topic.as_ref() {
-                            left_items.push(
-                                div()
-                                    .w(px(1.0))
-                                    .h(px(16.0))
-                                    .bg(rgb(0x4e5058))
-                                    .mx(px(4.0)),
-                            );
-                            left_items.push(
-                                div()
-                                    .text_color(rgb(0x80848e))
-                                    .text_size(px(13.0))
-                                    .overflow_hidden()
-                                    .child(topic.clone()),
-                            );
-                        }
-
-                        left_items
-                    } else if is_dm {
-                        vec![
-                            icon_friends(px(20.0), rgb(0x80848e)),
-                            div()
-                                .text_color(rgb(0xf2f3f5))
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(16.0))
-                                .child("Amigos"),
-                            div()
-                                .w(px(1.0))
-                                .h(px(16.0))
-                                .bg(rgb(0x4e5058))
-                                .mx(px(4.0)),
-                            div()
-                                .text_color(rgb(0x80848e))
-                                .text_size(px(13.0))
-                                .child("Disponível"),
-                        ]
-                    } else {
-                        vec![
-                            div()
-                                .text_color(rgb(0x80848e))
-                                .text_size(px(16.0))
-                                .child("#"),
-                            div()
-                                .text_color(rgb(0xf2f3f5))
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(16.0))
-                                .child("Selecione um canal"),
-                        ]
-                    }),
-            )
-            // =========================================================================
-            // RIGHT SIDE: Actions (Notifications, Pins, Member Toggle, Search, Inbox)
-            // =========================================================================
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(12.0))
-                    // 0. Discord Connection Shortcut Button (only when disconnected)
-                    .children(if !state.is_connected_to_gateway {
-                        let entity = app_entity.clone();
-                        Some(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(6.0))
-                                .px(px(10.0))
-                                .h(px(28.0))
-                                .rounded(px(4.0))
-                                .bg(rgb(0x5865f2))
-                                .hover(|s| s.bg(rgb(0x4752c4)))
-                                .cursor_pointer()
-                                .text_color(rgb(0xffffff))
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::BOLD)
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    entity.update(cx, |state, cx| {
-                                        state.open_modal(crate::app::state::ActiveModal::Login);
-                                        cx.notify();
-                                    });
-                                })
-                                .child(icon_key(px(14.0), rgb(0xffffff)))
-                                .child("Entrar no Discord"),
-                        )
-                    } else {
-                        None
-                    })
-                    // 1. Notifications / Bell button
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .text_color(rgb(0x80848e))
-                            .hover(|s| s.text_color(rgb(0xdbdee1)))
-                            .child(icon_bell(px(16.0), rgb(0x80848e))),
-                    )
-                    // 2. Pinned messages button
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .text_color(rgb(0x80848e))
-                            .hover(|s| s.text_color(rgb(0xdbdee1)))
-                            .child(icon_pin(px(16.0), rgb(0x80848e))),
-                    )
-                    // 3. Member list toggle button
-                    .child({
-                        let entity = app_entity.clone();
-                        let icon_col = if show_members {
-                            rgb(0xffffff)
-                        } else {
-                            rgb(0x80848e)
-                        };
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .rounded(px(4.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .bg(if show_members {
-                                rgb(0x35373c)
-                            } else {
-                                rgb(0x313338)
-                            })
-                            .text_color(icon_col)
-                            .hover(|s| s.text_color(rgb(0xdbdee1)))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                entity.update(cx, |state, cx| {
-                                    state.toggle_members();
-                                    cx.notify();
-                                });
-                            })
-                            .child(icon_members(px(16.0), icon_col))
-                    })
-                    // 4. Search bar (Buscar)
-                    .child({
-                        let entity = app_entity.clone();
-                        let is_search_open = state.is_search_open;
-                        let query = state.search_query.clone();
-                        div()
-                            .w(px(144.0))
-                            .h(px(24.0))
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .bg(if is_search_open { rgb(0x35373c) } else { rgb(0x1e1f22) })
-                            .border_1()
-                            .border_color(if is_search_open { rgb(0x5865f2) } else { rgb(0x1e1f22) })
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x35373c)))
-                            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                entity.update(cx, |state, cx| {
-                                    state.toggle_search();
-                                    cx.notify();
-                                });
-                            })
-                            .child(
-                                div()
-                                    .text_color(if !query.is_empty() { rgb(0xf2f3f5) } else { rgb(0x80848e) })
-                                    .text_size(px(12.0))
-                                    .child(if !query.is_empty() { query } else { "Buscar".to_string() }),
-                            )
-                            .child(icon_search(px(14.0), if is_search_open { rgb(0xffffff) } else { rgb(0x80848e) }))
-                    })
-                    // 5. Inbox button
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .text_color(rgb(0x80848e))
-                            .hover(|s| s.text_color(rgb(0xdbdee1)))
-                            .child(icon_inbox(px(16.0), rgb(0x80848e))),
-                    )
-                    // 6. Help button
-                    .child(
-                        div()
-                            .w(px(28.0))
-                            .h(px(28.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .text_color(rgb(0x80848e))
-                            .hover(|s| s.text_color(rgb(0xdbdee1)))
-                            .child(icon_info(px(16.0), rgb(0x80848e))),
-                    ),
-            )
+            .child(render_channel_left_side(
+                selected_channel_opt.as_ref(),
+                is_dm,
+                state,
+                cx,
+            ))
+            .child(render_toolbar(app_entity, state, cx))
     }
+}
+
+fn render_channel_left_side(
+    selected_channel: Option<&ChannelItemState>,
+    is_dm: bool,
+    state: &AppState,
+    cx: &App,
+) -> AnyElement {
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .overflow_hidden();
+
+    if let Some(channel) = selected_channel {
+        if is_dm {
+            row = row.child(render_dm_avatar(channel, state, cx));
+            row = row.child(render_title(&channel.name, cx));
+            if let Some(topic_el) = render_topic(channel.topic.as_deref(), cx) {
+                row = row.child(topic_el);
+            }
+        } else {
+            row = row.child(render_guild_channel_icon(channel, cx));
+            row = row.child(render_title(&channel.name, cx));
+            if let Some(topic_el) = render_topic(channel.topic.as_deref(), cx) {
+                row = row.child(topic_el);
+            }
+        }
+    } else if is_dm {
+        row = row.children(render_friends_header_items(cx));
+    } else {
+        row = row.children(render_no_channel_header_items(cx));
+    }
+
+    row.into_any_element()
+}
+
+fn render_dm_avatar(channel: &ChannelItemState, state: &AppState, cx: &App) -> AnyElement {
+    let recipient_id = channel.recipient_ids.first();
+    let recipient_friend = state.friends.iter().find(|f| {
+        if let Some(rid) = recipient_id {
+            f.id == *rid
+        } else {
+            f.username == channel.name || f.display_name == channel.name
+        }
+    });
+
+    let avatar_src = channel
+        .icon_url
+        .as_deref()
+        .or_else(|| recipient_friend.and_then(|f| f.avatar_url.as_deref()));
+
+    let presence_status = recipient_id
+        .and_then(|rid| state.get_user_presence(rid))
+        .or_else(|| recipient_friend.and_then(|f| state.get_user_presence(&f.id)))
+        .map(|p| p.status)
+        .or_else(|| recipient_friend.map(|f| crate::domain::user::PresenceStatus::from(f.presence)));
+
+    Avatar::new(channel.name.clone())
+        .size(AvatarSize::Px24)
+        .opt_src(avatar_src.map(|s| s.to_string()))
+        .opt_status(presence_status)
+        .opt_decoration(channel.avatar_decoration_data.clone())
+        .cutout_color(cx.discord().bg_chat)
+        .into_any_element()
+}
+
+fn render_guild_channel_icon(channel: &ChannelItemState, cx: &App) -> AnyElement {
+    div()
+        .text_color(cx.discord().text_secondary)
+        .text_size(px(20.0))
+        .child(channel.kind.symbol())
+        .into_any_element()
+}
+
+fn render_title(name: &str, cx: &App) -> AnyElement {
+    div()
+        .text_color(cx.discord().text_titles)
+        .font_weight(FontWeight::BOLD)
+        .text_size(px(16.0))
+        .child(name.to_string())
+        .into_any_element()
+}
+
+fn render_topic(topic: Option<&str>, cx: &App) -> Option<AnyElement> {
+    let topic = topic?;
+    let discord = cx.discord();
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(16.0))
+                    .bg(discord.borders)
+                    .mx(px(4.0)),
+            )
+            .child(
+                div()
+                    .text_color(discord.text_secondary)
+                    .text_size(px(13.0))
+                    .overflow_hidden()
+                    .child(topic.to_string()),
+            )
+            .into_any_element(),
+    )
+}
+
+fn render_friends_header_items(cx: &App) -> Vec<AnyElement> {
+    let discord = cx.discord();
+    vec![
+        icon_friends(px(20.0), discord.text_secondary).into_any_element(),
+        div()
+            .text_color(discord.text_titles)
+            .font_weight(FontWeight::BOLD)
+            .text_size(px(16.0))
+            .child("Amigos")
+            .into_any_element(),
+        div()
+            .w(px(1.0))
+            .h(px(16.0))
+            .bg(discord.borders)
+            .mx(px(4.0))
+            .into_any_element(),
+        div()
+            .text_color(discord.text_secondary)
+            .text_size(px(13.0))
+            .child("Disponível")
+            .into_any_element(),
+    ]
+}
+
+fn render_no_channel_header_items(cx: &App) -> Vec<AnyElement> {
+    let discord = cx.discord();
+    vec![
+        div()
+            .text_color(discord.text_secondary)
+            .text_size(px(16.0))
+            .child("#")
+            .into_any_element(),
+        div()
+            .text_color(discord.text_titles)
+            .font_weight(FontWeight::BOLD)
+            .text_size(px(16.0))
+            .child("Selecione um canal")
+            .into_any_element(),
+    ]
+}
+
+fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> AnyElement {
+    let show_members = state.show_members;
+    let mut toolbar = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .pl(px(8.0))
+        .gap(px(8.0));
+
+    // 0. Discord Connection Shortcut Button (only when disconnected)
+    if !state.is_connected_to_gateway {
+        toolbar = toolbar.child(render_login_button(app_entity.clone(), cx));
+    }
+
+    // 1. Notifications / Bell button
+    toolbar = toolbar.child(
+        IconButton::with_icon("header-btn-notifications", |sz, col| {
+            icon_bell(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Notification Settings"),
+    );
+
+    // 2. Pinned messages button
+    toolbar = toolbar.child(
+        IconButton::with_icon("header-btn-pinned", |sz, col| {
+            icon_pin(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Pinned Messages"),
+    );
+
+    // 3. Member list toggle button
+    let members_entity = app_entity.clone();
+    toolbar = toolbar.child(
+        IconButton::with_icon("header-btn-members", |sz, col| {
+            icon_members(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .active(show_members)
+        .tooltip(if show_members {
+            "Hide Member List"
+        } else {
+            "Show Member List"
+        })
+        .on_click(move |_event, _window, cx| {
+            members_entity.update(cx, |state, cx| {
+                state.toggle_members();
+                cx.notify();
+            });
+        }),
+    );
+
+    // 4. Search bar (Buscar)
+    toolbar = toolbar.child(render_search_box(
+        app_entity,
+        state.is_search_open,
+        state.search_query.clone(),
+        cx,
+    ));
+
+    // 5. Inbox button
+    toolbar = toolbar.child(
+        IconButton::with_icon("header-btn-inbox", |sz, col| {
+            icon_inbox(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Inbox"),
+    );
+
+    // 6. Help button
+    toolbar = toolbar.child(
+        IconButton::with_icon("header-btn-help", |sz, col| {
+            icon_info(sz, col).into_any_element()
+        })
+        .size(px(28.0))
+        .icon_size(px(16.0))
+        .rounded(px(4.0))
+        .tooltip("Help"),
+    );
+
+    toolbar.into_any_element()
+}
+
+fn render_login_button(entity: Entity<AppState>, cx: &App) -> AnyElement {
+    let discord = cx.discord();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(10.0))
+        .h(px(28.0))
+        .rounded(px(4.0))
+        .bg(discord.blurple)
+        .hover(|s| s.bg(colors::blurple_hover()))
+        .cursor_pointer()
+        .text_color(discord.white)
+        .text_size(px(12.0))
+        .font_weight(FontWeight::BOLD)
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            entity.update(cx, |state, cx| {
+                state.open_modal(ActiveModal::Login);
+                cx.notify();
+            });
+        })
+        .child(icon_key(px(14.0), discord.white))
+        .child("Entrar no Discord")
+        .into_any_element()
+}
+
+fn render_search_box(
+    entity: Entity<AppState>,
+    is_search_open: bool,
+    query: String,
+    cx: &App,
+) -> AnyElement {
+    let discord = cx.discord();
+    div()
+        .w(px(144.0))
+        .h(px(24.0))
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .bg(if is_search_open {
+            discord.channel_hover
+        } else {
+            discord.bg_server
+        })
+        .border_1()
+        .border_color(if is_search_open {
+            discord.blurple
+        } else {
+            discord.bg_server
+        })
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .cursor_pointer()
+        .hover(|s| s.bg(colors::channel_hover()))
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            entity.update(cx, |state, cx| {
+                state.toggle_search();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .text_color(if !query.is_empty() {
+                    discord.text_titles
+                } else {
+                    discord.text_secondary
+                })
+                .text_size(px(12.0))
+                .child(if !query.is_empty() {
+                    query
+                } else {
+                    "Buscar".to_string()
+                }),
+        )
+        .child(icon_search(
+            px(14.0),
+            if is_search_open {
+                discord.white
+            } else {
+                discord.text_secondary
+            },
+        ))
+        .into_any_element()
 }
