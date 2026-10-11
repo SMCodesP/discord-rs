@@ -19,10 +19,11 @@
 
 use gpui::component::Disableable as _;
 use gpui::component::button::{Button as KitButton, ButtonVariants as _};
+use gpui::component::input::InputState;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use crate::app::state::*;
-use crate::components::{Avatar, AvatarSize, Button, ButtonSize};
+use crate::components::{Avatar, AvatarSize, Button, ButtonSize, TextInput};
 use crate::domain::user::{AvatarDecorationData, PresenceStatus as DomainPresence};
 use crate::tokens::colors::white;
 use crate::tokens::*;
@@ -38,7 +39,13 @@ fn domain_presence(p: PresenceStatus) -> DomainPresence {
 }
 
 /// Main entry point for the Friends Hub ("Amigos") view when on Home.
-pub fn render_friends_hub(entity: Entity<AppState>, state: &AppState) -> Div {
+pub fn render_friends_hub(
+    entity: Entity<AppState>,
+    state: &AppState,
+    search_state: &Entity<InputState>,
+    search_query: &str,
+    add_friend_state: &Entity<InputState>,
+) -> Div {
     let mut container = div()
         .size_full()
         .bg(bg_chat())
@@ -52,9 +59,9 @@ pub fn render_friends_hub(entity: Entity<AppState>, state: &AppState) -> Div {
     let left_column = if state.friends_tab == FriendsTab::MessageRequests {
         render_message_requests_view(entity.clone(), state)
     } else if state.friends_tab == FriendsTab::AddFriend {
-        render_add_friend_view(entity.clone(), state)
+        render_add_friend_view(entity.clone(), state, add_friend_state)
     } else {
-        render_friends_list_view(entity.clone(), state)
+        render_friends_list_view(entity.clone(), state, search_state, search_query)
     };
 
     container.child(
@@ -75,7 +82,7 @@ fn render_header(entity: Entity<AppState>, state: &AppState) -> Div {
         .w_full()
         .h(px(48.0))
         .border_b_1()
-        // TOKEN FALTANDO: hairline do header, 0x1f2023 (mais próximo: bg_server).
+        // TOKEN FALTANDO: --border-subtle
         .border_color(rgb(0x1f2023))
         .px(px(24.0))
         .flex()
@@ -207,28 +214,27 @@ fn render_tab_item(
         .into_any_element()
 }
 
-/// Main tabs: Disponível, Todos, Pendente, Bloqueado, Solicitações + Adicionar amigo.
+/// Main tabs: Disponível, Todos, Pendente, (Bloqueado se houver) + Adicionar amigo.
 fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElement {
     let pending_friends = state
         .friends
         .iter()
         .filter(|f| f.relationship_type == 3)
         .count();
-    let pending_req = state
-        .message_requests
+    let blocked_count = state
+        .friends
         .iter()
-        .filter(|r| !r.is_spam)
+        .filter(|f| f.relationship_type == 2)
         .count();
 
     let e_online = entity.clone();
     let e_all = entity.clone();
     let e_pending = entity.clone();
     let e_blocked = entity.clone();
-    let e_req = entity.clone();
 
-    let is_req_selected = state.friends_tab == FriendsTab::MessageRequests;
+    let show_blocked = blocked_count > 0 || state.friends_tab == FriendsTab::Blocked;
 
-    div()
+    let mut tab_bar = div()
         .id("friends-tabbar")
         .flex()
         .flex_row()
@@ -264,6 +270,7 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
             "tab-pending",
             "Pendente",
             None,
+            // TOKEN FALTANDO: --badge-notification-background
             (pending_friends > 0).then(|| tab_count_badge(pending_friends, rgb(0xda373c))),
             state.friends_tab == FriendsTab::Pending,
             move |_ev, _window, cx| {
@@ -272,8 +279,10 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
                     cx.notify();
                 });
             },
-        ))
-        .child(render_tab_item(
+        ));
+
+    if show_blocked {
+        tab_bar = tab_bar.child(render_tab_item(
             "tab-blocked",
             "Bloqueado",
             None,
@@ -285,35 +294,15 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
                     cx.notify();
                 });
             },
-        ))
-        .child(render_tab_item(
-            "tab-msg-requests",
-            "Solicitações",
-            Some(
-                icon_inbox(
-                    px(16.0),
-                    if is_req_selected {
-                        white()
-                    } else {
-                        text_primary()
-                    },
-                )
-                .into_any_element(),
-            ),
-            (pending_req > 0).then(|| tab_count_badge(pending_req, blurple())),
-            is_req_selected,
-            move |_ev, _window, cx| {
-                e_req.update(cx, |s, cx| {
-                    s.select_friends_tab(FriendsTab::MessageRequests);
-                    cx.notify();
-                });
-            },
-        ))
-        .child(render_add_friend_tab_button(
-            entity.clone(),
-            state.friends_tab == FriendsTab::AddFriend,
-        ))
-        .into_any_element()
+        ));
+    }
+
+    tab_bar = tab_bar.child(render_add_friend_tab_button(
+        entity.clone(),
+        state.friends_tab == FriendsTab::AddFriend,
+    ));
+
+    tab_bar.into_any_element()
 }
 
 /// "Adicionar amigo" brand button (TabBar suffix of the main tab bar).
@@ -370,6 +359,7 @@ fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
             "subtab-spam",
             "Spam",
             None,
+            // TOKEN FALTANDO: --badge-notification-background
             (spam_count > 0).then(|| tab_count_badge(spam_count, rgb(0xda373c))),
             state.message_requests_subtab == MessageRequestsSubTab::Spam,
             move |_ev, _window, cx| {
@@ -626,9 +616,9 @@ fn render_msgreq_card_title(req: &MessageRequestItem) -> AnyElement {
                 .rounded(px(4.0))
                 .bg(bg_server())
                 .text_size(px(11.0))
-                // TOKEN FALTANDO: cinza do chip de servidor em comum, 0x949ba4.
+                // TOKEN FALTANDO: --text-muted (cinza do chip de servidor em comum, 0x949ba4)
                 .text_color(rgb(0x949ba4))
-                .child(icon_shield(px(12.0), rgb(0x949ba4)))
+                .child(icon_shield(px(12.0), rgb(0x949ba4))) // TOKEN FALTANDO: --text-muted
                 .child(guild_name.clone())
         }))
         .into_any_element()
@@ -669,22 +659,28 @@ fn render_msgreq_card_actions(entity: Entity<AppState>, req: &MessageRequestItem
 }
 
 /// Row data for the friends list (derived from state, no mocks).
-struct FriendRowData {
-    user_id: String,
-    display_name: String,
-    username: String,
-    avatar_text: String,
-    avatar_url: Option<String>,
-    avatar_decoration_data: Option<AvatarDecorationData>,
-    status: String,
-    channel_id: String,
-    presence: PresenceStatus,
-    relationship_type: u32,
+#[derive(Debug, Clone)]
+pub struct FriendRowData {
+    pub user_id: String,
+    pub display_name: String,
+    pub username: String,
+    pub avatar_text: String,
+    pub avatar_url: Option<String>,
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
+    pub status: String,
+    pub channel_id: String,
+    pub presence: PresenceStatus,
+    pub relationship_type: u32,
 }
 
 /// Friends list view (Online, All, Pending, Blocked): search + rows/empty.
-fn render_friends_list_view(entity: Entity<AppState>, state: &AppState) -> Div {
-    let rows = collect_friend_rows(state);
+fn render_friends_list_view(
+    entity: Entity<AppState>,
+    state: &AppState,
+    search_state: &Entity<InputState>,
+    search_query: &str,
+) -> Div {
+    let rows = collect_friend_rows(state, search_query);
     let is_empty = rows.is_empty();
 
     div()
@@ -692,7 +688,7 @@ fn render_friends_list_view(entity: Entity<AppState>, state: &AppState) -> Div {
         .flex()
         .flex_col()
         .overflow_hidden()
-        .child(render_friends_search())
+        .child(render_friends_search(search_state))
         .child(if is_empty {
             render_friends_empty(state.friends_tab)
         } else {
@@ -702,7 +698,7 @@ fn render_friends_list_view(entity: Entity<AppState>, state: &AppState) -> Div {
 
 /// Builds the visible friend rows: real relationships first, then offline
 /// demo fallbacks (members, DMs) exactly as today — no invented data.
-fn collect_friend_rows(state: &AppState) -> Vec<FriendRowData> {
+pub fn collect_friend_rows(state: &AppState, search_query: &str) -> Vec<FriendRowData> {
     let mut friends: Vec<FriendRowData> = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -820,7 +816,7 @@ fn collect_friend_rows(state: &AppState) -> Vec<FriendRowData> {
         }
     }
 
-    match state.friends_tab {
+    let mut filtered: Vec<FriendRowData> = match state.friends_tab {
         FriendsTab::Online => friends
             .into_iter()
             .filter(|f| f.relationship_type == 1 && f.presence != PresenceStatus::Offline)
@@ -838,7 +834,17 @@ fn collect_friend_rows(state: &AppState) -> Vec<FriendRowData> {
             .filter(|f| f.relationship_type == 2)
             .collect(),
         _ => Vec::new(),
+    };
+
+    let q = search_query.trim().to_lowercase();
+    if !q.is_empty() {
+        filtered.retain(|r| {
+            r.display_name.to_lowercase().contains(&q)
+                || r.username.to_lowercase().contains(&q)
+        });
     }
+
+    filtered
 }
 
 /// Finds the 1:1 DM channel for a user, falling back to `dm-<id>` as today.
@@ -856,28 +862,17 @@ fn find_dm_for(state: &AppState, user_id: &str, username: &str, display_name: &s
         .unwrap_or_else(|| format!("dm-{}", user_id))
 }
 
-/// Static search box (INPUT PENDENTE: kit Input needs Entity<InputState>).
-fn render_friends_search() -> AnyElement {
+/// Interactive search box bound to TextInput + kit InputState.
+fn render_friends_search(search_state: &Entity<InputState>) -> AnyElement {
     div()
         .px(px(24.0))
         .pt(px(16.0))
         .pb(px(8.0))
         .child(
-            div()
-                .h(px(38.0))
-                .bg(bg_server())
-                .rounded(px(4.0))
-                .px(px(12.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(text_muted())
-                        .child("Buscar"),
-                )
-                .child(icon_search(px(16.0), text_muted())),
+            TextInput::new("friends-search-input", search_state)
+                .placeholder("Buscar")
+                .show_paste(false)
+                .show_clear(true),
         )
         .into_any_element()
 }
@@ -1152,9 +1147,9 @@ fn render_friend_row_left(
                 .child(
                     div()
                         .text_size(font_size_xs())
-                        // TOKEN FALTANDO: vermelho do "Bloqueado", 0xda373c.
+                        // TOKEN FALTANDO: --status-danger (vermelho do "Bloqueado", 0xda373c)
                         .text_color(if row.relationship_type == 2 {
-                            rgb(0xda373c)
+                            rgb(0xda373c) // TOKEN FALTANDO: --status-danger
                         } else {
                             text_muted()
                         })
@@ -1210,7 +1205,7 @@ fn render_incoming_actions(
         ))
         .child(circle_action_button(
             SharedString::from(format!("btn-decline-{}", idx)),
-            // TOKEN FALTANDO: vermelho do recusar, 0xda373c.
+            // TOKEN FALTANDO: --status-danger (vermelho do recusar, 0xda373c)
             icon_close(px(18.0), rgb(0xda373c)).into_any_element(),
             "Ignorar".into(),
             pending,
@@ -1332,7 +1327,11 @@ fn render_mutual_actions(entity: Entity<AppState>, row: &FriendRowData, idx: usi
 }
 
 /// Add Friend view: header + static input card w/ send Button + discover row.
-pub fn render_add_friend_view(entity: Entity<AppState>, state: &AppState) -> Div {
+pub fn render_add_friend_view(
+    entity: Entity<AppState>,
+    state: &AppState,
+    add_friend_state: &Entity<InputState>,
+) -> Div {
     div()
         .flex_1()
         .flex()
@@ -1342,15 +1341,15 @@ pub fn render_add_friend_view(entity: Entity<AppState>, state: &AppState) -> Div
         .gap(px(16.0))
         .overflow_hidden()
         .child(render_add_friend_header())
-        .child(render_add_friend_card(entity.clone(), state))
+        .child(render_add_friend_card(entity.clone(), state, add_friend_state))
         .children(state.add_friend_feedback.clone().map(|(ok, msg)| {
             div()
                 .text_size(px(13.0))
-                // TOKEN FALTANDO (erro): 0xda373c; ok usa status_online().
+                // TOKEN FALTANDO: --status-danger (erro); ok usa status_online().
                 .text_color(if ok {
                     status_online()
                 } else {
-                    rgb(0xda373c)
+                    rgb(0xda373c) // TOKEN FALTANDO: --status-danger
                 })
                 .child(msg)
         }))
@@ -1393,9 +1392,13 @@ fn render_add_friend_header() -> AnyElement {
         .into_any_element()
 }
 
-/// Static username box (INPUT PENDENTE) + "Enviar pedido de amizade" Button.
+/// Interactive username box bound to TextInput + kit InputState + "Enviar pedido de amizade" Button.
 /// Sends only via `send_friend_request`; feedback comes from the API result.
-fn render_add_friend_card(entity: Entity<AppState>, state: &AppState) -> AnyElement {
+fn render_add_friend_card(
+    entity: Entity<AppState>,
+    state: &AppState,
+    add_friend_state: &Entity<InputState>,
+) -> AnyElement {
     let current_input = state.add_friend_input.clone();
     let can_send = !state.is_sending_friend_request && !current_input.trim().is_empty();
 
@@ -1416,19 +1419,12 @@ fn render_add_friend_card(entity: Entity<AppState>, state: &AppState) -> AnyElem
         .child(
             div()
                 .flex_1()
-                .flex()
-                .items_center()
-                .child(if current_input.is_empty() {
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(text_muted())
-                        .child("Insira um nome de usuário")
-                } else {
-                    div()
-                        .text_size(px(14.0))
-                        .text_color(white())
-                        .child(current_input.clone())
-                }),
+                .child(
+                    TextInput::new("add-friend-input", add_friend_state)
+                        .placeholder("Insira um nome de usuário")
+                        .show_paste(false)
+                        .show_clear(false),
+                ),
         )
         .child(render_send_request_button(entity, current_input, can_send))
         .into_any_element()
@@ -1640,7 +1636,7 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                // TOKEN FALTANDO: cinza do subtítulo, 0x949ba4.
+                                // TOKEN FALTANDO: --text-muted (cinza do subtítulo, 0x949ba4)
                                 .text_color(rgb(0x949ba4))
                                 .child(item.header_subtitle.clone()),
                         ),
@@ -1652,7 +1648,7 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .child(match item.kind {
-                    // TOKEN FALTANDO: cinza dos ícones de app, 0x949ba4.
+                    // TOKEN FALTANDO: --text-muted (cinza dos ícones de app, 0x949ba4)
                     ActiveNowKind::Quest | ActiveNowKind::Game => {
                         icon_gamepad(px(16.0), rgb(0x949ba4))
                     }
@@ -1695,7 +1691,7 @@ fn render_active_now_details(item: &ActiveNowItem) -> AnyElement {
                 .children(item.details_state.as_ref().map(|state_text| {
                     div()
                         .text_size(px(12.0))
-                        // TOKEN FALTANDO: cinza do state, 0x949ba4.
+                        // TOKEN FALTANDO: --text-muted (cinza do state, 0x949ba4)
                         .text_color(rgb(0x949ba4))
                         .child(state_text.clone())
                 }))
@@ -1719,7 +1715,7 @@ fn render_active_now_app_icon(item: &ActiveNowItem) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
-        // TOKEN FALTANDO: azul "VS" do rich presence, 0x007acc.
+        // TOKEN FALTANDO: --platform-vscode (azul "VS" do rich presence, 0x007acc)
         .when(item.kind == ActiveNowKind::RichPresence, |d| {
             d.bg(rgb(0x007acc))
                 .text_color(white())
@@ -1730,13 +1726,13 @@ fn render_active_now_app_icon(item: &ActiveNowItem) -> AnyElement {
                 .text_color(white())
                 .text_size(px(22.0))
         })
-        // TOKEN FALTANDO: fundo do ícone Spotify, 0x121212.
+        // TOKEN FALTANDO: --activity-card-background (fundo do ícone Spotify, 0x121212)
         .when(item.kind == ActiveNowKind::Spotify, |d| {
             d.bg(rgb(0x121212))
                 .text_color(status_online())
                 .text_size(px(24.0))
         })
-        // TOKEN FALTANDO: verde do ícone de jogo, 0x248046.
+        // TOKEN FALTANDO: --status-positive-background (verde do ícone de jogo, 0x248046)
         .when(item.kind == ActiveNowKind::Game, |d| {
             d.bg(rgb(0x248046))
                 .text_color(white())

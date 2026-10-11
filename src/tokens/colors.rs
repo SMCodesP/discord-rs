@@ -165,6 +165,54 @@ pub const HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT: u32 = 0xf87e7a;
 /// Control icon-only icon default (#abacb2). Source: `--control-icon-only-icon-default`
 pub const HEX_CONTROL_ICON_ONLY_ICON_DEFAULT: u32 = 0xabacb2;
 
+/// Mention foreground (#cdd7ff). Source: `.theme-dark --mention-foreground` -> `var(--blurple-8)`.
+pub const HEX_MENTION_FOREGROUND: u32 = 0xcdd7ff;
+
+/// Border subtle with alpha (#97979f1f). Source: `.theme-dark --border-subtle` -> `hsl(var(--opacity-12-hsl)/0.1215)`.
+pub const HEX_BORDER_SUBTLE: u32 = 0x97979f1f;
+
+/// Channels default text (#999aa1). Source: `.theme-dark --channels-default` -> `var(--neutral-28)`.
+pub const HEX_CHANNELS_DEFAULT: u32 = 0x999aa1;
+
+/// Interactive normal text (#c5c6ca). Source: `.theme-dark --interactive-text-default` -> `var(--neutral-16)`.
+pub const HEX_INTERACTIVE_NORMAL: u32 = 0xc5c6ca;
+
+/// Reaction text default (#c5c6ca). Source: `.theme-dark --reaction-text-default` -> `var(--neutral-16)`.
+pub const HEX_REACTION_TEXT_DEFAULT: u32 = 0xc5c6ca;
+
+/// Reaction text reacted (#dfe4ff). Source: `.theme-dark --reaction-text-reacted-default` -> `var(--blurple-3)`.
+pub const HEX_REACTION_TEXT_REACTED_DEFAULT: u32 = 0xdfe4ff;
+
+/// Status danger red (#da3e44). Source: `.theme-dark --status-danger` -> `var(--red-400)` -> `var(--red-new-46)`.
+pub const HEX_STATUS_DANGER: u32 = 0xda3e44;
+
+/// Status positive green (#3d9e60). Source: `.theme-dark --status-positive` -> `var(--green-360)` -> `var(--green-new-40)`.
+pub const HEX_STATUS_POSITIVE: u32 = 0x3d9e60;
+
+/// Status warning yellow (#fdb833). Source: `.theme-dark --status-warning` -> `var(--yellow-300)` -> `var(--yellow-new-36)`.
+pub const HEX_STATUS_WARNING: u32 = 0xfdb833;
+
+/// Badge brand bubble pink stop (#eb459e). Source: `--bg-animated-gradient-background-pink-1`.
+pub const HEX_BADGE_BRAND_BUBBLE: u32 = 0xeb459e;
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: header secondary (#949ba4). Não existe variável --header-secondary no DOM.
+pub const HEX_LEGACY_949BA4: u32 = 0x949ba4;
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: background modifier hover (#282a2e). Não existe variável --background-modifier-hover no DOM.
+pub const HEX_LEGACY_282A2E: u32 = 0x282a2e;
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: background modifier accent (#3f4147). Não existe variável --background-modifier-accent no DOM.
+pub const HEX_LEGACY_3F4147: u32 = 0x3f4147;
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: text danger (#fa777c). Não existe variável --text-danger no DOM.
+pub const HEX_LEGACY_FA777C: u32 = 0xfa777c;
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: button danger background hover (#da373c). Não existe variável --button-danger-background-hover no DOM.
+pub const HEX_LEGACY_DA373C: u32 = 0xda373c;
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: text warning (#fee75c). Não existe variável --text-warning no DOM.
+pub const HEX_LEGACY_FEE75C: u32 = 0xfee75c;
+
 // ============================================================================
 // Token Accessor Functions (Returning gpui::Rgba)
 // ============================================================================
@@ -463,6 +511,102 @@ pub fn control_icon_only_icon_default() -> Rgba {
     rgb(HEX_CONTROL_ICON_ONLY_ICON_DEFAULT)
 }
 
+/// Mention foreground (#cdd7ff)
+#[inline]
+pub fn mention_foreground() -> Rgba {
+    active_palette().mention_foreground
+}
+
+/// Border subtle (#97979f1f)
+#[inline]
+pub fn border_subtle() -> Rgba {
+    active_palette().border_subtle
+}
+
+/// Channels default text (#999aa1)
+#[inline]
+pub fn channels_default() -> Rgba {
+    active_palette().channels_default
+}
+
+/// Interactive normal text (#c5c6ca)
+#[inline]
+pub fn interactive_normal() -> Rgba {
+    active_palette().interactive_normal
+}
+
+/// Reaction text default (#c5c6ca)
+#[inline]
+pub fn reaction_text_default() -> Rgba {
+    active_palette().reaction_text_default
+}
+
+/// Reaction text reacted (#dfe4ff)
+#[inline]
+pub fn reaction_text_reacted_default() -> Rgba {
+    active_palette().reaction_text_reacted_default
+}
+
+/// Status danger red (#da3e44)
+#[inline]
+pub fn status_danger() -> Rgba {
+    active_palette().status_danger
+}
+
+/// Status positive green (#3d9e60)
+#[inline]
+pub fn status_positive() -> Rgba {
+    active_palette().status_positive
+}
+
+/// Status warning yellow (#fdb833)
+#[inline]
+pub fn status_warning() -> Rgba {
+    active_palette().status_warning
+}
+
+/// Badge brand bubble pink stop (#eb459e)
+#[inline]
+pub fn badge_brand_bubble() -> Rgba {
+    active_palette().badge_brand_bubble
+}
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: header secondary (#949ba4)
+#[inline]
+pub fn legacy_949ba4() -> Rgba {
+    active_palette().legacy_949ba4
+}
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: background modifier hover (#282a2e)
+#[inline]
+pub fn legacy_282a2e() -> Rgba {
+    active_palette().legacy_282a2e
+}
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: background modifier accent (#3f4147)
+#[inline]
+pub fn legacy_3f4147() -> Rgba {
+    active_palette().legacy_3f4147
+}
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: text danger (#fa777c)
+#[inline]
+pub fn legacy_fa777c() -> Rgba {
+    active_palette().legacy_fa777c
+}
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: button danger background hover (#da373c)
+#[inline]
+pub fn legacy_da373c() -> Rgba {
+    active_palette().legacy_da373c
+}
+
+/// COR ANTIGA SEM ORIGEM no Discord atual: text warning (#fee75c)
+#[inline]
+pub fn legacy_fee75c() -> Rgba {
+    active_palette().legacy_fee75c
+}
+
 // ============================================================================
 // Color Utility Helpers
 // ============================================================================
@@ -495,10 +639,157 @@ pub fn set_alpha(mut color: Rgba, alpha: f32) -> Rgba {
 }
 
 // ============================================================================
-// Semantic Theme Struct
+// Semantic Theme Struct & Palette
 // ============================================================================
 
-/// Aggregated Discord Dark Theme color palette.
+/// Canonical Discord Color Palette (standard dark reference theme).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DiscordPalette {
+    pub bg_server: Rgba,
+    pub bg_channels: Rgba,
+    pub bg_chat: Rgba,
+    pub bg_chat_hover: Rgba,
+    pub bg_user_bar: Rgba,
+    pub bg_input: Rgba,
+    pub bg_floating: Rgba,
+    pub blurple: Rgba,
+    pub blurple_hover: Rgba,
+    pub blurple_active: Rgba,
+    pub status_online: Rgba,
+    pub status_ausente: Rgba,
+    pub status_dnd: Rgba,
+    pub status_offline: Rgba,
+    pub status_danger: Rgba,
+    pub status_positive: Rgba,
+    pub status_warning: Rgba,
+    pub text_primary: Rgba,
+    pub text_secondary: Rgba,
+    pub text_titles: Rgba,
+    pub text_muted: Rgba,
+    pub borders: Rgba,
+    pub border_subtle: Rgba,
+    pub channel_hover: Rgba,
+    pub channel_active: Rgba,
+    pub channels_default: Rgba,
+    pub interactive_normal: Rgba,
+    pub mention_bg: Rgba,
+    pub mention_hover: Rgba,
+    pub mention_foreground: Rgba,
+    pub reaction_text_default: Rgba,
+    pub reaction_text_reacted_default: Rgba,
+    pub modal_backdrop: Rgba,
+    pub scrollbar_thumb: Rgba,
+    pub white: Rgba,
+    pub neutral_67: Rgba,
+    pub transparent: Rgba,
+    pub opacity_white_8: Rgba,
+    pub opacity_white_20: Rgba,
+    pub control_primary_border: Rgba,
+    pub control_secondary_bg_default: Rgba,
+    pub control_secondary_bg_hover: Rgba,
+    pub control_secondary_bg_active: Rgba,
+    pub control_critical_primary_bg_default: Rgba,
+    pub control_critical_primary_bg_hover: Rgba,
+    pub control_critical_primary_bg_active: Rgba,
+    pub control_critical_secondary_text_default: Rgba,
+    pub control_icon_only_icon_default: Rgba,
+    pub premium_tier_2_purple: Rgba,
+    pub bg_animated_gradient_pink_1: Rgba,
+    pub platform_xbox: Rgba,
+    pub platform_spotify: Rgba,
+    pub role_purple: Rgba,
+    pub platform_reddit: Rgba,
+    pub badge_brand_bubble: Rgba,
+    pub legacy_949ba4: Rgba,
+    pub legacy_282a2e: Rgba,
+    pub legacy_3f4147: Rgba,
+    pub legacy_fa777c: Rgba,
+    pub legacy_da373c: Rgba,
+    pub legacy_fee75c: Rgba,
+}
+
+impl Default for DiscordPalette {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+impl DiscordPalette {
+    /// Returns the exact Discord Dark Theme reference palette.
+    pub fn dark() -> Self {
+        Self {
+            bg_server: rgb(HEX_BG_SERVER),
+            bg_channels: rgb(HEX_BG_CHANNELS),
+            bg_chat: rgb(HEX_BG_CHAT),
+            bg_chat_hover: rgb(HEX_BG_CHAT_HOVER),
+            bg_user_bar: rgb(HEX_BG_USER_BAR),
+            bg_input: rgb(HEX_BG_INPUT),
+            bg_floating: rgb(HEX_BG_FLOATING),
+            blurple: rgb(HEX_BLURPLE),
+            blurple_hover: rgb(HEX_BLURPLE_HOVER),
+            blurple_active: rgb(HEX_BLURPLE_ACTIVE),
+            status_online: rgb(HEX_STATUS_ONLINE),
+            status_ausente: rgb(HEX_STATUS_AUSENTE),
+            status_dnd: rgb(HEX_STATUS_DND),
+            status_offline: rgb(HEX_STATUS_OFFLINE),
+            status_danger: rgb(HEX_STATUS_DANGER),
+            status_positive: rgb(HEX_STATUS_POSITIVE),
+            status_warning: rgb(HEX_STATUS_WARNING),
+            text_primary: rgb(HEX_TEXT_PRIMARY),
+            text_secondary: rgb(HEX_TEXT_SECONDARY),
+            text_titles: rgb(HEX_TEXT_TITLES),
+            text_muted: rgb(HEX_TEXT_MUTED),
+            borders: rgb(HEX_BORDERS),
+            border_subtle: rgba(HEX_BORDER_SUBTLE),
+            channel_hover: rgb(HEX_CHANNEL_HOVER),
+            channel_active: rgb(HEX_CHANNEL_ACTIVE),
+            channels_default: rgb(HEX_CHANNELS_DEFAULT),
+            interactive_normal: rgb(HEX_INTERACTIVE_NORMAL),
+            mention_bg: rgba(HEX_MENTION_BG),
+            mention_hover: rgba(HEX_MENTION_HOVER),
+            mention_foreground: rgb(HEX_MENTION_FOREGROUND),
+            reaction_text_default: rgb(HEX_REACTION_TEXT_DEFAULT),
+            reaction_text_reacted_default: rgb(HEX_REACTION_TEXT_REACTED_DEFAULT),
+            modal_backdrop: rgba(HEX_MODAL_BACKDROP),
+            scrollbar_thumb: rgb(HEX_SCROLLBAR_THUMB),
+            white: rgb(HEX_WHITE),
+            neutral_67: rgb(HEX_NEUTRAL_67),
+            transparent: rgba(HEX_TRANSPARENT),
+            opacity_white_8: rgba(HEX_OPACITY_WHITE_8),
+            opacity_white_20: rgba(HEX_OPACITY_WHITE_20),
+            control_primary_border: rgba(HEX_CONTROL_PRIMARY_BORDER),
+            control_secondary_bg_default: rgba(HEX_CONTROL_SECONDARY_BG_DEFAULT),
+            control_secondary_bg_hover: rgba(HEX_CONTROL_SECONDARY_BG_HOVER),
+            control_secondary_bg_active: rgba(HEX_CONTROL_SECONDARY_BG_ACTIVE),
+            control_critical_primary_bg_default: rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_DEFAULT),
+            control_critical_primary_bg_hover: rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_HOVER),
+            control_critical_primary_bg_active: rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_ACTIVE),
+            control_critical_secondary_text_default: rgb(HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT),
+            control_icon_only_icon_default: rgb(HEX_CONTROL_ICON_ONLY_ICON_DEFAULT),
+            premium_tier_2_purple: rgb(HEX_PREMIUM_TIER_2_PURPLE),
+            bg_animated_gradient_pink_1: rgb(HEX_BG_ANIMATED_GRADIENT_PINK_1),
+            platform_xbox: rgb(HEX_PLATFORM_XBOX),
+            platform_spotify: rgb(HEX_PLATFORM_SPOTIFY),
+            role_purple: rgb(HEX_ROLE_PURPLE),
+            platform_reddit: rgb(HEX_PLATFORM_REDDIT),
+            badge_brand_bubble: rgb(HEX_BADGE_BRAND_BUBBLE),
+            legacy_949ba4: rgb(HEX_LEGACY_949BA4),
+            legacy_282a2e: rgb(HEX_LEGACY_282A2E),
+            legacy_3f4147: rgb(HEX_LEGACY_3F4147),
+            legacy_fa777c: rgb(HEX_LEGACY_FA777C),
+            legacy_da373c: rgb(HEX_LEGACY_DA373C),
+            legacy_fee75c: rgb(HEX_LEGACY_FEE75C),
+        }
+    }
+}
+
+/// Returns the current active theme palette (Discord Dark Theme reference).
+#[inline]
+pub fn active_palette() -> DiscordPalette {
+    DiscordPalette::dark()
+}
+
+/// Aggregated Discord Dark Theme color palette (for backwards compatibility).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DiscordThemeColors {
     pub bg_server: Rgba,
@@ -529,24 +820,25 @@ impl Default for DiscordThemeColors {
 impl DiscordThemeColors {
     /// Returns the exact Discord Dark Theme palette.
     pub fn dark() -> Self {
+        let p = active_palette();
         Self {
-            bg_server: bg_server(),
-            bg_channels: bg_channels(),
-            bg_chat: bg_chat(),
-            bg_chat_hover: bg_chat_hover(),
-            bg_user_bar: bg_user_bar(),
-            bg_input: bg_input(),
-            blurple: blurple(),
-            blurple_hover: blurple_hover(),
-            blurple_active: blurple_active(),
-            status_online: status_online(),
-            status_ausente: status_ausente(),
-            status_dnd: status_dnd(),
-            status_offline: status_offline(),
-            text_secondary: text_secondary(),
-            text_primary: text_primary(),
-            text_titles: text_titles(),
-            borders: borders(),
+            bg_server: p.bg_server,
+            bg_channels: p.bg_channels,
+            bg_chat: p.bg_chat,
+            bg_chat_hover: p.bg_chat_hover,
+            bg_user_bar: p.bg_user_bar,
+            bg_input: p.bg_input,
+            blurple: p.blurple,
+            blurple_hover: p.blurple_hover,
+            blurple_active: p.blurple_active,
+            status_online: p.status_online,
+            status_ausente: p.status_ausente,
+            status_dnd: p.status_dnd,
+            status_offline: p.status_offline,
+            text_secondary: p.text_secondary,
+            text_primary: p.text_primary,
+            text_titles: p.text_titles,
+            borders: p.borders,
         }
     }
 }

@@ -85,8 +85,8 @@ impl Render for MemberSidebar {
             self.items
                 .iter()
                 .map(|item| match item {
-                    MemberSidebarItem::Header { .. } => size(px(240.0), px(34.0)),
-                    MemberSidebarItem::Member(_) => size(px(240.0), px(44.0)),
+                    MemberSidebarItem::Header { .. } => size(px(224.0), px(34.0)),
+                    MemberSidebarItem::Member(_) => size(px(224.0), px(44.0)),
                 })
                 .collect(),
         );
@@ -131,6 +131,8 @@ impl Render for MemberSidebar {
 
 fn render_group_header(title: &'static str, count: usize) -> AnyElement {
     div()
+        .w_full()
+        .min_w(px(0.0))
         .h(px(34.0))
         .pt(px(14.0))
         .pb(px(4.0))
@@ -158,6 +160,9 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
 
     let mut row = div()
         .id(ElementId::Name(format!("member-row-{}", member.id).into()))
+        .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden()
         .h(px(44.0))
         .px(px(8.0))
         .py(px(1.0))
@@ -222,6 +227,7 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
             div()
                 .text_color(text_muted())
                 .text_size(px(11.0))
+                .w_full()
                 .min_w(px(0.0))
                 .truncate()
                 .child(act.clone()),

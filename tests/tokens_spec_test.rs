@@ -84,6 +84,64 @@ fn test_new_parity_tokens_and_colors() {
 }
 
 #[test]
+fn test_parity_added_tokens_and_accessors() {
+    // Standard dark tokens
+    assert_eq!(HEX_BORDER_SUBTLE, 0x97979f1f);
+    assert_eq!(HEX_CHANNELS_DEFAULT, 0x999aa1);
+    assert_eq!(HEX_INTERACTIVE_NORMAL, 0xc5c6ca);
+    assert_eq!(HEX_MENTION_FOREGROUND, 0xcdd7ff);
+    assert_eq!(HEX_REACTION_TEXT_DEFAULT, 0xc5c6ca);
+    assert_eq!(HEX_REACTION_TEXT_REACTED_DEFAULT, 0xdfe4ff);
+    assert_eq!(HEX_STATUS_DANGER, 0xda3e44);
+    assert_eq!(HEX_STATUS_POSITIVE, 0x3d9e60);
+    assert_eq!(HEX_STATUS_WARNING, 0xfdb833);
+    assert_eq!(HEX_BADGE_BRAND_BUBBLE, 0xeb459e);
+
+    // Legacy tokens (sem origem no Discord atual)
+    assert_eq!(HEX_LEGACY_949BA4, 0x949ba4);
+    assert_eq!(HEX_LEGACY_282A2E, 0x282a2e);
+    assert_eq!(HEX_LEGACY_3F4147, 0x3f4147);
+    assert_eq!(HEX_LEGACY_FA777C, 0xfa777c);
+    assert_eq!(HEX_LEGACY_DA373C, 0xda373c);
+    assert_eq!(HEX_LEGACY_FEE75C, 0xfee75c);
+
+    // Accessors
+    assert_eq!(border_subtle(), rgba(0x97979f1f));
+    assert_eq!(channels_default(), rgb(0x999aa1));
+    assert_eq!(interactive_normal(), rgb(0xc5c6ca));
+    assert_eq!(mention_foreground(), rgb(0xcdd7ff));
+    assert_eq!(reaction_text_default(), rgb(0xc5c6ca));
+    assert_eq!(reaction_text_reacted_default(), rgb(0xdfe4ff));
+    assert_eq!(status_danger(), rgb(0xda3e44));
+    assert_eq!(status_positive(), rgb(0x3d9e60));
+    assert_eq!(status_warning(), rgb(0xfdb833));
+    assert_eq!(badge_brand_bubble(), rgb(0xeb459e));
+
+    assert_eq!(legacy_949ba4(), rgb(0x949ba4));
+    assert_eq!(legacy_282a2e(), rgb(0x282a2e));
+    assert_eq!(legacy_3f4147(), rgb(0x3f4147));
+    assert_eq!(legacy_fa777c(), rgb(0xfa777c));
+    assert_eq!(legacy_da373c(), rgb(0xda373c));
+    assert_eq!(legacy_fee75c(), rgb(0xfee75c));
+}
+
+#[test]
+fn test_palette_dark_instance() {
+    let p = DiscordPalette::dark();
+    assert_eq!(p.border_subtle, rgba(0x97979f1f));
+    assert_eq!(p.channels_default, rgb(0x999aa1));
+    assert_eq!(p.interactive_normal, rgb(0xc5c6ca));
+    assert_eq!(p.mention_foreground, rgb(0xcdd7ff));
+    assert_eq!(p.reaction_text_default, rgb(0xc5c6ca));
+    assert_eq!(p.reaction_text_reacted_default, rgb(0xdfe4ff));
+    assert_eq!(p.status_danger, rgb(0xda3e44));
+    assert_eq!(p.status_positive, rgb(0x3d9e60));
+    assert_eq!(p.status_warning, rgb(0xfdb833));
+    assert_eq!(p.badge_brand_bubble, rgb(0xeb459e));
+    assert_eq!(p.bg_chat, rgb(0x313338));
+}
+
+#[test]
 fn test_no_duplicate_tokens_with_conflicting_values() {
     // Verified that alias pairs have identical values
     assert_eq!(HEX_STATUS_IDLE, HEX_STATUS_AUSENTE);
