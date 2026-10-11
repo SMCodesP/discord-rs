@@ -113,6 +113,7 @@ impl AppState {
                 global_name: Some(self.current_user.display_name.clone()),
                 avatar: None,
                 bot: false,
+                avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
             },
             trimmed,
         )
@@ -153,6 +154,7 @@ impl AppState {
                 global_name: Some(self.current_user.display_name.clone()),
                 avatar: None,
                 bot: false,
+                avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
             },
             "",
         )

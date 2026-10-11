@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::user::AvatarDecorationData;
+
 /// The author of a message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Author {
@@ -15,6 +17,9 @@ pub struct Author {
     /// Whether the author is a bot.
     #[serde(default)]
     pub bot: bool,
+    /// Active avatar decoration equipped by the author.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 impl Author {
@@ -25,6 +30,7 @@ impl Author {
             global_name: None,
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         }
     }
 
@@ -42,6 +48,11 @@ impl Author {
                 format!("https://cdn.discordapp.com/avatars/{}/{}.png", self.id, hash)
             }
         })
+    }
+
+    /// Returns the avatar decoration CDN URL if the author has an equipped decoration.
+    pub fn avatar_decoration_url(&self) -> Option<String> {
+        self.avatar_decoration_data.as_ref().map(|d| d.url())
     }
 }
 

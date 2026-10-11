@@ -53,6 +53,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                     recipient_ids: Vec::new(),
                     recipient_names: Vec::new(),
                     user_limit: None,
+                    avatar_decoration_data: None,
                 }],
             },
             CategoryItemState {
@@ -73,6 +74,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
                         user_limit: None,
+                        avatar_decoration_data: None,
                     },
                     ChannelItemState {
                         id: format!("chan-{}-dev", id),
@@ -88,6 +90,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         recipient_ids: Vec::new(),
                         recipient_names: Vec::new(),
                         user_limit: None,
+                        avatar_decoration_data: None,
                     },
                 ],
             },
@@ -484,6 +487,7 @@ fn test_e2e_stress_high_volume_messages_and_members() {
             global_name: Some(format!("User #{}", i % 20)),
             avatar: None,
             bot: is_bot,
+            avatar_decoration_data: None,
         };
 
         let content = format!(
@@ -548,6 +552,7 @@ fn test_e2e_stress_high_volume_messages_and_members() {
             } else {
                 None
             },
+            avatar_decoration_data: None,
         };
         high_volume_members.push(member);
     }

@@ -80,6 +80,7 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
         global_name: Some("Alice".into()),
         avatar: None,
         bot: false,
+        avatar_decoration_data: None,
     };
     let msg = Message::new("msg-101", "chan-test", author, "Hello GPUI from ProtocolBridge!");
     bridge.emit_event(TransportEvent::MessageCreate(msg.clone()));

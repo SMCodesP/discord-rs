@@ -1,6 +1,8 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
+use super::user::AvatarDecorationData;
+
 /// Supported Discord channel types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChannelType {
@@ -167,6 +169,10 @@ pub struct Channel {
     /// List of recipient display names / usernames for DM / group DM channels.
     #[serde(default)]
     pub recipient_names: Vec<String>,
+    /// Per-recipient avatar decorations, aligned by index with `recipient_ids`
+    /// (parsed from each DM recipient user object). Empty for guild channels.
+    #[serde(default)]
+    pub recipient_avatar_decorations: Vec<Option<AvatarDecorationData>>,
     /// User limit for voice channels (0 or None means unlimited).
     #[serde(default)]
     pub user_limit: Option<u32>,
@@ -188,6 +194,7 @@ impl Channel {
             is_pinned: false,
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),
+            recipient_avatar_decorations: Vec::new(),
             user_limit: None,
         }
     }
