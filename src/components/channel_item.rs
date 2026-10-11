@@ -1,17 +1,19 @@
 //! Discord RS - Channel Item Component
 //! Channel row in sidebar: text, voice, announcement with selected, unread, and hover states.
+//! Visual reference (channel-sidebar.md):
+//! - linha de canal: 286x32 | padding 4px 8px | radius 8px | 16px/16px w400
 
 use gpui::prelude::*;
 use gpui::*;
 
 use crate::components::badge::{MentionBadge, UnreadMarker, UnreadMarkerState};
 use crate::domain::channel::ChannelType;
-use crate::tokens::colors::{white, *};
+use crate::tokens::colors::{channel_active, channel_hover, text_muted, text_normal, white};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
 
-/// Channel row item in the channels sidebar (240px)
+/// Channel row item in the channels sidebar (286x32px, radius 8px)
 #[derive(IntoElement)]
 pub struct ChannelItem {
     id: ElementId,
@@ -85,148 +87,204 @@ impl ChannelItem {
         self.on_click = Some(Box::new(handler));
         self
     }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    pub fn is_unread(&self) -> bool {
+        self.unread
+    }
+
+    pub fn get_mention_count(&self) -> u32 {
+        self.mention_count
+    }
 }
 
 impl RenderOnce for ChannelItem {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let (bg_color, text_color, icon_color, font_weight) = if self.selected {
-            (
-                channel_active(),
-                crate::tokens::colors::white(),
-                crate::tokens::colors::white(),
-                FontWeight::SEMIBOLD,
-            )
-        } else if self.unread {
-            (
-                rgba(0x00000000),
-                crate::tokens::colors::white(),
-                crate::tokens::colors::white(),
-                FontWeight::SEMIBOLD,
-            )
-        } else {
-            (
-                rgba(0x00000000),
-                text_muted(),
-                text_muted(),
-                FontWeight::MEDIUM,
-            )
-        };
+        render_channel_row(self)
+    }
+}
 
-        let channel_icon_el = match self.channel_type {
-            ChannelType::Text => icon_hash(px(18.0), icon_color),
-            ChannelType::Voice => icon_speaker(px(18.0), icon_color),
-            ChannelType::Announcement => icon_megaphone(px(18.0), icon_color),
-            ChannelType::Dm => icon_user(px(18.0), icon_color),
-            ChannelType::GroupDm => icon_members(px(18.0), icon_color),
-            ChannelType::Category => icon_hash(px(18.0), icon_color),
-        };
+fn render_channel_icon(channel_type: ChannelType, color: Rgba) -> AnyElement {
+    match channel_type {
+        ChannelType::Text => icon_hash(px(18.0), color).into_any_element(),
+        ChannelType::Voice => icon_speaker(px(18.0), color).into_any_element(),
+        ChannelType::Announcement => icon_megaphone(px(18.0), color).into_any_element(),
+        ChannelType::Dm => icon_user(px(18.0), color).into_any_element(),
+        ChannelType::GroupDm => icon_members(px(18.0), color).into_any_element(),
+        ChannelType::Category => icon_hash(px(18.0), color).into_any_element(),
+    }
+}
 
-        // Indicator pill state on left edge
-        let marker_state = if self.selected {
-            UnreadMarkerState::Hidden // Selected row has full background highlight
-        } else if self.unread {
-            UnreadMarkerState::Unread
-        } else {
-            UnreadMarkerState::Hidden
-        };
+fn render_channel_row(item: ChannelItem) -> AnyElement {
+    let (bg_color, text_color, icon_color, font_weight) = if item.selected {
+        (
+            Some(channel_active()),
+            white(),
+            white(),
+            FontWeight::SEMIBOLD,
+        )
+    } else if item.unread {
+        (
+            None,
+            white(),
+            white(),
+            FontWeight::SEMIBOLD,
+        )
+    } else {
+        (
+            None,
+            text_muted(),
+            text_muted(),
+            FontWeight::MEDIUM,
+        )
+    };
 
-        let mut row = div()
-            .id(self.id)
-            .relative()
+    let marker_state = if item.selected {
+        UnreadMarkerState::Hidden
+    } else if item.unread {
+        UnreadMarkerState::Unread
+    } else {
+        UnreadMarkerState::Hidden
+    };
+
+    let mut row = div()
+        .id(item.id)
+        .relative()
+        .flex()
+        .items_center()
+        .h(px(32.0))
+        .mx(space_2())
+        .px(px(8.0))
+        .py(px(4.0))
+        .rounded(radius_md()) // 8px radius per channel-sidebar.md
+        .cursor_pointer()
+        .flex_shrink_0();
+
+    if let Some(bg) = bg_color {
+        row = row.bg(bg);
+    }
+
+    if !item.selected {
+        row = row
+            .hover(move |s| {
+                s.bg(channel_hover())
+                    .text_color(text_normal())
+            })
+            .active(move |s| {
+                s.bg(channel_active())
+                    .text_color(white())
+            });
+    }
+
+    if let Some(on_click) = item.on_click {
+        row = row.on_click(move |ev, window, cx| {
+            (on_click)(ev, window, cx);
+        });
+    }
+
+    // Unread white pill indicator positioned at left edge
+    if marker_state.is_visible() {
+        row = row.child(
+            div()
+                .absolute()
+                .left(px(-8.0))
+                .top(px(12.0)) // Center 8px indicator inside 32px height
+                .child(UnreadMarker::new(marker_state)),
+        );
+    }
+
+    // Channel Icon
+    row = row.child(
+        div()
             .flex()
             .items_center()
-            .h(px(34.0))
-            .mx(space_2())
-            .px(space_2())
-            .rounded(radius_sm())
-            .bg(bg_color)
-            .cursor_pointer()
-            .flex_shrink_0();
+            .justify_center()
+            .w(px(20.0))
+            .h(px(20.0))
+            .mr(space_2())
+            .child(render_channel_icon(item.channel_type, icon_color)),
+    );
 
-        if !self.selected {
-            row = row
-                .hover(move |s| {
-                    s.bg(channel_hover())
-                        .text_color(text_normal())
-                })
-                .active(move |s| {
-                    s.bg(channel_active())
-                        .text_color(white())
-                });
-        }
+    // Channel Name
+    row = row.child(
+        div()
+            .flex_1()
+            .text_size(font_size_sm())
+            .font_weight(font_weight)
+            .text_color(text_color)
+            .overflow_hidden()
+            .child(item.name),
+    );
 
-        if let Some(on_click) = self.on_click {
-            row = row.on_click(move |ev, window, cx| {
-                (on_click)(ev, window, cx);
-            });
-        }
-
-        // Unread white pill indicator positioned at left edge
-        if marker_state.is_visible() {
-            row = row.child(
-                div()
-                    .absolute()
-                    .left(px(-8.0))
-                    .top(px(13.0)) // Center 8px indicator inside 34px height
-                    .child(UnreadMarker::new(marker_state)),
-            );
-        }
-
-        // Channel Icon
+    // Lock icon if private channel
+    if item.locked {
         row = row.child(
             div()
-                .flex()
-                .items_center()
-                .justify_center()
-                .w(px(20.0))
-                .h(px(20.0))
-                .mr(space_2())
-                .child(channel_icon_el),
+                .mr(space_1())
+                .child(icon_lock(px(14.0), text_muted())),
         );
+    }
 
-        // Channel Name
+    // Voice connected participants count
+    if matches!(item.channel_type, ChannelType::Voice) && item.connected_users > 0 {
         row = row.child(
             div()
-                .flex_1()
-                .text_size(font_size_sm())
-                .font_weight(font_weight)
-                .text_color(text_color)
-                .overflow_hidden()
-                .child(self.name),
+                .px(px(6.0))
+                .py(px(1.0))
+                .rounded_xs()
+                .bg(rgba(0xffffff14)) // TOKEN FALTANDO: --background-mod-subtle
+                .text_size(font_size_xxs())
+                .text_color(text_muted())
+                .child(format!("{}", item.connected_users)),
         );
+    }
 
-        // Lock icon if private channel
-        if self.locked {
-            row = row.child(
-                div()
-                    .mr(space_1())
-                    .child(icon_lock(px(14.0), text_muted())),
-            );
-        }
+    // Red mention badge on right
+    if item.mention_count > 0 {
+        row = row.child(
+            div()
+                .ml(space_2())
+                .child(MentionBadge::new(item.mention_count)),
+        );
+    }
 
-        // Voice connected participants count
-        if matches!(self.channel_type, ChannelType::Voice) && self.connected_users > 0 {
-            row = row.child(
-                div()
-                    .px(px(6.0))
-                    .py(px(1.0))
-                    .rounded_xs()
-                    .bg(rgba(0xffffff14))
-                    .text_size(font_size_xxs())
-                    .text_color(text_muted())
-                    .child(format!("{}", self.connected_users)),
-            );
-        }
+    row.into_any_element()
+}
 
-        // Red mention badge on right
-        if self.mention_count > 0 {
-            row = row.child(
-                div()
-                    .ml(space_2())
-                    .child(MentionBadge::new(self.mention_count)),
-            );
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        row
+    #[test]
+    fn test_channel_item_builder() {
+        let ch = ChannelItem::new("ch-1", "general")
+            .channel_type(ChannelType::Text)
+            .selected(true)
+            .unread(false)
+            .mention_count(3)
+            .locked(true)
+            .connected_users(0);
+
+        assert_eq!(ch.get_name(), "general");
+        assert!(ch.is_selected());
+        assert!(!ch.is_unread());
+        assert_eq!(ch.get_mention_count(), 3);
+    }
+
+    #[test]
+    fn test_channel_item_voice_users() {
+        let voice = ChannelItem::new("vc-1", "Voice Lounge")
+            .channel_type(ChannelType::Voice)
+            .connected_users(5);
+
+        assert_eq!(voice.connected_users, 5);
+        assert!(!voice.is_selected());
     }
 }

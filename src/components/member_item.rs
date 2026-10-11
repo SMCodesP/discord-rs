@@ -1,5 +1,8 @@
 //! Discord RS - Member Item Component
-//! Member row in members sidebar (240px) with avatar, status, role color, and bot tag.
+//! Member row in members sidebar (248x44px r8) with avatar, status, role color, and bot tag.
+//! Visual reference (member-sidebar.md):
+//! - linha de membro: 248x44 | padding vertical 1px | radius 8px | 16px/16px w400
+//! - avatar (svg com status): 40x40
 
 use gpui::prelude::*;
 use gpui::*;
@@ -11,7 +14,7 @@ use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
 
-/// Member item row in the 240px member sidebar
+/// Member item row in the member sidebar (248x44px, radius 8px, avatar 40px)
 #[derive(IntoElement)]
 pub struct MemberItem {
     id: ElementId,
@@ -137,116 +140,159 @@ impl MemberItem {
         self.on_click = Some(Box::new(handler));
         self
     }
+
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    pub fn get_status(&self) -> PresenceStatus {
+        self.status
+    }
 }
 
 impl RenderOnce for MemberItem {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let name_color = if let Some(role_color) = self.role_color {
-            role_color
-        } else if self.status == PresenceStatus::Offline {
-            text_muted()
-        } else {
-            text_normal()
-        };
+        render_member_row(self)
+    }
+}
 
-        let bg_color = if self.selected {
-            channel_active()
-        } else {
-            rgba(0x00000000)
-        };
+fn render_bot_tag() -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .py(px(1.0))
+        .rounded_xs()
+        .bg(blurple())
+        .text_color(crate::tokens::colors::white())
+        .text_size(font_size_xxs())
+        .font_weight(FontWeight::BOLD)
+        .child(icon_check(px(10.0), crate::tokens::colors::white()))
+        .child("BOT")
+        .into_any_element()
+}
 
-        let mut row = div()
-            .id(self.id)
-            .flex()
-            .items_center()
-            .h(px(44.0))
-            .mx(space_2())
-            .px(space_2())
-            .rounded(radius_sm())
-            .bg(bg_color)
-            .cursor_pointer()
-            .gap(space_3())
-            .flex_shrink_0();
+fn render_member_row(item: MemberItem) -> AnyElement {
+    let name_color = if let Some(role_color) = item.role_color {
+        role_color
+    } else if item.status == PresenceStatus::Offline {
+        text_muted()
+    } else {
+        text_normal()
+    };
 
-        if !self.selected {
-            row = row
-                .hover(|s| s.bg(channel_hover()))
-                .active(|s| s.bg(channel_active()));
-        }
+    let mut row = div()
+        .id(item.id)
+        .flex()
+        .items_center()
+        .h(px(44.0))
+        .mx(space_2())
+        .px(px(8.0))
+        .py(px(1.0))
+        .rounded(radius_md()) // 8px radius per member-sidebar.md
+        .cursor_pointer()
+        .gap(space_3())
+        .flex_shrink_0();
 
-        if let Some(on_click) = self.on_click {
-            row = row.on_click(move |ev, window, cx| {
-                (on_click)(ev, window, cx);
-            });
-        }
+    if item.selected {
+        row = row.bg(channel_active());
+    } else {
+        row = row
+            .hover(|s| s.bg(channel_hover()))
+            .active(|s| s.bg(channel_active()));
+    }
 
-        // 32px Avatar with status indicator and optional decoration
-        let mut avatar = Avatar::new(self.name.clone())
-            .size(AvatarSize::Px32)
-            .status(self.status)
-            .cutout_color(bg_channels())
-            .opt_decoration(self.avatar_decoration);
+    if let Some(on_click) = item.on_click {
+        row = row.on_click(move |ev, window, cx| {
+            (on_click)(ev, window, cx);
+        });
+    }
 
-        if let Some(url) = &self.avatar_url {
-            avatar = avatar.src(url.clone());
-        }
+    // 40px Avatar with status indicator and optional decoration (per member-sidebar.md)
+    let mut avatar = Avatar::new(item.name.clone())
+        .size(AvatarSize::Px40)
+        .status(item.status)
+        .cutout_color(bg_channels())
+        .opt_decoration(item.avatar_decoration);
 
-        row = row.child(avatar);
+    if let Some(url) = &item.avatar_url {
+        avatar = avatar.src(url.clone());
+    }
 
-        // Name and Activity column
-        let mut text_col = div()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .flex_1()
-            .overflow_hidden();
+    row = row.child(avatar);
 
-        // Top line: Name + Bot Tag
-        let mut name_line = div()
-            .flex()
-            .items_center()
-            .gap(space_1());
+    // Name and Activity column
+    let mut text_col = div()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .flex_1()
+        .overflow_hidden();
 
-        name_line = name_line.child(
+    // Top line: Name + Bot Tag
+    let mut name_line = div()
+        .flex()
+        .items_center()
+        .gap(space_1());
+
+    name_line = name_line.child(
+        div()
+            .text_size(font_size_sm())
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(name_color)
+            .overflow_hidden()
+            .child(item.name),
+    );
+
+    if item.is_bot {
+        name_line = name_line.child(render_bot_tag());
+    }
+
+    text_col = text_col.child(name_line);
+
+    // Bottom line: Activity text (if present)
+    if let Some(act) = item.activity_text {
+        text_col = text_col.child(
             div()
-                .text_size(font_size_sm())
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(name_color)
+                .text_size(font_size_xs())
+                .text_color(text_muted())
                 .overflow_hidden()
-                .child(self.name),
+                .child(act),
         );
+    }
 
-        if self.is_bot {
-            name_line = name_line.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.0))
-                    .px(px(4.0))
-                    .py(px(1.0))
-                    .rounded_xs()
-                    .bg(blurple())
-                    .text_color(crate::tokens::colors::white())
-                    .text_size(font_size_xxs())
-                    .font_weight(FontWeight::BOLD)
-                    .child(icon_check(px(10.0), crate::tokens::colors::white()))
-                    .child("BOT"),
-            );
-        }
+    row.child(text_col).into_any_element()
+}
 
-        text_col = text_col.child(name_line);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        // Bottom line: Activity text (if present)
-        if let Some(act) = self.activity_text {
-            text_col = text_col.child(
-                div()
-                    .text_size(font_size_xs())
-                    .text_color(text_muted())
-                    .overflow_hidden()
-                    .child(act),
-            );
-        }
+    #[test]
+    fn test_member_item_builder() {
+        let m = MemberItem::new("m-1", "Alice")
+            .status(PresenceStatus::Online)
+            .is_bot(false)
+            .activity_text("Coding Rust");
 
-        row.child(text_col)
+        assert_eq!(m.get_name(), "Alice");
+        assert_eq!(m.get_status(), PresenceStatus::Online);
+        assert!(!m.is_bot);
+        assert_eq!(m.activity_text.as_deref(), Some("Coding Rust"));
+    }
+
+    #[test]
+    fn test_member_item_bot() {
+        let bot = MemberItem::new("bot-1", "MusicBot")
+            .status(PresenceStatus::Idle)
+            .is_bot(true);
+
+        assert!(bot.is_bot);
+        assert_eq!(bot.get_status(), PresenceStatus::Idle);
     }
 }

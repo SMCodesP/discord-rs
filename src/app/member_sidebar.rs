@@ -1,9 +1,26 @@
+use gpui::component::menu::{ContextMenuExt, PopupMenu};
+use gpui::component::v_virtual_list;
+use gpui::prelude::*;
 use gpui::*;
-use super::state::{AppState, PresenceStatus};
+use std::rc::Rc;
 
-/// Server member list sidebar (240px wide) with role groupings
+use super::state::{AppState, MemberItemState, PresenceStatus};
+use crate::components::avatar::{Avatar, AvatarSize};
+use crate::tokens::colors::*;
+use crate::tokens::icons::*;
+use crate::tokens::spacing::*;
+
+/// An item row in the member sidebar virtual list
+#[derive(Clone)]
+enum MemberSidebarItem {
+    Header { title: &'static str, count: usize },
+    Member(MemberItemState),
+}
+
+/// Server member list sidebar (240px wide) with role groupings and virtual list
 pub struct MemberSidebar {
     state: Entity<AppState>,
+    items: Vec<MemberSidebarItem>,
 }
 
 impl MemberSidebar {
@@ -12,18 +29,17 @@ impl MemberSidebar {
             cx.notify();
         })
         .detach();
-        Self { state }
+        Self {
+            state,
+            items: Vec::new(),
+        }
     }
-}
 
-impl Render for MemberSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn rebuild_items(&mut self, cx: &App) {
         let state = self.state.read(cx);
         let members = state.members.clone();
-        let state_entity = self.state.clone();
 
-        // Organize members into groups preserving order: Admin, Moderador, Bots, Membros, Offline
-        let mut groups: Vec<(&'static str, Vec<super::state::MemberItemState>)> = vec![
+        let mut groups: Vec<(&'static str, Vec<MemberItemState>)> = vec![
             ("ADMINISTRADOR", Vec::new()),
             ("MODERADOR", Vec::new()),
             ("BOTS", Vec::new()),
@@ -45,146 +61,218 @@ impl Render for MemberSidebar {
             }
         }
 
+        let mut items = Vec::new();
+        for (title, list) in groups {
+            if !list.is_empty() {
+                items.push(MemberSidebarItem::Header {
+                    title,
+                    count: list.len(),
+                });
+                for member in list {
+                    items.push(MemberSidebarItem::Member(member));
+                }
+            }
+        }
+
+        self.items = items;
+    }
+}
+
+impl Render for MemberSidebar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.rebuild_items(cx);
+
+        let item_sizes: Rc<Vec<Size<Pixels>>> = Rc::new(
+            self.items
+                .iter()
+                .map(|item| match item {
+                    MemberSidebarItem::Header { .. } => size(px(240.0), px(34.0)),
+                    MemberSidebarItem::Member(_) => size(px(240.0), px(44.0)),
+                })
+                .collect(),
+        );
+
+        let entity = cx.entity().clone();
+        let app_entity = self.state.clone();
+        let items = self.items.clone();
+
         div()
             .w(px(240.0))
             .h_full()
             .min_h(px(0.0))
-            .bg(rgb(0x2b2d31))
+            .bg(bg_channels())
             .overflow_hidden()
             .flex()
             .flex_col()
             .p(px(8.0))
             .flex_shrink_0()
             .child(
-                div()
-                    .flex_1()
-                    .w_full()
-                    .min_h(px(0.0))
-                    .id("member-sidebar-scroll")
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .children(
-                        groups
-                            .into_iter()
-                            .filter(|(_, list)| !list.is_empty())
-                            .map(move |(title, member_list)| {
-                        let count = member_list.len();
-                        let entity_group = state_entity.clone();
-
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                // Group Header: "ROLE — COUNT"
-                                div()
-                                    .pt(px(14.0))
-                                    .pb(px(4.0))
-                                    .px(px(8.0))
-                                    .text_color(rgb(0x80848e))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_size(px(11.0))
-                                    .child(format!("{} — {}", title, count)),
-                            )
-                            .children(member_list.into_iter().map(move |member| {
-                                let status_color = member.presence.color_rgb();
-                                let role_color = member.role_color;
-                                let is_bot = member.is_bot;
-                                let activity = member.activity.clone();
-
-                                let member_uid = member.id.clone();
-                                let entity_profile = entity_group.clone();
-                                div()
-                                    .h(px(44.0))
-                                    .px(px(8.0))
-                                    .rounded(px(4.0))
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(10.0))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(0x35373c)))
-                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                                        let uid = member_uid.clone();
-                                        entity_profile.update(cx, |s, cx| {
-                                            let current_guild = s.selected_guild_id.clone();
-                                            s.open_user_profile_in_guild(&uid, current_guild);
-                                            cx.notify();
-                                        });
-                                    })
-                                    // Avatar with Presence indicator
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .w(px(32.0))
-                                            .h(px(32.0))
-                                            .rounded_full()
-                                            .bg(rgb(0x5865f2))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_color(rgb(0xffffff))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(14.0))
-                                            .child(member.avatar_text)
-                                            .child(
-                                                div()
-                                                    .absolute()
-                                                    .bottom(px(-1.0))
-                                                    .right(px(-1.0))
-                                                    .w(px(10.0))
-                                                    .h(px(10.0))
-                                                    .rounded_full()
-                                                    .bg(rgb(status_color))
-                                                    .border_2()
-                                                    .border_color(rgb(0x2b2d31)),
-                                            ),
-                                    )
-                                    // Info column (Name + Bot Tag + Activity)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .overflow_hidden()
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap(px(4.0))
-                                                    .child(
-                                                        div()
-                                                            .text_color(rgb(role_color))
-                                                            .font_weight(FontWeight::SEMIBOLD)
-                                                            .text_size(px(14.0))
-                                                            .child(member.name),
-                                                    )
-                                                    .children(if is_bot {
-                                                        Some(
-                                                            div()
-                                                                .px(px(4.0))
-                                                                .py(px(1.0))
-                                                                .rounded(px(3.0))
-                                                                .bg(rgb(0x5865f2))
-                                                                .text_color(rgb(0xffffff))
-                                                                .text_size(px(9.0))
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .child("BOT"),
-                                                        )
-                                                    } else {
-                                                        None
-                                                    }),
-                                            )
-                                            .children(activity.map(|act| {
-                                                div()
-                                                    .text_color(rgb(0x80848e))
-                                                    .text_size(px(11.0))
-                                                    .child(act)
-                                            }))
-                                    )
-                            }))
-                    })),
+                v_virtual_list(
+                    entity,
+                    "member-sidebar-virtual-list",
+                    item_sizes,
+                    move |_this, range, _window, _cx| {
+                        let app = app_entity.clone();
+                        range
+                            .filter_map(|ix| items.get(ix))
+                            .map(|item| match item {
+                                MemberSidebarItem::Header { title, count } => {
+                                    render_group_header(title, *count)
+                                }
+                                MemberSidebarItem::Member(member) => {
+                                    render_member_row(member, &app)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
             )
     }
+}
+
+fn render_group_header(title: &'static str, count: usize) -> AnyElement {
+    div()
+        .h(px(34.0))
+        .pt(px(14.0))
+        .pb(px(4.0))
+        .px(px(8.0))
+        .text_color(text_muted())
+        .font_weight(FontWeight::BOLD)
+        .text_size(px(11.0))
+        .child(format!("{} — {}", title, count))
+        .into_any_element()
+}
+
+fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) -> AnyElement {
+    let role_color = if member.role_color != 0 {
+        rgb(member.role_color)
+    } else if member.presence == PresenceStatus::Offline {
+        text_muted()
+    } else {
+        text_normal()
+    };
+
+    let member_uid = member.id.clone();
+    let entity_profile = app_entity.clone();
+    let entity_menu = app_entity.clone();
+    let menu_uid = member.id.clone();
+
+    let mut row = div()
+        .id(ElementId::Name(format!("member-row-{}", member.id).into()))
+        .h(px(44.0))
+        .px(px(8.0))
+        .py(px(1.0))
+        .rounded(radius_md()) // 8px per member-sidebar.md
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(channel_hover()))
+        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+            let uid = member_uid.clone();
+            entity_profile.update(cx, |s, cx| {
+                let current_guild = s.selected_guild_id.clone();
+                s.open_user_profile_in_guild(&uid, current_guild);
+                cx.notify();
+            });
+        });
+
+    // Avatar using crate::components::Avatar with status cutout & decoration
+    let avatar = Avatar::new(member.name.clone())
+        .size(AvatarSize::Px40) // 40x40 per member-sidebar.md
+        .status(member.presence.into())
+        .cutout_color(bg_channels())
+        .opt_decoration(member.avatar_decoration_data.clone());
+
+    row = row.child(avatar);
+
+    // Text column (Name + Bot Tag + Activity)
+    let mut text_col = div()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .flex_1()
+        .overflow_hidden();
+
+    let mut name_line = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_color(role_color)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(14.0))
+                .child(member.name.clone()),
+        );
+
+    if member.is_bot {
+        name_line = name_line.child(render_bot_tag());
+    }
+
+    text_col = text_col.child(name_line);
+
+    if let Some(ref act) = member.activity {
+        text_col = text_col.child(
+            div()
+                .text_color(text_muted())
+                .text_size(px(11.0))
+                .child(act.clone()),
+        );
+    }
+
+    row = row.child(text_col);
+
+    // Context menu using gpui-kit ContextMenuExt & PopupMenu (per context-menu-user.md)
+    let app1 = entity_menu.clone();
+    let uid1 = menu_uid.clone();
+    let app2 = entity_menu.clone();
+    let uid2 = menu_uid.clone();
+
+    row.context_menu(move |menu: PopupMenu, _window, _cx| {
+        let a1 = app1.clone();
+        let u1 = uid1.clone();
+        let a2 = app2.clone();
+        let u2 = uid2.clone();
+        menu
+            .item(
+                gpui::component::menu::PopupMenuItem::new("Perfil").on_click(move |_ev, _win, cx| {
+                    a1.update(cx, |s, cx| {
+                        let current_guild = s.selected_guild_id.clone();
+                        s.open_user_profile_in_guild(&u1, current_guild);
+                        cx.notify();
+                    });
+                }),
+            )
+            .item(
+                gpui::component::menu::PopupMenuItem::new("Mensagem").on_click(move |_ev, _win, cx| {
+                    a2.update(cx, |s, cx| {
+                        s.open_user_profile(&u2);
+                        cx.notify();
+                    });
+                }),
+            )
+            .separator()
+            .item(gpui::component::menu::PopupMenuItem::new("Mencionar"))
+    })
+    .into_any_element()
+}
+
+fn render_bot_tag() -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .px(px(4.0))
+        .py(px(1.0))
+        .rounded_xs()
+        .bg(blurple())
+        .text_color(crate::tokens::colors::white())
+        .text_size(px(9.0))
+        .font_weight(FontWeight::BOLD)
+        .child(icon_check(px(10.0), crate::tokens::colors::white()))
+        .child("BOT")
+        .into_any_element()
 }

@@ -1,12 +1,13 @@
 //! Discord RS - Badge Component
-//! Unread pill marker and red mention badge with Discord styling.
+//! Thin wrapper over gpui-kit Badge (`gpui::component::badge::Badge`) with Discord styling,
+//! plus unread pill marker.
 
+use gpui::component::badge::Badge as KitBadge;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::tokens::colors::{white, *};
-use crate::tokens::spacing::*;
-use crate::tokens::typography::*;
+use crate::tokens::colors::{bg_server, status_dnd, white};
+use crate::tokens::spacing::{radius_full, radius_sm};
 
 /// Visual states for the Discord unread indicator pill
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,7 +93,7 @@ impl RenderOnce for UnreadMarker {
     }
 }
 
-/// Red notification badge for unread mentions
+/// Red notification badge for unread mentions (thin wrapper around kit Badge)
 #[derive(IntoElement)]
 pub struct MentionBadge {
     count: u32,
@@ -139,66 +140,56 @@ impl MentionBadge {
 impl RenderOnce for MentionBadge {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         if self.count == 0 && !self.dot_only {
-            return div();
+            return div().into_any_element();
         }
 
-        let badge_bg = status_dnd(); // Discord red (#F23F43)
-
+        let mut badge = KitBadge::new().color(status_dnd());
         if self.dot_only {
-            let mut dot = div()
-                .w(px(8.0))
-                .h(px(8.0))
-                .rounded_full()
-                .bg(badge_bg);
-
-            if self.cutout {
-                let border_bg = self.cutout_color.unwrap_or_else(bg_server);
-                dot = div()
-                    .w(px(12.0))
-                    .h(px(12.0))
-                    .rounded_full()
-                    .bg(border_bg)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(dot);
-            }
-            return dot;
-        }
-
-        let text = if self.count > 99 {
-            "99+".to_string()
+            badge = badge.dot();
         } else {
-            self.count.to_string()
-        };
-
-        let mut badge = div()
-            .h(px(18.0))
-            .min_w(px(18.0))
-            .px(px(5.0))
-            .rounded_full()
-            .bg(badge_bg)
-            .text_color(white())
-            .text_size(font_size_xxs())
-            .font_weight(FontWeight::BOLD)
-            .flex()
-            .items_center()
-            .justify_center()
-            .flex_shrink_0()
-            .child(text);
+            badge = badge.count(self.count as usize).max(99);
+        }
 
         if self.cutout {
             let border_bg = self.cutout_color.unwrap_or_else(bg_server);
-            badge = div()
-                .p(px(2.0))
-                .rounded_full()
-                .bg(border_bg)
+            div()
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(badge);
+                .p(px(2.0))
+                .rounded(radius_full())
+                .bg(border_bg)
+                .child(badge)
+                .into_any_element()
+        } else {
+            badge.into_any_element()
         }
+    }
+}
 
-        badge
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unread_marker_states() {
+        assert_eq!(UnreadMarkerState::Hidden.height(), px(0.0));
+        assert_eq!(UnreadMarkerState::Unread.height(), px(8.0));
+        assert_eq!(UnreadMarkerState::Hover.height(), px(20.0));
+        assert_eq!(UnreadMarkerState::Selected.height(), px(40.0));
+        assert!(!UnreadMarkerState::Hidden.is_visible());
+        assert!(UnreadMarkerState::Unread.is_visible());
+    }
+
+    #[test]
+    fn test_mention_badge_builder() {
+        let b = MentionBadge::new(5);
+        assert_eq!(b.count, 5);
+        assert!(!b.dot_only);
+        assert!(!b.cutout);
+
+        let dot = MentionBadge::dot().with_cutout(bg_server());
+        assert!(dot.dot_only);
+        assert!(dot.cutout);
     }
 }
