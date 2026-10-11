@@ -25,13 +25,12 @@ fn main() {
 
     platform::application()
         .with_http_client(Arc::new(ReqwestHttpClient::new()))
-        .with_assets(discord_rs::tokens::icons::IconAssetSource)
+        .with_assets(discord_rs::tokens::icons::AppAssetSource)
         .run(move |cx: &mut App| {
             // Inicializa o gpui-kit (tema, Root, overlays, keybindings) antes de abrir a janela.
             gpui::init(cx);
-            // PONTO KTheme: outro agente criará `discord_rs::tokens::kit_theme::install(cx)`;
-            // chamar `crate::tokens::kit_theme::install(cx);` aqui, logo após `gpui::init(cx)`.
-            // (Não chamar agora: não existe nesta branch.)
+            // Tema escuro Discord registrado pelo caminho oficial do kit (KTheme).
+            discord_rs::tokens::kit_theme::install(cx);
 
             // Dynamically limit window bounds within primary display bounds to avoid Wayland compositor buffer crashes
             let (target_w, target_h) = if let Some(display) = cx.primary_display() {

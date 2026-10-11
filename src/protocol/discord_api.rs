@@ -1418,6 +1418,19 @@ async fn handle_dispatch(
                 guild_folders,
             });
 
+            // Extrair relacionamentos iniciais do payload READY (Gateway)
+            if let Some(raw_relationships) = data.get("relationships").and_then(|v| v.as_array()) {
+                let mut relationships = Vec::new();
+                for r in raw_relationships {
+                    if let Some(rel) = parse_relationship_from_json(r) {
+                        relationships.push(rel);
+                    }
+                }
+                if !relationships.is_empty() {
+                    let _ = event_tx.send(TransportEvent::RelationshipsUpdated(relationships));
+                }
+            }
+
             // Extrair presenças iniciais de amigos/contatos do payload READY
             if let Some(raw_presences) = data.get("presences").and_then(|v| v.as_array()) {
                 for p in raw_presences {
@@ -1716,12 +1729,12 @@ async fn handle_dispatch(
         }
         "USER_UPDATE" => {
             // Current-user profile changed (e.g. new avatar decoration equipped).
-            // Persist to disk cache; live propagation to AppState::current_user
-            // requires a new TransportEvent variant in src/protocol/transport.rs,
-            // which is outside this task's file scope.
+            // Persist to disk cache and propagate live to AppState::current_user
+            // via TransportEvent::CurrentUserUpdated.
             if let Some(user) = parse_user_from_json(&data) {
                 *current_user_id.write().await = Some(user.id.clone());
                 cache_engine.save_current_user(&user);
+                let _ = event_tx.send(TransportEvent::CurrentUserUpdated(user));
             }
         }
         _ => {}
@@ -1763,12 +1776,19 @@ pub fn parse_relationship_from_json(r: &serde_json::Value) -> Option<Relationshi
         }
     });
 
+    // Decoration comes from the nested `user` object of the relationship payload
+    // (READY relationships, RELATIONSHIP_ADD dispatch, REST list). Absent/null -> None.
+    let avatar_decoration_data = user_val
+        .and_then(parse_avatar_decoration_data)
+        .or_else(|| parse_avatar_decoration_data(r));
+
     Some(Relationship {
         id,
         rel_type,
         username,
         global_name,
         avatar,
+        avatar_decoration_data,
     })
 }
 

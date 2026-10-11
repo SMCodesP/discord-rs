@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use gpui::*;
+use gpui::component::input::InputState;
 use serde::Deserialize;
 
 use discord_rs::app::{
@@ -33,11 +34,18 @@ use discord_rs::app::{
     FriendsTab, GuildItemState, MemberItemState, PresenceStatus, RootView, SettingsTab,
 };
 use discord_rs::chat::media_picker::MediaPickerTab;
+use discord_rs::components::{Avatar, AvatarSize, Banner, BannerVariant, Button, ButtonSize,
+    ButtonVariant, IconButton, TextInput};
 use discord_rs::domain::message::{Attachment, Author, Message, Reaction};
 use discord_rs::domain::profile::{MutualGuild, ProfilePopoutState, UserProfileData};
-use discord_rs::domain::settings::AccountConnection;
-use discord_rs::domain::user::User;
+use discord_rs::domain::settings::{AccountConnection, NitroTier};
+use discord_rs::domain::user::{AvatarDecorationData, User};
 use discord_rs::protocol::ConnectionMode;
+use discord_rs::tokens::colors::{
+    text_muted, text_normal, text_titles, HEX_BG_CHAT,
+};
+use discord_rs::tokens::spacing::{space_2, space_3, space_4};
+use discord_rs::tokens::typography::{font_size_sm, font_size_xs, WEIGHT_BOLD};
 
 // Fixed clock for deterministic message timestamps: every fixture message
 // timestamp is BASE minus `minutes_ago`.
@@ -175,6 +183,14 @@ struct FixtureFriend {
     presence: String,
     #[serde(default)]
     custom_status: Option<String>,
+    /// Discord relationship type: 1 friend (Online/All tabs), 2 blocked,
+    /// 3 incoming request, 4 outgoing request (Pending tab).
+    #[serde(default = "default_rel_type")]
+    relationship_type: u32,
+}
+
+fn default_rel_type() -> u32 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +292,12 @@ struct ShotFixture {
     media_picker: Option<FixtureMediaPicker>,
     #[serde(default)]
     connections: Vec<FixtureConnection>,
+    /// Prefill for the AddFriend tab input (friends_add screen).
+    #[serde(default)]
+    add_friend_input: String,
+    /// Selects the "Conta de Usuário" account type (login modal).
+    #[serde(default)]
+    is_user_token: bool,
 }
 
 fn default_true() -> bool {
@@ -403,7 +425,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     // --- Hard offline: no token, no gateway, no disk persistence -----------
     s.auth_token = None;
     s.token_input = String::new();
-    s.is_user_token = false;
+    s.is_user_token = f.is_user_token;
     s.save_token_to_disk = false;
     s.is_connecting = false;
     s.is_connected_to_gateway = f.connected;
@@ -535,7 +557,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
             avatar_text: fr.display_name.chars().next().unwrap_or('?').to_string(),
             presence: parse_presence(&fr.presence),
             custom_status: fr.custom_status.clone(),
-            relationship_type: 1,
+            relationship_type: fr.relationship_type,
         })
         .collect();
     s.friends_tab = parse_friends_tab(&f.friends_tab);
@@ -559,9 +581,17 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.show_members = f.show_members;
     s.active_modal = match f.active_modal.as_deref() {
         Some("UserSettings") => Some(ActiveModal::UserSettings),
-        // ui_shot only drives the settings modal today; anything else would
-        // need a new fixture variant, so fail loudly instead of guessing.
-        Some(other) => panic!("ui_shot: unsupported active_modal {:?}", other),
+        Some("AddServer") => Some(ActiveModal::AddServer),
+        Some("ExploreServers") => Some(ActiveModal::ExploreServers),
+        Some("Login") => Some(ActiveModal::Login),
+        Some("LoginDiscord") => Some(ActiveModal::LoginDiscord),
+        Some("CreateGroupDm") => Some(ActiveModal::CreateGroupDm),
+        // "AddFriendToGroup:<channel_id>" — needs the DM channel to exist in
+        // the fixture so the modal can list recipients.
+        Some(other) => match other.strip_prefix("AddFriendToGroup:") {
+            Some(channel_id) => Some(ActiveModal::AddFriendToGroup(channel_id.to_string())),
+            None => panic!("ui_shot: unsupported active_modal {:?}", other),
+        },
         None => None,
     };
     s.user_settings_tab = parse_settings_tab(&f.user_settings_tab);
@@ -612,6 +642,9 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.authorized_apps = Vec::new();
     s.server_boosts = Vec::new();
     s.family_center_links = Vec::new();
+    // No subscription in fixtures: tier None keeps the Nitro tab coherent
+    // ("Sem Assinatura") instead of mixing seed Full with subscription None.
+    s.nitro_tier = NitroTier::None;
     s.active_subscription = None;
 
     s.profile_popout = f.profile_popout.as_ref().map(|p| {
@@ -677,12 +710,354 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.replying_to_message = None;
     s.active_draft = String::new();
     s.auth_error = None;
-    s.add_friend_input = String::new();
+    s.add_friend_input = f.add_friend_input.clone();
     s.add_friend_feedback = None;
     s.is_sending_friend_request = false;
     s.pending_relationship_actions = HashSet::new();
 
     s
+}
+
+// ---------------------------------------------------------------------------
+// Gallery screen: deterministic component sheet (fixture screen "gallery").
+//
+// Uses only discord_rs::components public APIs; every item carries a small
+// label with its exact variant name. No hover states (static capture).
+// No Modal: src/components/modal.rs is dead code being deleted elsewhere.
+// No avatar decoration: AvatarDecorationData::url() always builds a CDN
+// https URL (src/domain/user.rs), so offline only undecorated avatars can
+// be shown.
+// ---------------------------------------------------------------------------
+
+fn gallery_label(name: &str) -> AnyElement {
+    div()
+        .text_size(font_size_xs())
+        .text_color(text_muted())
+        .child(name.to_string())
+        .into_any_element()
+}
+
+fn gallery_section(title: &str, body: AnyElement) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .child(
+            div()
+                .text_size(font_size_sm())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(text_titles())
+                .child(title.to_string()),
+        )
+        .child(body)
+        .into_any_element()
+}
+
+fn gallery_labeled(name: String, item: AnyElement) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .child(gallery_label(&name))
+        .child(item)
+        .into_any_element()
+}
+
+fn gallery_buttons() -> AnyElement {
+    let variants = [
+        ("Blurple", ButtonVariant::Blurple),
+        ("Gray", ButtonVariant::Gray),
+        ("Danger", ButtonVariant::Danger),
+        ("Ghost", ButtonVariant::Ghost),
+    ];
+    let sizes = [
+        ("Sm", ButtonSize::Sm),
+        ("Md", ButtonSize::Md),
+        ("Lg", ButtonSize::Lg),
+    ];
+    let mut columns = Vec::new();
+    for (vname, variant) in variants {
+        let mut cells = Vec::new();
+        for (sname, size) in sizes {
+            for disabled in [false, true] {
+                for with_icon in [false, true] {
+                    let id = format!("gal-btn-{}-{}-{}-{}", vname, sname, disabled, with_icon);
+                    let label = format!(
+                        "{} {} {}{}",
+                        vname,
+                        sname,
+                        if disabled { "dis" } else { "ok" },
+                        if with_icon { " ★" } else { "" }
+                    );
+                    let mut btn = Button::new(id, label)
+                        .variant(variant)
+                        .size(size)
+                        .disabled(disabled);
+                    if with_icon {
+                        btn = btn.icon("✚");
+                    }
+                    cells.push(btn.into_any_element());
+                }
+            }
+        }
+        let mut col = div().flex_1().flex().flex_col().gap(px(2.0));
+        col = col.child(
+            div()
+                .text_size(font_size_xs())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(text_muted())
+                .child(vname.to_string()),
+        );
+        for c in cells {
+            col = col.child(c);
+        }
+        columns.push(col.into_any_element());
+    }
+    let mut row = div().w_full().flex().flex_row().gap(space_2());
+    for c in columns {
+        row = row.child(c);
+    }
+    gallery_section(
+        "Button — 4 variantes x 3 tamanhos x normal/disabled x com/sem ícone",
+        row.into_any_element(),
+    )
+}
+
+fn gallery_icon_buttons() -> AnyElement {
+    let states = [
+        ("Normal", false, false, false),
+        ("Active", true, false, false),
+        ("Danger", false, true, false),
+        ("Disabled", false, false, true),
+    ];
+    let mut row = div().w_full().flex().flex_row().gap(space_4()).items_center();
+    for (i, (name, active, danger, disabled)) in states.iter().enumerate() {
+        let btn = IconButton::new(format!("gal-iconbtn-{}", i), "✕")
+            .active(*active)
+            .danger(*danger)
+            .disabled(*disabled);
+        row = row.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space_2())
+                .child(btn)
+                .child(
+                    div()
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child(name.to_string()),
+                ),
+        );
+    }
+    gallery_section("IconButton — normal / active / danger / disabled", row.into_any_element())
+}
+
+fn gallery_text_inputs(
+    empty: &Entity<InputState>,
+    with_text: &Entity<InputState>,
+    with_error: &Entity<InputState>,
+    masked: &Entity<InputState>,
+) -> AnyElement {
+    let empty_inp = TextInput::new("gal-input-empty", empty)
+        .label("TEXTINPUT VAZIO")
+        .placeholder("Placeholder de exemplo");
+    let text_inp = TextInput::new("gal-input-text", with_text)
+        .label("TEXTINPUT PREENCHIDO")
+        .placeholder("Placeholder de exemplo");
+    let err_inp = TextInput::new("gal-input-error", with_error)
+        .label("TEXTINPUT COM ERRO")
+        .placeholder("Placeholder de exemplo")
+        .error("Campo obrigatório ou formato inválido");
+    let secret_inp = TextInput::new("gal-input-masked", masked)
+        .label("TEXTINPUT SECRETO")
+        .placeholder("Placeholder de exemplo")
+        .secret(true);
+
+    let mut col = div().w_full().flex().flex_col().gap(space_2());
+    col = col.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(empty_inp))
+            .child(div().flex_1().child(text_inp)),
+    );
+    col = col.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(err_inp))
+            .child(div().flex_1().child(secret_inp)),
+    );
+    gallery_section("TextInput — vazio / preenchido / erro / secreto", col.into_any_element())
+}
+
+fn gallery_avatars() -> AnyElement {
+    let decor = AvatarDecorationData::new("decor_preset_gallery");
+    let mut col = div().w_full().flex().flex_col().gap(space_3());
+
+    // Px80
+    let mut row80 = div().w_full().flex().flex_row().gap(space_4()).items_center();
+    row80 = row80.child(gallery_labeled("80 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px80).into_any_element()));
+    row80 = row80.child(gallery_labeled("80 online".to_string(), Avatar::new("UA").size(AvatarSize::Px80).online().into_any_element()));
+    row80 = row80.child(gallery_labeled("80 dnd".to_string(), Avatar::new("UA").size(AvatarSize::Px80).dnd().into_any_element()));
+    row80 = row80.child(gallery_labeled("80 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px80).decoration(decor.clone()).into_any_element()));
+    row80 = row80.child(gallery_labeled("80 online+decor".to_string(), Avatar::new("UA").size(AvatarSize::Px80).online().decoration(decor.clone()).into_any_element()));
+    col = col.child(row80);
+
+    // Px40
+    let mut row40 = div().w_full().flex().flex_row().gap(space_3()).items_center();
+    row40 = row40.child(gallery_labeled("40 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px40).into_any_element()));
+    row40 = row40.child(gallery_labeled("40 online".to_string(), Avatar::new("UA").size(AvatarSize::Px40).online().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 idle".to_string(), Avatar::new("UA").size(AvatarSize::Px40).idle().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 dnd".to_string(), Avatar::new("UA").size(AvatarSize::Px40).dnd().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 offline".to_string(), Avatar::new("UA").size(AvatarSize::Px40).offline().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px40).decoration(decor.clone()).into_any_element()));
+    row40 = row40.child(gallery_labeled("40 on+decor".to_string(), Avatar::new("UA").size(AvatarSize::Px40).online().decoration(decor.clone()).into_any_element()));
+    col = col.child(row40);
+
+    // Px32 & Px24 side-by-side
+    let mut row_compact = div().w_full().flex().flex_row().gap(space_3()).items_center();
+    row_compact = row_compact.child(gallery_labeled("32 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px32).into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("32 online".to_string(), Avatar::new("UA").size(AvatarSize::Px32).online().into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("32 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px32).decoration(decor.clone()).into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("24 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px24).into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("24 online".to_string(), Avatar::new("UA").size(AvatarSize::Px24).online().into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("24 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px24).decoration(decor.clone()).into_any_element()));
+    col = col.child(row_compact);
+
+    gallery_section("Avatar — 4 tamanhos x com/sem status x com/sem decoração", col.into_any_element())
+}
+
+fn gallery_banners() -> AnyElement {
+    let mut grid = div().w_full().flex().flex_col().gap(space_2());
+    let b1 = Banner::new("gal-b-info", "Mensagem de informação da variante")
+        .variant(BannerVariant::Info)
+        .title("Banner Info");
+    let b2 = Banner::new("gal-b-succ", "Operação concluída com sucesso")
+        .variant(BannerVariant::Success)
+        .title("Banner Success");
+    let b3 = Banner::new("gal-b-warn", "Atenção: verifique suas permissões")
+        .variant(BannerVariant::Warning)
+        .title("Banner Warning");
+    let b4 = Banner::new("gal-b-dang", "Erro crítico: falha na conexão")
+        .variant(BannerVariant::Danger)
+        .title("Banner Danger");
+
+    grid = grid.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(b1))
+            .child(div().flex_1().child(b2)),
+    );
+    grid = grid.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(b3))
+            .child(div().flex_1().child(b4)),
+    );
+    gallery_section("Banner — 4 variantes", grid.into_any_element())
+}
+
+struct GalleryView {
+    input_empty: Entity<InputState>,
+    input_text: Entity<InputState>,
+    input_error: Entity<InputState>,
+    input_masked: Entity<InputState>,
+}
+
+fn gallery_content(gal: &GalleryView) -> AnyElement {
+    div()
+        .size_full()
+        .bg(rgb(HEX_BG_CHAT))
+        .text_color(text_normal())
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .p(space_3())
+        .gap(space_2())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(font_size_sm())
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_titles())
+                        .child("Galeria de componentes próprios (comparação visual com referências button-*.png)"),
+                )
+                .child(
+                    div()
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child("Button | IconButton | TextInput | Banner | Avatar (sem Modal)"),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .flex_row()
+                .gap(space_4())
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(space_3())
+                        .child(gallery_buttons())
+                        .child(gallery_icon_buttons())
+                        .child(gallery_banners()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(space_3())
+                        .child(gallery_text_inputs(
+                            &gal.input_empty,
+                            &gal.input_text,
+                            &gal.input_error,
+                            &gal.input_masked,
+                        ))
+                        .child(gallery_avatars()),
+                ),
+        )
+        .into_any_element()
+}
+
+/// Single view type for `open_window`: either the app shell or the gallery.
+enum ShotRoot {
+    App(Entity<RootView>),
+    Gallery(GalleryView),
+}
+
+impl Render for ShotRoot {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        match self {
+            ShotRoot::App(root) => root.clone().into_any_element(),
+            ShotRoot::Gallery(gal) => gallery_content(gal),
+        }
+    }
+}
+
+impl Render for GalleryView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gallery_content(self)
+    }
 }
 
 fn parse_size(arg: &str) -> (f32, f32) {
@@ -763,9 +1138,11 @@ fn main() {
 
     platform::application()
         .with_http_client(Arc::new(discord_rs::protocol::ReqwestHttpClient::new()))
-        .with_assets(discord_rs::tokens::icons::IconAssetSource)
+        .with_assets(discord_rs::tokens::icons::AppAssetSource)
         .run(move |cx: &mut App| {
             gpui::init(cx);
+            // Same theme the app installs.
+            discord_rs::tokens::kit_theme::install(cx);
 
             let window_bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             let window_options = WindowOptions {
@@ -785,19 +1162,44 @@ fn main() {
 
             // with_state (not RootView::new): mounts a prebuilt fixture state
             // without creating a ClientManager or spawning any auto-login.
+            // Screen "gallery" mounts the component sheet instead (no state).
             let moved_state = app_state;
             let moved_tab = media_tab;
-            let (_handle, _view) = gpui::open_window(window_options, cx, |_window, cx| {
-                let state_entity = cx.new(|_cx| moved_state);
-                let root = cx.new(|cx| RootView::with_state(state_entity, cx));
-                if let Some(tab) = moved_tab {
-                    let chat = root.read(cx).chat_view.clone();
-                    chat.update(cx, |v, _cx| {
-                        v.media_picker_open = true;
-                        v.media_picker_tab = tab;
+            let is_gallery = fixture.screen == "gallery";
+            let (_handle, _view) = gpui::open_window(window_options, cx, |window, cx| {
+                if is_gallery {
+                    let input_empty = cx.new(|cx| InputState::new(window, cx));
+                    let input_text = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("Texto de exemplo")
                     });
+                    let input_error = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("Valor inválido")
+                    });
+                    let input_masked = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .default_value("segredo-exemplo")
+                            .masked(true)
+                    });
+                    cx.new(|_cx| {
+                        ShotRoot::Gallery(GalleryView {
+                            input_empty,
+                            input_text,
+                            input_error,
+                            input_masked,
+                        })
+                    })
+                } else {
+                    let state_entity = cx.new(|_cx| moved_state);
+                    let root = cx.new(|cx| RootView::with_state(state_entity, cx));
+                    if let Some(tab) = moved_tab {
+                        let chat = root.read(cx).chat_view.clone();
+                        chat.update(cx, |v, _cx| {
+                            v.media_picker_open = true;
+                            v.media_picker_tab = tab;
+                        });
+                    }
+                    cx.new(|_cx| ShotRoot::App(root))
                 }
-                root
             })
             .expect("ui_shot: failed to open window");
             println!("UI_SHOT_WINDOW_OPEN {}", fixture.screen);

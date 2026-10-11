@@ -1,86 +1,126 @@
-# UI Shot — captura determinística de telas (Etapa 2, item 3)
+# UI Shot & UI Compare — Captura Determinística e Comparação Visual
 
-Ferramenta para fotografar o app numa tela específica, em estado
-determinístico, **sem conta real e sem rede**. Sem ela nenhuma tela pode ser
-dada como pronta.
+Conjunto de ferramentas para fotografar o app numa tela ou sub-estado específico,
+em estado determinístico, **sem conta real e sem rede**, e comparar as capturas
+lado a lado com as referências visuais oficiais do Discord inspecionado.
 
-## Uso
+Sem essas ferramentas, nenhuma alteração de interface pode ser validada visualmente.
+
+---
+
+## 1. Scripts e Uso
+
+### `scripts/ui-shot.sh`
 
 ```sh
 scripts/ui-shot.sh <tela> <saida.png> [LARGURAxALTURA]
 ```
 
-- `<tela>`: `login` `friends` `dm` `guild` `settings` `profile_popout`
-  `media_picker` `search` (uma fixture em `tests/fixtures/ui_shot/<tela>.json`).
-- `<saida.png>`: caminho do PNG. Um nome simples (sem `/`) cai no padrão
-  **fora do repo**: `~/.cache/discord-rs-parity/app/`.
-- `[LARGURAxALTURA]`: padrão `1280x800`.
+- `<tela>`: Identificador da tela ou sub-estado (corresponde a uma fixture em `tests/fixtures/ui_shot/<tela>.json`).
+- `<saida.png>`: Caminho de saída da imagem. Se for informado apenas um nome de arquivo (sem `/`), o script salva automaticamente fora do repositório em `~/.cache/discord-rs-parity/app/<saida.png>`.
+- `[LARGURAxALTURA]`: Dimensão da janela e do PNG capturado. O padrão obrigatório é `1280x800`.
 
-Exemplo:
+#### Variáveis de Ambiente Suportadas
+
+- `UI_SHOT_CARGO_LOCK`: Caminho do lock flock para cargo (padrão `/tmp/discord-rs-cargo-B.lock` na worktree correspondente).
+- `UI_SHOT_DISPLAY`: Reutiliza display existente (ex: `:0`) em vez de iniciar um Xvfb privado. **Aviso**: compositores com auto-tiling podem redimensionar a janela e reprovar a validação estrita de tamanho.
+- `UI_SHOT_XVFB_DISPLAY`: Display preferencial do Xvfb (padrão `:99` ou randômico se ocupado).
+
+#### Como Funciona
+
+1. Compila o binário de captura `examples/ui_shot` (armazenado em `target/debug/examples/ui_shot` da worktree, com suporte a `target` como link simbólico).
+2. Sobe um servidor `Xvfb` privado com dimensões expandidas (+120px) para acomodar a janela sem recorte.
+3. Inicia o app isolado (`XDG_CONFIG_HOME` efêmero, sem variáveis de token) com título de janela exclusivo.
+4. Localiza a janela via `xdotool`, ajusta o tamanho exato e aguarda o primeiro frame desenhado (verificado via desvio padrão de cores `identify -format "%[fx:standard_deviation]"` > 0.02).
+5. Captura a janela com ImageMagick `import -window <id>` e valida que a resolução é rigorosamente a solicitada e que a imagem não está em branco.
+6. Encerra o processo do app e o Xvfb (sem processos órfãos).
+
+---
+
+### `scripts/ui-compare.sh`
 
 ```sh
-scripts/ui-shot.sh guild ~/.cache/discord-rs-parity/app/guild.png 1280x800
+scripts/ui-compare.sh <discord.png> <app.png> <saida.png>
 ```
 
-O script compila `examples/ui_shot`, abre o app sob um Xvfb privado, espera
-o primeiro frame desenhado, captura com `import -window <id>` e **falha**
-se o PNG final não tiver exatamente o tamanho pedido ou estiver em branco.
-O processo do app e o Xvfb são sempre mortos ao final (sem órfãos).
+- `<discord.png>`: Imagem de referência oficial do Discord (geralmente em `~/.cache/discord-rs-parity/discord/`).
+- `<app.png>`: Imagem capturada pelo cliente nativo (gerada pelo `ui-shot.sh`).
+- `<saida.png>`: Caminho de saída da imagem de comparação. O script exige que a saída seja **sempre fora do repositório** (rejeita qualquer caminho interno).
 
-## Como funciona
+#### Saída e Métricas
 
-1. `examples/ui_shot <fixture.json> <titulo> <LARGURAxALTURA>` monta o
-   `AppState` só com APIs públicas (`AppState::new()` + campos `pub`, e
-   `RootView::with_state` em vez de `RootView::new` — ver § "Sem rede").
-   A fixture **substitui** o seed de demonstração: as coleções são limpas
-   antes de aplicar o conteúdo sintético.
-2. A janela usa o `<titulo>` único da execução; o script a localiza com
-   `xdotool search --name` e fotografa com `import -window <id> out.png`.
-3. Timestamps das mensagens são determinísticos: base fixa
-   `2026-01-05T12:00:00Z` menos `minutes_ago` da fixture.
+1. Exige que ambas as imagens tenham as mesmas dimensões (ex.: 1280x800).
+2. Executa `compare -metric AE` do ImageMagick para calcular a diferença absoluta de pixels (`AE`) e a porcentagem de pixels divergentes.
+3. Monta horizontalmente uma imagem com as 3 etapas lado a lado:
+   `[Referência Discord] | [Captura discord-rs] | [Diferença (diff)]`
+4. Imprime no terminal a métrica calculada:
+   ```
+   ui-compare: discord=<discord.png> app=<app.png> size=1280x800
+   ui-compare: AE=<pixels> pixels diferentes de 1024000 (<porcentagem>%)
+   ui-compare: montagem: <saida.png>
+   ```
 
-## Sem rede e sem disco do usuário
+---
 
-- O example aponta `XDG_CONFIG_HOME` para um diretório temporário **antes**
-  de construir qualquer estado, e remove `DISCORD_TOKEN` /
-  `DISCORD_TOKEN_IS_USER` do ambiente (o script faz o mesmo).
-- `auth_token` e `client_manager` são forçados a `None` depois do
-  `AppState::new()` (sem auto-login, sem gateway); `pinned_dms_path = None`
-  desliga persistência; `save_token_to_disk = false`.
-- As fixtures não contêm nenhuma URL (sem avatar/ícone/anexo remoto), então
-  o pipeline de mídia/imagem não tem o que buscar.
+## 2. Telas e Fixtures Disponíveis
 
-Caminhos de rede que **não** executam (auditoria em `src/`, que este
-harness não toca):
+Todas as fixtures residem em `tests/fixtures/ui_shot/<tela>.json` com dados 100% sintéticos (sem dados de usuários ou servidores reais).
 
-| Caminho | Arquivo:linha | Por que não roda |
-|---|---|---|
-| Auto-login com token salvo (`connect_with_token` via `tokio::spawn`) | `src/app/root_view.rs:40-61` (`RootView::new`) | o example usa `RootView::with_state` (`src/app/root_view.rs:109-139`), que não cria `ClientManager` nem agenda login |
-| Leitura de token em disco (`TokenStorage::load`) e de cache de guilds (`load_guilds_from_disk`) | `src/app/state.rs:1028-1034` (dentro de `AppState::new`) | `XDG_CONFIG_HOME` temporário: arquivos não existem → `Ok(None)`/`None`; e o resultado é descartado (`auth_token = None`) |
-| Envio de friend request / aceitar / remover (`ClientManager::send_friend_request` etc., via `tokio::spawn`) | `src/app/state.rs:1345`, `1378`, `1400` | só disparam em clique do usuário; `client_manager` é `None` e nada é clicado |
-| `ReqwestHttpClient` (HTTP real) | `src/main.rs` / `src/protocol/http_client.rs` | a instância é registrada no platform como no `main`, mas nenhum request é feito: sem URLs nas fixtures e sem ação de rede |
-| Telemetria com export (`TelemetryService::start`) | `src/telemetry/mod.rs:178` | o example não inicia o serviço; usa só o `global()` em memória herdado do `AppState::new` |
+### A. Galeria de Componentes Próprios (`gallery`)
+Tela de comparação visual de componentes próprios sem Modal, montada lado a lado:
+- **Button**: 4 variantes (`Blurple`, `Gray`, `Danger`, `Ghost`) x 3 tamanhos (`Sm`, `Md`, `Lg`) x 2 estados (`normal`, `disabled`) x com e sem ícone (comparação direta com `button-*.png`).
+- **IconButton**: 4 estados (`normal`, `active`, `danger`, `disabled`).
+- **TextInput**: 4 estados (`vazio com placeholder`, `preenchido`, `com erro`, `secreto / token mascarado`).
+- **Banner**: 4 variantes (`Info`, `Success`, `Warning`, `Danger`).
+- **Avatar**: 4 tamanhos (`Px80`, `Px40`, `Px32`, `Px24`), com e sem status (`online`, `idle`, `dnd`, `offline`, sem status) e com e sem decoração de avatar.
 
-## Limitações conhecidas
+### B. Telas Principais do App
+- `login`: Tela cheia obrigatória de login quando desconectado.
+- `friends`: Hub de amigos (aba Disponível/Online; alias `friends_online`).
+- `dm`: Visualização de mensagens diretas e chat privado.
+- `guild`: Visualização de canal de texto em servidor com lista de membros.
+- `settings`: Modal de configurações do usuário (aba Minha Conta; alias `settings_myaccount`).
+- `profile_popout`: Popout de perfil de usuário com bio, cargos e status.
+- `media_picker`: Popover seletor de mídia com aba de emojis sintéticos.
+- `search`: Painel lateral de busca de mensagens com contexto antes/depois.
 
-- **Display**: o padrão é um Xvfb privado (tamanho exato, sem interferência
-  do compositor). Sob o COSMIC em `:0` (`UI_SHOT_DISPLAY=:0`) o compositor
-  retileja a janela (observado: pediu 1280x800, veio 846x1374 e depois
-  1698x1374; `xdotool windowsize` ignorado) e o script falha no check de
-  tamanho — de propósito, para nunca entregar PNG fora do padrão.
-- **Aba do media picker**: só `Emojis` é capturável offline. `Stickers`,
-  `Gifs` e `Soundboard` (abas em `src/chat/media_picker.rs:48-54`) podem
-  tentar carregar previews remotos; a fixture só declara `Emojis`.
-- **Anexos**: só arquivos de texto (`.txt`/`.rs`, `text/plain`), que
-  renderizam como cartão de arquivo (`src/chat/message_list.rs:492-531`).
-  Anexos de imagem com URL remota nunca são usados (sem rede).
-- **Achados no código de produção (fora do escopo: `src/` intocado)**:
-  - `src/app/user_settings.rs:525` — e-mail mockado fixo
-    (`vanguard@discord-rs.native`) na aba Minha Conta; a fixture não tem
-    API pública para sobrescrevê-lo, então ele aparece na foto de
-    `settings`.
-  - `src/app/user_profile_popout.rs:720` — servidor em comum cai no
-    fallback `Servidor {id}` quando `nick` é `None` (sem lookup do nome da
-    guild); aparece como "Servidor g1" na foto de `profile_popout`.
-- Janela usa `gpui::init(cx)` + `gpui::open_window`
-  (`gpui-kit-0.7.1/src/lib.rs:149-180`), igual ao `main.rs` pós-migração.
+### C. Sub-estados de Amigos (Abas)
+- `friends_online`: Aba "Disponível".
+- `friends_all`: Aba "Todos".
+- `friends_pending`: Aba "Pendente" com solicitações recebidas e enviadas.
+- `friends_add`: Aba "Adicionar amigo" com formulário de solicitação.
+
+### D. Sub-estados de Configurações (Abas de `UserSettings`)
+- `settings_myaccount`: Minha Conta.
+- `settings_profiles`: Perfis.
+- `settings_privacy`: Privacidade & Segurança.
+- `settings_authorizedapps`: Aplicativos Autorizados.
+- `settings_connections`: Conexões.
+- `settings_nitro`: Nitro.
+- `settings_serverboost`: Impulso de Servidor.
+- `settings_familycenter`: Centro da Família.
+- `settings_appearance`: Aparência.
+- `settings_accessibility`: Acessibilidade.
+- `settings_voicevideo`: Voz & Vídeo.
+- `settings_notifications`: Notificações.
+- `settings_keybinds`: Atalhos de Teclado.
+- `settings_language`: Idioma.
+
+### E. Modais de `ActiveModal`
+- `modal_addserver` (alias `modal_add_server`): Diálogo de criar ou entrar em servidor.
+- `modal_explore` (alias `modal_explore_servers`): Explorar servidores públicos.
+- `modal_login`: Modal interno de troca de token.
+- `modal_logindiscord` (alias `modal_login_discord`): Modal de autenticação Discord.
+- `modal_addfriendtogroup` (alias `modal_add_friend_to_group`): Diálogo para adicionar amigo à conversa em grupo.
+- `modal_creategroupdm` (alias `modal_create_group_dm`): Diálogo para criar mensagem direta em grupo.
+
+---
+
+## 3. Garantias de Isolamento Offline
+
+Para garantir testes reproduzíveis e prevenir vazamento de dados ou chamadas de rede:
+- `XDG_CONFIG_HOME` é apontado para diretório temporário exclusivo antes de carregar o estado.
+- Variáveis `DISCORD_TOKEN` e `DISCORD_TOKEN_IS_USER` são removidas do ambiente.
+- `AppState` é montado via `RootView::with_state` sem instanciar `ClientManager`, sem conexões WebSocket ou spawn assíncrono de auto-login.
+- O tema oficial do kit é instalado na mesma ordem que a aplicação de produção: `gpui::init(cx)` seguido de `discord_rs::tokens::kit_theme::install(cx)`.
+- Timestamps das mensagens são ancorados num horário fixo base (`2026-01-05T12:00:00Z`).
