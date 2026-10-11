@@ -39,13 +39,13 @@ use discord_rs::components::{Avatar, AvatarSize, Banner, BannerVariant, Button, 
 use discord_rs::domain::message::{Attachment, Author, Message, Reaction};
 use discord_rs::domain::profile::{MutualGuild, ProfilePopoutState, UserProfileData};
 use discord_rs::domain::settings::{AccountConnection, NitroTier};
-use discord_rs::domain::user::User;
+use discord_rs::domain::user::{AvatarDecorationData, User};
 use discord_rs::protocol::ConnectionMode;
 use discord_rs::tokens::colors::{
     text_muted, text_normal, text_titles, HEX_BG_CHAT,
 };
-use discord_rs::tokens::spacing::{space_2, space_3, space_4, space_6};
-use discord_rs::tokens::typography::{font_size_sm, font_size_xs, WEIGHT_BOLD, WEIGHT_MEDIUM};
+use discord_rs::tokens::spacing::{space_2, space_3, space_4};
+use discord_rs::tokens::typography::{font_size_sm, font_size_xs, WEIGHT_BOLD};
 
 // Fixed clock for deterministic message timestamps: every fixture message
 // timestamp is BASE minus `minutes_ago`.
@@ -784,50 +784,73 @@ fn gallery_buttons() -> AnyElement {
                 for with_icon in [false, true] {
                     let id = format!("gal-btn-{}-{}-{}-{}", vname, sname, disabled, with_icon);
                     let label = format!(
-                        "Button {} {} {}{}",
+                        "{} {} {}{}",
                         vname,
                         sname,
-                        if disabled { "disabled" } else { "normal" },
-                        if with_icon { " icon" } else { "" }
+                        if disabled { "dis" } else { "ok" },
+                        if with_icon { " ★" } else { "" }
                     );
-                    let mut btn = Button::new(id, "Exemplo")
+                    let mut btn = Button::new(id, label)
                         .variant(variant)
                         .size(size)
                         .disabled(disabled);
                     if with_icon {
                         btn = btn.icon("✚");
                     }
-                    cells.push(gallery_labeled(label, btn.into_any_element()));
+                    cells.push(btn.into_any_element());
                 }
             }
         }
-        let mut col = div().flex_1().flex().flex_col().gap(space_3());
+        let mut col = div().flex_1().flex().flex_col().gap(px(2.0));
+        col = col.child(
+            div()
+                .text_size(font_size_xs())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(text_muted())
+                .child(vname.to_string()),
+        );
         for c in cells {
             col = col.child(c);
         }
         columns.push(col.into_any_element());
     }
-    let mut row = div().w_full().flex().flex_row().gap(space_4());
+    let mut row = div().w_full().flex().flex_row().gap(space_2());
     for c in columns {
         row = row.child(c);
     }
-    gallery_section("Button — 4 variantes x 3 tamanhos x normal/disabled x com/sem ícone", row.into_any_element())
+    gallery_section(
+        "Button — 4 variantes x 3 tamanhos x normal/disabled x com/sem ícone",
+        row.into_any_element(),
+    )
 }
 
 fn gallery_icon_buttons() -> AnyElement {
     let states = [
-        ("IconButton normal", false, false, false),
-        ("IconButton active", true, false, false),
-        ("IconButton danger", false, true, false),
-        ("IconButton disabled", false, false, true),
+        ("Normal", false, false, false),
+        ("Active", true, false, false),
+        ("Danger", false, true, false),
+        ("Disabled", false, false, true),
     ];
-    let mut row = div().w_full().flex().flex_row().gap(space_6()).items_start();
+    let mut row = div().w_full().flex().flex_row().gap(space_4()).items_center();
     for (i, (name, active, danger, disabled)) in states.iter().enumerate() {
         let btn = IconButton::new(format!("gal-iconbtn-{}", i), "✕")
             .active(*active)
             .danger(*danger)
             .disabled(*disabled);
-        row = row.child(gallery_labeled(name.to_string(), btn.into_any_element()));
+        row = row.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space_2())
+                .child(btn)
+                .child(
+                    div()
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child(name.to_string()),
+                ),
+        );
     }
     gallery_section("IconButton — normal / active / danger / disabled", row.into_any_element())
 }
@@ -835,76 +858,119 @@ fn gallery_icon_buttons() -> AnyElement {
 fn gallery_text_inputs(
     empty: &Entity<InputState>,
     with_text: &Entity<InputState>,
+    with_error: &Entity<InputState>,
     masked: &Entity<InputState>,
 ) -> AnyElement {
-    let empty = TextInput::new("gal-input-empty", empty).placeholder("Placeholder de exemplo");
-    let with_text = TextInput::new("gal-input-text", with_text).placeholder("Placeholder de exemplo");
-    let masked = TextInput::new("gal-input-masked", masked)
+    let empty_inp = TextInput::new("gal-input-empty", empty)
+        .label("TEXTINPUT VAZIO")
+        .placeholder("Placeholder de exemplo");
+    let text_inp = TextInput::new("gal-input-text", with_text)
+        .label("TEXTINPUT PREENCHIDO")
+        .placeholder("Placeholder de exemplo");
+    let err_inp = TextInput::new("gal-input-error", with_error)
+        .label("TEXTINPUT COM ERRO")
+        .placeholder("Placeholder de exemplo")
+        .error("Campo obrigatório ou formato inválido");
+    let secret_inp = TextInput::new("gal-input-masked", masked)
+        .label("TEXTINPUT SECRETO")
         .placeholder("Placeholder de exemplo")
         .secret(true);
-    let mut col = div().w_full().flex().flex_col().gap(space_4());
-    col = col.child(gallery_labeled(
-        "TextInput vazio com placeholder".to_string(),
-        empty.into_any_element(),
-    ));
-    col = col.child(gallery_labeled(
-        "TextInput com texto".to_string(),
-        with_text.into_any_element(),
-    ));
-    col = col.child(gallery_labeled(
-        "TextInput mascarado".to_string(),
-        masked.into_any_element(),
-    ));
-    gallery_section("TextInput", col.into_any_element())
+
+    let mut col = div().w_full().flex().flex_col().gap(space_2());
+    col = col.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(empty_inp))
+            .child(div().flex_1().child(text_inp)),
+    );
+    col = col.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(err_inp))
+            .child(div().flex_1().child(secret_inp)),
+    );
+    gallery_section("TextInput — vazio / preenchido / erro / secreto", col.into_any_element())
 }
 
 fn gallery_avatars() -> AnyElement {
-    let sizes = [
-        ("Px24", AvatarSize::Px24),
-        ("Px32", AvatarSize::Px32),
-        ("Px40", AvatarSize::Px40),
-        ("Px80", AvatarSize::Px80),
-    ];
-    let mut col = div().w_full().flex().flex_col().gap(space_4());
-    for (sname, size) in sizes {
-        let mut row = div().w_full().flex().flex_row().gap(space_6()).items_start();
-        let combos: [(&str, Avatar); 4] = [
-            ("Online", Avatar::new("UA").size(size).online()),
-            ("Idle", Avatar::new("UA").size(size).idle()),
-            ("Dnd", Avatar::new("UA").size(size).dnd()),
-            ("Offline", Avatar::new("UA").size(size).offline()),
-        ];
-        for (status_name, avatar) in combos {
-            row = row.child(gallery_labeled(
-                format!("Avatar {} {}", sname, status_name),
-                avatar.into_any_element(),
-            ));
-        }
-        col = col.child(row.into_any_element());
-    }
-    gallery_section("Avatar — 4 tamanhos x 4 status (sem decoração: sem asset local offline)", col.into_any_element())
+    let decor = AvatarDecorationData::new("decor_preset_gallery");
+    let mut col = div().w_full().flex().flex_col().gap(space_3());
+
+    // Px80
+    let mut row80 = div().w_full().flex().flex_row().gap(space_4()).items_center();
+    row80 = row80.child(gallery_labeled("80 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px80).into_any_element()));
+    row80 = row80.child(gallery_labeled("80 online".to_string(), Avatar::new("UA").size(AvatarSize::Px80).online().into_any_element()));
+    row80 = row80.child(gallery_labeled("80 dnd".to_string(), Avatar::new("UA").size(AvatarSize::Px80).dnd().into_any_element()));
+    row80 = row80.child(gallery_labeled("80 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px80).decoration(decor.clone()).into_any_element()));
+    row80 = row80.child(gallery_labeled("80 online+decor".to_string(), Avatar::new("UA").size(AvatarSize::Px80).online().decoration(decor.clone()).into_any_element()));
+    col = col.child(row80);
+
+    // Px40
+    let mut row40 = div().w_full().flex().flex_row().gap(space_3()).items_center();
+    row40 = row40.child(gallery_labeled("40 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px40).into_any_element()));
+    row40 = row40.child(gallery_labeled("40 online".to_string(), Avatar::new("UA").size(AvatarSize::Px40).online().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 idle".to_string(), Avatar::new("UA").size(AvatarSize::Px40).idle().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 dnd".to_string(), Avatar::new("UA").size(AvatarSize::Px40).dnd().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 offline".to_string(), Avatar::new("UA").size(AvatarSize::Px40).offline().into_any_element()));
+    row40 = row40.child(gallery_labeled("40 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px40).decoration(decor.clone()).into_any_element()));
+    row40 = row40.child(gallery_labeled("40 on+decor".to_string(), Avatar::new("UA").size(AvatarSize::Px40).online().decoration(decor.clone()).into_any_element()));
+    col = col.child(row40);
+
+    // Px32 & Px24 side-by-side
+    let mut row_compact = div().w_full().flex().flex_row().gap(space_3()).items_center();
+    row_compact = row_compact.child(gallery_labeled("32 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px32).into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("32 online".to_string(), Avatar::new("UA").size(AvatarSize::Px32).online().into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("32 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px32).decoration(decor.clone()).into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("24 sem status".to_string(), Avatar::new("UA").size(AvatarSize::Px24).into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("24 online".to_string(), Avatar::new("UA").size(AvatarSize::Px24).online().into_any_element()));
+    row_compact = row_compact.child(gallery_labeled("24 decor".to_string(), Avatar::new("UA").size(AvatarSize::Px24).decoration(decor.clone()).into_any_element()));
+    col = col.child(row_compact);
+
+    gallery_section("Avatar — 4 tamanhos x com/sem status x com/sem decoração", col.into_any_element())
 }
 
 fn gallery_banners() -> AnyElement {
-    let variants = [
-        ("Banner Info", BannerVariant::Info),
-        ("Banner Success", BannerVariant::Success),
-        ("Banner Warning", BannerVariant::Warning),
-        ("Banner Danger", BannerVariant::Danger),
-    ];
-    let mut col = div().w_full().flex().flex_col().gap(space_3());
-    for (name, variant) in variants {
-        let banner = Banner::new(format!("gal-banner-{}", name), "Mensagem de exemplo da variante")
-            .variant(variant)
-            .title("Título de exemplo");
-        col = col.child(gallery_labeled(name.to_string(), banner.into_any_element()));
-    }
-    gallery_section("Banner — 4 variantes", col.into_any_element())
+    let mut grid = div().w_full().flex().flex_col().gap(space_2());
+    let b1 = Banner::new("gal-b-info", "Mensagem de informação da variante")
+        .variant(BannerVariant::Info)
+        .title("Banner Info");
+    let b2 = Banner::new("gal-b-succ", "Operação concluída com sucesso")
+        .variant(BannerVariant::Success)
+        .title("Banner Success");
+    let b3 = Banner::new("gal-b-warn", "Atenção: verifique suas permissões")
+        .variant(BannerVariant::Warning)
+        .title("Banner Warning");
+    let b4 = Banner::new("gal-b-dang", "Erro crítico: falha na conexão")
+        .variant(BannerVariant::Danger)
+        .title("Banner Danger");
+
+    grid = grid.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(b1))
+            .child(div().flex_1().child(b2)),
+    );
+    grid = grid.child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_2())
+            .child(div().flex_1().child(b3))
+            .child(div().flex_1().child(b4)),
+    );
+    gallery_section("Banner — 4 variantes", grid.into_any_element())
 }
 
 struct GalleryView {
     input_empty: Entity<InputState>,
     input_text: Entity<InputState>,
+    input_error: Entity<InputState>,
     input_masked: Entity<InputState>,
 }
 
@@ -916,20 +982,60 @@ fn gallery_content(gal: &GalleryView) -> AnyElement {
         .overflow_hidden()
         .flex()
         .flex_col()
-        .gap(space_6())
-        .p(space_6())
+        .p(space_3())
+        .gap(space_2())
         .child(
             div()
-                .text_size(font_size_sm())
-                .font_weight(WEIGHT_MEDIUM)
-                .text_color(text_titles())
-                .child("Galeria de componentes — estado determinístico (sem hover)".to_string()),
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(font_size_sm())
+                        .font_weight(WEIGHT_BOLD)
+                        .text_color(text_titles())
+                        .child("Galeria de componentes próprios (comparação visual com referências button-*.png)"),
+                )
+                .child(
+                    div()
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child("Button | IconButton | TextInput | Banner | Avatar (sem Modal)"),
+                ),
         )
-        .child(gallery_buttons())
-        .child(gallery_icon_buttons())
-        .child(gallery_text_inputs(&gal.input_empty, &gal.input_text, &gal.input_masked))
-        .child(gallery_avatars())
-        .child(gallery_banners())
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .flex_row()
+                .gap(space_4())
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(space_3())
+                        .child(gallery_buttons())
+                        .child(gallery_icon_buttons())
+                        .child(gallery_banners()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(space_3())
+                        .child(gallery_text_inputs(
+                            &gal.input_empty,
+                            &gal.input_text,
+                            &gal.input_error,
+                            &gal.input_masked,
+                        ))
+                        .child(gallery_avatars()),
+                ),
+        )
         .into_any_element()
 }
 
@@ -1068,6 +1174,9 @@ fn main() {
                     let input_text = cx.new(|cx| {
                         InputState::new(window, cx).default_value("Texto de exemplo")
                     });
+                    let input_error = cx.new(|cx| {
+                        InputState::new(window, cx).default_value("Valor inválido")
+                    });
                     let input_masked = cx.new(|cx| {
                         InputState::new(window, cx)
                             .default_value("segredo-exemplo")
@@ -1077,6 +1186,7 @@ fn main() {
                         ShotRoot::Gallery(GalleryView {
                             input_empty,
                             input_text,
+                            input_error,
                             input_masked,
                         })
                     })
