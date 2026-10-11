@@ -398,6 +398,30 @@ pub struct DiscordExtras {
     pub control_critical_secondary_text_default: Rgba,
     /// Control icon-only icon default (#abacb2).
     pub control_icon_only_icon_default: Rgba,
+    /// Mention foreground (#a7b2ff).
+    pub mention_foreground: Rgba,
+    /// Border subtle (#635a731f).
+    pub border_subtle: Rgba,
+    /// Channels default text (#8989aa).
+    pub channels_default: Rgba,
+    /// Interactive normal text (#9999b9).
+    pub interactive_normal: Rgba,
+    /// Badge brand bubble pink stop (#eb459e).
+    pub badge_brand_bubble: Rgba,
+    /// Text warning yellow (#fee75c).
+    pub text_warning: Rgba,
+    /// Background modifier hover (#282a2e).
+    pub background_modifier_hover: Rgba,
+    /// Header secondary text (#949ba4).
+    pub header_secondary: Rgba,
+    /// Background modifier accent (#3f4147).
+    pub background_modifier_accent: Rgba,
+    /// Text danger (#fa777c).
+    pub text_danger: Rgba,
+    /// Button danger background hover (#da373c).
+    pub button_danger_background_hover: Rgba,
+    /// Muted text alias (#80848e).
+    pub text_muted: Rgba,
 }
 
 impl Global for DiscordExtras {}
@@ -450,6 +474,18 @@ impl DiscordExtras {
             control_critical_primary_bg_active: colors::control_critical_primary_bg_active(),
             control_critical_secondary_text_default: colors::control_critical_secondary_text_default(),
             control_icon_only_icon_default: colors::control_icon_only_icon_default(),
+            mention_foreground: colors::mention_foreground(),
+            border_subtle: colors::border_subtle(),
+            channels_default: colors::channels_default(),
+            interactive_normal: colors::interactive_normal(),
+            badge_brand_bubble: colors::badge_brand_bubble(),
+            text_warning: colors::text_warning(),
+            background_modifier_hover: colors::background_modifier_hover(),
+            header_secondary: colors::header_secondary(),
+            background_modifier_accent: colors::background_modifier_accent(),
+            text_danger: colors::text_danger(),
+            button_danger_background_hover: colors::button_danger_background_hover(),
+            text_muted: colors::text_muted(),
         }
     }
 

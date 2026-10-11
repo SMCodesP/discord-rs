@@ -165,6 +165,39 @@ pub const HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT: u32 = 0xf87e7a;
 /// Control icon-only icon default (#abacb2). Source: `--control-icon-only-icon-default`
 pub const HEX_CONTROL_ICON_ONLY_ICON_DEFAULT: u32 = 0xabacb2;
 
+/// Mention foreground (#a7b2ff). Source: `--mention-foreground`
+pub const HEX_MENTION_FOREGROUND: u32 = 0xa7b2ff;
+
+/// Border subtle with alpha (#635a731f). Source: `--border-subtle`
+pub const HEX_BORDER_SUBTLE: u32 = 0x635a731f;
+
+/// Channels default text (#8989aa). Source: `--channels-default`
+pub const HEX_CHANNELS_DEFAULT: u32 = 0x8989aa;
+
+/// Interactive normal text (#9999b9). Source: `--interactive-normal`
+pub const HEX_INTERACTIVE_NORMAL: u32 = 0x9999b9;
+
+/// Badge brand bubble pink stop (#eb459e). Source: `--badge-brand-bubble`
+pub const HEX_BADGE_BRAND_BUBBLE: u32 = 0xeb459e;
+
+/// Text warning yellow (#fee75c). Source: `--text-warning`
+pub const HEX_TEXT_WARNING: u32 = 0xfee75c;
+
+/// Background modifier hover (#282a2e). Source: `--background-modifier-hover`
+pub const HEX_BACKGROUND_MODIFIER_HOVER: u32 = 0x282a2e;
+
+/// Header secondary text (#949ba4). Source: `--header-secondary`
+pub const HEX_HEADER_SECONDARY: u32 = 0x949ba4;
+
+/// Background modifier accent (#3f4147). Source: `--background-modifier-accent`
+pub const HEX_BACKGROUND_MODIFIER_ACCENT: u32 = 0x3f4147;
+
+/// Text danger (#fa777c). Source: `--text-danger`
+pub const HEX_TEXT_DANGER: u32 = 0xfa777c;
+
+/// Button danger background hover (#da373c). Source: `--button-danger-background-hover`
+pub const HEX_BUTTON_DANGER_BACKGROUND_HOVER: u32 = 0xda373c;
+
 // ============================================================================
 // Token Accessor Functions (Returning gpui::Rgba)
 // ============================================================================
@@ -461,6 +494,72 @@ pub fn control_critical_secondary_text_default() -> Rgba {
 #[inline]
 pub fn control_icon_only_icon_default() -> Rgba {
     rgb(HEX_CONTROL_ICON_ONLY_ICON_DEFAULT)
+}
+
+/// Mention foreground (#a7b2ff)
+#[inline]
+pub fn mention_foreground() -> Rgba {
+    rgb(HEX_MENTION_FOREGROUND)
+}
+
+/// Border subtle (#635a731f)
+#[inline]
+pub fn border_subtle() -> Rgba {
+    rgba(HEX_BORDER_SUBTLE)
+}
+
+/// Channels default text (#8989aa)
+#[inline]
+pub fn channels_default() -> Rgba {
+    rgb(HEX_CHANNELS_DEFAULT)
+}
+
+/// Interactive normal text (#9999b9)
+#[inline]
+pub fn interactive_normal() -> Rgba {
+    rgb(HEX_INTERACTIVE_NORMAL)
+}
+
+/// Badge brand bubble pink stop (#eb459e)
+#[inline]
+pub fn badge_brand_bubble() -> Rgba {
+    rgb(HEX_BADGE_BRAND_BUBBLE)
+}
+
+/// Text warning yellow (#fee75c)
+#[inline]
+pub fn text_warning() -> Rgba {
+    rgb(HEX_TEXT_WARNING)
+}
+
+/// Background modifier hover (#282a2e)
+#[inline]
+pub fn background_modifier_hover() -> Rgba {
+    rgb(HEX_BACKGROUND_MODIFIER_HOVER)
+}
+
+/// Header secondary text (#949ba4)
+#[inline]
+pub fn header_secondary() -> Rgba {
+    rgb(HEX_HEADER_SECONDARY)
+}
+
+/// Background modifier accent (#3f4147)
+#[inline]
+pub fn background_modifier_accent() -> Rgba {
+    rgb(HEX_BACKGROUND_MODIFIER_ACCENT)
+}
+
+/// Text danger (#fa777c)
+#[inline]
+pub fn text_danger() -> Rgba {
+    rgb(HEX_TEXT_DANGER)
+}
+
+/// Button danger background hover (#da373c)
+#[inline]
+pub fn button_danger_background_hover() -> Rgba {
+    rgb(HEX_BUTTON_DANGER_BACKGROUND_HOVER)
 }
 
 // ============================================================================

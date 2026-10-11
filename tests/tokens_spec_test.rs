@@ -84,6 +84,34 @@ fn test_new_parity_tokens_and_colors() {
 }
 
 #[test]
+fn test_parity_added_tokens_and_accessors() {
+    assert_eq!(HEX_MENTION_FOREGROUND, 0xa7b2ff);
+    assert_eq!(HEX_BORDER_SUBTLE, 0x635a731f);
+    assert_eq!(HEX_CHANNELS_DEFAULT, 0x8989aa);
+    assert_eq!(HEX_INTERACTIVE_NORMAL, 0x9999b9);
+    assert_eq!(HEX_BADGE_BRAND_BUBBLE, 0xeb459e);
+    assert_eq!(HEX_TEXT_WARNING, 0xfee75c);
+    assert_eq!(HEX_BACKGROUND_MODIFIER_HOVER, 0x282a2e);
+    assert_eq!(HEX_HEADER_SECONDARY, 0x949ba4);
+    assert_eq!(HEX_BACKGROUND_MODIFIER_ACCENT, 0x3f4147);
+    assert_eq!(HEX_TEXT_DANGER, 0xfa777c);
+    assert_eq!(HEX_BUTTON_DANGER_BACKGROUND_HOVER, 0xda373c);
+
+    // Accessors
+    assert_eq!(mention_foreground(), rgb(0xa7b2ff));
+    assert_eq!(border_subtle(), rgba(0x635a731f));
+    assert_eq!(channels_default(), rgb(0x8989aa));
+    assert_eq!(interactive_normal(), rgb(0x9999b9));
+    assert_eq!(badge_brand_bubble(), rgb(0xeb459e));
+    assert_eq!(text_warning(), rgb(0xfee75c));
+    assert_eq!(background_modifier_hover(), rgb(0x282a2e));
+    assert_eq!(header_secondary(), rgb(0x949ba4));
+    assert_eq!(background_modifier_accent(), rgb(0x3f4147));
+    assert_eq!(text_danger(), rgb(0xfa777c));
+    assert_eq!(button_danger_background_hover(), rgb(0xda373c));
+}
+
+#[test]
 fn test_no_duplicate_tokens_with_conflicting_values() {
     // Verified that alias pairs have identical values
     assert_eq!(HEX_STATUS_IDLE, HEX_STATUS_AUSENTE);

@@ -460,7 +460,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
         if let Some(sub) = content.get(s..e) {
             container = container.child(
                 div()
-                    .bg(rgb(0xfee75c)) // TOKEN FALTANDO: --text-warning
+                    .bg(text_warning())
                     .text_color(bg_server())
                     .font_weight(FontWeight::BOLD)
                     .rounded(px(2.0))
@@ -876,7 +876,7 @@ fn render_search_chips_section(
 fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
     let mut guide = vec![
         div()
-            .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
+            .text_color(header_secondary())
             .font_weight(FontWeight::BOLD)
             .text_size(px(12.0))
             .child("EU ESTOU PROCURANDO POR...")
@@ -992,7 +992,7 @@ fn render_search_result_card(
         .bg(bg_user_bar())
         .border_1()
         .border_color(rgb(0x1f2023)) // TOKEN FALTANDO: --border-subtle
-        .hover(|s| s.border_color(channel_hover()).bg(rgb(0x282a2e))) // TOKEN FALTANDO: --background-modifier-hover
+        .hover(|s| s.border_color(channel_hover()).bg(background_modifier_hover()))
         .flex()
         .flex_col()
         .gap(px(8.0))
