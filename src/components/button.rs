@@ -1,12 +1,42 @@
 //! Discord RS - Button Component
-//! Buttons: Blurple, Gray, Danger, Ghost, and Icon buttons with hover/active states.
+//! Thin Discord-styled wrapper over the gpui-kit `Button`
+//! (`gpui::component::button::Button`). Our public types (`Button`,
+//! `ButtonSize`, `ButtonVariant`, `IconButton`) keep their exact API; only the
+//! rendering is delegated to the kit.
+//!
+//! Visual source (2026-10-11, read-only inspection of discord.com web client,
+//! own tab, `sm`/`md`/`icon-only`/`critical-*` classes + resolved
+//! `--control-*` CSS variables, screenshots in
+//! `~/.cache/discord-rs-parity/discord/button-*.png`):
+//! - primary: normal #5865F2 (= token), hover #4452BB (token #4752C4
+//!   diverges), active #3A48A3 (token #3C45A5 diverges); text white.
+//! - secondary: translucent gray rgb(151,151,159) at 12%/16%/20% alpha for
+//!   normal/hover/active; text near-white.
+//! - danger solid: #D22D39 / #A9232E / #971D28; text white.
+//! - danger secondary: translucent gray bg (same alphas), text #F87E7A.
+//! - icon-only: transparent, icon #ABACB2, hover bg 16% + white icon,
+//!   active bg 20% + white icon.
+//! - geometry: sm h32/px11/min-w60/text14, md h40/px15/min-w100/text16,
+//!   icon-only 32x32, radius 8px, weight 500, disabled = whole-button
+//!   opacity 0.5 (`:disabled { opacity: 0.5 }`).
+//! - Kit note: `ButtonVariant::Custom` carries the exact hover/active colors
+//!   (applied verbatim) while its normal background is faded 20% toward
+//!   transparent, so the wrapper refines `.bg(exact)` on top for the normal
+//!   state. No `.hover()` is set on the kit button (it would clash with the
+//!   hover style the kit wires internally).
 
+use gpui::component::button::{
+    Button as KitButton, ButtonCustomVariant, ButtonVariant as KitVariant, ButtonVariants,
+};
+use gpui::component::{Disableable, Size, Sizable};
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::tokens::colors::{white, *};
-use crate::tokens::spacing::*;
-use crate::tokens::typography::*;
+use crate::tokens::colors::{
+    blurple, blurple_active, blurple_hover, rgba, rgb, text_normal, white,
+};
+use crate::tokens::spacing::radius_md;
+use crate::tokens::typography::WEIGHT_MEDIUM;
 
 /// Visual variants for Discord buttons
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -14,9 +44,9 @@ pub enum ButtonVariant {
     /// Discord Brand Blurple (#5865F2)
     #[default]
     Blurple,
-    /// Secondary Gray (#4E5058)
+    /// Secondary translucent gray button
     Gray,
-    /// Destructive Danger Red (#DA373C)
+    /// Destructive Danger Red (#D22D39)
     Danger,
     /// Ghost transparent button
     Ghost,
@@ -25,9 +55,9 @@ pub enum ButtonVariant {
 /// Sizing options for Discord buttons
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ButtonSize {
-    /// Compact button (height 24px, 12px text)
+    /// Compact button (height 32px, 14px text)
     Sm,
-    /// Standard Discord button (height 38px, 14px text)
+    /// Standard Discord button (height 40px, 16px text)
     #[default]
     Md,
     /// Large button (height 44px, 16px text)
@@ -130,113 +160,195 @@ impl Button {
     }
 }
 
+/// Discord secondary gray: rgb(151,151,159) at 12% alpha (measured
+/// `--control-secondary-background-default`, live `rgba(151, 151, 159, 0.12)`).
+#[inline]
+fn secondary_bg() -> Rgba {
+    rgba(0x97979f1f)
+}
+
+/// Discord secondary hover: same gray at 16% alpha (live hover match).
+#[inline]
+fn secondary_bg_hover() -> Rgba {
+    rgba(0x97979f29)
+}
+
+/// Discord secondary active: same gray at 20% alpha
+/// (`--control-secondary-background-active`).
+#[inline]
+fn secondary_bg_active() -> Rgba {
+    rgba(0x97979f33)
+}
+
+/// Discord danger red: #D22D39 (measured live `rgb(210, 45, 57)`; the previous
+/// hardcoded #DA373C diverges).
+#[inline]
+fn danger_bg() -> Rgba {
+    rgb(0xd22d39)
+}
+
+/// Discord danger hover: #A9232E (measured live + CSS variable).
+#[inline]
+fn danger_bg_hover() -> Rgba {
+    rgb(0xa9232e)
+}
+
+/// Discord danger active: #971D28 (`--control-critical-primary-…-active`).
+#[inline]
+fn danger_bg_active() -> Rgba {
+    rgb(0x971d28)
+}
+
+/// Discord critical-secondary text: #F87E7A (measured live).
+#[inline]
+fn danger_text() -> Rgba {
+    rgb(0xf87e7a)
+}
+
+/// Discord icon-only glyph color: #ABACB2 (measured live +
+/// `--control-icon-only-icon-default`).
+#[inline]
+fn icon_muted() -> Rgba {
+    rgb(0xabacb2)
+}
+
+/// Builds a kit `Custom` variant carrying the exact Discord colors for the
+/// hover/active states (the kit applies them verbatim). The normal background
+/// is faded 20% toward transparent by the kit, so callers additionally refine
+/// `.bg(exact)` on top; per-state styles still win for hover/active. The
+/// custom `foreground` is the hover/active text color; the normal text color
+/// is refined on top the same way.
+fn kit_custom(cx: &App, bg: Rgba, fg_hover: Rgba, hover: Rgba, active: Rgba) -> KitVariant {
+    KitVariant::Custom(
+        ButtonCustomVariant::new(cx)
+            .color(bg.into())
+            .foreground(fg_hover.into())
+            .hover(hover.into())
+            .active(active.into()),
+    )
+}
+
 impl RenderOnce for Button {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let (height, text_size, px_pad, py_pad, radius) = match self.size {
-            ButtonSize::Sm => (px(24.0), font_size_xs(), px(10.0), px(2.0), radius_sm()),
-            ButtonSize::Md => (px(38.0), font_size_sm(), px(16.0), px(6.0), radius_sm()),
-            ButtonSize::Lg => (px(44.0), font_size_base(), px(24.0), px(8.0), radius_md()),
-        };
-
-        let (bg_normal, bg_hover, bg_active, text_color_normal) = match self.variant {
-            ButtonVariant::Blurple => (
-                blurple(),
-                blurple_hover(),
-                blurple_active(),
-                white(),
-            ),
-            ButtonVariant::Gray => (
-                rgb(0x4e5058),
-                rgb(0x6d6f78),
-                rgb(0x80848e),
-                white(),
-            ),
-            ButtonVariant::Danger => (
-                rgb(0xda373c),
-                rgb(0xa12828),
-                rgb(0x8f2022),
-                white(),
-            ),
-            ButtonVariant::Ghost => (
-                rgba(0x00000000),
-                rgba(0xffffff14),
-                rgba(0xffffff24),
-                text_normal(),
-            ),
-        };
-
-        let mut el = div()
-            .id(self.id)
-            .flex()
-            .items_center()
-            .justify_center()
-            .h(height)
-            .px(px_pad)
-            .py(py_pad)
-            .rounded(radius)
-            .gap(space_2())
-            .text_size(text_size)
-            .font_weight(FontWeight::SEMIBOLD)
-            .flex_shrink_0();
-
-        if self.full_width {
-            el = el.w_full();
-        }
-
-        if self.disabled {
-            el = el
-                .bg(set_alpha(bg_normal, 0.5))
-                .text_color(set_alpha(text_color_normal, 0.5))
-                .cursor_not_allowed();
-        } else {
-            el = el
-                .bg(bg_normal)
-                .text_color(text_color_normal)
-                .cursor_pointer()
-                .hover(move |s| s.bg(bg_hover).text_color(white()))
-                .active(move |s| s.bg(bg_active).text_color(white()));
-
-            if let Some(on_click) = self.on_click {
-                el = el.on_click(move |ev, window, cx| {
-                    (on_click)(ev, window, cx);
-                });
-            }
-        }
-
-        // Add leading icon if present
-        if let Some(icon) = self.icon {
-            el = el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon),
-            );
-        }
-
-        // Add label if present
-        if let Some(label) = self.label {
-            el = el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(label),
-            );
-        }
-
-        // Add trailing icon if present
-        if let Some(trailing) = self.trailing_icon {
-            el = el.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(trailing),
-            );
-        }
-
-        el
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        render_button(self, cx)
     }
+}
+
+/// Builds the kit button for [`Button`]. Kept as a free function returning
+/// `AnyElement` so the `rustc` watcher never sees one giant expression.
+///
+/// NOTE: only base-style refinements (`.bg`, `.text_color`, …) are applied to
+/// the kit button here. Setting `.hover()` on it would clash with the hover
+/// style the kit wires internally, so hover/active colors travel through the
+/// `Custom` variant instead.
+fn render_button(btn: Button, cx: &mut App) -> AnyElement {
+    // Measured Discord geometry: sm h32/px11/min-w60, md h40/px15/min-w100.
+    // Kit text sizes line up via Size::Small (14px) and Size::Large (16px);
+    // heights/padding are overridden below.
+    let (height, pad_x, min_w, kit_size) = match btn.size {
+        ButtonSize::Sm => (px(32.0), px(11.0), Some(px(60.0)), Size::Small),
+        ButtonSize::Md => (px(40.0), px(15.0), Some(px(100.0)), Size::Large),
+        // Lg has no measured Discord counterpart in the inspected surfaces;
+        // values carried over from the previous implementation.
+        ButtonSize::Lg => (px(44.0), px(24.0), None, Size::Large),
+    };
+
+    let (bg_normal, bg_hover, bg_active, text_color_normal) = match btn.variant {
+        ButtonVariant::Blurple => (
+            blurple(),
+            blurple_hover(),
+            blurple_active(),
+            white(),
+        ),
+        ButtonVariant::Gray => (
+            secondary_bg(),
+            secondary_bg_hover(),
+            secondary_bg_active(),
+            white(),
+        ),
+        ButtonVariant::Danger => (
+            danger_bg(),
+            danger_bg_hover(),
+            danger_bg_active(),
+            white(),
+        ),
+        // No measured Discord sample for a ghost button; values carried over.
+        ButtonVariant::Ghost => (
+            rgba(0x00000000),
+            rgba(0xffffff14),
+            rgba(0xffffff24),
+            text_normal(),
+        ),
+    };
+
+    let mut el = KitButton::new(btn.id)
+        .with_variant(kit_custom(
+            cx,
+            bg_normal,
+            white(),
+            bg_hover,
+            bg_active,
+        ))
+        .with_size(kit_size)
+        .disabled(btn.disabled)
+        .rounded(radius_md())
+        .h(height)
+        .px(pad_x)
+        .font_weight(WEIGHT_MEDIUM)
+        .bg(bg_normal)
+        .text_color(text_color_normal);
+
+    if let Some(min_w) = min_w {
+        el = el.min_w(min_w);
+    }
+
+    if btn.full_width {
+        el = el.w_full();
+    }
+
+    if btn.disabled {
+        // Discord `:disabled { opacity: 0.5 }`: keep exact normal colors and
+        // fade the whole button. The kit wires no hover/active/click while
+        // disabled, matching the previous implementation.
+        el = el.opacity(0.5);
+    } else if let Some(on_click) = btn.on_click {
+        el = el
+            .cursor_pointer()
+            .on_click(move |ev, window, cx| {
+                (on_click)(ev, window, cx);
+            });
+    } else {
+        el = el.cursor_pointer();
+    }
+
+    // Content order (leading icon, label, trailing icon) is preserved by
+    // passing everything as ordered children; the kit centers them with its
+    // content row.
+    if let Some(icon) = btn.icon {
+        el = el.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon),
+        );
+    }
+
+    if let Some(label) = btn.label {
+        el = el.child(div().flex().items_center().child(label));
+    }
+
+    if let Some(trailing) = btn.trailing_icon {
+        el = el.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(trailing),
+        );
+    }
+
+    el.into_any_element()
 }
 
 /// Compact icon button with Discord hover & active styling
@@ -316,64 +428,66 @@ impl IconButton {
 }
 
 impl RenderOnce for IconButton {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let (normal_color, hover_color, active_color, normal_bg, hover_bg) = if self.danger {
-            (
-                rgb(0xfa777c),
-                white(),
-                white(),
-                rgba(0xda373c22),
-                rgb(0xda373c),
-            )
-        } else if self.active {
-            (
-                white(),
-                white(),
-                white(),
-                rgba(0xffffff24),
-                rgba(0xffffff33),
-            )
-        } else {
-            (
-                text_muted(),
-                text_normal(),
-                white(),
-                rgba(0x00000000),
-                rgba(0xffffff14),
-            )
-        };
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        render_icon_button(self, cx)
+    }
+}
 
-        let mut el = div()
-            .id(self.id)
+/// Builds the kit button for [`IconButton`]. Discord icon-only buttons are
+/// 32x32 with radius 8px, transparent background, #ABACB2 glyph, 16%/20%
+/// translucent-gray hover/active backgrounds and a white glyph on hover.
+/// Same refinement rules as [`render_button`]: no `.hover()` on the kit
+/// button, hover/active colors via the `Custom` variant.
+fn render_icon_button(btn: IconButton, cx: &mut App) -> AnyElement {
+    let (icon_normal, bg_normal, bg_hover, fg_hover) = if btn.danger {
+        // Measured `critical-secondary` pattern: red text on translucent gray.
+        (danger_text(), rgba(0x00000000), secondary_bg_hover(), danger_text())
+    } else if btn.active {
+        // Toggled state has no measured Discord sample; values carried over.
+        (white(), rgba(0xffffff24), rgba(0xffffff33), white())
+    } else {
+        (icon_muted(), rgba(0x00000000), secondary_bg_hover(), white())
+    };
+    let bg_active = if btn.danger || btn.active {
+        bg_hover
+    } else {
+        secondary_bg_active()
+    };
+
+    let mut el = KitButton::new(btn.id)
+        .with_variant(kit_custom(cx, bg_normal, fg_hover, bg_hover, bg_active))
+        .with_size(Size::Medium)
+        .disabled(btn.disabled)
+        .rounded(radius_md())
+        .w(btn.size)
+        .h(btn.size)
+        .font_weight(WEIGHT_MEDIUM)
+        .bg(bg_normal)
+        .text_color(icon_normal);
+
+    if btn.disabled {
+        el = el.opacity(0.5);
+    } else {
+        el = el.cursor_pointer();
+
+        if let Some(on_click) = btn.on_click {
+            el = el.on_click(move |ev, window, cx| {
+                (on_click)(ev, window, cx);
+            });
+        }
+    }
+
+    if let Some(tooltip) = btn.tooltip_text {
+        el = el.tooltip(tooltip);
+    }
+
+    el.child(
+        div()
             .flex()
             .items_center()
             .justify_center()
-            .w(self.size)
-            .h(self.size)
-            .rounded(radius_sm())
-            .text_size(self.icon_size)
-            .flex_shrink_0();
-
-        if self.disabled {
-            el = el
-                .bg(normal_bg)
-                .text_color(set_alpha(normal_color, 0.4))
-                .cursor_not_allowed();
-        } else {
-            el = el
-                .bg(normal_bg)
-                .text_color(normal_color)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover_bg).text_color(hover_color))
-                .active(move |s| s.bg(hover_bg).text_color(active_color));
-
-            if let Some(on_click) = self.on_click {
-                el = el.on_click(move |ev, window, cx| {
-                    (on_click)(ev, window, cx);
-                });
-            }
-        }
-
-        el.child(self.icon)
-    }
+            .text_size(btn.icon_size)
+            .child(btn.icon),
+    )
+    .into_any_element()
 }
