@@ -18,9 +18,11 @@
 extern crate gpui_kit as gpui;
 
 use discord_rs::tokens::kit_theme::{
-    self, CSS_BLUE_LIGHT, CSS_DANGER_ACTIVE, CSS_DANGER_HOVER, CSS_GREEN_LIGHT, CSS_INFO,
-    CSS_INFO_ACTIVE, CSS_INFO_HOVER, CSS_LINK, CSS_RED_LIGHT, CSS_SUCCESS_ACTIVE, CSS_SUCCESS_HOVER,
-    CSS_WARNING_ACTIVE, CSS_WARNING_HOVER, DISCORD_THEME_NAME, DiscordExtras,
+    self, CSS_BLUE_LIGHT, CSS_CHART_1, CSS_CHART_2, CSS_CHART_3, CSS_CHART_4, CSS_CHART_5,
+    CSS_CHART_BEARISH, CSS_CHART_BULLISH, CSS_DANGER_ACTIVE, CSS_DANGER_HOVER, CSS_GREEN_LIGHT,
+    CSS_INFO, CSS_INFO_ACTIVE, CSS_INFO_HOVER, CSS_LINK, CSS_RED_LIGHT, CSS_SLIDER_TRACK,
+    CSS_SUCCESS_ACTIVE, CSS_SUCCESS_HOVER, CSS_SWITCH_BG, CSS_SWITCH_THUMB, CSS_WARNING_ACTIVE,
+    CSS_WARNING_HOVER, DISCORD_THEME_NAME, DiscordExtras,
 };
 use discord_rs::tokens::{self as tokens, FONT_FAMILY_CODE, FONT_FAMILY_PRIMARY};
 
@@ -190,31 +192,35 @@ fn key_theme_colors_match_tokens() {
         color_of(&v, "base.yellow"),
         hex6(tokens::HEX_STATUS_IDLE)
     );
+
+    // Switches / sliders.
+    assert_eq!(color_of(&v, "switch.background"), CSS_SWITCH_BG);
+    assert_eq!(color_of(&v, "switch.thumb.background"), CSS_SWITCH_THUMB);
+    assert_eq!(color_of(&v, "slider.background"), CSS_SLIDER_TRACK);
+
+    // Charts.
+    assert_eq!(color_of(&v, "chart.1"), CSS_CHART_1);
+    assert_eq!(color_of(&v, "chart.2"), CSS_CHART_2);
+    assert_eq!(color_of(&v, "chart.3"), CSS_CHART_3);
+    assert_eq!(color_of(&v, "chart.4"), CSS_CHART_4);
+    assert_eq!(color_of(&v, "chart.5"), CSS_CHART_5);
+    assert_eq!(color_of(&v, "chart.bullish"), CSS_CHART_BULLISH);
+    assert_eq!(color_of(&v, "chart.bearish"), CSS_CHART_BEARISH);
 }
 
 #[test]
 fn fields_without_discord_source_are_left_to_kit_defaults() {
     let v = theme_json_value();
     let colors = &v["themes"][0]["colors"];
-    // No Discord surface exists for these; omitting keeps the kit dark default.
+    // No proven Discord surface exists for these; omitting keeps the kit dark default.
     for key in [
         "caret",
-        "chart.1",
-        "chart.2",
-        "chart.3",
-        "chart.4",
-        "chart.5",
-        "chart.bullish",
-        "chart.bearish",
         "chart.grid",
         "table.background",
         "table.hover.background",
         "group_box.background",
         "description_list.label.background",
         "skeleton.background",
-        "switch.background",
-        "switch.thumb.background",
-        "slider.background",
         "slider.thumb.background",
         "selection.background",
         "scrollbar.thumb.hover.background",
@@ -256,4 +262,23 @@ fn discord_extras_match_token_accessors() {
     assert_eq!(ex.modal_backdrop, tokens::modal_backdrop());
     assert_eq!(ex.scrollbar_thumb, tokens::scrollbar_thumb());
     assert_eq!(ex.white, tokens::white());
+    assert_eq!(ex.neutral_67, tokens::neutral_67());
+    assert_eq!(ex.transparent, tokens::transparent());
+    assert_eq!(ex.opacity_white_8, tokens::opacity_white_8());
+    assert_eq!(ex.control_primary_border, tokens::control_primary_border());
+    assert_eq!(ex.opacity_white_20, tokens::opacity_white_20());
+    assert_eq!(ex.premium_tier_2_purple, tokens::premium_tier_2_purple());
+    assert_eq!(ex.bg_animated_gradient_pink_1, tokens::bg_animated_gradient_pink_1());
+    assert_eq!(ex.platform_xbox, tokens::platform_xbox());
+    assert_eq!(ex.platform_spotify, tokens::platform_spotify());
+    assert_eq!(ex.role_purple, tokens::role_purple());
+    assert_eq!(ex.platform_reddit, tokens::platform_reddit());
+    assert_eq!(ex.control_secondary_bg_default, tokens::control_secondary_bg_default());
+    assert_eq!(ex.control_secondary_bg_hover, tokens::control_secondary_bg_hover());
+    assert_eq!(ex.control_secondary_bg_active, tokens::control_secondary_bg_active());
+    assert_eq!(ex.control_critical_primary_bg_default, tokens::control_critical_primary_bg_default());
+    assert_eq!(ex.control_critical_primary_bg_hover, tokens::control_critical_primary_bg_hover());
+    assert_eq!(ex.control_critical_primary_bg_active, tokens::control_critical_primary_bg_active());
+    assert_eq!(ex.control_critical_secondary_text_default, tokens::control_critical_secondary_text_default());
+    assert_eq!(ex.control_icon_only_icon_default, tokens::control_icon_only_icon_default());
 }
