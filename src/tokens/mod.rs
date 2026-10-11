@@ -3,12 +3,14 @@
 
 pub mod colors;
 pub mod icons;
+pub mod kit_theme;
 pub mod motion;
 pub mod spacing;
 pub mod typography;
 
 pub use colors::*;
 pub use icons::*;
+pub use kit_theme::*;
 pub use motion::*;
 pub use spacing::*;
 pub use typography::*;
