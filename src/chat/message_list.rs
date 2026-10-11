@@ -1,20 +1,24 @@
 //! Discord RS - Cozy Message List History
 //! Implements canonical Discord Cozy style message history:
 //! - 5-minute author grouping window
-//! - User avatars (with initials fallback or image URL)
+//! - User avatars with crate::components::Avatar (support for decorations & CDN URLs)
 //! - Role-colored usernames and BOT badges
 //! - Timestamps and date separators ("Hoje", "Ontem", "22 de Setembro de 2026")
-//! - Floating hover action bar (Reply, React, More)
+//! - Floating hover action bar with kit IconButton and tooltips
+//! - Kit PopupMenu message context menu
 //! - Attachments & rich embed rendering
 //! - Embedded reactions bar
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use gpui::component::menu::{PopupMenu, PopupMenuItem};
 use gpui::*;
 use std::sync::Arc;
 
 use crate::chat::markdown::render_markdown;
 use crate::chat::reactions::{render_reaction_bar, AddReactionCallback, ReactionActionCallback};
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::domain::message::{Attachment, Embed, Message};
+use crate::tokens::colors::white;
 use crate::tokens::colors::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
@@ -90,23 +94,6 @@ fn format_file_size(bytes: u64) -> String {
     }
 }
 
-/// Derives a consistent avatar background color from a username string.
-fn avatar_color_for_name(name: &str) -> u32 {
-    let mut hash: u32 = 0;
-    for b in name.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    const AVATAR_PALETTE: [u32; 6] = [
-        0x5865F2, // Blurple
-        0x57F287, // Green
-        0xFEE75C, // Yellow
-        0xEB459E, // Fuchsia
-        0xED4245, // Red
-        0x00A8FC, // Cyan
-    ];
-    AVATAR_PALETTE[(hash as usize) % AVATAR_PALETTE.len()]
-}
-
 // ============================================================================
 // Date Separator Component
 // ============================================================================
@@ -128,6 +115,7 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
                 .absolute()
                 .w_full()
                 .h_px()
+                // TOKEN FALTANDO: --background-modifier-accent / COR ANTIGA SEM ORIGEM: 0x3f4147
                 .bg(rgb(0x3f4147)),
         )
         .child(
@@ -150,7 +138,6 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
 // ============================================================================
 
 /// Renders the floating action bar displayed on message hover (React, Reply, More).
-/// Renders the floating action bar displayed on message hover (React, Reply, More).
 pub fn render_hover_action_bar(
     message_id: &str,
     on_react: Option<MessageActionCallback>,
@@ -168,7 +155,7 @@ pub fn render_hover_action_bar(
         .size(px(28.0))
         .rounded(radius_sm())
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).text_color(text_titles()))
+        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
         .text_color(text_muted())
         .child(
             div()
@@ -189,7 +176,7 @@ pub fn render_hover_action_bar(
         .size(px(28.0))
         .rounded(radius_sm())
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).text_color(text_titles()))
+        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
         .text_color(text_muted())
         .child(
             div()
@@ -210,7 +197,7 @@ pub fn render_hover_action_bar(
         .size(px(28.0))
         .rounded(radius_sm())
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(HEX_BG_CHAT_HOVER)).text_color(text_titles()))
+        .hover(|s| s.bg(bg_chat_hover()).text_color(text_titles()))
         .text_color(text_muted())
         .child(
             div()
@@ -228,9 +215,9 @@ pub fn render_hover_action_bar(
         .absolute()
         .top(px(4.0))
         .right(space_8())
-        .bg(rgb(0x313338))
+        .bg(bg_chat())
         .border_1()
-        .border_color(rgb(0x232428))
+        .border_color(bg_user_bar())
         .rounded(px(6.0))
         .shadow_md()
         .p(px(2.0))
@@ -246,7 +233,7 @@ pub fn render_hover_action_bar(
 }
 
 // ============================================================================
-// Message Context Menu Component
+// Message Context Menu Component (Kit PopupMenu & ContextMenu)
 // ============================================================================
 
 /// Configuration for the message contextual dropdown menu.
@@ -261,6 +248,67 @@ pub struct MessageContextMenuConfig {
     pub on_pin: Option<MessageActionCallback>,
     pub on_delete: Option<MessageActionCallback>,
     pub on_close: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>>,
+}
+
+/// Builds kit PopupMenu with canonical Discord message actions.
+pub fn build_message_popup_menu(
+    config: MessageContextMenuConfig,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu {
+    move |mut menu, _window, _cx| {
+        let msg_id = config.message_id.clone();
+        let is_pinned = config.is_pinned;
+        let pin_label = if is_pinned {
+            "Desafixar Mensagem"
+        } else {
+            "Fixar Mensagem"
+        };
+
+        if let Some(act) = config.on_add_reaction.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Adicionar Reação")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        if let Some(act) = config.on_reply.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Responder")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        menu = menu.separator();
+        if let Some(act) = config.on_copy_text.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Copiar Texto")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        if let Some(act) = config.on_copy_id.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Copiar ID da Mensagem")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        menu = menu.separator();
+        if let Some(act) = config.on_pin.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new(pin_label)
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        if let Some(act) = config.on_delete.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Excluir Mensagem")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        menu.min_w(px(222.0))
+    }
 }
 
 /// Helper to render an item row inside the message context menu.
@@ -288,12 +336,14 @@ fn render_menu_item(
 
     if is_danger {
         item = item
+            // TOKEN FALTANDO: --text-danger / COR ANTIGA SEM ORIGEM: 0xfa777c
             .text_color(rgb(0xfa777c))
-            .hover(|s| s.bg(rgb(0xda373c)).text_color(rgb(HEX_WHITE)));
+            // TOKEN FALTANDO: --button-danger-background-hover / COR ANTIGA SEM ORIGEM: 0xda373c
+            .hover(|s| s.bg(rgb(0xda373c)).text_color(white()));
     } else {
         item = item
             .text_color(text_primary())
-            .hover(|s| s.bg(rgb(0x5865f2)).text_color(rgb(HEX_WHITE)));
+            .hover(|s| s.bg(blurple()).text_color(white()));
     }
 
     item = item
@@ -324,7 +374,7 @@ fn render_menu_item(
     item
 }
 
-/// Renders canonical Discord message context menu popup.
+/// Renders canonical Discord message context menu popup (222px width, 8px radius, floating background).
 pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
     let pin_label = if config.is_pinned {
         "Desafixar Mensagem"
@@ -333,11 +383,11 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
     };
 
     div()
-        .w(px(220.0))
+        .w(px(222.0))
         .bg(bg_floating())
         .border_1()
-        .border_color(rgb(0x232428))
-        .rounded(px(6.0))
+        .border_color(bg_user_bar())
+        .rounded(radius_md())
         .shadow_lg()
         .p(px(6.0))
         .flex()
@@ -359,7 +409,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             &config.message_id,
             config.on_close.clone(),
         ))
-        .child(div().h_px().bg(rgb(0x232428)).my(px(3.0)))
+        .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
         .child(render_menu_item(
             "Copiar Texto",
             "📋",
@@ -376,7 +426,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             &config.message_id,
             config.on_close.clone(),
         ))
-        .child(div().h_px().bg(rgb(0x232428)).my(px(3.0)))
+        .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
         .child(render_menu_item(
             pin_label,
             "📌",
@@ -393,45 +443,6 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             &config.message_id,
             config.on_close,
         ))
-}
-
-// ============================================================================
-// Avatar Component
-// ============================================================================
-
-/// Renders a Cozy user avatar (40x40 circle) with initials or image URL.
-pub fn render_avatar(name: &str, avatar_url: Option<&str>) -> Div {
-    let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
-    let color = avatar_color_for_name(name);
-
-    if let Some(url) = avatar_url {
-        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || url.starts_with("/") || url.starts_with("file://") {
-            return div()
-                .size(avatar_md())
-                .rounded_full()
-                .overflow_hidden()
-                .flex_shrink_0()
-                .cursor_pointer()
-                .child(img(url.to_string()).size_full().rounded_full());
-        }
-    }
-
-    div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .size(avatar_md())
-        .rounded_full()
-        .bg(rgb(color))
-        .flex_shrink_0()
-        .cursor_pointer()
-        .child(
-            div()
-                .font_weight(WEIGHT_BOLD)
-                .text_color(rgb(HEX_WHITE))
-                .text_size(font_size_md())
-                .child(initial),
-        )
 }
 
 // ============================================================================
@@ -458,9 +469,9 @@ pub fn render_attachments(attachments: &[Attachment]) -> Div {
                     .flex()
                     .flex_col()
                     .max_w(px(400.0))
-                    .bg(rgb(HEX_BG_CHANNELS))
+                    .bg(bg_channels())
                     .border_1()
-                    .border_color(rgb(HEX_BG_SERVER))
+                    .border_color(bg_server())
                     .rounded(radius_md())
                     .p(space_2())
                     .gap(space_1())
@@ -468,7 +479,7 @@ pub fn render_attachments(attachments: &[Attachment]) -> Div {
                         div()
                             .h(px(200.0))
                             .w_full()
-                            .bg(rgb(HEX_BG_USER_BAR))
+                            .bg(bg_user_bar())
                             .rounded(radius_sm())
                             .flex()
                             .items_center()
@@ -498,9 +509,9 @@ pub fn render_attachments(attachments: &[Attachment]) -> Div {
                     .gap(space_3())
                     .max_w(px(400.0))
                     .p(space_3())
-                    .bg(rgb(HEX_BG_CHANNELS))
+                    .bg(bg_channels())
                     .border_1()
-                    .border_color(rgb(HEX_BG_SERVER))
+                    .border_color(bg_server())
                     .rounded(radius_md())
                     .child(
                         div()
@@ -538,9 +549,9 @@ pub fn render_sticker_card(sticker_name: &str) -> Div {
         .my(space_2())
         .p(space_2())
         .max_w(px(220.0))
-        .bg(rgb(0x2b2d31))
+        .bg(bg_channels())
         .border_1()
-        .border_color(rgb(HEX_BG_SERVER))
+        .border_color(bg_server())
         .rounded(radius_md())
         .flex()
         .items_center()
@@ -608,15 +619,15 @@ pub fn render_embeds(embeds: &[Embed]) -> Div {
         .my(space_2());
 
     for embed in embeds {
-        let stripe_color = embed.color.unwrap_or(HEX_BLURPLE);
+        let stripe_color = embed.color.map(from_hex).unwrap_or_else(blurple);
 
         let mut embed_card = div()
             .flex()
             .flex_col()
             .max_w(px(520.0))
-            .bg(rgb(HEX_BG_CHANNELS))
+            .bg(bg_channels())
             .border_l_4()
-            .border_color(rgb(stripe_color))
+            .border_color(stripe_color)
             .rounded(radius_sm())
             .p(space_4())
             .gap(space_2());
@@ -719,7 +730,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
     let name_color = if message.is_pending {
         text_muted()
     } else {
-        config.role_color.map(rgb).unwrap_or_else(text_titles)
+        config.role_color.map(from_hex).unwrap_or_else(text_titles)
     };
 
     let mut row = div()
@@ -741,7 +752,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
         row = row.opacity(0.5).text_color(text_muted());
     }
 
-    // 1. Left Gutter (Avatar or hover timestamp - Cozy 48px spacing)
+    // 1. Left Gutter (Avatar via crate::components::Avatar or hover timestamp - Cozy 48px spacing)
     let left_gutter = if config.is_grouped {
         // Grouped mode: gutter displays timestamp only on hover
         let time_hh_mm = message.timestamp.format("%H:%M").to_string();
@@ -761,8 +772,13 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
                     .child(time_hh_mm),
             )
     } else {
-        // Full mode: displays avatar
+        // Full mode: displays canonical author avatar using crate::components::Avatar
         let author_id = message.author.id.clone();
+        let author_avatar = Avatar::new(author_name.clone())
+            .size(AvatarSize::Px40)
+            .opt_src(message.author.avatar_url())
+            .opt_decoration(message.author.avatar_decoration_data.clone());
+
         div()
             .w(px(48.0))
             .flex_shrink_0()
@@ -778,7 +794,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
                     });
                 }
             })
-            .child(render_avatar(&author_name, message.author.avatar_url().as_deref()))
+            .child(author_avatar)
     };
 
     // 2. Right Content Area
@@ -831,7 +847,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
                     .py(px(1.0))
                     .text_size(px(10.0))
                     .font_weight(WEIGHT_BOLD)
-                    .text_color(rgb(HEX_WHITE))
+                    .text_color(white())
                     .child("BOT"),
             );
         }
@@ -979,11 +995,11 @@ pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
             div()
                 .size(px(64.0))
                 .rounded_full()
-                .bg(rgb(0x3f4248))
+                .bg(channel_active())
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(HEX_WHITE))
+                .text_color(white())
                 .text_size(px(36.0))
                 .font_weight(WEIGHT_BOLD)
                 .child("#"),
@@ -1005,7 +1021,7 @@ pub fn render_welcome_banner(channel_name: &str, channel_topic: &str) -> Div {
 
 /// Renders a complete message history stream with 5-minute Cozy grouping and date separators.
 /// Uses a bounded dynamic buffer window (latest 60 messages) if called on large datasets
-/// without gpui::list virtualization, preventing layout and frame-rate bottlenecks.
+/// without virtualization, preventing layout and frame-rate bottlenecks.
 pub fn render_message_list(
     messages: &[Message],
     on_react: Option<MessageActionCallback>,
@@ -1043,7 +1059,7 @@ pub fn render_message_list(
                         .px(space_3())
                         .py(space_1())
                         .rounded(radius_pill())
-                        .bg(rgb(HEX_BG_CHANNELS))
+                        .bg(bg_channels())
                         .text_size(font_size_xs())
                         .text_color(text_muted())
                         .child(format!("Exibindo últimas 60 de {} mensagens", messages.len())),
@@ -1210,15 +1226,17 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn test_avatar_dimensions_and_rendering() {
-        use crate::components::avatar::AvatarSize;
+        use crate::components::avatar::{Avatar, AvatarSize};
         assert_eq!(avatar_md(), px(40.0));
         assert_eq!(avatar_sm(), px(32.0));
         assert_eq!(AvatarSize::Px40.pixels(), px(40.0));
         assert_eq!(AvatarSize::Px32.pixels(), px(32.0));
 
-        // Test render_avatar with URL and without URL
-        let _avatar_initials = render_avatar("Rustacean", None);
-        let _avatar_url = render_avatar("Rustacean", Some("https://cdn.discordapp.com/avatars/1/test.png"));
+        // Test Avatar with URL and without URL
+        let _avatar_initials = Avatar::new("Rustacean").size(AvatarSize::Px40);
+        let _avatar_url = Avatar::new("Rustacean")
+            .size(AvatarSize::Px40)
+            .src("https://cdn.discordapp.com/avatars/1/test.png");
     }
 
     #[::core::prelude::v1::test]
