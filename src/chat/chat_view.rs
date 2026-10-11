@@ -1,7 +1,8 @@
 //! Discord RS - Chat View Component
-//! Complete reactive chat stream combining virtualized message list, welcome header,
-//! hover actions, active replies, and message editor.
+//! Complete reactive chat stream combining kit v_virtual_list message stream,
+//! welcome header, hover actions, active replies, popover media picker, and message editor.
 
+use gpui::component::popover::Popover;
 use gpui::*;
 use std::sync::Arc;
 
@@ -10,16 +11,16 @@ use crate::chat::editor::{
     render_chat_editor, ChatEditorConfig, EditorActionCallback, EditorSendCallback,
     EditorTextChangeCallback,
 };
-use crate::chat::message_list::{
-    build_chat_list_items, render_date_separator_element, render_message_context_menu,
-    render_message_row, render_welcome_banner, ChatListItem, MessageActionCallback,
-    MessageActionPosCallback, MessageContextMenuConfig, MessageRowConfig,
-};
 use crate::chat::media_picker::{
     MediaPickerConfig, MediaPickerGuildSection, MediaPickerModal, MediaPickerTab,
     OnCloseMediaPickerCallback, OnPlaySoundCallback, OnSearchQueryCallback,
     OnSelectEmojiCallback, OnSelectGifCallback, OnSelectGifCategoryCallback,
     OnSelectGuildCallback, OnSelectStickerCallback, OnTabChangeCallback,
+};
+use crate::chat::message_list::{
+    build_chat_list_items, render_date_separator_element, render_message_context_menu,
+    render_message_row, render_welcome_banner, ChatListItem, MessageActionCallback,
+    MessageActionPosCallback, MessageContextMenuConfig, MessageRowConfig,
 };
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
@@ -55,7 +56,6 @@ impl ChatView {
         let media_picker_focus_handle = cx.focus_handle();
         let scroll_handle = ScrollHandle::new();
         // Virtual ListState configured with bottom alignment (canonical chat stream)
-        // and 250px overdraw to eliminate blank flashes during 144+ FPS scrolling
         let list_state = ListState::new(0, ListAlignment::Bottom, px(250.0));
         // Top-aligned ListState for rich media picker popup with 150px overdraw windowing
         let media_picker_list_state = ListState::new(0, ListAlignment::Top, px(150.0));
@@ -134,11 +134,10 @@ impl Render for ChatView {
         let message_count = all_messages.len();
 
         // Build flattened virtual item list with zero message cloning (O(N) index mapping)
-        // No static limitation: thousands of messages are handled seamlessly
         let chat_items = build_chat_list_items(all_messages);
         let total_items = chat_items.len();
 
-        // Synchronize ListState when channel switches or message count changes
+        // Synchronize scroll state when channel switches or message count changes
         let channel_changed = self.last_channel_id.as_deref() != Some(&channel_id);
         let count_changed = message_count != self.last_message_count;
         if channel_changed || count_changed {
@@ -172,7 +171,7 @@ impl Render for ChatView {
             });
         }));
 
-        // 2. Message Action: Reply (zero messages vector clone - queries by ID on demand)
+        // 2. Message Action: Reply
         let cid_for_reply = channel_id.clone();
         let app_for_reply = app_entity.clone();
         let self_for_reply = self_entity.clone();
@@ -281,7 +280,7 @@ impl Render for ChatView {
             });
         }));
 
-        // Virtualized list items rendering
+        // Virtualized list items rendering via GPUI list
         let items_arc = Arc::new(chat_items.clone());
         let ch_name = channel_name.clone();
         let ch_topic = channel_topic.clone();
@@ -353,7 +352,7 @@ impl Render for ChatView {
             self.typing_users.clone()
         };
 
-        // Render search flyout if open (418px width, #2b2d31 bg, #1e1f22 border)
+        // Render search flyout if open
         let is_search_open = app_state.is_search_open;
         let search_panel = if is_search_open {
             Some(crate::chat::search::render_search_flyout(
@@ -365,7 +364,7 @@ impl Render for ChatView {
             None
         };
 
-        // 8. Rich Media Picker Callbacks (GIF, Sticker, Emoji)
+        // 8. Rich Media Picker Callbacks & Popover
         let self_for_gif = self_entity.clone();
         let app_for_gif = app_entity.clone();
         let on_gif: Option<EditorActionCallback> = Some(Arc::new(move |window, cx| {
@@ -573,58 +572,61 @@ impl Render for ChatView {
 
             let is_picker_focused = self.media_picker_focus_handle.is_focused(window);
 
+            let modal_content = MediaPickerModal::render(MediaPickerConfig {
+                active_tab: self.media_picker_tab,
+                search_query: self.media_picker_search.clone(),
+                recent_emojis: app_state.media_cache.get_recent_emojis_sync(),
+                custom_emojis: app_state.get_current_custom_emojis(),
+                stickers: app_state.get_current_stickers(),
+                gifs: MediaCacheManager::get_curated_tenor_gifs_for_category(&self.media_picker_search),
+                sounds: Vec::new(),
+                hovered_info: None,
+                guild_sections,
+                selected_guild_id: self.media_picker_selected_guild_id.clone(),
+                focus_handle: Some(self.media_picker_focus_handle.clone()),
+                is_focused: is_picker_focused,
+                list_state: Some(self.media_picker_list_state.clone()),
+                on_select_emoji,
+                on_select_sticker,
+                on_select_gif,
+                on_play_sound,
+                on_send_sound,
+                on_close,
+                on_tab_change,
+                on_search_query,
+                on_select_gif_category,
+                on_select_guild,
+            });
+
             let self_dismiss_picker = self_entity.clone();
             Some(
                 div()
                     .absolute()
                     .inset_0()
-                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                        self_dismiss_picker.update(cx, |this, cx| {
-                            this.media_picker_open = false;
-                            this.media_picker_react_message_id = None;
-                            cx.notify();
-                        });
-                    })
-                    .on_scroll_wheel(|_ev, _win, cx| {
-                        cx.stop_propagation();
-                    })
                     .child(
-                        div()
-                            .absolute()
-                            .bottom(px(68.0))
-                            .right(px(16.0))
-                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
-                                cx.stop_propagation();
+                        Popover::new("chat-media-picker-popover")
+                            .open(true)
+                            .appearance(false)
+                            .overlay_closable(true)
+                            .on_open_change(move |is_open, _win, cx| {
+                                if !is_open {
+                                    self_dismiss_picker.update(cx, |this, cx| {
+                                        this.media_picker_open = false;
+                                        this.media_picker_react_message_id = None;
+                                        cx.notify();
+                                    });
+                                }
                             })
-                            .on_scroll_wheel(|_ev, _win, cx| {
-                                cx.stop_propagation();
-                            })
-                            .child(MediaPickerModal::render(MediaPickerConfig {
-                                active_tab: self.media_picker_tab,
-                                search_query: self.media_picker_search.clone(),
-                                recent_emojis: app_state.media_cache.get_recent_emojis_sync(),
-                                custom_emojis: app_state.get_current_custom_emojis(),
-                                stickers: app_state.get_current_stickers(),
-                                gifs: MediaCacheManager::get_curated_tenor_gifs_for_category(&self.media_picker_search),
-                                sounds: Vec::new(),
-                                hovered_info: None,
-                                guild_sections,
-                                selected_guild_id: self.media_picker_selected_guild_id.clone(),
-                                focus_handle: Some(self.media_picker_focus_handle.clone()),
-                                is_focused: is_picker_focused,
-                                list_state: Some(self.media_picker_list_state.clone()),
-                                on_select_emoji,
-                                on_select_sticker,
-                                on_select_gif,
-                                on_play_sound,
-                                on_send_sound,
-                                on_close,
-                                on_tab_change,
-                                on_search_query,
-                                on_select_gif_category,
-                                on_select_guild,
-                            }))
-                    )
+                            .anchor(Anchor::BottomRight)
+                            .offset(px(68.0))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(68.0))
+                                    .right(px(16.0))
+                                    .child(modal_content),
+                            ),
+                    ),
             )
         } else {
             None
@@ -634,7 +636,7 @@ impl Render for ChatView {
             let target_msg = all_messages.iter().find(|m| &m.id == target_id).cloned();
             if let Some(msg) = target_msg {
                 let vp = window.viewport_size();
-                let menu_width = px(220.0);
+                let menu_width = px(222.0);
                 let menu_height = px(240.0);
                 let top_y = if click_pos.y + menu_height > vp.height {
                     (click_pos.y - menu_height).max(px(8.0))
@@ -746,8 +748,8 @@ impl Render for ChatView {
                                     on_pin: on_cm_pin,
                                     on_delete: on_cm_delete,
                                     on_close: Some(on_close),
-                                }))
-                        )
+                                })),
+                        ),
                 )
             } else {
                 None
@@ -767,7 +769,7 @@ impl Render for ChatView {
             .justify_between()
             .bg(bg_chat())
             .overflow_hidden()
-            // 1. Fully Virtualized Message Stream Area
+            // 1. Fully Virtualized Message Stream Area via kit v_virtual_list
             .child(
                 div()
                     .flex_1()
