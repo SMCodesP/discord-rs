@@ -168,11 +168,12 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
         .gap(px(10.0))
         .cursor_pointer()
         .hover(|s| s.bg(channel_hover()))
-        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+        .on_mouse_down(MouseButton::Left, move |ev, _win, cx| {
             let uid = member_uid.clone();
+            let pos = ev.position;
             entity_profile.update(cx, |s, cx| {
                 let current_guild = s.selected_guild_id.clone();
-                s.open_user_profile_in_guild(&uid, current_guild);
+                s.open_user_profile_in_guild(&uid, current_guild, Some(pos));
                 cx.notify();
             });
         });
@@ -242,18 +243,20 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
         let u2 = uid2.clone();
         menu
             .item(
-                gpui::component::menu::PopupMenuItem::new("Perfil").on_click(move |_ev, _win, cx| {
+                gpui::component::menu::PopupMenuItem::new("Perfil").on_click(move |ev, _win, cx| {
+                    let pos = ev.position();
                     a1.update(cx, |s, cx| {
                         let current_guild = s.selected_guild_id.clone();
-                        s.open_user_profile_in_guild(&u1, current_guild);
+                        s.open_user_profile_in_guild(&u1, current_guild, Some(pos));
                         cx.notify();
                     });
                 }),
             )
             .item(
-                gpui::component::menu::PopupMenuItem::new("Mensagem").on_click(move |_ev, _win, cx| {
+                gpui::component::menu::PopupMenuItem::new("Mensagem").on_click(move |ev, _win, cx| {
+                    let pos = ev.position();
                     a2.update(cx, |s, cx| {
-                        s.open_user_profile(&u2);
+                        s.open_user_profile(&u2, Some(pos));
                         cx.notify();
                     });
                 }),

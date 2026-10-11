@@ -206,6 +206,12 @@ struct FixturePopout {
     mutual_guilds: Vec<FixtureMutualGuild>,
     #[serde(default)]
     mutual_friends_count: u32,
+    #[serde(default)]
+    anchor_x: Option<f32>,
+    #[serde(default)]
+    anchor_y: Option<f32>,
+    #[serde(default)]
+    modal_open: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -682,6 +688,15 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
             quick_message: String::new(),
         }
     });
+
+    if let Some(ref p) = f.profile_popout {
+        if let (Some(ax), Some(ay)) = (p.anchor_x, p.anchor_y) {
+            s.profile_anchor = Some(point(px(ax), px(ay)));
+        }
+        if p.modal_open || f.screen == "profile_modal" {
+            s.profile_modal_open = true;
+        }
+    }
 
     s.is_search_open = f.is_search_open;
     s.search_query = f.search_query.clone();

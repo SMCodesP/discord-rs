@@ -72,7 +72,9 @@
     "presence": "Online",
     "bio": "Biografia fictícia para captura de exemplo.",
     "mutual_guilds": [{ "id": "g1", "nick": null }],
-    "mutual_friends_count": 2
+    "mutual_friends_count": 2,
+    "anchor_x": 1040,
+    "anchor_y": 60
   },
   "is_search_open": false,
   "search_query": "",
