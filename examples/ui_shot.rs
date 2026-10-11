@@ -1138,12 +1138,10 @@ fn main() {
 
     platform::application()
         .with_http_client(Arc::new(discord_rs::protocol::ReqwestHttpClient::new()))
-        .with_assets(discord_rs::tokens::icons::IconAssetSource)
+        .with_assets(discord_rs::tokens::icons::AppAssetSource)
         .run(move |cx: &mut App| {
             gpui::init(cx);
-            // Same theme the app installs (src/main.rs still wires only
-            // IconAssetSource; there is no composed asset source yet, so the
-            // example registers the same IconAssetSource as the app).
+            // Same theme the app installs.
             discord_rs::tokens::kit_theme::install(cx);
 
             let window_bounds = Bounds::centered(None, size(px(width), px(height)), cx);
