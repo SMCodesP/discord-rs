@@ -36,6 +36,65 @@ fn test_all_design_tokens_and_colors() {
 }
 
 #[test]
+fn test_new_parity_tokens_and_colors() {
+    assert_eq!(HEX_NEUTRAL_67, 0x35363c);
+    assert_eq!(HEX_TRANSPARENT, 0x00000000);
+    assert_eq!(HEX_OPACITY_WHITE_8, 0xffffff14);
+    assert_eq!(HEX_CONTROL_PRIMARY_BORDER, 0xffffff14);
+    assert_eq!(HEX_OPACITY_WHITE_20, 0xffffff33);
+    assert_eq!(HEX_PREMIUM_TIER_2_PURPLE_FOR_GRADIENTS, 0x8547c6);
+    assert_eq!(HEX_PREMIUM_TIER_2_PURPLE, 0x8547c6);
+    assert_eq!(HEX_BG_ANIMATED_GRADIENT_PINK_1, 0xeb459e);
+    assert_eq!(HEX_PLATFORM_XBOX, 0x107c10);
+    assert_eq!(HEX_PLATFORM_SPOTIFY, 0x1db954);
+    assert_eq!(HEX_ROLE_PURPLE, 0x9b59b6);
+    assert_eq!(HEX_PLATFORM_REDDIT, 0xff4500);
+
+    // Button controls
+    assert_eq!(HEX_CONTROL_SECONDARY_BG_DEFAULT, 0x97979f1f);
+    assert_eq!(HEX_CONTROL_SECONDARY_BG_HOVER, 0x97979f29);
+    assert_eq!(HEX_CONTROL_SECONDARY_BG_ACTIVE, 0x97979f33);
+    assert_eq!(HEX_CONTROL_CRITICAL_PRIMARY_BG_DEFAULT, 0xd22d39);
+    assert_eq!(HEX_CONTROL_CRITICAL_PRIMARY_BG_HOVER, 0xa9232e);
+    assert_eq!(HEX_CONTROL_CRITICAL_PRIMARY_BG_ACTIVE, 0x971d28);
+    assert_eq!(HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT, 0xf87e7a);
+    assert_eq!(HEX_CONTROL_ICON_ONLY_ICON_DEFAULT, 0xabacb2);
+
+    // Accessors
+    assert_eq!(neutral_67(), rgb(0x35363c));
+    assert_eq!(transparent(), rgba(0x00000000));
+    assert_eq!(opacity_white_8(), rgba(0xffffff14));
+    assert_eq!(control_primary_border(), rgba(0xffffff14));
+    assert_eq!(opacity_white_20(), rgba(0xffffff33));
+    assert_eq!(premium_tier_2_purple_for_gradients(), rgb(0x8547c6));
+    assert_eq!(premium_tier_2_purple(), rgb(0x8547c6));
+    assert_eq!(bg_animated_gradient_pink_1(), rgb(0xeb459e));
+    assert_eq!(platform_xbox(), rgb(0x107c10));
+    assert_eq!(platform_spotify(), rgb(0x1db954));
+    assert_eq!(role_purple(), rgb(0x9b59b6));
+    assert_eq!(platform_reddit(), rgb(0xff4500));
+    assert_eq!(control_secondary_bg_default(), rgba(0x97979f1f));
+    assert_eq!(control_secondary_bg_hover(), rgba(0x97979f29));
+    assert_eq!(control_secondary_bg_active(), rgba(0x97979f33));
+    assert_eq!(control_critical_primary_bg_default(), rgb(0xd22d39));
+    assert_eq!(control_critical_primary_bg_hover(), rgb(0xa9232e));
+    assert_eq!(control_critical_primary_bg_active(), rgb(0x971d28));
+    assert_eq!(control_critical_secondary_text_default(), rgb(0xf87e7a));
+    assert_eq!(control_icon_only_icon_default(), rgb(0xabacb2));
+}
+
+#[test]
+fn test_no_duplicate_tokens_with_conflicting_values() {
+    // Verified that alias pairs have identical values
+    assert_eq!(HEX_STATUS_IDLE, HEX_STATUS_AUSENTE);
+    assert_eq!(HEX_TEXT_MUTED, HEX_TEXT_SECONDARY);
+    assert_eq!(HEX_TEXT_NORMAL, HEX_TEXT_PRIMARY);
+    assert_eq!(HEX_TEXT_HEADER, HEX_TEXT_TITLES);
+    assert_eq!(HEX_CONTROL_PRIMARY_BORDER, HEX_OPACITY_WHITE_8);
+    assert_eq!(HEX_PREMIUM_TIER_2_PURPLE, HEX_PREMIUM_TIER_2_PURPLE_FOR_GRADIENTS);
+}
+
+#[test]
 fn test_spacing_and_dimensions() {
     assert_eq!(RAW_RAIL_WIDTH, 72.0);
     assert_eq!(RAW_CHANNELS_WIDTH, 240.0);
