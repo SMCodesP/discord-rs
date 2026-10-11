@@ -43,6 +43,11 @@ pub struct RootView {
     token_modal_sub: Option<Subscription>,
     quick_msg_state: Option<Entity<InputState>>,
     quick_msg_sub: Option<Subscription>,
+    friends_search_state: Option<Entity<InputState>>,
+    friends_search_sub: Option<Subscription>,
+    friends_search_query: String,
+    add_friend_state: Option<Entity<InputState>>,
+    add_friend_sub: Option<Subscription>,
     active_modal_open: Option<ActiveModal>,
     profile_modal_open: bool,
 }
@@ -119,6 +124,11 @@ impl RootView {
             token_modal_sub: None,
             quick_msg_state: None,
             quick_msg_sub: None,
+            friends_search_state: None,
+            friends_search_sub: None,
+            friends_search_query: String::new(),
+            add_friend_state: None,
+            add_friend_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
         }
@@ -157,6 +167,11 @@ impl RootView {
             token_modal_sub: None,
             quick_msg_state: None,
             quick_msg_sub: None,
+            friends_search_state: None,
+            friends_search_sub: None,
+            friends_search_query: String::new(),
+            add_friend_state: None,
+            add_friend_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
         }
@@ -273,6 +288,84 @@ fn sync_quick_input(
     }
 }
 
+/// Creates the friends search kit state once, with a `Change` subscription that
+/// updates `RootView::friends_search_query` and requests a re-render.
+fn ensure_friends_search_input(
+    slot: &mut Option<Entity<InputState>>,
+    sub: &mut Option<Subscription>,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let st = cx.new(|cx| InputState::new(window, cx));
+    let sub_new = cx.subscribe_in(&st, window, move |view, st, event: &InputEvent, _window, cx| {
+        if matches!(event, InputEvent::Change) {
+            view.friends_search_query = st.read(cx).value().to_string();
+            cx.notify();
+        }
+    });
+    *slot = Some(st);
+    *sub = Some(sub_new);
+}
+
+/// Creates the add friend kit state once, with `Change` (mirroring to `AppState::add_friend_input`)
+/// and `PressEnter` (calling `AppState::send_friend_request`) subscriptions.
+fn ensure_add_friend_input(
+    slot: &mut Option<Entity<InputState>>,
+    sub: &mut Option<Subscription>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let initial = app_state.read(cx).add_friend_input.clone();
+    let st = cx.new(|cx| {
+        InputState::new(window, cx)
+            .default_value(initial)
+    });
+    let app = app_state.clone();
+    let sub_new = cx.subscribe_in(&st, window, move |_view, st, event: &InputEvent, _window, cx| {
+        match event {
+            InputEvent::Change => {
+                let v = st.read(cx).value().to_string();
+                app.update(cx, |s, cx| {
+                    s.add_friend_input = v;
+                    cx.notify();
+                });
+            }
+            InputEvent::PressEnter { .. } => {
+                app.update(cx, |s, cx| {
+                    let target = s.add_friend_input.clone();
+                    if !s.is_sending_friend_request && !target.trim().is_empty() {
+                        s.send_friend_request(&target);
+                        cx.notify();
+                    }
+                });
+            }
+            _ => {}
+        }
+    });
+    *slot = Some(st);
+    *sub = Some(sub_new);
+}
+
+/// Caller-to-kit sync for the add friend input field.
+fn sync_add_friend_input(
+    st: &Entity<InputState>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let want: SharedString = app_state.read(cx).add_friend_input.clone().into();
+    if st.read(cx).value() != want {
+        st.update(cx, |s, cx| s.set_value(want.clone(), window, cx));
+    }
+}
+
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Kit input states live on this view (never in AppState). Ensure +
@@ -292,6 +385,22 @@ impl Render for RootView {
             window,
             cx,
         );
+        ensure_friends_search_input(
+            &mut self.friends_search_state,
+            &mut self.friends_search_sub,
+            window,
+            cx,
+        );
+        ensure_add_friend_input(
+            &mut self.add_friend_state,
+            &mut self.add_friend_sub,
+            &app,
+            window,
+            cx,
+        );
+        if let Some(ref add_st) = self.add_friend_state {
+            sync_add_friend_input(add_st, &app, window, cx);
+        }
         let is_user_account = self.state.read(cx).is_user_token;
         let login_placeholder: SharedString = if is_user_account {
             "Cole seu token de usuário aqui...".into()
@@ -437,7 +546,10 @@ impl Render for RootView {
         // Synchronize UserProfileModal with WindowState dialog layer
         if self.profile_modal_open != is_prof_modal {
             if self.profile_modal_open {
-                window.close_all_dialogs(cx);
+                // Fechamos apenas o diálogo do topo (o modal de perfil), em vez de
+                // `window.close_all_dialogs(cx)`, para preservar diálogos de fundo
+                // se múltiplos estiverem empilhados no WindowState dialog layer.
+                window.close_dialog(cx);
             }
             self.profile_modal_open = is_prof_modal;
             if is_prof_modal {
@@ -508,7 +620,22 @@ impl Render for RootView {
                             .child(if in_voice_channel {
                                 self.voice_panel.clone().into_any_element()
                             } else if state.selected_guild_id.is_none() && state.selected_channel_id.is_none() {
-                                render_friends_view(app_entity.clone(), state).into_any_element()
+                                let search_state = self
+                                    .friends_search_state
+                                    .as_ref()
+                                    .expect("friends_search_state must be initialized");
+                                let add_friend_state = self
+                                    .add_friend_state
+                                    .as_ref()
+                                    .expect("add_friend_state must be initialized");
+                                render_friends_view(
+                                    app_entity.clone(),
+                                    state,
+                                    search_state,
+                                    &self.friends_search_query,
+                                    add_friend_state,
+                                )
+                                .into_any_element()
                             } else {
                                 self.chat_view.clone().into_any_element()
                             }),
@@ -1518,8 +1645,17 @@ fn render_create_group_dm_row(
 fn render_friends_view(
     entity: Entity<AppState>,
     state: &AppState,
+    search_state: &Entity<InputState>,
+    search_query: &str,
+    add_friend_state: &Entity<InputState>,
 ) -> Div {
-    super::friends_hub::render_friends_hub(entity, state)
+    super::friends_hub::render_friends_hub(
+        entity,
+        state,
+        search_state,
+        search_query,
+        add_friend_state,
+    )
 }
 
 

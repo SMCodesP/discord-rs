@@ -540,3 +540,79 @@ fn test_friends_view_filter_predicates() {
     assert_eq!(blocked_count, 1);
 }
 
+#[test]
+fn test_friends_search_filter_in_memory() {
+    let mut state = AppState::new();
+    state.friends.clear();
+    state.friends_tab = FriendsTab::All;
+    state.friends.push(FriendItemState {
+        id: "u-1".into(),
+        username: "alice_wonderland".into(),
+        display_name: "Alice Liddell".into(),
+        avatar_url: None,
+        avatar_text: "A".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+    state.friends.push(FriendItemState {
+        id: "u-2".into(),
+        username: "bob_builder".into(),
+        display_name: "Robert Bob".into(),
+        avatar_url: None,
+        avatar_text: "B".into(),
+        presence: PresenceStatus::Idle,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+    state.friends.push(FriendItemState {
+        id: "u-3".into(),
+        username: "charlie_chaplin".into(),
+        display_name: "The Tramp".into(),
+        avatar_url: None,
+        avatar_text: "C".into(),
+        presence: PresenceStatus::Offline,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+
+    // 1. Empty query returns all friends in the active tab (All -> 3)
+    let rows_empty = discord_rs::app::friends_hub::collect_friend_rows(&state, "");
+    assert_eq!(rows_empty.len(), 3);
+
+    // 2. Filter matching display name ("alice")
+    let rows_alice = discord_rs::app::friends_hub::collect_friend_rows(&state, "alice");
+    assert_eq!(rows_alice.len(), 1);
+    assert_eq!(rows_alice[0].user_id, "u-1");
+    assert_eq!(rows_alice[0].display_name, "Alice Liddell");
+
+    // 3. Filter matching username only ("chaplin" -> Charlie with display_name "The Tramp")
+    let rows_chaplin = discord_rs::app::friends_hub::collect_friend_rows(&state, "chaplin");
+    assert_eq!(rows_chaplin.len(), 1);
+    assert_eq!(rows_chaplin[0].user_id, "u-3");
+
+    // 4. Case-insensitivity ("BOB" matches "bob_builder" and "Robert Bob")
+    let rows_bob = discord_rs::app::friends_hub::collect_friend_rows(&state, "BOB");
+    assert_eq!(rows_bob.len(), 1);
+    assert_eq!(rows_bob[0].user_id, "u-2");
+
+    // 5. Query matching nothing returns empty list
+    let rows_none = discord_rs::app::friends_hub::collect_friend_rows(&state, "nonexistent");
+    assert!(rows_none.is_empty());
+
+    // 6. Tab filtering combined with search query:
+    // Charlie is offline, so searching "chaplin" in Online tab yields 0 rows
+    state.friends_tab = FriendsTab::Online;
+    let rows_online_c = discord_rs::app::friends_hub::collect_friend_rows(&state, "chaplin");
+    assert!(rows_online_c.is_empty());
+
+    // Alice is online, so searching "alice" in Online tab yields 1 row
+    let rows_online_alice = discord_rs::app::friends_hub::collect_friend_rows(&state, "alice");
+    assert_eq!(rows_online_alice.len(), 1);
+    assert_eq!(rows_online_alice[0].user_id, "u-1");
+}
+
+
