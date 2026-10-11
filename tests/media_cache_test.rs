@@ -1,5 +1,5 @@
 use chrono::Utc;
-use discord_rs::protocol::media_cache::{MediaCacheManager, StickerFormatType};
+use discord_rs::protocol::media_cache::MediaCacheManager;
 use std::fs;
 
 #[test]
@@ -35,6 +35,10 @@ async fn test_recent_emojis_recording() {
     ));
     let mgr = MediaCacheManager::with_root(&temp_dir);
 
+    // Sem histórico de uso, a lista deve vir vazia (zero mocks)
+    let initial = mgr.get_recent_emojis().await;
+    assert!(initial.is_empty(), "Sem histórico de uso, recentes deve vir vazio");
+
     mgr.record_emoji_use("🦀", "ferris", false, None).await;
     mgr.record_emoji_use("🦀", "ferris", false, None).await;
 
@@ -48,41 +52,35 @@ async fn test_recent_emojis_recording() {
 #[test]
 fn test_soundboard_defaults() {
     let sounds = MediaCacheManager::get_default_soundboard_sounds();
-    assert!(!sounds.is_empty());
-    let names: Vec<&str> = sounds.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"Quack"));
-    assert!(names.contains(&"Airhorn"));
-    assert!(names.contains(&"Cricket"));
-    assert!(names.contains(&"Applause"));
+    assert!(
+        sounds.is_empty(),
+        "Sem resposta da rede/API, lista de sons deve vir vazia (zero mocks)"
+    );
 }
 
 #[test]
 fn test_tenor_gif_categories() {
     let trending = MediaCacheManager::get_curated_tenor_gifs_for_category("trending");
-    assert!(!trending.is_empty());
+    assert!(
+        trending.is_empty(),
+        "Sem rede/resposta real da API, lista de GIFs deve vir vazia (zero mocks)"
+    );
 
     let anime = MediaCacheManager::get_curated_tenor_gifs_for_category("anime");
-    assert!(!anime.is_empty());
-    assert!(anime.iter().any(|g| g.category.as_deref() == Some("anime")));
+    assert!(anime.is_empty());
 
     let reactions = MediaCacheManager::get_curated_tenor_gifs_for_category("reactions");
-    assert!(!reactions.is_empty());
-    assert!(reactions.iter().any(|g| g.category.as_deref() == Some("reactions")));
+    assert!(reactions.is_empty());
 
     let memes = MediaCacheManager::get_curated_tenor_gifs_for_category("memes");
-    assert!(!memes.is_empty());
-    assert!(memes.iter().any(|g| g.category.as_deref() == Some("memes")));
+    assert!(memes.is_empty());
 }
 
 #[test]
 fn test_sticker_packs_defaults() {
     let packs = MediaCacheManager::get_default_sticker_packs();
-    assert!(packs.len() >= 3);
-    assert!(packs.iter().any(|p| p.name == "Wumpus Adventures"));
-    assert!(packs.iter().any(|p| p.name == "Clyde Classic"));
-    assert!(packs.iter().any(|p| p.name == "Nelly the Hamster"));
-
-    let wumpus_pack = packs.iter().find(|p| p.name == "Wumpus Adventures").unwrap();
-    assert!(wumpus_pack.stickers.len() >= 4);
-    assert_eq!(wumpus_pack.stickers[0].format_type, StickerFormatType::Png);
+    assert!(
+        packs.is_empty(),
+        "Sem resposta da rede/API, pacotes de figurinhas devem vir vazios (zero mocks)"
+    );
 }
