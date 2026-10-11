@@ -16,6 +16,7 @@ impl AppState {
                 self.current_user.id = user.id;
                 self.current_user.username = username.clone();
                 self.current_user.display_name = display_name;
+                self.current_user.discriminator = user.discriminator;
                 self.current_user.avatar_text = avatar_text;
                 self.current_user.avatar_url = avatar_url;
                 self.current_user.avatar_decoration_data = user.avatar_decoration_data;
@@ -625,10 +626,10 @@ impl AppState {
                     existing.presence = presence;
                     existing.custom_status = custom_status;
                     existing.relationship_type = r.rel_type;
-                    existing.avatar_decoration_data = r.avatar_decoration_data;
+                    existing.avatar_decoration_data = r.avatar_decoration_data.clone();
                 } else {
                     self.friends.push(FriendItemState {
-                        id: r.id,
+                        id: r.id.clone(),
                         username: r.username,
                         display_name,
                         avatar_url,
@@ -636,8 +637,11 @@ impl AppState {
                         presence,
                         custom_status,
                         relationship_type: r.rel_type,
-                        avatar_decoration_data: r.avatar_decoration_data,
+                        avatar_decoration_data: r.avatar_decoration_data.clone(),
                     });
+                }
+                if let Some(active) = self.active_now_items.iter_mut().find(|a| a.user_id == r.id) {
+                    active.avatar_decoration_data = r.avatar_decoration_data;
                 }
             }
             TransportEvent::RelationshipRemove { id } => {
@@ -697,6 +701,12 @@ impl AppState {
                 self.current_user.avatar_text = avatar_text;
                 self.current_user.avatar_url = avatar_url;
                 self.current_user.avatar_decoration_data = user.avatar_decoration_data;
+                if self.is_connected_to_gateway {
+                    self.connection_status = format!("Conectado como @{}", self.current_user.username);
+                    if matches!(self.connection_mode, ConnectionMode::LiveDiscord(_)) {
+                        self.connection_mode = ConnectionMode::LiveDiscord(self.current_user.username.clone());
+                    }
+                }
             }
             _ => {}
         }

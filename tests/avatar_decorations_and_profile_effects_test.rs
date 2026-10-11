@@ -422,6 +422,22 @@ fn test_krel_relationship_decoration_reaches_friend_state() {
         None
     );
 
+    // Flat structure (top-level decoration fallback)
+    let flat = serde_json::json!({
+        "id": "synth-user-112b",
+        "type": 1,
+        "username": "synth_flat",
+        "avatar_decoration_data": { "asset": "a_synth_flat_rel_deco" }
+    });
+    assert_eq!(
+        parse_relationship_from_json(&flat)
+            .expect("flat relationship must parse")
+            .avatar_decoration_data
+            .as_ref()
+            .map(|d| d.asset.as_str()),
+        Some("a_synth_flat_rel_deco")
+    );
+
     // 2. Bulk path: RelationshipsUpdated carries the decoration into FriendItemState.
     let mut state = AppState::new();
     state.friends.clear();
@@ -585,4 +601,29 @@ fn test_kavatardata_struct_json_backward_shapes() {
         serde_json::from_str(r#"{"user_id": "synth-user-116", "session_id": "s"}"#)
             .expect("legacy voice state must deserialize");
     assert_eq!(vs_bare.avatar_decoration_data, None);
+
+    // Relationship with decoration present / absent / null.
+    let rel_json = r#"{
+        "id": "synth-user-117",
+        "type": 1,
+        "username": "synth_rel_json",
+        "avatar_decoration_data": { "asset": "a_synth_rel_json" }
+    }"#;
+    let rel: Relationship = serde_json::from_str(rel_json).expect("relationship must deserialize");
+    assert_eq!(
+        rel.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_synth_rel_json")
+    );
+
+    let rel_bare: Relationship = serde_json::from_str(
+        r#"{"id": "synth-user-118", "type": 1, "username": "synth_bare"}"#,
+    )
+    .expect("legacy relationship must deserialize");
+    assert_eq!(rel_bare.avatar_decoration_data, None);
+
+    let rel_null: Relationship = serde_json::from_str(
+        r#"{"id": "synth-user-119", "type": 1, "username": "synth_null", "avatar_decoration_data": null}"#,
+    )
+    .expect("null decoration relationship must deserialize");
+    assert_eq!(rel_null.avatar_decoration_data, None);
 }

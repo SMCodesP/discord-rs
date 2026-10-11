@@ -18,6 +18,7 @@ pub struct GuildFolder {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct Relationship {
     pub id: String,
+    #[serde(alias = "type", default)]
     pub rel_type: u32,
     pub username: String,
     pub global_name: Option<String>,
