@@ -1,3 +1,4 @@
+use gpui_kit::{Pixels, Point};
 use super::*;
 
 impl AppState {
@@ -32,22 +33,32 @@ impl AppState {
         self.active_modal = None;
     }
 
-    /// Opens the user profile popout for a user (with current guild context)
-    pub fn open_user_profile(&mut self, user_id: &str) {
+    /// Opens the user profile popout for a user (with current guild context and optional screen anchor)
+    pub fn open_user_profile(&mut self, user_id: &str, anchor: Option<Point<Pixels>>) {
         let current_guild = self.selected_guild_id.clone();
-        self.open_user_profile_in_guild(user_id, current_guild);
+        self.open_user_profile_in_guild(user_id, current_guild, anchor);
     }
 
-    /// Opens the user profile popout with specific guild context
-    pub fn open_user_profile_in_guild(&mut self, user_id: &str, guild_id: Option<String>) {
+    /// Opens the user profile popout with specific guild context and optional screen anchor
+    pub fn open_user_profile_in_guild(
+        &mut self,
+        user_id: &str,
+        guild_id: Option<String>,
+        anchor: Option<Point<Pixels>>,
+    ) {
         let uid = user_id.to_string();
 
         // Guard against duplicate concurrent fetch if already loading this user
         if let Some(ref popout) = self.profile_popout {
             if popout.user_id == uid && popout.is_loading {
+                self.profile_anchor = anchor;
                 return;
             }
         }
+
+        self.profile_anchor = anchor;
+        self.profile_modal_open = false;
+        self.profile_modal_tab = ProfileModalTab::AboutMe;
 
         let fallback = self.build_fallback_profile_data(&uid, guild_id.as_deref());
 
@@ -84,9 +95,50 @@ impl AppState {
         }
     }
 
-    /// Closes the active user profile popout
+    /// Closes the active user profile popout and resets anchor/modal state
     pub fn close_profile_popout(&mut self) {
         self.profile_popout = None;
+        self.profile_anchor = None;
+        self.profile_modal_open = false;
+    }
+
+    /// Returns whether the full user profile modal dialog is open (requires popout to be open)
+    pub fn is_profile_modal_open(&self) -> bool {
+        self.profile_modal_open && self.profile_popout.is_some()
+    }
+
+    /// Opens the full user profile modal dialog (only succeeds if profile popout is currently open)
+    pub fn open_user_profile_modal(&mut self) {
+        if self.profile_popout.is_some() {
+            self.profile_modal_open = true;
+        }
+    }
+
+    /// Closes the full user profile modal dialog while keeping the popout open
+    pub fn close_user_profile_modal(&mut self) {
+        self.profile_modal_open = false;
+    }
+
+    /// Sets the active tab in the full user profile modal dialog
+    pub fn set_profile_modal_tab(&mut self, tab: ProfileModalTab) {
+        self.profile_modal_tab = tab;
+    }
+
+    /// Handles Escape key dispatch, closing one level at a time:
+    /// Modal -> Popout -> other modals. Returns true if something was closed.
+    pub fn handle_escape(&mut self) -> bool {
+        if self.is_profile_modal_open() {
+            self.close_user_profile_modal();
+            true
+        } else if self.profile_popout.is_some() {
+            self.close_profile_popout();
+            true
+        } else if self.active_modal.is_some() {
+            self.close_modal();
+            true
+        } else {
+            false
+        }
     }
 
     /// Updates the profile popout with loaded data

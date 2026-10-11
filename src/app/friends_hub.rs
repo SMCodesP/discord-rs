@@ -1094,10 +1094,11 @@ fn render_friend_row_left(
         .child(
             div()
                 .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                .on_mouse_down(MouseButton::Left, move |ev, _win, cx| {
                     if !avatar_uid.is_empty() {
+                        let pos = ev.position;
                         entity_avatar.update(cx, |s, cx| {
-                            s.open_user_profile(&avatar_uid);
+                            s.open_user_profile(&avatar_uid, Some(pos));
                             cx.notify();
                         });
                     }
@@ -1130,10 +1131,11 @@ fn render_friend_row_left(
                                 .text_color(white())
                                 .cursor_pointer()
                                 .hover(|s| s.underline())
-                                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                .on_mouse_down(MouseButton::Left, move |ev, _win, cx| {
                                     if !name_uid.is_empty() {
+                                        let pos = ev.position;
                                         entity_name.update(cx, |s, cx| {
-                                            s.open_user_profile(&name_uid);
+                                            s.open_user_profile(&name_uid, Some(pos));
                                             cx.notify();
                                         });
                                     }

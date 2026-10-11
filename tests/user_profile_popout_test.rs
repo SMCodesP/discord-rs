@@ -5,6 +5,7 @@ use discord_rs::domain::profile::{
 };
 use discord_rs::protocol::discord_api::parse_user_profile_from_json;
 use discord_rs::protocol::transport::TransportEvent;
+use gpui_kit::{point, px};
 
 #[test]
 fn test_snowflake_to_datetime_calculation() {
@@ -145,7 +146,7 @@ fn test_app_state_profile_popout_workflow() {
     assert!(state.profile_popout.is_none());
 
     // 1. Open profile popout (initial loading state)
-    state.open_user_profile("user_100");
+    state.open_user_profile("user_100", None);
     assert!(state.profile_popout.is_some());
     let popout = state.profile_popout.as_ref().unwrap();
     assert_eq!(popout.user_id, "user_100");
@@ -196,7 +197,7 @@ fn test_app_state_profile_popout_workflow() {
     assert!(popout.error.is_none());
 
     // 4. Opening a new user profile without existing data where error occurs sets error state
-    state.open_user_profile("user_200");
+    state.open_user_profile("user_200", None);
     let popout = state.profile_popout.as_ref().unwrap();
     assert_eq!(popout.user_id, "user_200");
     assert!(popout.is_loading);
@@ -217,7 +218,7 @@ fn test_single_fetch_and_concurrent_deduplication() {
     let mut state = AppState::new();
 
     // First open triggers loading
-    state.open_user_profile("user_duplicate_check");
+    state.open_user_profile("user_duplicate_check", None);
     assert!(state.profile_popout.is_some());
     assert!(state.profile_popout.as_ref().unwrap().is_loading);
 
@@ -226,7 +227,7 @@ fn test_single_fetch_and_concurrent_deduplication() {
 
     // Second open for SAME user while is_loading is true:
     // MUST NOT reset popout state or spawn duplicate fetch
-    state.open_user_profile("user_duplicate_check");
+    state.open_user_profile("user_duplicate_check", None);
     let popout = state.profile_popout.as_ref().unwrap();
     assert_eq!(popout.user_id, "user_duplicate_check");
     assert_eq!(popout.quick_message, "drafting...");
@@ -238,11 +239,11 @@ fn test_out_of_order_stale_response_discarded() {
     let mut state = AppState::new();
 
     // 1. User clicks User A
-    state.open_user_profile("user_A");
+    state.open_user_profile("user_A", None);
     assert_eq!(state.profile_popout.as_ref().unwrap().user_id, "user_A");
 
     // 2. Before User A responds, User clicks User B
-    state.open_user_profile("user_B");
+    state.open_user_profile("user_B", None);
     assert_eq!(state.profile_popout.as_ref().unwrap().user_id, "user_B");
 
     // 3. Stale response for User A arrives via TransportEvent
@@ -322,7 +323,7 @@ fn test_profile_popout_quick_direct_message_send() {
     let mut state = AppState::new();
 
     // Open profile popout
-    state.open_user_profile("recipient_99");
+    state.open_user_profile("recipient_99", None);
 
     // Populate profile data with target username
     let test_profile = UserProfileData {
@@ -386,11 +387,95 @@ fn test_profile_popout_live_presence_integration() {
     assert_eq!(live_presence.activity, Some(game));
 
     // Open profile
-    state.open_user_profile(user_id);
+    state.open_user_profile(user_id, None);
     let popout = state.profile_popout.as_ref().unwrap();
     assert_eq!(popout.user_id, user_id);
 
     // Live presence is resolved for this user from state
     let resolved_p = state.get_user_presence(&popout.user_id);
     assert_eq!(resolved_p.unwrap().status, discord_rs::domain::user::PresenceStatus::DoNotDisturb);
+}
+
+#[test]
+fn test_profile_popout_anchor_stored_and_cleared_on_close() {
+    let mut state = AppState::new();
+    assert!(state.profile_anchor.is_none());
+
+    // Open popout with anchor coordinates
+    let anchor_pt = point(px(1040.0), px(60.0));
+    state.open_user_profile("user_anchor_test", Some(anchor_pt));
+
+    assert!(state.profile_popout.is_some());
+    assert_eq!(state.profile_anchor, Some(anchor_pt));
+
+    // Close popout -> anchor is cleared
+    state.close_profile_popout();
+    assert!(state.profile_popout.is_none());
+    assert!(state.profile_anchor.is_none());
+}
+
+#[test]
+fn test_profile_modal_only_opens_with_popout_open() {
+    let mut state = AppState::new();
+    assert!(state.profile_popout.is_none());
+    assert!(!state.is_profile_modal_open());
+
+    // Attempting to open modal without popout must not open modal
+    state.open_user_profile_modal();
+    assert!(!state.is_profile_modal_open());
+
+    // Open popout first
+    state.open_user_profile("user_modal_test", None);
+    assert!(state.profile_popout.is_some());
+    assert!(!state.is_profile_modal_open());
+
+    // Now open modal succeeds
+    state.open_user_profile_modal();
+    assert!(state.is_profile_modal_open());
+}
+
+#[test]
+fn test_escape_closes_one_level_at_a_time() {
+    let mut state = AppState::new();
+
+    // With nothing open, Esc returns false
+    assert!(!state.handle_escape());
+
+    // Open popout and modal
+    state.open_user_profile("user_esc_test", None);
+    state.open_user_profile_modal();
+    assert!(state.is_profile_modal_open());
+    assert!(state.profile_popout.is_some());
+
+    // First Esc: closes modal only, leaves popout open
+    let handled_first = state.handle_escape();
+    assert!(handled_first);
+    assert!(!state.is_profile_modal_open());
+    assert!(state.profile_popout.is_some());
+
+    // Second Esc: closes popout
+    let handled_second = state.handle_escape();
+    assert!(handled_second);
+    assert!(!state.is_profile_modal_open());
+    assert!(state.profile_popout.is_none());
+
+    // Third Esc: nothing to close, returns false
+    let handled_third = state.handle_escape();
+    assert!(!handled_third);
+}
+
+#[test]
+fn test_close_profile_modal_leaves_popout_open() {
+    let mut state = AppState::new();
+
+    state.open_user_profile("user_modal_close_test", None);
+    state.open_user_profile_modal();
+    assert!(state.is_profile_modal_open());
+    assert!(state.profile_popout.is_some());
+
+    // Explicitly closing the modal dialog leaves the popout visible
+    state.close_user_profile_modal();
+    assert!(!state.is_profile_modal_open());
+    assert!(state.profile_popout.is_some());
+    assert_eq!(state.profile_popout.as_ref().unwrap().user_id, "user_modal_close_test");
 }

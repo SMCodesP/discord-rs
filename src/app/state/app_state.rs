@@ -111,6 +111,12 @@ pub struct AppState {
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
     /// Currently opened user profile popout
     pub profile_popout: Option<crate::domain::profile::ProfilePopoutState>,
+    /// Screen anchor position for the user profile popout
+    pub profile_anchor: Option<gpui::Point<gpui::Pixels>>,
+    /// Whether the full user profile modal dialog is open
+    pub profile_modal_open: bool,
+    /// Active tab in the full user profile modal
+    pub profile_modal_tab: ProfileModalTab,
     /// Collectibles profile effects catalog
     pub profile_effects_catalog: crate::components::ProfileEffectCatalog,
     /// Active voice states by voice channel ID

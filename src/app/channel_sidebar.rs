@@ -459,10 +459,11 @@ fn render_dm_item(
                     let mut av = div().child(avatar_el).cursor_pointer();
                     if let Some(uid) = dm.recipient_ids.first().cloned() {
                         let av_entity = entity.clone();
-                        av = av.on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                        av = av.on_mouse_down(MouseButton::Left, move |ev, _win, cx| {
                             let uid = uid.clone();
+                            let pos = ev.position;
                             av_entity.update(cx, |s, cx| {
-                                s.open_user_profile(&uid);
+                                s.open_user_profile(&uid, Some(pos));
                                 cx.notify();
                             });
                         });
