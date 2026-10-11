@@ -1,0 +1,58 @@
+{
+  "screen": "friends",
+  "connected": true,
+  "connection_status": "Conectado (captura local)",
+  "selected_guild_id": null,
+  "selected_channel_id": null,
+  "show_members": false,
+  "friends_tab": "Online",
+  "current_user": {
+    "id": "u-me",
+    "username": "usuario_a",
+    "display_name": "Usuário A",
+    "presence": "Online",
+    "custom_status": "Captura de exemplo"
+  },
+  "guilds": [],
+  "dm_channels": [],
+  "messages": {},
+  "members": [],
+  "friends": [
+    {
+      "id": "u-b",
+      "username": "usuario_b",
+      "display_name": "Usuário B",
+      "presence": "Online",
+      "custom_status": "Jogando Exemplo Quest"
+    },
+    {
+      "id": "u-c",
+      "username": "usuario_c",
+      "display_name": "Usuário C",
+      "presence": "Online",
+      "custom_status": null
+    },
+    {
+      "id": "u-d",
+      "username": "usuario_d",
+      "display_name": "Usuário D",
+      "presence": "Idle",
+      "custom_status": "Volto já"
+    },
+    {
+      "id": "u-e",
+      "username": "usuario_e",
+      "display_name": "Usuário E",
+      "presence": "Offline",
+      "custom_status": null
+    }
+  ],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": null,
+  "is_search_open": false,
+  "search_query": "",
+  "search_results": [],
+  "media_picker": null,
+  "connections": []
+}
