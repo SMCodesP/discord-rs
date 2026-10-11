@@ -785,6 +785,7 @@ fn gallery_buttons() -> AnyElement {
         ("Gray", ButtonVariant::Gray),
         ("Danger", ButtonVariant::Danger),
         ("Ghost", ButtonVariant::Ghost),
+        ("Link", ButtonVariant::Link),
     ];
     let sizes = [
         ("Sm", ButtonSize::Sm),
@@ -834,7 +835,7 @@ fn gallery_buttons() -> AnyElement {
         row = row.child(c);
     }
     gallery_section(
-        "Button — 4 variantes x 3 tamanhos x normal/disabled x com/sem ícone",
+        "Button — 5 variantes x 3 tamanhos x normal/disabled x com/sem ícone",
         row.into_any_element(),
     )
 }
