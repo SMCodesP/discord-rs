@@ -13,6 +13,7 @@ fn test_relationship_model_types_and_helpers() {
         avatar: Some("avatar1".into()),
         global_name: Some("Alice".into()),
         rel_type: Relationship::TYPE_FRIEND,
+        avatar_decoration_data: None,
     };
     assert!(friend.is_friend());
     assert!(!friend.is_blocked());
@@ -25,6 +26,7 @@ fn test_relationship_model_types_and_helpers() {
         avatar: None,
         global_name: None,
         rel_type: Relationship::TYPE_BLOCKED,
+        avatar_decoration_data: None,
     };
     assert!(blocked.is_blocked());
     assert!(!blocked.is_friend());
@@ -35,6 +37,7 @@ fn test_relationship_model_types_and_helpers() {
         avatar: None,
         global_name: Some("Bob".into()),
         rel_type: Relationship::TYPE_INCOMING_REQUEST,
+        avatar_decoration_data: None,
     };
     assert!(incoming.is_incoming_request());
 
@@ -44,6 +47,7 @@ fn test_relationship_model_types_and_helpers() {
         avatar: None,
         global_name: Some("Carol".into()),
         rel_type: Relationship::TYPE_OUTGOING_REQUEST,
+        avatar_decoration_data: None,
     };
     assert!(outgoing.is_outgoing_request());
 }
@@ -60,6 +64,7 @@ fn test_app_state_relationship_events() {
             avatar: Some("av101".into()),
             global_name: Some("Friend One".into()),
             rel_type: 1,
+            avatar_decoration_data: None,
         },
         Relationship {
             id: "102".into(),
@@ -67,6 +72,7 @@ fn test_app_state_relationship_events() {
             avatar: None,
             global_name: Some("Pending User".into()),
             rel_type: 3,
+            avatar_decoration_data: None,
         },
     ];
     state.handle_transport_event(TransportEvent::RelationshipsUpdated(rels));
@@ -86,6 +92,7 @@ fn test_app_state_relationship_events() {
         avatar: None,
         global_name: None,
         rel_type: 2,
+        avatar_decoration_data: None,
     }));
 
     assert_eq!(state.friends.len(), 3);
@@ -111,6 +118,7 @@ fn test_active_now_aggregation_from_presence() {
         avatar: None,
         global_name: Some("Gamer".into()),
         rel_type: 1,
+        avatar_decoration_data: None,
     }));
 
     // Presence update with Playing game
@@ -178,6 +186,7 @@ fn test_relationship_default_presence_is_offline() {
         avatar: None,
         global_name: Some("Newbie".into()),
         rel_type: 1,
+        avatar_decoration_data: None,
     }));
 
     let f = state.friends.iter().find(|f| f.id == "user-new").unwrap();
@@ -259,6 +268,7 @@ async fn test_send_friend_request_no_fake_line_and_result_handling() {
         avatar: None,
         global_name: None,
         rel_type: 4, // Outgoing pending
+        avatar_decoration_data: None,
     }));
     assert_eq!(state.friends.len(), 1);
     assert_eq!(state.friends[0].id, "real-snowflake-12345");
@@ -304,6 +314,7 @@ async fn test_pending_relationship_actions_state() {
         avatar: None,
         global_name: Some("Target".into()),
         rel_type: 1, // now Friend
+        avatar_decoration_data: None,
     }));
     assert!(!state.pending_relationship_actions.contains("target-user"));
     assert_eq!(state.friends[0].relationship_type, 1);

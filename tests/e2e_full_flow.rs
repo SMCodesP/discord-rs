@@ -263,6 +263,7 @@ fn test_e2e_home_and_dm_navigation_with_friends() {
         Relationship {
             id: "user-ferris".to_string(),
             rel_type: 1, // Friend
+            avatar_decoration_data: None,
             username: "ferris_crab".to_string(),
             global_name: Some("Ferris".to_string()),
             avatar: Some("https://cdn.discordapp.com/avatars/user-ferris/avatar.png".to_string()),
@@ -270,6 +271,7 @@ fn test_e2e_home_and_dm_navigation_with_friends() {
         Relationship {
             id: "user-ana".to_string(),
             rel_type: 1, // Friend
+            avatar_decoration_data: None,
             username: "ana_rust".to_string(),
             global_name: None,
             avatar: None,
