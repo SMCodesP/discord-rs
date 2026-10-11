@@ -224,12 +224,17 @@ impl RenderOnce for Banner {
         }
 
         // Left Side: Icon + Message Content
+        // overflow_hidden on both flex containers lets long messages wrap
+        // inside the box instead of overflowing it (same technique as the
+        // kit Alert: flex_1 + overflow_hidden on each text ancestor).
         let mut left_side = div()
             .flex()
             .flex_row()
             .items_center()
             .gap(space_4())
-            .flex_1();
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden();
 
         // Banner Icon
         left_side = left_side.child(
@@ -247,7 +252,9 @@ impl RenderOnce for Banner {
             .flex()
             .flex_col()
             .gap(px(2.0))
-            .flex_1();
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden();
 
         if let Some(title) = self.title {
             text_column = text_column.child(
