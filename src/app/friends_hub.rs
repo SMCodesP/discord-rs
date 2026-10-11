@@ -80,11 +80,11 @@ pub fn render_friends_hub(
 fn render_header(entity: Entity<AppState>, state: &AppState) -> Div {
     div()
         .w_full()
-        .h(px(48.0))
+        .h(px(49.0))
         .border_b_1()
-        // TOKEN FALTANDO: --border-subtle
-        .border_color(rgb(0x1f2023))
-        .px(px(24.0))
+        .border_color(border_subtle())
+        .pl(px(16.0))
+        .pr(px(16.0))
         .flex()
         .flex_row()
         .items_center()
@@ -270,8 +270,7 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
             "tab-pending",
             "Pendente",
             None,
-            // TOKEN FALTANDO: --badge-notification-background
-            (pending_friends > 0).then(|| tab_count_badge(pending_friends, rgb(0xda373c))),
+            (pending_friends > 0).then(|| tab_count_badge(pending_friends, legacy_da373c())),
             state.friends_tab == FriendsTab::Pending,
             move |_ev, _window, cx| {
                 e_pending.update(cx, |s, cx| {
@@ -359,8 +358,7 @@ fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
             "subtab-spam",
             "Spam",
             None,
-            // TOKEN FALTANDO: --badge-notification-background
-            (spam_count > 0).then(|| tab_count_badge(spam_count, rgb(0xda373c))),
+            (spam_count > 0).then(|| tab_count_badge(spam_count, legacy_da373c())),
             state.message_requests_subtab == MessageRequestsSubTab::Spam,
             move |_ev, _window, cx| {
                 e_spam.update(cx, |s, cx| {
@@ -385,13 +383,21 @@ fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
         .into_any_element()
 }
 
-/// Right side of the header: inbox + help icons (display-only, as today).
+/// Right side of the header: new group dm + inbox + help icons per friends-online.png.
 fn render_header_actions() -> AnyElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(16.0))
+        .child(icon_chat(px(20.0), text_muted()))
+        .child(
+            div()
+                .w(px(1.0))
+                .h(px(16.0))
+                .bg(border_subtle())
+                .mx(px(2.0)),
+        )
         .child(icon_inbox(px(20.0), text_muted()))
         .child(icon_help(px(20.0), text_muted()))
         .into_any_element()
@@ -616,9 +622,8 @@ fn render_msgreq_card_title(req: &MessageRequestItem) -> AnyElement {
                 .rounded(px(4.0))
                 .bg(bg_server())
                 .text_size(px(11.0))
-                // TOKEN FALTANDO: --text-muted (cinza do chip de servidor em comum, 0x949ba4)
-                .text_color(rgb(0x949ba4))
-                .child(icon_shield(px(12.0), rgb(0x949ba4))) // TOKEN FALTANDO: --text-muted
+                .text_color(legacy_949ba4())
+                .child(icon_shield(px(12.0), legacy_949ba4()))
                 .child(guild_name.clone())
         }))
         .into_any_element()
@@ -1147,9 +1152,8 @@ fn render_friend_row_left(
                 .child(
                     div()
                         .text_size(font_size_xs())
-                        // TOKEN FALTANDO: --status-danger (vermelho do "Bloqueado", 0xda373c)
                         .text_color(if row.relationship_type == 2 {
-                            rgb(0xda373c) // TOKEN FALTANDO: --status-danger
+                            status_danger()
                         } else {
                             text_muted()
                         })
@@ -1205,8 +1209,7 @@ fn render_incoming_actions(
         ))
         .child(circle_action_button(
             SharedString::from(format!("btn-decline-{}", idx)),
-            // TOKEN FALTANDO: --status-danger (vermelho do recusar, 0xda373c)
-            icon_close(px(18.0), rgb(0xda373c)).into_any_element(),
+            icon_close(px(18.0), status_danger()).into_any_element(),
             "Ignorar".into(),
             pending,
             move |_window, cx| {
@@ -1345,11 +1348,10 @@ pub fn render_add_friend_view(
         .children(state.add_friend_feedback.clone().map(|(ok, msg)| {
             div()
                 .text_size(px(13.0))
-                // TOKEN FALTANDO: --status-danger (erro); ok usa status_online().
                 .text_color(if ok {
                     status_online()
                 } else {
-                    rgb(0xda373c) // TOKEN FALTANDO: --status-danger
+                    status_danger()
                 })
                 .child(msg)
         }))
@@ -1636,8 +1638,7 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                // TOKEN FALTANDO: --text-muted (cinza do subtítulo, 0x949ba4)
-                                .text_color(rgb(0x949ba4))
+                                .text_color(legacy_949ba4())
                                 .child(item.header_subtitle.clone()),
                         ),
                 ),
@@ -1648,13 +1649,12 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
                 .items_center()
                 .justify_center()
                 .child(match item.kind {
-                    // TOKEN FALTANDO: --text-muted (cinza dos ícones de app, 0x949ba4)
                     ActiveNowKind::Quest | ActiveNowKind::Game => {
-                        icon_gamepad(px(16.0), rgb(0x949ba4))
+                        icon_gamepad(px(16.0), legacy_949ba4())
                     }
                     ActiveNowKind::Spotify => icon_music(px(16.0), status_online()),
                     ActiveNowKind::RichPresence => {
-                        icon_screen_share(px(16.0), rgb(0x949ba4))
+                        icon_screen_share(px(16.0), legacy_949ba4())
                     }
                 }),
         )
@@ -1691,8 +1691,7 @@ fn render_active_now_details(item: &ActiveNowItem) -> AnyElement {
                 .children(item.details_state.as_ref().map(|state_text| {
                     div()
                         .text_size(px(12.0))
-                        // TOKEN FALTANDO: --text-muted (cinza do state, 0x949ba4)
-                        .text_color(rgb(0x949ba4))
+                        .text_color(legacy_949ba4())
                         .child(state_text.clone())
                 }))
                 .children(item.elapsed_time_text.as_ref().map(|elapsed| {

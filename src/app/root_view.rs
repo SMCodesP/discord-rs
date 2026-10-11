@@ -608,8 +608,8 @@ impl Render for RootView {
                     .flex_col()
                     .bg(bg_chat())
                     .overflow_hidden()
-                    // Top Header Bar (48px)
-                    .child(self.header_bar.clone())
+                    // Top Header Bar (48px) - shown for chat / voice channels; Friends Hub renders its own unified header bar
+                    .children((!(state.selected_guild_id.is_none() && state.selected_channel_id.is_none())).then(|| self.header_bar.clone()))
                     // Center Content (Voice Panel if in voice channel, Friends View if in Home with no channel selected, else Chat area)
                     .child(
                         div()
@@ -1352,7 +1352,7 @@ fn build_add_friend_to_group_dialog(
             div()
                 .p(space_4())
                 .text_center()
-                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                .text_color(legacy_949ba4())
                 .text_size(px(13.0))
                 .child("Nenhum amigo disponível na sua lista para adicionar.")
                 .into_any_element(),
@@ -1379,7 +1379,7 @@ fn build_add_friend_to_group_dialog(
         )
         .child(
             div()
-                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
+                .text_color(legacy_949ba4())
                 .text_size(px(13.0))
                 .child("Selecione amigos para adicionar a este grupo de conversa direta."),
         );
@@ -1454,7 +1454,7 @@ fn render_add_friend_row(
                         )
                         .child(
                             div()
-                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                                .text_color(legacy_949ba4())
                                 .text_size(px(11.0))
                                 .child(format!("@{}", fname)),
                         ),
@@ -1466,7 +1466,7 @@ fn render_add_friend_row(
                 .py(px(4.0))
                 .rounded(radius_sm())
                 .bg(channel_active())
-                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                .text_color(legacy_949ba4())
                 .text_size(px(12.0))
                 .child("Já adicionado")
                 .into_any_element()
@@ -1520,7 +1520,7 @@ fn build_create_group_dm_dialog(
             div()
                 .p(space_4())
                 .text_center()
-                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                .text_color(legacy_949ba4())
                 .text_size(px(13.0))
                 .child("Nenhum amigo disponível na sua lista para criar grupo.")
                 .into_any_element(),
@@ -1547,7 +1547,7 @@ fn build_create_group_dm_dialog(
         )
         .child(
             div()
-                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --header-secondary
+                .text_color(legacy_949ba4())
                 .text_size(px(13.0))
                 .child("Selecione um amigo para iniciar um novo grupo de conversa."),
         );
@@ -1619,7 +1619,7 @@ fn render_create_group_dm_row(
                         )
                         .child(
                             div()
-                                .text_color(rgb(0x949ba4)) // TOKEN FALTANDO: --text-muted
+                                .text_color(legacy_949ba4())
                                 .text_size(px(11.0))
                                 .child(format!("@{}", fname)),
                         ),

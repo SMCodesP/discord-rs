@@ -133,7 +133,7 @@ fn render_server_header(guild_name: &str) -> AnyElement {
         .items_center()
         .justify_between()
         .border_b_1()
-        .border_color(rgba(0x635a731f)) // TOKEN FALTANDO: --border-subtle
+        .border_color(border_subtle())
         .cursor_pointer()
         .hover(|s| s.bg(channel_hover()))
         .child(
@@ -171,7 +171,7 @@ fn render_dm_search_header() -> AnyElement {
         .flex_row()
         .items_center()
         .border_b_1()
-        .border_color(rgba(0x635a731f)) // TOKEN FALTANDO: --border-subtle
+        .border_color(border_subtle())
         .child(
             div()
                 .w_full()
@@ -673,7 +673,7 @@ fn render_channel_entry(
                     .justify_center()
                     .text_size(px(11.0))
                     .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
-                    .text_color(if is_full { white() } else { rgb(0x9999b9) }) // TOKEN FALTANDO: --interactive-normal
+                    .text_color(if is_full { white() } else { interactive_normal() })
                     .child(format!("{}/{}", count, limit)),
             )
         } else if count > 0 {
@@ -688,7 +688,7 @@ fn render_channel_entry(
                     .justify_center()
                     .text_size(px(11.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
+                    .text_color(interactive_normal())
                     .child(count.to_string()),
             )
         } else {
@@ -720,6 +720,14 @@ fn render_channel_entry(
         row = row.hover(|s| s.bg(channel_hover()));
     }
 
+    let channel_icon_color = if is_selected {
+        white()
+    } else if is_unread {
+        text_header()
+    } else {
+        channels_default()
+    };
+
     row = row
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             let cid = click_cid.clone();
@@ -737,13 +745,7 @@ fn render_channel_entry(
                 .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_size(px(14.0))
-                        .text_color(if is_selected { white() } else { text_muted() })
-                        .child(ch_kind.symbol()),
-                )
+                .child(render_icon(ch_kind.discord_icon(), px(18.0), channel_icon_color))
                 .child(
                     div()
                         .text_size(px(14.0))
@@ -859,7 +861,7 @@ fn render_voice_user_row(
                     div()
                         .text_size(px(13.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
+                        .text_color(interactive_normal())
                         .overflow_hidden()
                         .child(display_name),
                 ),
@@ -1026,7 +1028,7 @@ fn render_user_panel(current_user: &CurrentUserProfile, app_entity: &Entity<AppS
                         )
                         .child(
                             div()
-                                .text_color(rgb(0x9999b9)) // TOKEN FALTANDO: --interactive-normal
+                                .text_color(interactive_normal())
                                 .text_size(px(11.0))
                                 .child(user_tag),
                         ),
@@ -1179,7 +1181,7 @@ fn render_dm_avatar(
                     .right(px(0.0))
                     .size(px(24.0))
                     .rounded(radius_full())
-                    .bg(rgb(0xeb459e)) // TOKEN FALTANDO: --badge-brand-bubble
+                    .bg(badge_brand_bubble())
                     .border_2()
                     .border_color(bg_channels())
                     .flex()
@@ -1296,7 +1298,7 @@ fn render_dm_text_column(
     } else if unread {
         text_header()
     } else {
-        rgb(0x9999b9) // TOKEN FALTANDO: --interactive-normal
+        interactive_normal()
     };
     let font_weight = if is_selected || unread {
         FontWeight::SEMIBOLD

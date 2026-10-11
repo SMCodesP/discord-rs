@@ -106,7 +106,7 @@ fn render_mutual_guilds_list(guilds: &[MutualGuild], is_modal: bool) -> AnyEleme
         return div()
             .py(if is_modal { px(0.0) } else { px(8.0) })
             .text_size(if is_modal { px(14.0) } else { px(12.0) })
-            .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+            .text_color(legacy_949ba4())
             .child("Nenhum servidor em comum.")
             .into_any_element();
     }
@@ -160,7 +160,7 @@ fn render_mutual_friends_content(count: u32, is_modal: bool) -> AnyElement {
         return div()
             .py(if is_modal { px(0.0) } else { px(8.0) })
             .text_size(if is_modal { px(14.0) } else { px(12.0) })
-            .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+            .text_color(legacy_949ba4())
             .child("Nenhum amigo em comum.")
             .into_any_element();
     }
@@ -203,7 +203,7 @@ fn render_member_dates_content(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(icon_info(px(14.0), rgb(0x949ba4))) // COR ANTIGA SEM ORIGEM
+                        .child(icon_info(px(14.0), legacy_949ba4()))
                         .child(
                             div()
                                 .text_size(px(12.0))
@@ -233,7 +233,7 @@ fn render_member_dates_content(
                         .flex_row()
                         .items_center()
                         .gap(px(6.0))
-                        .child(icon_hash(px(14.0), rgb(0x949ba4))) // COR ANTIGA SEM ORIGEM
+                        .child(icon_hash(px(14.0), legacy_949ba4()))
                         .child(
                             div()
                                 .text_size(px(12.0))
@@ -387,7 +387,7 @@ fn render_profile_card(
                             div()
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xfa777c)) // COR ANTIGA SEM ORIGEM
+                                .text_color(legacy_fa777c())
                                 .child(t("profile.error")),
                         )
                         .child(
@@ -597,7 +597,7 @@ fn render_popout_body(
         .child(
             div()
                 .text_size(px(14.0))
-                .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+                .text_color(legacy_949ba4())
                 .child(format!("@{}", username)),
         );
 
@@ -758,7 +758,7 @@ fn render_popout_activity(
             .children(game.state.as_ref().map(|s| {
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+                    .text_color(legacy_949ba4())
                     .child(s.clone())
             }))
             .into_any_element(),
@@ -819,7 +819,7 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_guilds_tab { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
+                .text_color(if is_guilds_tab { white() } else { legacy_949ba4() })
                 .border_b_2()
                 .border_color(if is_guilds_tab { blurple() } else { transparent() })
                 .pb(px(4.0))
@@ -838,7 +838,7 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if !is_guilds_tab { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
+                .text_color(if !is_guilds_tab { white() } else { legacy_949ba4() })
                 .border_b_2()
                 .border_color(if !is_guilds_tab { blurple() } else { transparent() })
                 .pb(px(4.0))
@@ -1070,7 +1070,7 @@ fn render_modal_header(popout: &ProfilePopoutState, presence: Option<&Presence>)
                         .child(
                             div()
                                 .text_size(px(14.0))
-                                .text_color(rgb(0x949ba4)) // COR ANTIGA SEM ORIGEM
+                                .text_color(legacy_949ba4())
                                 .child(format!("@{}", username)),
                         ),
                 ),
@@ -1133,7 +1133,7 @@ fn render_modal_tabs_bar(
                 .cursor_pointer()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_about { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
+                .text_color(if is_about { white() } else { legacy_949ba4() })
                 .border_b_2()
                 .border_color(if is_about { blurple() } else { transparent() })
                 .pb(px(8.0))
@@ -1150,7 +1150,7 @@ fn render_modal_tabs_bar(
                 .cursor_pointer()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_guilds { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
+                .text_color(if is_guilds { white() } else { legacy_949ba4() })
                 .border_b_2()
                 .border_color(if is_guilds { blurple() } else { transparent() })
                 .pb(px(8.0))
@@ -1167,7 +1167,7 @@ fn render_modal_tabs_bar(
                 .cursor_pointer()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_friends { white() } else { rgb(0x949ba4) }) // COR ANTIGA SEM ORIGEM
+                .text_color(if is_friends { white() } else { legacy_949ba4() })
                 .border_b_2()
                 .border_color(if is_friends { blurple() } else { transparent() })
                 .pb(px(8.0))

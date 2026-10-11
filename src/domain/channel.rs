@@ -51,10 +51,22 @@ impl ChannelType {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Text => "#",
-            Self::Voice => "🔊",
-            Self::Announcement => "📢",
-            Self::Category => "📁",
+            Self::Voice => "",
+            Self::Announcement => "",
+            Self::Category => "",
             Self::Dm | Self::GroupDm => "@",
+        }
+    }
+
+    /// Discord vector icon token for the channel.
+    pub fn discord_icon(&self) -> Option<crate::tokens::icons::DiscordIcon> {
+        match self {
+            Self::Text => Some(crate::tokens::icons::DiscordIcon::Hash),
+            Self::Voice => Some(crate::tokens::icons::DiscordIcon::Speaker),
+            Self::Announcement => Some(crate::tokens::icons::DiscordIcon::Megaphone),
+            Self::Category => Some(crate::tokens::icons::DiscordIcon::Folder),
+            Self::Dm => Some(crate::tokens::icons::DiscordIcon::User),
+            Self::GroupDm => Some(crate::tokens::icons::DiscordIcon::Members),
         }
     }
 
