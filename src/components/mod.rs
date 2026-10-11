@@ -11,7 +11,6 @@ pub mod member_item;
 pub mod modal;
 pub mod profile_effect;
 pub mod text_input;
-pub mod tooltip;
 
 pub use avatar::{Avatar, AvatarSize};
 pub use badge::{MentionBadge, UnreadMarker, UnreadMarkerState};
@@ -27,7 +26,4 @@ pub use profile_effect::{
 };
 pub use text_input::{
     TextInput, TextInputActionCallback, TextInputChangeCallback, TextInputMaskCallback,
-};
-pub use tooltip::{
-    discord_tooltip, discord_tooltip_with_shortcut, Tooltip, TooltipView,
 };
