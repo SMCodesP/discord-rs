@@ -110,6 +110,14 @@ else
   done
   DISPLAY="$CAP_DISPLAY" xdpyinfo >/dev/null 2>&1 \
     || { echo "ui-shot: ERRO: Xvfb não responde em $CAP_DISPLAY" >&2; exit 1; }
+  # The display may belong to a stale/foreign Xvfb (shared machine): require
+  # room for the requested window, else fail instead of a clamped capture.
+  DSIZE="$(DISPLAY="$CAP_DISPLAY" xdpyinfo 2>/dev/null | grep -m1 dimensions | grep -m1 -oE '[0-9]+x[0-9]+' || echo 0x0)"
+  DW="${DSIZE%x*}"; DH="${DSIZE#*x}"
+  if [[ "$DW" -lt "$W" || "$DH" -lt "$H" ]]; then
+    echo "ui-shot: ERRO: display $CAP_DISPLAY tem ${DW}x${DH}, menor que o pedido ${W}x${H} (Xvfb de outro dono?)" >&2
+    exit 1
+  fi
 fi
 
 # 3. Launch the app with a unique window title.

@@ -33,11 +33,18 @@ use discord_rs::app::{
     FriendsTab, GuildItemState, MemberItemState, PresenceStatus, RootView, SettingsTab,
 };
 use discord_rs::chat::media_picker::MediaPickerTab;
+use discord_rs::components::{Avatar, AvatarSize, Banner, BannerVariant, Button, ButtonSize,
+    ButtonVariant, IconButton, TextInput};
 use discord_rs::domain::message::{Attachment, Author, Message, Reaction};
 use discord_rs::domain::profile::{MutualGuild, ProfilePopoutState, UserProfileData};
-use discord_rs::domain::settings::AccountConnection;
+use discord_rs::domain::settings::{AccountConnection, NitroTier};
 use discord_rs::domain::user::User;
 use discord_rs::protocol::ConnectionMode;
+use discord_rs::tokens::colors::{
+    text_muted, text_normal, text_titles, HEX_BG_CHAT,
+};
+use discord_rs::tokens::spacing::{space_2, space_3, space_4, space_6};
+use discord_rs::tokens::typography::{font_size_sm, font_size_xs, WEIGHT_BOLD, WEIGHT_MEDIUM};
 
 // Fixed clock for deterministic message timestamps: every fixture message
 // timestamp is BASE minus `minutes_ago`.
@@ -175,6 +182,14 @@ struct FixtureFriend {
     presence: String,
     #[serde(default)]
     custom_status: Option<String>,
+    /// Discord relationship type: 1 friend (Online/All tabs), 2 blocked,
+    /// 3 incoming request, 4 outgoing request (Pending tab).
+    #[serde(default = "default_rel_type")]
+    relationship_type: u32,
+}
+
+fn default_rel_type() -> u32 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +291,12 @@ struct ShotFixture {
     media_picker: Option<FixtureMediaPicker>,
     #[serde(default)]
     connections: Vec<FixtureConnection>,
+    /// Prefill for the AddFriend tab input (friends_add screen).
+    #[serde(default)]
+    add_friend_input: String,
+    /// Selects the "Conta de Usuário" account type (login modal).
+    #[serde(default)]
+    is_user_token: bool,
 }
 
 fn default_true() -> bool {
@@ -403,7 +424,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     // --- Hard offline: no token, no gateway, no disk persistence -----------
     s.auth_token = None;
     s.token_input = String::new();
-    s.is_user_token = false;
+    s.is_user_token = f.is_user_token;
     s.save_token_to_disk = false;
     s.is_connecting = false;
     s.is_connected_to_gateway = f.connected;
@@ -531,7 +552,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
             avatar_text: fr.display_name.chars().next().unwrap_or('?').to_string(),
             presence: parse_presence(&fr.presence),
             custom_status: fr.custom_status.clone(),
-            relationship_type: 1,
+            relationship_type: fr.relationship_type,
         })
         .collect();
     s.friends_tab = parse_friends_tab(&f.friends_tab);
@@ -555,9 +576,17 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.show_members = f.show_members;
     s.active_modal = match f.active_modal.as_deref() {
         Some("UserSettings") => Some(ActiveModal::UserSettings),
-        // ui_shot only drives the settings modal today; anything else would
-        // need a new fixture variant, so fail loudly instead of guessing.
-        Some(other) => panic!("ui_shot: unsupported active_modal {:?}", other),
+        Some("AddServer") => Some(ActiveModal::AddServer),
+        Some("ExploreServers") => Some(ActiveModal::ExploreServers),
+        Some("Login") => Some(ActiveModal::Login),
+        Some("LoginDiscord") => Some(ActiveModal::LoginDiscord),
+        Some("CreateGroupDm") => Some(ActiveModal::CreateGroupDm),
+        // "AddFriendToGroup:<channel_id>" — needs the DM channel to exist in
+        // the fixture so the modal can list recipients.
+        Some(other) => match other.strip_prefix("AddFriendToGroup:") {
+            Some(channel_id) => Some(ActiveModal::AddFriendToGroup(channel_id.to_string())),
+            None => panic!("ui_shot: unsupported active_modal {:?}", other),
+        },
         None => None,
     };
     s.user_settings_tab = parse_settings_tab(&f.user_settings_tab);
@@ -607,6 +636,9 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.authorized_apps = Vec::new();
     s.server_boosts = Vec::new();
     s.family_center_links = Vec::new();
+    // No subscription in fixtures: tier None keeps the Nitro tab coherent
+    // ("Sem Assinatura") instead of mixing seed Full with subscription None.
+    s.nitro_tier = NitroTier::None;
     s.active_subscription = None;
 
     s.profile_popout = f.profile_popout.as_ref().map(|p| {
@@ -672,12 +704,244 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.replying_to_message = None;
     s.active_draft = String::new();
     s.auth_error = None;
-    s.add_friend_input = String::new();
+    s.add_friend_input = f.add_friend_input.clone();
     s.add_friend_feedback = None;
     s.is_sending_friend_request = false;
     s.pending_relationship_actions = HashSet::new();
 
     s
+}
+
+// ---------------------------------------------------------------------------
+// Gallery screen: deterministic component sheet (fixture screen "gallery").
+//
+// Uses only discord_rs::components public APIs; every item carries a small
+// label with its exact variant name. No hover states (static capture).
+// No Modal: src/components/modal.rs is dead code being deleted elsewhere.
+// No avatar decoration: AvatarDecorationData::url() always builds a CDN
+// https URL (src/domain/user.rs), so offline only undecorated avatars can
+// be shown.
+// ---------------------------------------------------------------------------
+
+fn gallery_label(name: &str) -> AnyElement {
+    div()
+        .text_size(font_size_xs())
+        .text_color(text_muted())
+        .child(name.to_string())
+        .into_any_element()
+}
+
+fn gallery_section(title: &str, body: AnyElement) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .child(
+            div()
+                .text_size(font_size_sm())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(text_titles())
+                .child(title.to_string()),
+        )
+        .child(body)
+        .into_any_element()
+}
+
+fn gallery_labeled(name: String, item: AnyElement) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .child(gallery_label(&name))
+        .child(item)
+        .into_any_element()
+}
+
+fn gallery_buttons() -> AnyElement {
+    let variants = [
+        ("Blurple", ButtonVariant::Blurple),
+        ("Gray", ButtonVariant::Gray),
+        ("Danger", ButtonVariant::Danger),
+        ("Ghost", ButtonVariant::Ghost),
+    ];
+    let sizes = [
+        ("Sm", ButtonSize::Sm),
+        ("Md", ButtonSize::Md),
+        ("Lg", ButtonSize::Lg),
+    ];
+    let mut columns = Vec::new();
+    for (vname, variant) in variants {
+        let mut cells = Vec::new();
+        for (sname, size) in sizes {
+            for disabled in [false, true] {
+                for with_icon in [false, true] {
+                    let id = format!("gal-btn-{}-{}-{}-{}", vname, sname, disabled, with_icon);
+                    let label = format!(
+                        "Button {} {} {}{}",
+                        vname,
+                        sname,
+                        if disabled { "disabled" } else { "normal" },
+                        if with_icon { " icon" } else { "" }
+                    );
+                    let mut btn = Button::new(id, "Exemplo")
+                        .variant(variant)
+                        .size(size)
+                        .disabled(disabled);
+                    if with_icon {
+                        btn = btn.icon("✚");
+                    }
+                    cells.push(gallery_labeled(label, btn.into_any_element()));
+                }
+            }
+        }
+        let mut col = div().flex_1().flex().flex_col().gap(space_3());
+        for c in cells {
+            col = col.child(c);
+        }
+        columns.push(col.into_any_element());
+    }
+    let mut row = div().w_full().flex().flex_row().gap(space_4());
+    for c in columns {
+        row = row.child(c);
+    }
+    gallery_section("Button — 4 variantes x 3 tamanhos x normal/disabled x com/sem ícone", row.into_any_element())
+}
+
+fn gallery_icon_buttons() -> AnyElement {
+    let states = [
+        ("IconButton normal", false, false, false),
+        ("IconButton active", true, false, false),
+        ("IconButton danger", false, true, false),
+        ("IconButton disabled", false, false, true),
+    ];
+    let mut row = div().w_full().flex().flex_row().gap(space_6()).items_start();
+    for (i, (name, active, danger, disabled)) in states.iter().enumerate() {
+        let btn = IconButton::new(format!("gal-iconbtn-{}", i), "✕")
+            .active(*active)
+            .danger(*danger)
+            .disabled(*disabled);
+        row = row.child(gallery_labeled(name.to_string(), btn.into_any_element()));
+    }
+    gallery_section("IconButton — normal / active / danger / disabled", row.into_any_element())
+}
+
+fn gallery_text_inputs() -> AnyElement {
+    let empty = TextInput::new("gal-input-empty").placeholder("Placeholder de exemplo");
+    let with_text = TextInput::new("gal-input-text")
+        .placeholder("Placeholder de exemplo")
+        .value("Texto de exemplo");
+    let masked = TextInput::new("gal-input-masked")
+        .placeholder("Placeholder de exemplo")
+        .value("segredo-exemplo")
+        .secret(true)
+        .masked(true);
+    let mut col = div().w_full().flex().flex_col().gap(space_4());
+    col = col.child(gallery_labeled(
+        "TextInput vazio com placeholder".to_string(),
+        empty.into_any_element(),
+    ));
+    col = col.child(gallery_labeled(
+        "TextInput com texto".to_string(),
+        with_text.into_any_element(),
+    ));
+    col = col.child(gallery_labeled(
+        "TextInput mascarado".to_string(),
+        masked.into_any_element(),
+    ));
+    gallery_section("TextInput", col.into_any_element())
+}
+
+fn gallery_avatars() -> AnyElement {
+    let sizes = [
+        ("Px24", AvatarSize::Px24),
+        ("Px32", AvatarSize::Px32),
+        ("Px40", AvatarSize::Px40),
+        ("Px80", AvatarSize::Px80),
+    ];
+    let mut col = div().w_full().flex().flex_col().gap(space_4());
+    for (sname, size) in sizes {
+        let mut row = div().w_full().flex().flex_row().gap(space_6()).items_start();
+        let combos: [(&str, Avatar); 4] = [
+            ("Online", Avatar::new("UA").size(size).online()),
+            ("Idle", Avatar::new("UA").size(size).idle()),
+            ("Dnd", Avatar::new("UA").size(size).dnd()),
+            ("Offline", Avatar::new("UA").size(size).offline()),
+        ];
+        for (status_name, avatar) in combos {
+            row = row.child(gallery_labeled(
+                format!("Avatar {} {}", sname, status_name),
+                avatar.into_any_element(),
+            ));
+        }
+        col = col.child(row.into_any_element());
+    }
+    gallery_section("Avatar — 4 tamanhos x 4 status (sem decoração: sem asset local offline)", col.into_any_element())
+}
+
+fn gallery_banners() -> AnyElement {
+    let variants = [
+        ("Banner Info", BannerVariant::Info),
+        ("Banner Success", BannerVariant::Success),
+        ("Banner Warning", BannerVariant::Warning),
+        ("Banner Danger", BannerVariant::Danger),
+    ];
+    let mut col = div().w_full().flex().flex_col().gap(space_3());
+    for (name, variant) in variants {
+        let banner = Banner::new(format!("gal-banner-{}", name), "Mensagem de exemplo da variante")
+            .variant(variant)
+            .title("Título de exemplo");
+        col = col.child(gallery_labeled(name.to_string(), banner.into_any_element()));
+    }
+    gallery_section("Banner — 4 variantes", col.into_any_element())
+}
+
+struct GalleryView;
+
+fn gallery_content() -> AnyElement {
+    div()
+        .size_full()
+        .bg(rgb(HEX_BG_CHAT))
+        .text_color(text_normal())
+        .overflow_hidden()
+        .flex()
+        .flex_col()
+        .gap(space_6())
+        .p(space_6())
+        .child(
+            div()
+                .text_size(font_size_sm())
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_titles())
+                .child("Galeria de componentes — estado determinístico (sem hover)".to_string()),
+        )
+        .child(gallery_buttons())
+        .child(gallery_icon_buttons())
+        .child(gallery_text_inputs())
+        .child(gallery_avatars())
+        .child(gallery_banners())
+        .into_any_element()
+}
+
+/// Single view type for `open_window`: either the app shell or the gallery.
+enum ShotRoot {
+    App(Entity<RootView>),
+    Gallery(GalleryView),
+}
+
+impl Render for ShotRoot {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        match self {
+            ShotRoot::App(root) => root.clone().into_any_element(),
+            ShotRoot::Gallery(_) => gallery_content(),
+        }
+    }
+}
+
+impl Render for GalleryView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gallery_content()
+    }
 }
 
 fn parse_size(arg: &str) -> (f32, f32) {
@@ -750,6 +1014,10 @@ fn main() {
         .with_assets(discord_rs::tokens::icons::IconAssetSource)
         .run(move |cx: &mut App| {
             gpui::init(cx);
+            // Same theme the app installs (src/main.rs still wires only
+            // IconAssetSource; there is no composed asset source yet, so the
+            // example registers the same IconAssetSource as the app).
+            discord_rs::tokens::kit_theme::install(cx);
 
             let window_bounds = Bounds::centered(None, size(px(width), px(height)), cx);
             let window_options = WindowOptions {
@@ -769,19 +1037,25 @@ fn main() {
 
             // with_state (not RootView::new): mounts a prebuilt fixture state
             // without creating a ClientManager or spawning any auto-login.
+            // Screen "gallery" mounts the component sheet instead (no state).
             let moved_state = app_state;
             let moved_tab = media_tab;
+            let is_gallery = fixture.screen == "gallery";
             let (_handle, _view) = gpui::open_window(window_options, cx, |_window, cx| {
-                let state_entity = cx.new(|_cx| moved_state);
-                let root = cx.new(|cx| RootView::with_state(state_entity, cx));
-                if let Some(tab) = moved_tab {
-                    let chat = root.read(cx).chat_view.clone();
-                    chat.update(cx, |v, _cx| {
-                        v.media_picker_open = true;
-                        v.media_picker_tab = tab;
-                    });
+                if is_gallery {
+                    cx.new(|_cx| ShotRoot::Gallery(GalleryView))
+                } else {
+                    let state_entity = cx.new(|_cx| moved_state);
+                    let root = cx.new(|cx| RootView::with_state(state_entity, cx));
+                    if let Some(tab) = moved_tab {
+                        let chat = root.read(cx).chat_view.clone();
+                        chat.update(cx, |v, _cx| {
+                            v.media_picker_open = true;
+                            v.media_picker_tab = tab;
+                        });
+                    }
+                    cx.new(|_cx| ShotRoot::App(root))
                 }
-                root
             })
             .expect("ui_shot: failed to open window");
             println!("UI_SHOT_WINDOW_OPEN {}", fixture.screen);
