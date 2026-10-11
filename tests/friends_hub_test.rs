@@ -1,4 +1,7 @@
-use discord_rs::app::state::{AppState, FriendItemState, PresenceStatus};
+use discord_rs::app::state::{
+    AppState, FriendItemState, FriendsTab, MessageRequestItem, MessageRequestsSubTab,
+    PresenceStatus,
+};
 use discord_rs::domain::user::{Activity, ActivityType, PresenceStatus as DomainPresenceStatus};
 use discord_rs::protocol::transport::{Relationship, TransportEvent};
 
@@ -316,3 +319,224 @@ async fn test_pending_relationship_actions_state() {
     assert!(!state.pending_relationship_actions.contains("target-user"));
     assert_eq!(state.friends[0].relationship_type, 1);
 }
+
+#[test]
+fn test_friends_tab_selection_covers_all_tabs() {
+    let mut state = AppState::new();
+    assert_eq!(state.friends_tab, FriendsTab::Online);
+    assert_eq!(
+        state.message_requests_subtab,
+        MessageRequestsSubTab::YouMayKnow
+    );
+
+    for tab in [
+        FriendsTab::All,
+        FriendsTab::Pending,
+        FriendsTab::Blocked,
+        FriendsTab::AddFriend,
+        FriendsTab::MessageRequests,
+        FriendsTab::Online,
+    ] {
+        state.select_friends_tab(tab);
+        assert_eq!(state.friends_tab, tab);
+    }
+
+    state.select_message_requests_subtab(MessageRequestsSubTab::Spam);
+    assert_eq!(
+        state.message_requests_subtab,
+        MessageRequestsSubTab::Spam
+    );
+    state.select_message_requests_subtab(MessageRequestsSubTab::YouMayKnow);
+    assert_eq!(
+        state.message_requests_subtab,
+        MessageRequestsSubTab::YouMayKnow
+    );
+}
+
+#[test]
+fn test_tab_badge_counts_match_view_filters() {
+    let mut state = AppState::new();
+    state.friends.clear();
+    state.message_requests.clear();
+
+    for (id, rel_type) in [
+        ("u-1", 1),
+        ("u-2", 1),
+        ("u-3", 3),
+        ("u-4", 4),
+        ("u-5", 2),
+    ] {
+        state.friends.push(FriendItemState {
+            id: id.into(),
+            username: format!("user_{}", id),
+            display_name: format!("User {}", id),
+            avatar_url: None,
+            avatar_text: "U".into(),
+            presence: PresenceStatus::Online,
+            custom_status: None,
+            avatar_decoration_data: None,
+            relationship_type: rel_type,
+        });
+    }
+
+    // Same predicate the hub header uses for the "Pendente" badge.
+    let pending_friends = state
+        .friends
+        .iter()
+        .filter(|f| f.relationship_type == 3)
+        .count();
+    assert_eq!(pending_friends, 1);
+
+    for (id, is_spam) in [("req-1", false), ("req-2", false), ("req-3", true)] {
+        state.message_requests.push(MessageRequestItem {
+            id: id.into(),
+            user_id: format!("user_{}", id),
+            username: format!("user_{}", id),
+            display_name: format!("User {}", id),
+            avatar_url: None,
+            avatar_text: "U".into(),
+            presence: PresenceStatus::Online,
+            mutual_guilds: 0,
+            mutual_guild_name: None,
+            preview_message: "Olá!".into(),
+            timestamp: "Hoje".into(),
+            is_spam,
+        });
+    }
+
+    // Same predicates the hub header/tabs use for badges and filtering.
+    let pending_req = state
+        .message_requests
+        .iter()
+        .filter(|r| !r.is_spam)
+        .count();
+    assert_eq!(pending_req, 2);
+    let spam = state
+        .message_requests
+        .iter()
+        .filter(|r| r.is_spam)
+        .count();
+    assert_eq!(spam, 1);
+
+    // Spam clear keeps only real (non-spam) requests.
+    state.clear_spam_requests();
+    assert_eq!(state.message_requests.len(), 2);
+    assert!(state.message_requests.iter().all(|r| !r.is_spam));
+}
+
+#[test]
+fn test_friend_item_avatar_decoration_propagation() {
+    let mut state = AppState::new();
+    let deco = discord_rs::domain::user::AvatarDecorationData::new("a_decor_asset_123");
+    state.handle_transport_event(TransportEvent::RelationshipsUpdated(vec![
+        Relationship {
+            id: "u-decor".into(),
+            username: "DecoratedUser".into(),
+            avatar: None,
+            global_name: Some("Decorated".into()),
+            rel_type: 1,
+            avatar_decoration_data: Some(deco.clone()),
+        },
+    ]));
+
+    assert_eq!(state.friends.len(), 1);
+    assert_eq!(
+        state.friends[0].avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+        Some("a_decor_asset_123")
+    );
+}
+
+#[test]
+fn test_friends_view_filter_predicates() {
+    let mut state = AppState::new();
+    state.friends.clear();
+
+    state.friends.push(FriendItemState {
+        id: "u-online".into(),
+        username: "user_online".into(),
+        display_name: "Online Friend".into(),
+        avatar_url: None,
+        avatar_text: "O".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+    state.friends.push(FriendItemState {
+        id: "u-offline".into(),
+        username: "user_offline".into(),
+        display_name: "Offline Friend".into(),
+        avatar_url: None,
+        avatar_text: "F".into(),
+        presence: PresenceStatus::Offline,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+    state.friends.push(FriendItemState {
+        id: "u-incoming".into(),
+        username: "user_incoming".into(),
+        display_name: "Incoming Request".into(),
+        avatar_url: None,
+        avatar_text: "I".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 3,
+    });
+    state.friends.push(FriendItemState {
+        id: "u-outgoing".into(),
+        username: "user_outgoing".into(),
+        display_name: "Outgoing Request".into(),
+        avatar_url: None,
+        avatar_text: "G".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 4,
+    });
+    state.friends.push(FriendItemState {
+        id: "u-blocked".into(),
+        username: "user_blocked".into(),
+        display_name: "Blocked User".into(),
+        avatar_url: None,
+        avatar_text: "B".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 2,
+    });
+
+    // Online tab: rel_type == 1 && presence != Offline
+    let online_count = state
+        .friends
+        .iter()
+        .filter(|f| f.relationship_type == 1 && f.presence != PresenceStatus::Offline)
+        .count();
+    assert_eq!(online_count, 1);
+
+    // All tab: rel_type == 1
+    let all_count = state
+        .friends
+        .iter()
+        .filter(|f| f.relationship_type == 1)
+        .count();
+    assert_eq!(all_count, 2);
+
+    // Pending tab: rel_type == 3 || rel_type == 4
+    let pending_count = state
+        .friends
+        .iter()
+        .filter(|f| f.relationship_type == 3 || f.relationship_type == 4)
+        .count();
+    assert_eq!(pending_count, 2);
+
+    // Blocked tab: rel_type == 2
+    let blocked_count = state
+        .friends
+        .iter()
+        .filter(|f| f.relationship_type == 2)
+        .count();
+    assert_eq!(blocked_count, 1);
+}
+
