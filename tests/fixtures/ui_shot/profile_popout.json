@@ -1,0 +1,82 @@
+{
+  "screen": "profile_popout",
+  "connected": true,
+  "connection_status": "Conectado (captura local)",
+  "selected_guild_id": "g1",
+  "selected_channel_id": "c-geral",
+  "show_members": true,
+  "friends_tab": "Online",
+  "current_user": {
+    "id": "u-me",
+    "username": "usuario_a",
+    "display_name": "Usuário A",
+    "presence": "Online",
+    "custom_status": "Captura de exemplo"
+  },
+  "guilds": [
+    {
+      "id": "g1",
+      "name": "Servidor Exemplo",
+      "acronym": "SE",
+      "categories": [
+        {
+          "id": "cat-texto",
+          "name": "CANAIS DE TEXTO",
+          "channels": [
+            {
+              "id": "c-geral",
+              "name": "geral",
+              "kind": "Text",
+              "topic": "Canal principal de exemplo"
+            }
+          ]
+        }
+      ],
+      "emojis": []
+    }
+  ],
+  "dm_channels": [],
+  "messages": {
+    "c-geral": [
+      {
+        "id": "m-p-1",
+        "author_id": "u-b",
+        "author_username": "usuario_b",
+        "author_display": "Usuário B",
+        "bot": false,
+        "text": "Mensagem de fundo fictícia atrás do popout de perfil.",
+        "minutes_ago": 12,
+        "attachments": [],
+        "reactions": []
+      }
+    ]
+  },
+  "members": [
+    {
+      "id": "u-b",
+      "name": "Usuário B",
+      "presence": "Online",
+      "role_group": "MEMBROS",
+      "role_color": 14408667,
+      "is_bot": false,
+      "activity": "Jogando Exemplo Quest"
+    }
+  ],
+  "friends": [],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": {
+    "user_id": "u-b",
+    "username": "usuario_b",
+    "display_name": "Usuário B",
+    "presence": "Online",
+    "bio": "Biografia fictícia para captura de exemplo.",
+    "mutual_guilds": [{ "id": "g1", "nick": null }],
+    "mutual_friends_count": 2
+  },
+  "is_search_open": false,
+  "search_query": "",
+  "search_results": [],
+  "media_picker": null,
+  "connections": []
+}

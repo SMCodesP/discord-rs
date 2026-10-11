@@ -1,0 +1,164 @@
+{
+  "screen": "guild",
+  "connected": true,
+  "connection_status": "Conectado (captura local)",
+  "selected_guild_id": "g1",
+  "selected_channel_id": "c-geral",
+  "show_members": true,
+  "friends_tab": "Online",
+  "current_user": {
+    "id": "u-me",
+    "username": "usuario_a",
+    "display_name": "Usuário A",
+    "presence": "Online",
+    "custom_status": "Captura de exemplo"
+  },
+  "guilds": [
+    {
+      "id": "g1",
+      "name": "Servidor Exemplo",
+      "acronym": "SE",
+      "categories": [
+        {
+          "id": "cat-info",
+          "name": "INFORMAÇÕES",
+          "channels": [
+            {
+              "id": "c-regras",
+              "name": "regras",
+              "kind": "Announcement",
+              "topic": "Diretrizes de exemplo do servidor"
+            }
+          ]
+        },
+        {
+          "id": "cat-texto",
+          "name": "CANAIS DE TEXTO",
+          "channels": [
+            {
+              "id": "c-geral",
+              "name": "geral",
+              "kind": "Text",
+              "topic": "Canal principal de exemplo"
+            },
+            {
+              "id": "c-ajuda",
+              "name": "ajuda",
+              "kind": "Text",
+              "topic": "Tire dúvidas de exemplo"
+            }
+          ]
+        },
+        {
+          "id": "cat-voz",
+          "name": "CANAIS DE VOZ",
+          "channels": [
+            {
+              "id": "c-voz-1",
+              "name": "Conversa de Exemplo",
+              "kind": "Voice",
+              "topic": null
+            }
+          ]
+        }
+      ],
+      "emojis": []
+    }
+  ],
+  "dm_channels": [],
+  "messages": {
+    "c-geral": [
+      {
+        "id": "m-g-1",
+        "author_id": "u-b",
+        "author_username": "usuario_b",
+        "author_display": "Usuário B",
+        "bot": false,
+        "text": "Bem-vindos ao canal **geral** do Servidor Exemplo! Esta mensagem é fictícia, só para captura.",
+        "minutes_ago": 60,
+        "attachments": [],
+        "reactions": [
+          { "emoji": "👋", "count": 3, "me": false }
+        ]
+      },
+      {
+        "id": "m-g-2",
+        "author_id": "u-c",
+        "author_username": "usuario_c",
+        "author_display": "Usuário C",
+        "bot": false,
+        "text": "Alguém tem um exemplo de mensagem com bloco de código?\n```\nexemplo de código fictício\n```",
+        "minutes_ago": 25,
+        "attachments": [],
+        "reactions": []
+      },
+      {
+        "id": "m-g-3",
+        "author_id": "u-me",
+        "author_username": "usuario_a",
+        "author_display": "Usuário A",
+        "bot": false,
+        "text": "Tenho sim, segue acima. Qualquer dúvida é só chamar!",
+        "minutes_ago": 9,
+        "attachments": [],
+        "reactions": [{ "emoji": "✅", "count": 1, "me": false }]
+      }
+    ]
+  },
+  "members": [
+    {
+      "id": "u-admin",
+      "name": "Moderador Exemplo",
+      "presence": "Online",
+      "role_group": "MODERAÇÃO",
+      "role_color": 3462712,
+      "is_bot": false,
+      "activity": "Moderando o exemplo"
+    },
+    {
+      "id": "u-b",
+      "name": "Usuário B",
+      "presence": "Online",
+      "role_group": "MEMBROS",
+      "role_color": 14408667,
+      "is_bot": false,
+      "activity": null
+    },
+    {
+      "id": "u-c",
+      "name": "Usuário C",
+      "presence": "Idle",
+      "role_group": "MEMBROS",
+      "role_color": 14408667,
+      "is_bot": false,
+      "activity": "Lendo o exemplo"
+    },
+    {
+      "id": "u-bot",
+      "name": "Robô Exemplo",
+      "presence": "Online",
+      "role_group": "ROBÔS",
+      "role_color": 3462712,
+      "is_bot": true,
+      "activity": "/ajuda para comandos de exemplo"
+    },
+    {
+      "id": "u-e",
+      "name": "Usuário E",
+      "presence": "Offline",
+      "role_group": "MEMBROS",
+      "role_color": 8421504,
+      "is_bot": false,
+      "activity": null
+    }
+  ],
+  "friends": [],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": null,
+  "is_search_open": false,
+  "search_query": "",
+  "search_results": [],
+  "media_picker": null,
+  "connections": []
+}

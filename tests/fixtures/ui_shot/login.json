@@ -1,0 +1,29 @@
+{
+  "screen": "login",
+  "connected": false,
+  "connection_status": "Não conectado (captura local)",
+  "selected_guild_id": null,
+  "selected_channel_id": null,
+  "show_members": false,
+  "friends_tab": "Online",
+  "current_user": {
+    "id": "u-me",
+    "username": "usuario_a",
+    "display_name": "Usuário A",
+    "presence": "Offline",
+    "custom_status": null
+  },
+  "guilds": [],
+  "dm_channels": [],
+  "messages": {},
+  "members": [],
+  "friends": [],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": null,
+  "is_search_open": false,
+  "search_query": "",
+  "search_results": [],
+  "media_picker": null,
+  "connections": []
+}

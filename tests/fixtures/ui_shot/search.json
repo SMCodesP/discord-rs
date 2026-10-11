@@ -1,0 +1,129 @@
+{
+  "screen": "search",
+  "connected": true,
+  "connection_status": "Conectado (captura local)",
+  "selected_guild_id": "g1",
+  "selected_channel_id": "c-geral",
+  "show_members": false,
+  "friends_tab": "Online",
+  "current_user": {
+    "id": "u-me",
+    "username": "usuario_a",
+    "display_name": "Usuário A",
+    "presence": "Online",
+    "custom_status": "Captura de exemplo"
+  },
+  "guilds": [
+    {
+      "id": "g1",
+      "name": "Servidor Exemplo",
+      "acronym": "SE",
+      "categories": [
+        {
+          "id": "cat-texto",
+          "name": "CANAIS DE TEXTO",
+          "channels": [
+            {
+              "id": "c-geral",
+              "name": "geral",
+              "kind": "Text",
+              "topic": "Canal principal de exemplo"
+            },
+            {
+              "id": "c-ajuda",
+              "name": "ajuda",
+              "kind": "Text",
+              "topic": "Tire dúvidas de exemplo"
+            }
+          ]
+        }
+      ],
+      "emojis": []
+    }
+  ],
+  "dm_channels": [],
+  "messages": {
+    "c-geral": [
+      {
+        "id": "m-sr-0",
+        "author_id": "u-c",
+        "author_username": "usuario_c",
+        "author_display": "Usuário C",
+        "bot": false,
+        "text": "Mensagem de fundo fictícia no canal geral.",
+        "minutes_ago": 50,
+        "attachments": [],
+        "reactions": []
+      }
+    ]
+  },
+  "members": [],
+  "friends": [],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": null,
+  "is_search_open": true,
+  "search_query": "exemplo",
+  "search_results": [
+    {
+      "channel_id": "c-geral",
+      "channel_name": "geral",
+      "context_before": [
+        {
+          "id": "m-sr-ctx-1",
+          "author_id": "u-b",
+          "author_username": "usuario_b",
+          "author_display": "Usuário B",
+          "bot": false,
+          "text": "Contexto fictício anterior ao resultado.",
+          "minutes_ago": 33,
+          "attachments": [],
+          "reactions": []
+        }
+      ],
+      "hit": {
+        "id": "m-sr-hit-1",
+        "author_id": "u-c",
+        "author_username": "usuario_c",
+        "author_display": "Usuário C",
+        "bot": false,
+        "text": "Aqui está um resultado de exemplo para a busca.",
+        "minutes_ago": 30,
+        "attachments": [],
+        "reactions": []
+      },
+      "context_after": []
+    },
+    {
+      "channel_id": "c-ajuda",
+      "channel_name": "ajuda",
+      "context_before": [],
+      "hit": {
+        "id": "m-sr-hit-2",
+        "author_id": "u-me",
+        "author_username": "usuario_a",
+        "author_display": "Usuário A",
+        "bot": false,
+        "text": "Outro exemplo encontrado em outro canal.",
+        "minutes_ago": 20,
+        "attachments": [],
+        "reactions": []
+      },
+      "context_after": [
+        {
+          "id": "m-sr-ctx-2",
+          "author_id": "u-b",
+          "author_username": "usuario_b",
+          "author_display": "Usuário B",
+          "bot": false,
+          "text": "Contexto fictício posterior ao resultado.",
+          "minutes_ago": 18,
+          "attachments": [],
+          "reactions": []
+        }
+      ]
+    }
+  ],
+  "media_picker": null,
+  "connections": []
+}
