@@ -6,7 +6,7 @@ use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::tokens::icons::*;
 use crate::tokens::kit_theme::DiscordTheme;
 
-use super::components::{render_section_description, render_section_header};
+use super::components::render_section_header;
 
 pub fn render_family_center(
     _app_entity: Entity<AppState>,
@@ -16,82 +16,53 @@ pub fn render_family_center(
     let links = &app_state.family_center_links;
 
     div()
+        .w_full()
         .flex()
         .flex_col()
         .gap(px(16.0))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .size(px(28.0))
-                        .rounded_full()
-                        .bg(cx.discord().channel_hover)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon_shield(px(18.0), cx.discord().blurple)),
-                )
-                .child(
-                    div()
-                        .text_color(cx.discord().text_titles)
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(16.0))
-                        .child("Centro da Família (Family Center)"),
-                ),
-        )
-        .child(render_section_description(
-            "O Centro da Família permite que pais e responsáveis acompanhem os hábitos digitais de adolescentes com total transparência e sem invadir a privacidade das mensagens diretas.",
-            cx,
-        ))
         .children(if links.is_empty() {
-            // Honest empty state matching Discord reference settings-family-center.png
-            // Purged all fabricated metrics (fake added friends / new servers / calls counters)
             vec![
                 div()
-                    .p(px(20.0))
+                    .w_full()
+                    .p(px(16.0))
                     .rounded(px(8.0))
                     .bg(cx.discord().bg_channels)
                     .border_1()
                     .border_color(cx.discord().neutral_67)
                     .flex()
-                    .flex_col()
-                    .gap(px(12.0))
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
+                            .w(px(480.0))
                             .flex()
-                            .flex_row()
-                            .items_start()
-                            .justify_between()
+                            .flex_col()
+                            .gap(px(4.0))
                             .child(
                                 div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(4.0))
-                                    .child(
-                                        div()
-                                            .text_color(cx.discord().text_titles)
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_size(px(15.0))
-                                            .child("Configurar a Central da Família"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(cx.discord().text_secondary)
-                                            .text_size(px(13.0))
-                                            .child("Mantenha-se informado sobre a experiência do seu adolescente no Discord. Veja a atividade, gerencie configurações de segurança e inicie conversas melhores juntos."),
-                                    ),
+                                    .text_color(cx.discord().text_titles)
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_size(px(15.0))
+                                    .child("Set up Family Center"),
                             )
                             .child(
-                                Button::new("btn-setup-family", "Configurar")
+                                div()
+                                    .text_color(cx.discord().text_secondary)
+                                    .text_size(px(13.0))
+                                    .child("Stay informed about your teen’s experience on Discord. See their activity, manage key safety settings, and start better conversations together."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .child(
+                                Button::new("btn-setup-family", "Set Up")
                                     .variant(ButtonVariant::Blurple)
                                     .size(ButtonSize::Sm)
                                     .on_click(|_ev, _win, _cx| {})
                             ),
-                    )
+                    ),
             ]
         } else {
             vec![
@@ -99,7 +70,7 @@ pub fn render_family_center(
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
-                    .child(render_section_header("CONTAS VINCULADAS", cx))
+                    .child(render_section_header("LINKED ACCOUNTS", cx))
                     .children(links.iter().map(|link| {
                         div()
                             .p(px(12.0))
@@ -147,9 +118,9 @@ pub fn render_family_center(
                                                     .text_color(cx.discord().text_secondary)
                                                     .text_size(px(11.0))
                                                     .child(if link.is_guardian {
-                                                        "Responsável legal (Guardian)"
+                                                        "Guardian"
                                                     } else {
-                                                        "Conta de adolescente supervisionada"
+                                                        "Supervised Teen Account"
                                                     }),
                                             ),
                                     ),

@@ -1,146 +1,117 @@
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::components::button::{Button, ButtonSize, ButtonVariant};
+use crate::tokens::icons::icon_info;
 use crate::tokens::kit_theme::DiscordTheme;
 
-use super::components::{render_section_description, render_section_header};
+use super::components::render_section_description;
 use super::UserSettingsModal;
 
 pub fn render_keybinds(
-    modal: Entity<UserSettingsModal>,
-    modal_state: &UserSettingsModal,
+    _modal: Entity<UserSettingsModal>,
+    _modal_state: &UserSettingsModal,
     cx: &App,
 ) -> Div {
-    let is_recording = modal_state.is_recording_keybind;
-
     div()
         .flex()
         .flex_col()
-        .gap(px(16.0))
-        .child(render_section_description(
-            "Atalhos rápidos para navegação veloz, controle de chamadas de voz e gerenciamento de microfone.",
-            cx,
-        ))
-        // Top Bar: Header + Record Button
+        .gap(px(20.0))
+        // Section: Custom Keybinds
         .child(
             div()
-                .flex()
-                .flex_row()
-                .justify_between()
-                .items_center()
-                .child(render_section_header("ATALHOS PADRÃO DO DISCORD RS", cx))
-                .child({
-                    let modal_c = modal.clone();
-                    Button::new(
-                        "btn-rec-keybind",
-                        if is_recording { "Cancelar Gravação" } else { "Gravar Novo Atalho" },
-                    )
-                    .variant(if is_recording { ButtonVariant::Danger } else { ButtonVariant::Blurple })
-                    .size(ButtonSize::Sm)
-                    .on_click(move |_ev, _win, cx| {
-                        modal_c.update(cx, |this, cx| {
-                            this.is_recording_keybind = !this.is_recording_keybind;
-                            cx.notify();
-                        });
-                    })
-                }),
-        )
-        // Optional Recording Glow Banner
-        .children(if is_recording {
-            Some(
-                div()
-                    .p(px(12.0))
-                    .rounded(px(6.0))
-                    .bg(cx.discord().bg_server)
-                    .border_2()
-                    .border_color(cx.discord().blurple)
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .size(px(8.0))
-                                    .rounded_full()
-                                    .bg(cx.discord().status_dnd),
-                            )
-                            .child(
-                                div()
-                                    .text_color(cx.discord().blurple)
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_size(px(13.0))
-                                    .child("Modo de Gravação Ativo: Pressione qualquer combinação de teclas..."),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_color(cx.discord().text_secondary)
-                            .text_size(px(12.0))
-                            .child("Exemplo: Ctrl + Shift + P ou Alt + F. Clique em 'Cancelar Gravação' para fechar."),
-                    ),
-            )
-        } else {
-            None
-        })
-        // Styled Keybinds Table
-        .child(
-            div()
-                .rounded(px(8.0))
-                .bg(cx.discord().bg_server)
-                .border_1()
-                .border_color(cx.discord().neutral_67)
-                .overflow_hidden()
                 .flex()
                 .flex_col()
-                // Table Header
+                .gap(px(8.0))
                 .child(
                     div()
-                        .h(px(36.0))
-                        .px(px(16.0))
+                        .text_color(cx.discord().text_titles)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(20.0))
+                        .child("Custom Keybinds"),
+                )
+                .child(render_section_description(
+                    "Keybinds are custom keyboard shortcuts that let you perform specific actions in Discord without needing to click through menus.",
+                    cx,
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .p(px(12.0))
+                        .rounded(px(6.0))
                         .bg(cx.discord().bg_channels)
+                        .border_1()
+                        .border_color(cx.discord().borders)
                         .flex()
                         .flex_row()
                         .items_center()
-                        .justify_between()
-                        .text_color(cx.discord().text_secondary)
+                        .gap(px(10.0))
+                        .child(icon_info(px(18.0), cx.discord().blurple))
+                        .child(
+                            div()
+                                .w(px(580.0))
+                                .text_color(cx.discord().text_primary)
+                                .text_size(px(13.0))
+                                .child("Custom keybinds are not currently supported in the browser. Download the desktop application to use custom keybinds."),
+                        ),
+                ),
+        )
+        // Section: Default Keybinds
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
-                        .text_size(px(11.0))
-                        .child("AÇÃO")
-                        .child("ATALHO DE TECLADO")
-                        .child("CATEGORIA"),
+                        .text_size(px(16.0))
+                        .child("Default Keybinds"),
                 )
-                // Rows
-                .child(render_keybind_row("Busca Rápida de Canais e DMs", &["Ctrl", "K"], "Navegação", cx))
-                .child(render_keybind_row("Navegar para Canal Acima", &["Alt", "Up"], "Navegação", cx))
-                .child(render_keybind_row("Navegar para Canal Abaixo", &["Alt", "Down"], "Navegação", cx))
-                .child(render_keybind_row("Alternar Mudo do Microfone", &["Ctrl", "Shift", "M"], "Voz", cx))
-                .child(render_keybind_row("Alternar Ensurdecer", &["Ctrl", "Shift", "D"], "Voz", cx))
-                .child(render_keybind_row("Push-To-Talk (PTT)", &["Mouse 4", "Caps Lock"], "Voz / Global", cx))
-                .child(render_keybind_row("Alternar Painel de Configurações", &["Ctrl", ","], "Sistema", cx))
-                .child(render_keybind_row("Marcar Canal como Lido", &["Esc"], "Chat", cx))
-                .child(render_keybind_row("Pular para a Mensagem Mais Recente", &["Shift", "PageDown"], "Chat", cx)),
+                .child(
+                    div()
+                        .rounded(px(8.0))
+                        .bg(cx.discord().bg_channels)
+                        .child(render_keybind_row("Show Keyboard Shortcuts List", &["CTRL", "/"], cx)),
+                ),
+        )
+        // Section: Messages
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_color(cx.discord().text_titles)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(16.0))
+                        .child("Messages"),
+                )
+                .child(render_section_description(
+                    "These shortcuts work when focused on a message.",
+                    cx,
+                ))
+                .child(
+                    div()
+                        .rounded(px(8.0))
+                        .bg(cx.discord().bg_channels)
+                        .child(render_keybind_row("Edit Message", &["E"], cx))
+                        .child(render_keybind_row("Delete Message", &["BACKSPACE"], cx)),
+                ),
         )
 }
 
 fn render_keybind_row(
     action: &'static str,
     keys: &[&'static str],
-    category: &'static str,
     cx: &App,
 ) -> Div {
-    let hover_bg = cx.discord().bg_channels;
+    let hover_bg = cx.discord().channel_hover;
 
     div()
         .h(px(44.0))
         .px(px(16.0))
-        .border_t_1()
-        .border_color(cx.discord().neutral_67)
         .flex()
         .flex_row()
         .items_center()
@@ -149,10 +120,9 @@ fn render_keybind_row(
         // Action Label
         .child(
             div()
-                .w(px(240.0))
                 .text_color(cx.discord().text_titles)
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(13.0))
+                .text_size(px(14.0))
                 .child(action),
         )
         // Key Pills
@@ -162,45 +132,18 @@ fn render_keybind_row(
                 .flex_row()
                 .items_center()
                 .gap(px(4.0))
-                .children(keys.iter().enumerate().map(|(idx, key)| {
+                .children(keys.iter().map(|key| {
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(4.0))
-                        .children(if idx > 0 {
-                            Some(
-                                div()
-                                    .text_color(cx.discord().text_secondary)
-                                    .text_size(px(11.0))
-                                    .child("+"),
-                            )
-                        } else {
-                            None
-                        })
-                        .child(
-                            div()
-                                .px(px(8.0))
-                                .py(px(3.0))
-                                .rounded(px(4.0))
-                                .bg(cx.discord().bg_channels)
-                                .border_1()
-                                .border_color(cx.discord().borders)
-                                .text_color(cx.discord().text_primary)
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(11.0))
-                                .child(*key),
-                        )
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(cx.discord().bg_server)
+                        .border_1()
+                        .border_color(cx.discord().borders)
+                        .text_color(cx.discord().text_primary)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(12.0))
+                        .child(*key)
                 })),
-        )
-        // Category Label
-        .child(
-            div()
-                .w(px(100.0))
-                .flex()
-                .justify_end()
-                .text_color(cx.discord().text_secondary)
-                .text_size(px(12.0))
-                .child(category),
         )
 }

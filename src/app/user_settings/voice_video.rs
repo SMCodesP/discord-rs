@@ -4,7 +4,7 @@ use gpui::*;
 use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::tokens::kit_theme::DiscordTheme;
 
-use super::components::{render_divider, render_section_description, render_section_header, render_slider_row, render_toggle_row};
+use super::components::{render_divider, render_section_header, render_slider_row};
 use super::UserSettingsModal;
 
 pub fn render_voice_video_expanded(
@@ -16,74 +16,76 @@ pub fn render_voice_video_expanded(
     let in_vol = modal_read.input_volume;
     let out_vol = modal_read.output_volume;
     let is_testing = modal_read.is_testing_mic;
-    let krisp = modal_read.krisp_enabled;
-    let echo = modal_read.echo_cancellation;
-    let agc = modal_read.auto_gain;
-    let res = modal_read.video_resolution;
-    let fps = modal_read.video_fps;
 
     div()
         .flex()
         .flex_col()
         .gap(px(20.0))
-        .child(render_section_description(
-            "Configure seus dispositivos de áudio, níveis de volume, filtros de ruído e transmissão de vídeo.",
-            cx,
-        ))
-        // Section 1: Devices
+        // -------------------------------------------------------------
+        // Voice Header & Devices (settings-voice-video.png)
+        // -------------------------------------------------------------
         .child(
             div()
                 .flex()
-                .flex_row()
-                .gap(px(20.0))
-                // Input Device Box
+                .flex_col()
+                .gap(px(14.0))
+                .child(render_section_header("VOICE", cx))
                 .child(
                     div()
-                        .flex_1()
                         .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(render_section_header("DISPOSITIVO DE ENTRADA", cx))
+                        .flex_row()
+                        .gap(px(20.0))
+                        // Microphone
                         .child(
                             div()
-                                .h(px(40.0))
-                                .px(px(12.0))
-                                .rounded(px(4.0))
-                                .bg(cx.discord().bg_server)
+                                .flex_1()
                                 .flex()
-                                .items_center()
-                                .justify_between()
-                                .text_color(cx.discord().text_primary)
-                                .text_size(px(13.0))
-                                .child("Microfone Padrão (PipeWire / ALSA)")
-                                .child("⌵"),
-                        ),
-                )
-                // Output Device Box
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(render_section_header("DISPOSITIVO DE SAÍDA", cx))
+                                .flex_col()
+                                .gap(px(6.0))
+                                .child(render_section_header("MICROPHONE", cx))
+                                .child(
+                                    div()
+                                        .h(px(40.0))
+                                        .px(px(12.0))
+                                        .rounded(px(4.0))
+                                        .bg(cx.discord().bg_server)
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .text_color(cx.discord().text_primary)
+                                        .text_size(px(13.0))
+                                        .child("Default")
+                                        .child("⌵"),
+                                ),
+                        )
+                        // Speaker
                         .child(
                             div()
-                                .h(px(40.0))
-                                .px(px(12.0))
-                                .rounded(px(4.0))
-                                .bg(cx.discord().bg_server)
+                                .flex_1()
                                 .flex()
-                                .items_center()
-                                .justify_between()
-                                .text_color(cx.discord().text_primary)
-                                .text_size(px(13.0))
-                                .child("Alto-falantes / Fones (Padrão)")
-                                .child("⌵"),
+                                .flex_col()
+                                .gap(px(6.0))
+                                .child(render_section_header("SPEAKER", cx))
+                                .child(
+                                    div()
+                                        .h(px(40.0))
+                                        .px(px(12.0))
+                                        .rounded(px(4.0))
+                                        .bg(cx.discord().bg_server)
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .text_color(cx.discord().text_primary)
+                                        .text_size(px(13.0))
+                                        .child("Default")
+                                        .child("⌵"),
+                                ),
                         ),
                 ),
         )
-        // Section 2: Volume Sliders
+        // -------------------------------------------------------------
+        // Volume Sliders (settings-voice-video.png)
+        // -------------------------------------------------------------
         .child(
             div()
                 .flex()
@@ -92,7 +94,7 @@ pub fn render_voice_video_expanded(
                 .child({
                     let modal_c = modal.clone();
                     render_slider_row(
-                        "VOLUME DE ENTRADA (MICROFONE)",
+                        "MICROPHONE VOLUME",
                         in_vol,
                         move |v, _win, cx| {
                             modal_c.update(cx, |this, cx| {
@@ -106,7 +108,7 @@ pub fn render_voice_video_expanded(
                 .child({
                     let modal_c = modal.clone();
                     render_slider_row(
-                        "VOLUME DE SAÍDA (ALTO-FALANTES)",
+                        "SPEAKER VOLUME",
                         out_vol,
                         move |v, _win, cx| {
                             modal_c.update(cx, |this, cx| {
@@ -118,13 +120,15 @@ pub fn render_voice_video_expanded(
                     )
                 }),
         )
-        // Section 3: Mic Test
+        // -------------------------------------------------------------
+        // Mic Test (settings-voice-video.png)
+        // -------------------------------------------------------------
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.0))
-                .child(render_section_header("TESTE DE MICROFONE", cx))
+                .child(render_section_header("MIC TEST", cx))
                 .child(
                     div()
                         .flex()
@@ -135,7 +139,7 @@ pub fn render_voice_video_expanded(
                             let modal_c = modal.clone();
                             Button::new(
                                 "btn-mic-test",
-                                if is_testing { "Parar Teste" } else { "Vamos Testar" },
+                                if is_testing { "Stop Testing" } else { "Mic Test" },
                             )
                             .variant(if is_testing { ButtonVariant::Danger } else { ButtonVariant::Blurple })
                             .size(ButtonSize::Sm)
@@ -164,120 +168,90 @@ pub fn render_voice_video_expanded(
                 ),
         )
         .child(render_divider(cx))
-        // Section 4: Advanced Voice Processing
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(render_section_header("PROCESSAMENTO AVANÇADO DE VOZ", cx))
-                .child({
-                    let modal_c = modal.clone();
-                    render_toggle_row(
-                        "toggle-krisp",
-                        "Supressão de Ruído Krisp",
-                        "Filtro neural avançado para eliminar ruídos de fundo e teclados mecânicos.",
-                        krisp,
-                        move |_checked, _win, cx| {
-                            modal_c.update(cx, |this, cx| {
-                                this.krisp_enabled = !this.krisp_enabled;
-                                cx.notify();
-                            });
-                        },
-                        cx,
-                    )
-                })
-                .child({
-                    let modal_c = modal.clone();
-                    render_toggle_row(
-                        "toggle-echo",
-                        "Cancelamento de Eco",
-                        "Impede que o áudio das caixas de som retorne ao microfone.",
-                        echo,
-                        move |_checked, _win, cx| {
-                            modal_c.update(cx, |this, cx| {
-                                this.echo_cancellation = !this.echo_cancellation;
-                                cx.notify();
-                            });
-                        },
-                        cx,
-                    )
-                })
-                .child({
-                    let modal_c = modal.clone();
-                    render_toggle_row(
-                        "toggle-agc",
-                        "Controle Automático de Ganho",
-                        "Equaliza volumes baixos para manter consistência vocal em chamadas de grupo.",
-                        agc,
-                        move |_checked, _win, cx| {
-                            modal_c.update(cx, |this, cx| {
-                                this.auto_gain = !this.auto_gain;
-                                cx.notify();
-                            });
-                        },
-                        cx,
-                    )
-                }),
-        )
-        .child(render_divider(cx))
-        // Section 5: Video Settings
+        // -------------------------------------------------------------
+        // Input Profile (settings-voice-video.png)
+        // -------------------------------------------------------------
         .child(
             div()
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(render_section_header("CONFIGURAÇÕES DE TRANSMISSÃO DE VÍDEO", cx))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(px(16.0))
-                        .child(render_quality_pill(modal.clone(), "720p HD", res == 720, true, 720, cx))
-                        .child(render_quality_pill(modal.clone(), "1080p FHD (Nitro)", res == 1080, true, 1080, cx))
-                        .child(render_quality_pill(modal.clone(), "30 FPS", fps == 30, false, 30, cx))
-                        .child(render_quality_pill(modal.clone(), "60 FPS (Nitro)", fps == 60, false, 60, cx)),
-                ),
+                .child(render_section_header("INPUT PROFILE", cx))
+                .child(render_profile_option(
+                    "Voice Isolation",
+                    "Just your beautiful voice: let Discord cut through the noise",
+                    false,
+                    cx,
+                ))
+                .child(render_profile_option(
+                    "Studio",
+                    "Pure audio: open mic with no processing",
+                    false,
+                    cx,
+                ))
+                .child(render_profile_option(
+                    "Custom",
+                    "Advanced controls: use all the buttons and dials",
+                    true,
+                    cx,
+                )),
         )
 }
 
-fn render_quality_pill(
-    modal: Entity<UserSettingsModal>,
-    label: &'static str,
-    is_active: bool,
-    is_res: bool,
-    val: u32,
+fn render_profile_option(
+    title: &'static str,
+    desc: &'static str,
+    is_selected: bool,
     cx: &App,
 ) -> Div {
-    let bg_col = if is_active {
-        cx.discord().blurple
-    } else {
-        cx.discord().bg_channels
-    };
-    let text_col = if is_active {
-        cx.discord().white
-    } else {
-        cx.discord().text_secondary
-    };
-
     div()
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded(px(4.0))
-        .bg(bg_col)
-        .text_color(text_col)
-        .text_size(px(12.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-            modal.update(cx, |this, cx| {
-                if is_res {
-                    this.video_resolution = val;
+        .p(px(12.0))
+        .rounded(px(6.0))
+        .bg(cx.discord().bg_channels)
+        .border_1()
+        .border_color(if is_selected { cx.discord().blurple } else { cx.discord().neutral_67 })
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(12.0))
+        .child(
+            div()
+                .size(px(18.0))
+                .rounded_full()
+                .border_2()
+                .border_color(if is_selected { cx.discord().blurple } else { cx.discord().borders })
+                .bg(if is_selected { cx.discord().blurple } else { cx.discord().transparent })
+                .flex()
+                .items_center()
+                .justify_center()
+                .children(if is_selected {
+                    Some(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(cx.discord().white),
+                    )
                 } else {
-                    this.video_fps = val;
-                }
-                cx.notify();
-            });
-        })
-        .child(label)
+                    None
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .text_color(cx.discord().text_titles)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(14.0))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_color(cx.discord().text_secondary)
+                        .text_size(px(12.0))
+                        .child(desc),
+                ),
+        )
 }

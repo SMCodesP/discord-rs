@@ -3,7 +3,7 @@ use gpui::*;
 
 use crate::tokens::kit_theme::DiscordTheme;
 
-use super::components::render_section_description;
+use super::components::{render_section_description, render_section_header};
 use super::UserSettingsModal;
 
 pub fn render_language(
@@ -32,8 +32,9 @@ pub fn render_language(
         .flex()
         .flex_col()
         .gap(px(16.0))
+        .child(render_section_header("SELECT A LANGUAGE", cx))
         .child(render_section_description(
-            "Selecione o idioma da interface. As alterações são aplicadas instantaneamente em todos os menus do aplicativo.",
+            "Choose the language you want Discord to display.",
             cx,
         ))
         .child(

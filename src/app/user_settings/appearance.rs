@@ -41,7 +41,7 @@ pub fn render_appearance(
                             ThemeChoice::Dark,
                             current_theme,
                             "Escuro",
-                            "Clássico (#313338)",
+                            "",
                             cx.discord().bg_chat,
                             cx.discord().bg_channels,
                             cx.discord().text_titles,
@@ -52,7 +52,7 @@ pub fn render_appearance(
                             ThemeChoice::Light,
                             current_theme,
                             "Claro",
-                            "Alto contraste (#ffffff)",
+                            "",
                             cx.discord().white,
                             cx.discord().text_titles,
                             cx.discord().bg_chat,
@@ -63,7 +63,7 @@ pub fn render_appearance(
                             ThemeChoice::Midnight,
                             current_theme,
                             "Midnight OLED",
-                            "Preto puro (#000000)",
+                            "",
                             cx.discord().transparent,
                             cx.discord().bg_input,
                             cx.discord().white,
@@ -90,7 +90,7 @@ pub fn render_appearance(
                             MessageDisplayMode::Cozy,
                             display_mode,
                             "Aconchegante",
-                            "Avatares grandes de 40px, mensagens modernas e espaçamento confortável.",
+                            "",
                             true,
                             chat_font_size,
                             current_user,
@@ -101,7 +101,7 @@ pub fn render_appearance(
                             MessageDisplayMode::Compact,
                             display_mode,
                             "Compacto",
-                            "Linhas condensadas estilo IRC clássico, timestamp à esquerda e sem avatares.",
+                            "",
                             false,
                             chat_font_size,
                             current_user,
@@ -338,12 +338,16 @@ fn render_theme_card(
                         .text_size(px(14.0))
                         .child(name),
                 )
-                .child(
-                    div()
-                        .text_color(cx.discord().text_secondary)
-                        .text_size(px(11.0))
-                        .child(subtitle),
-                ),
+                .children(if !subtitle.is_empty() {
+                    Some(
+                        div()
+                            .text_color(cx.discord().text_secondary)
+                            .text_size(px(11.0))
+                            .child(subtitle),
+                    )
+                } else {
+                    None
+                }),
         )
 }
 
@@ -423,12 +427,16 @@ fn render_display_mode_card(
                                 .text_size(px(14.0))
                                 .child(title),
                         )
-                        .child(
-                            div()
-                                .text_color(cx.discord().text_secondary)
-                                .text_size(px(12.0))
-                                .child(desc),
-                        ),
+                        .children(if !desc.is_empty() {
+                            Some(
+                                div()
+                                    .text_color(cx.discord().text_secondary)
+                                    .text_size(px(12.0))
+                                    .child(desc),
+                            )
+                        } else {
+                            None
+                        }),
                 ),
         )
         // Visual Preview Row
@@ -480,7 +488,7 @@ fn render_display_mode_card(
                                         div()
                                             .text_color(cx.discord().text_primary)
                                             .text_size(px(font_size))
-                                            .child("Visual Aconchegante com avatar e espaçamento completo."),
+                                            .child("what happened to all the beans"),
                                     ),
                             ),
                     )
@@ -508,7 +516,7 @@ fn render_display_mode_card(
                                 div()
                                     .text_color(cx.discord().text_primary)
                                     .text_size(px(font_size))
-                                    .child("Visual Compacto estilo IRC denso em linha única."),
+                                    .child("what happened to all the beans"),
                             ),
                     )
                 }),

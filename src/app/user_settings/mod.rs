@@ -35,10 +35,6 @@ pub struct UserSettingsModal {
     pub profile_display_name: String,
     pub profile_pronouns: String,
     pub profile_bio: String,
-    pub profile_banner_color: u32,
-    pub profile_badge_nitro: bool,
-    pub profile_badge_dev: bool,
-    pub profile_badge_hypesquad: bool,
 
     // --- Privacy State ---
     pub allow_dm_from_members: bool,
@@ -81,12 +77,11 @@ impl UserSettingsModal {
         })
         .detach();
 
-        let (display_name, custom_status, has_nitro) = {
+        let (display_name, custom_status) = {
             let s = state.read(cx);
             (
                 s.current_user.display_name.clone(),
                 s.current_user.custom_status.clone().unwrap_or_default(),
-                s.nitro_tier != NitroTier::None,
             )
         };
 
@@ -95,10 +90,6 @@ impl UserSettingsModal {
             profile_display_name: display_name,
             profile_pronouns: String::new(),
             profile_bio: custom_status,
-            profile_banner_color: 0x5865f2,
-            profile_badge_nitro: has_nitro,
-            profile_badge_dev: false,
-            profile_badge_hypesquad: false,
 
             allow_dm_from_members: true,
             allow_friend_requests_from_members: true,
@@ -363,7 +354,7 @@ impl Render for UserSettingsModal {
                             )
                             .child(match active_tab {
                                 SettingsTab::MyAccount => my_account::render_my_account(app_entity.clone(), &current_user, cx).into_any_element(),
-                                SettingsTab::Profiles => profiles::render_profiles(modal_entity.clone(), self, &current_user, cx).into_any_element(),
+                                SettingsTab::Profiles => profiles::render_profiles(modal_entity.clone(), self, &current_user, state.nitro_tier != NitroTier::None, cx).into_any_element(),
                                 SettingsTab::Privacy => privacy::render_privacy(modal_entity.clone(), self, cx).into_any_element(),
                                 SettingsTab::AuthorizedApps => authorized_apps::render_authorized_apps(app_entity.clone(), state, cx).into_any_element(),
                                 SettingsTab::Connections => connections::render_connections(app_entity.clone(), state, cx).into_any_element(),
@@ -388,19 +379,29 @@ impl Render for UserSettingsModal {
                             .gap(px(4.0))
                             .pt(px(4.0))
                             .child(
-                                IconButton::with_icon("btn-close-settings", |size, color| {
-                                    icon_close(size, color).into_any_element()
-                                })
-                                .size(px(36.0))
-                                .icon_size(px(16.0))
-                                .rounded(px(18.0))
-                                .tooltip("ESC")
-                                .on_click(move |_event, _window, cx| {
-                                    entity.update(cx, |state, cx| {
-                                        state.close_modal();
-                                        cx.notify();
-                                    });
-                                }),
+                                div()
+                                    .size(px(36.0))
+                                    .rounded_full()
+                                    .border_2()
+                                    .border_color(cx.discord().borders)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(
+                                        IconButton::with_icon("btn-close-settings", |size, color| {
+                                            icon_close(size, color).into_any_element()
+                                        })
+                                        .size(px(32.0))
+                                        .icon_size(px(16.0))
+                                        .rounded(px(16.0))
+                                        .tooltip("ESC")
+                                        .on_click(move |_event, _window, cx| {
+                                            entity.update(cx, |state, cx| {
+                                                state.close_modal();
+                                                cx.notify();
+                                            });
+                                        }),
+                                    ),
                             )
                             .child(
                                 div()
