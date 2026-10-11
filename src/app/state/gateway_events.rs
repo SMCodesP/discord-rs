@@ -584,9 +584,7 @@ impl AppState {
                             presence,
                             custom_status,
                             relationship_type: r.rel_type,
-                            // Relationship (src/protocol/transport.rs, fora do escopo desta
-                            // tarefa) ainda não transporta avatar_decoration_data.
-                            avatar_decoration_data: None,
+                            avatar_decoration_data: r.avatar_decoration_data,
                         }
                     })
                     .collect();
@@ -627,6 +625,7 @@ impl AppState {
                     existing.presence = presence;
                     existing.custom_status = custom_status;
                     existing.relationship_type = r.rel_type;
+                    existing.avatar_decoration_data = r.avatar_decoration_data;
                 } else {
                     self.friends.push(FriendItemState {
                         id: r.id,
@@ -637,9 +636,7 @@ impl AppState {
                         presence,
                         custom_status,
                         relationship_type: r.rel_type,
-                        // Ver nota em RelationshipsUpdated: Relationship ainda não
-                        // transporta avatar_decoration_data.
-                        avatar_decoration_data: None,
+                        avatar_decoration_data: r.avatar_decoration_data,
                     });
                 }
             }
@@ -684,6 +681,22 @@ impl AppState {
             }
             TransportEvent::UserProfileError { user_id, error } => {
                 self.set_profile_popout_error(&user_id, error);
+            }
+            TransportEvent::CurrentUserUpdated(user) => {
+                // Live USER_UPDATE dispatch: refresh only what the user payload
+                // carries (identity, avatar, decoration). Presence, custom
+                // status and mute/deafen state are not part of the payload and
+                // stay untouched.
+                let display_name = user.display_name().to_string();
+                let avatar_text = user.username.chars().next().unwrap_or('U').to_uppercase().to_string();
+                let avatar_url = user.avatar_url();
+                self.current_user.id = user.id;
+                self.current_user.username = user.username;
+                self.current_user.display_name = display_name;
+                self.current_user.discriminator = user.discriminator;
+                self.current_user.avatar_text = avatar_text;
+                self.current_user.avatar_url = avatar_url;
+                self.current_user.avatar_decoration_data = user.avatar_decoration_data;
             }
             _ => {}
         }
