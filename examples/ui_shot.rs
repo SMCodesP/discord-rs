@@ -441,6 +441,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
                         .channels
                         .iter()
                         .map(|ch| ChannelItemState {
+                            avatar_decoration_data: None,
                             id: ch.id.clone(),
                             name: ch.name.clone(),
                             kind: parse_channel_kind(&ch.kind),
@@ -478,6 +479,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
         .dm_channels
         .iter()
         .map(|d| ChannelItemState {
+            avatar_decoration_data: None,
             id: d.id.clone(),
             name: d.name.clone(),
             kind: ChannelKind::Text,
@@ -509,6 +511,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
         .members
         .iter()
         .map(|m| MemberItemState {
+            avatar_decoration_data: None,
             id: m.id.clone(),
             name: m.name.clone(),
             avatar_text: m.name.chars().next().unwrap_or('?').to_string(),
@@ -524,6 +527,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
         .friends
         .iter()
         .map(|fr| FriendItemState {
+            avatar_decoration_data: None,
             id: fr.id.clone(),
             username: fr.username.clone(),
             display_name: fr.display_name.clone(),
@@ -563,6 +567,7 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.user_settings_tab = parse_settings_tab(&f.user_settings_tab);
 
     s.current_user = discord_rs::app::CurrentUserProfile {
+        avatar_decoration_data: None,
         id: if f.current_user.id.is_empty() {
             "u-me".to_string()
         } else {
@@ -684,8 +689,12 @@ fn parse_size(arg: &str) -> (f32, f32) {
     let (w, h) = arg
         .split_once('x')
         .unwrap_or_else(|| panic!("ui_shot: size must look like 1280x800, got {:?}", arg));
-    let w: f32 = w.parse().unwrap_or_else(|_| panic!("ui_shot: bad width {:?}", w));
-    let h: f32 = h.parse().unwrap_or_else(|_| panic!("ui_shot: bad height {:?}", h));
+    let w: f32 = w
+        .parse()
+        .unwrap_or_else(|_| panic!("ui_shot: bad width {:?}", w));
+    let h: f32 = h
+        .parse()
+        .unwrap_or_else(|_| panic!("ui_shot: bad height {:?}", h));
     (w, h)
 }
 
@@ -727,7 +736,10 @@ fn main() {
             fixture.screen, screen
         );
     }
-    let media_tab = fixture.media_picker.as_ref().map(|m| parse_media_tab(&m.tab));
+    let media_tab = fixture
+        .media_picker
+        .as_ref()
+        .map(|m| parse_media_tab(&m.tab));
 
     let app_state = apply_fixture(&fixture);
     assert!(
@@ -741,7 +753,11 @@ fn main() {
         fixture.connected,
         app_state.guilds.len(),
         app_state.dm_channels.len(),
-        app_state.messages_by_channel.values().map(|v| v.len()).sum::<usize>(),
+        app_state
+            .messages_by_channel
+            .values()
+            .map(|v| v.len())
+            .sum::<usize>(),
         title,
     );
 

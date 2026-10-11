@@ -207,6 +207,7 @@ impl AppState {
                 spotify_progress_text: None,
                 spotify_progress_pct: None,
                 button_text: None,
+                avatar_decoration_data: friend.avatar_decoration_data.clone(),
             });
         }
     }
@@ -257,6 +258,7 @@ impl AppState {
             recipient_ids: vec![user_id.to_string()],
             recipient_names: vec![username.to_string()],
             user_limit: None,
+            avatar_decoration_data: None,
         };
 
         self.dm_channels.insert(0, item);
@@ -309,6 +311,7 @@ impl AppState {
             recipient_ids,
             recipient_names,
             user_limit: None,
+            avatar_decoration_data: None,
         };
 
         self.dm_channels.insert(0, item);

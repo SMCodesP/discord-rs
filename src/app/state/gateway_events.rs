@@ -18,6 +18,7 @@ impl AppState {
                 self.current_user.display_name = display_name;
                 self.current_user.avatar_text = avatar_text;
                 self.current_user.avatar_url = avatar_url;
+                self.current_user.avatar_decoration_data = user.avatar_decoration_data;
                 self.is_connected_to_gateway = true;
                 self.is_connecting = false;
                 self.connection_mode = ConnectionMode::LiveDiscord(username);
@@ -357,6 +358,7 @@ impl AppState {
                     .map(|c| {
                         let is_group = c.channel_type == ChannelType::GroupDm;
                         let is_pinned = c.is_pinned || self.pinned_dms.contains(&c.id);
+                        let avatar_decoration_data = c.recipient_avatar_decorations.first().cloned().flatten();
                         ChannelItemState {
                             id: c.id,
                             name: c.name,
@@ -371,6 +373,7 @@ impl AppState {
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
                             user_limit: None,
+                            avatar_decoration_data,
                         }
                     })
                     .collect();
@@ -409,6 +412,7 @@ impl AppState {
             TransportEvent::DmChannelCreated(c) => {
                 let is_group = c.channel_type == ChannelType::GroupDm;
                 let real_id = c.id.clone();
+                let avatar_decoration_data = c.recipient_avatar_decorations.first().cloned().flatten();
                 let mut temp_id_to_migrate: Option<String> = None;
                 if let Some(existing) = self.dm_channels.iter_mut().find(|d| {
                     d.id == real_id
@@ -426,6 +430,7 @@ impl AppState {
                     existing.recipient_ids = c.recipient_ids;
                     existing.recipient_names = c.recipient_names;
                     existing.is_group_dm = is_group;
+                    existing.avatar_decoration_data = avatar_decoration_data;
                 } else {
                     self.dm_channels.insert(
                         0,
@@ -443,6 +448,7 @@ impl AppState {
                             recipient_ids: c.recipient_ids,
                             recipient_names: c.recipient_names,
                             user_limit: None,
+                            avatar_decoration_data,
                         },
                     );
                 }
@@ -470,6 +476,7 @@ impl AppState {
             TransportEvent::DmChannelResolved { temp_id, channel } => {
                 let real_id = channel.id.clone();
                 let is_group = channel.channel_type == ChannelType::GroupDm;
+                let avatar_decoration_data = channel.recipient_avatar_decorations.first().cloned().flatten();
 
                 // 1. Atualizar ou inserir em self.dm_channels
                 if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == temp_id || c.id == real_id) {
@@ -479,6 +486,7 @@ impl AppState {
                     dm.is_group_dm = is_group;
                     dm.recipient_ids = channel.recipient_ids.clone();
                     dm.recipient_names = channel.recipient_names.clone();
+                    dm.avatar_decoration_data = avatar_decoration_data.clone();
                 } else {
                     self.dm_channels.insert(
                         0,
@@ -496,6 +504,7 @@ impl AppState {
                             recipient_ids: channel.recipient_ids.clone(),
                             recipient_names: channel.recipient_names.clone(),
                             user_limit: None,
+                            avatar_decoration_data,
                         },
                     );
                 }
@@ -575,6 +584,9 @@ impl AppState {
                             presence,
                             custom_status,
                             relationship_type: r.rel_type,
+                            // Relationship (src/protocol/transport.rs, fora do escopo desta
+                            // tarefa) ainda não transporta avatar_decoration_data.
+                            avatar_decoration_data: None,
                         }
                     })
                     .collect();
@@ -625,6 +637,9 @@ impl AppState {
                         presence,
                         custom_status,
                         relationship_type: r.rel_type,
+                        // Ver nota em RelationshipsUpdated: Relationship ainda não
+                        // transporta avatar_decoration_data.
+                        avatar_decoration_data: None,
                     });
                 }
             }

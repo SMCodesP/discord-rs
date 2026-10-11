@@ -278,6 +278,7 @@ async fn test_pending_relationship_actions_state() {
         presence: PresenceStatus::Offline,
         custom_status: None,
         relationship_type: 3, // Incoming request
+        avatar_decoration_data: None,
     });
 
     state.accept_friend_request("target-user");

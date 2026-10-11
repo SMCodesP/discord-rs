@@ -40,10 +40,10 @@ impl MockDiscordProvider {
             global_name: Some("Nexus".to_string()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
             presence: PresenceStatus::Online,
             activity: Some(Activity::playing("discord-rs (GPUI)")),
             custom_status: None,
-            avatar_decoration_data: None,
         };
 
         // --- Guild 1: Rust Brasil ---
@@ -246,6 +246,7 @@ impl MockDiscordProvider {
             global_name: Some("Ferran".to_string()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         };
 
         let author_ana = Author {
@@ -254,6 +255,7 @@ impl MockDiscordProvider {
             global_name: Some("Ana Paula".to_string()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         };
 
         let author_carlos = Author {
@@ -262,6 +264,7 @@ impl MockDiscordProvider {
             global_name: Some("Carlos".to_string()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         };
 
         let author_alice = Author {
@@ -270,6 +273,7 @@ impl MockDiscordProvider {
             global_name: Some("Alice".to_string()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         };
 
         let msg_br_1 = Message::new(
@@ -327,6 +331,7 @@ impl MockDiscordProvider {
             global_name: Some("Moderação Rust BR".to_string()),
             avatar: None,
             bot: true,
+            avatar_decoration_data: None,
         };
         let msg_rules = Message::new(
             "msg-br-001",
@@ -366,6 +371,7 @@ impl MockDiscordProvider {
             global_name: Some("Nathan".to_string()),
             avatar: None,
             bot: false,
+            avatar_decoration_data: None,
         };
         let msg_gpui_1 = Message::new(
             "msg-gpui-101",
@@ -683,6 +689,7 @@ impl DiscordTransport for MockDiscordProvider {
             global_name: state.current_user.global_name.clone(),
             avatar: state.current_user.avatar.clone(),
             bot: state.current_user.bot,
+            avatar_decoration_data: state.current_user.avatar_decoration_data.clone(),
         };
 
         let mut msg = Message::new(id, channel_id, author, content);
@@ -729,6 +736,7 @@ impl DiscordTransport for MockDiscordProvider {
             global_name: state.current_user.global_name.clone(),
             avatar: state.current_user.avatar.clone(),
             bot: state.current_user.bot,
+            avatar_decoration_data: state.current_user.avatar_decoration_data.clone(),
         };
 
         let mut msg = Message::new(id, channel_id, author, "");
