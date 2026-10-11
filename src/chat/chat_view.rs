@@ -167,7 +167,7 @@ impl Render for ChatView {
                 this.media_picker_react_message_id = Some(msg_id);
                 this.media_picker_list_state.reset(0);
                 this.active_context_menu = None;
-                window.focus(&this.media_picker_focus_handle);
+                window.focus(&this.media_picker_focus_handle, cx);
                 cx.notify();
             });
         }));
@@ -217,7 +217,7 @@ impl Render for ChatView {
                 this.media_picker_react_message_id = Some(msg_id);
                 this.media_picker_list_state.reset(0);
                 this.active_context_menu = None;
-                window.focus(&this.media_picker_focus_handle);
+                window.focus(&this.media_picker_focus_handle, cx);
                 cx.notify();
             });
         }));
@@ -379,7 +379,7 @@ impl Render for ChatView {
                     this.media_picker_open = true;
                     this.media_picker_tab = MediaPickerTab::Gifs;
                     this.media_picker_list_state.reset(0);
-                    window.focus(&this.media_picker_focus_handle);
+                    window.focus(&this.media_picker_focus_handle, cx);
                 }
                 cx.notify();
             });
@@ -398,7 +398,7 @@ impl Render for ChatView {
                     this.media_picker_open = true;
                     this.media_picker_tab = MediaPickerTab::Stickers;
                     this.media_picker_list_state.reset(0);
-                    window.focus(&this.media_picker_focus_handle);
+                    window.focus(&this.media_picker_focus_handle, cx);
                 }
                 cx.notify();
             });
@@ -419,7 +419,7 @@ impl Render for ChatView {
                     this.media_picker_tab = MediaPickerTab::Emojis;
                     this.media_picker_react_message_id = None;
                     this.media_picker_list_state.reset(0);
-                    window.focus(&this.media_picker_focus_handle);
+                    window.focus(&this.media_picker_focus_handle, cx);
                 }
                 cx.notify();
             });
@@ -668,7 +668,7 @@ impl Render for ChatView {
                         this.media_picker_react_message_id = Some(id);
                         this.media_picker_list_state.reset(0);
                         this.active_context_menu = None;
-                        _win.focus(&this.media_picker_focus_handle);
+                        _win.focus(&this.media_picker_focus_handle, cx);
                         cx.notify();
                     });
                 }));

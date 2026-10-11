@@ -386,8 +386,8 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
             .track_focus(fh)
             .on_mouse_down(MouseButton::Left, {
                 let fh = fh.clone();
-                move |_e, window, _cx| {
-                    window.focus(&fh);
+                move |_e, window, cx| {
+                    window.focus(&fh, cx);
                 }
             })
             .on_key_down({
@@ -396,7 +396,7 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
                 let current_query = config.search_query.clone();
                 let fh = fh.clone();
                 move |ev: &KeyDownEvent, window, cx| {
-                    window.focus(&fh);
+                    window.focus(&fh, cx);
                     let key = &ev.keystroke.key;
                     let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
                     let is_paste = (is_ctrl && (key == "v" || key == "V"))

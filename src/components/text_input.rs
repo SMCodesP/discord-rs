@@ -360,7 +360,7 @@ impl RenderOnce for TextInput {
             let fh_click = focus_handle.clone();
             let on_click = self.on_click.clone();
             input_box = input_box.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-                window.focus(&fh_click);
+                window.focus(&fh_click, cx);
                 if let Some(ref click) = on_click {
                     click(window, cx);
                 }
@@ -373,7 +373,7 @@ impl RenderOnce for TextInput {
             let on_enter = self.on_enter.clone();
 
             input_box = input_box.on_key_down(move |ev: &KeyDownEvent, window, cx| {
-                window.focus(&fh_key);
+                window.focus(&fh_key, cx);
 
                 let key = &ev.keystroke.key;
                 let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
@@ -534,7 +534,7 @@ impl RenderOnce for TextInput {
                         .child("Colar"),
                 )
                 .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-                    window.focus(&fh_paste);
+                    window.focus(&fh_paste, cx);
                     if let Some(clipboard) = cx.read_from_clipboard() {
                         if let Some(text) = clipboard.text() {
                             if let Some(ref cb) = on_change_paste {

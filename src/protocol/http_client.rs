@@ -57,10 +57,6 @@ impl Default for ReqwestHttpClient {
 }
 
 impl HttpClient for ReqwestHttpClient {
-    fn type_name(&self) -> &'static str {
-        "ReqwestHttpClient"
-    }
-
     fn user_agent(&self) -> Option<&http::HeaderValue> {
         None
     }

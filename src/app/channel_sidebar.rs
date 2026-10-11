@@ -534,7 +534,7 @@ impl Render for ChannelSidebar {
                                                     let pos = event.position;
                                                     self_ctx.update(cx, |this, cx| {
                                                         this.context_menu_dm = Some((menu_cid.clone(), pos));
-                                                        window.focus(&this.focus_handle);
+                                                        window.focus(&this.focus_handle, cx);
                                                         cx.notify();
                                                     });
                                                 }

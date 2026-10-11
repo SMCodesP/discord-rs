@@ -1,3 +1,5 @@
+extern crate gpui_kit as gpui;
+
 use std::sync::Arc;
 use discord_rs::app::RootView;
 use discord_rs::protocol::ReqwestHttpClient;
@@ -21,7 +23,7 @@ fn main() {
         discord_rs::telemetry::TelemetryConfig::default(),
     );
 
-    Application::new()
+    platform::application()
         .with_http_client(Arc::new(ReqwestHttpClient::new()))
         .with_assets(discord_rs::tokens::icons::IconAssetSource)
         .run(move |cx: &mut App| {

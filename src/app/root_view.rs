@@ -148,11 +148,13 @@ impl Render for RootView {
         // If not connected to the live Discord Gateway, show the full-screen login.
         // No chat background or sidebar is leaked.
         // =========================================================================
-        if !state.is_connected_to_gateway {
+        let state_snapshot = state.clone();
+        let is_connected_to_gateway = state_snapshot.is_connected_to_gateway;
+        if !is_connected_to_gateway {
             if !self.login_focus_handle.is_focused(window) {
-                window.focus(&self.login_focus_handle);
+                window.focus(&self.login_focus_handle, cx);
             }
-            return render_login_screen(self.state.clone(), state, &self.login_focus_handle).into_any_element();
+            return render_login_screen(self.state.clone(), &state_snapshot, &self.login_focus_handle).into_any_element();
         }
 
         // =========================================================================

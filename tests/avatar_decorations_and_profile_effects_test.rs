@@ -1,5 +1,7 @@
 //! Integration tests for Avatar Decorations and Profile Effects (Phase 5)
 
+extern crate gpui_kit as gpui;
+
 use discord_rs::components::avatar::{Avatar, AvatarSize};
 use discord_rs::components::member_item::MemberItem;
 use discord_rs::components::profile_effect::{

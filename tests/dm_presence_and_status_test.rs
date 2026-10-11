@@ -1,3 +1,5 @@
+extern crate gpui_kit as gpui;
+
 use discord_rs::app::state::{AppState, ChannelItemState, ChannelKind};
 use discord_rs::components::avatar::AvatarSize;
 use discord_rs::domain::user::{Activity, CustomStatus, CustomStatusEmoji, PresenceStatus};

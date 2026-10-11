@@ -1,5 +1,7 @@
 #![recursion_limit = "4096"]
 
+extern crate gpui_kit as gpui;
+
 pub mod app;
 pub mod capture;
 pub mod chat;
