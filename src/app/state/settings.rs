@@ -1,9 +1,8 @@
 use super::*;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use crate::domain::settings::AccountConnection;
 use crate::domain::settings::MessageDisplayMode;
 use crate::domain::settings::NitroTier;
-use crate::domain::settings::Subscription;
 use crate::domain::settings::ThemeChoice;
 
 impl AppState {
@@ -24,24 +23,11 @@ impl AppState {
         self.user_settings_tab = tab;
     }
 
-    /// Sets the Nitro subscription tier
+    /// Sets the Nitro subscription tier (Zero Mocks: does not fabricate subscriptions)
     pub fn set_nitro_tier(&mut self, tier: NitroTier) {
         self.nitro_tier = tier;
         if tier == NitroTier::None {
             self.active_subscription = None;
-        } else {
-            self.active_subscription = Some(Subscription {
-                id: format!("sub-nitro-{}", Utc::now().timestamp()),
-                tier,
-                status: "active".into(),
-                current_period_end: Utc::now() + Duration::days(30),
-                plan_name: match tier {
-                    NitroTier::Basic => "Nitro Basic Mensal (R$ 8,99)".into(),
-                    NitroTier::Full => "Discord Nitro Mensal (R$ 24,99)".into(),
-                    NitroTier::None => "Sem Plano".into(),
-                },
-                payment_gateway: String::new(),
-            });
         }
     }
 

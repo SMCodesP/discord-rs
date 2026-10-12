@@ -85,7 +85,7 @@ impl AppState {
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
             tokio::spawn(async move {
-                let _ = cm.connect_mock().await;
+                let _ = cm.disconnect().await;
             });
         }
     }

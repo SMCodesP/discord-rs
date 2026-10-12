@@ -54,7 +54,7 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(telemetry: crate::telemetry::TelemetryHandle, cx: &mut Context<Self>) -> Self {
-        let (client_manager, mut event_rx) = crate::protocol::ClientManager::new_mock();
+        let (client_manager, mut event_rx) = crate::protocol::ClientManager::new();
         let cm_auto_login = client_manager.clone();
         let tel_init = telemetry.clone();
         let state = cx.new(|_cx| {

@@ -77,7 +77,15 @@ fn test_hygiene_no_invented_mocks_outside_allowed() {
         Some("Stripe")
     );
 
-    let forbidden = ["Vanguard", "Rust Brasil", "Stripe"];
+    let forbidden = [
+        "Vanguard",
+        "Rust Brasil",
+        "Stripe",
+        "R$ ",
+        "Nexus",
+        "Ferran",
+        "GPUI Hub",
+    ];
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let src_dir = Path::new(manifest_dir).join("src");
 
@@ -128,16 +136,16 @@ fn test_hygiene_no_invented_mocks_outside_allowed() {
                 in_test_mod = false;
             }
 
+            if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                continue;
+            }
+
             // Strip trailing comments (e.g. `pub payment_gateway: String, // "Stripe"...`)
             let code_part = if let Some((code, _)) = line.split_once("//") {
                 code.trim()
             } else {
                 trimmed
             };
-
-            if trimmed.starts_with("/*") || trimmed.starts_with('*') {
-                continue;
-            }
 
             if !in_test_mod {
                 for &word in &forbidden {
@@ -151,6 +159,16 @@ fn test_hygiene_no_invented_mocks_outside_allowed() {
                         ));
                     }
                 }
+
+                // new_mock( is only allowed in client_manager.rs, mock_provider.rs, or #[cfg(test)]
+                if relative != "src/protocol/client_manager.rs" && code_part.contains("new_mock(") {
+                    violations.push(format!(
+                        "{}:{}: contains forbidden 'new_mock(' in production code: {}",
+                        relative,
+                        line_no + 1,
+                        trimmed
+                    ));
+                }
             }
         }
     });
@@ -160,4 +178,18 @@ fn test_hygiene_no_invented_mocks_outside_allowed() {
         "Found forbidden strings outside seeded_for_tests/mock_provider/testes:\n{}",
         violations.join("\n")
     );
+}
+
+#[tokio::test]
+async fn test_client_manager_new_starts_idle_disconnected() {
+    let (cm, _rx) = discord_rs::protocol::ClientManager::new();
+    assert_eq!(
+        cm.current_mode().await,
+        discord_rs::protocol::ConnectionMode::Disconnected("Não conectado".to_string())
+    );
+    assert!(cm.list_guilds().await.unwrap().is_empty());
+    assert!(cm.list_dm_channels().await.unwrap().is_empty());
+    assert!(cm.list_relationships().await.unwrap().is_empty());
+    assert!(cm.get_messages("chan-1", 10).await.unwrap().is_empty());
+    assert!(cm.send_message("chan-1", "hello").await.is_err());
 }
