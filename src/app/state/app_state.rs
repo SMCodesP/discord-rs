@@ -45,6 +45,20 @@ pub struct AppState {
     pub search_results: Vec<crate::chat::search::SearchResultGroup>,
     /// Search executing flag
     pub is_searching: bool,
+    /// Total matching results count returned by Discord REST API
+    pub search_total_results: u64,
+    /// Current search pagination offset (0, 25, 50...)
+    pub search_offset: u32,
+    /// Search sort order (Desc / Recentes, Asc / Antigos)
+    pub search_sort_order: crate::chat::search::SearchSortOrder,
+    /// Visible search error message, if any
+    pub search_error: Option<String>,
+    /// True if search returned HTTP 202 indexing in progress
+    pub is_search_indexing: bool,
+    /// Retry-after duration in seconds when indexing
+    pub search_retry_after: Option<f64>,
+    /// Monotonic search generation counter to discard stale out-of-order responses
+    pub search_generation: u64,
     /// Target message Snowflake ID to focus/scroll to in chat
     pub target_message_id: Option<String>,
     /// Real-time coalesced typing tracker: channel_id -> user_id -> (username, timestamp)
@@ -213,6 +227,13 @@ impl AppState {
             is_search_open: false,
             search_results: Vec::new(),
             is_searching: false,
+            search_total_results: 0,
+            search_offset: 0,
+            search_sort_order: crate::chat::search::SearchSortOrder::Desc,
+            search_error: None,
+            is_search_indexing: false,
+            search_retry_after: None,
+            search_generation: 0,
             target_message_id: None,
             typing_tracker: HashMap::new(),
             is_connected_to_gateway: false,

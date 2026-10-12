@@ -803,3 +803,43 @@ impl ClientManager {
     }
 }
 
+impl ClientManager {
+    /// Searches messages across channel or guild using the active DiscordApiClient
+    pub async fn search_messages(
+        &self,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        query: &crate::chat::search::SearchQuery,
+        offset: u32,
+        sort_order: Option<&str>,
+    ) -> Result<crate::chat::search::SearchApiResponse> {
+        let client_opt = {
+            let rc = self.real_client.read().await;
+            rc.clone()
+        };
+        let client = match client_opt {
+            Some(c) => c,
+            None => {
+                anyhow::bail!("Não conectado à API do Discord");
+            }
+        };
+
+        if let Some(gid) = guild_id {
+            client.search_guild_messages(gid, query, offset, sort_order).await
+        } else if let Some(cid) = channel_id {
+            let real_cid = if cid.starts_with("dm-") && !cid.starts_with("dm-group-") {
+                let recipient_id = cid.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => cid.to_string(),
+                }
+            } else {
+                cid.to_string()
+            };
+            client.search_channel_messages(&real_cid, query, offset, sort_order).await
+        } else {
+            anyhow::bail!("Nenhum canal ou servidor selecionado para busca");
+        }
+    }
+}
+
