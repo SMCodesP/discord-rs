@@ -3,6 +3,7 @@
 //! processes incoming WebSocket Gateway events, and provides thread-safe messaging.
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use anyhow::Result;
 use log::{info, warn, error};
@@ -702,7 +703,8 @@ impl ClientManager {
                 .map(|d| !d.is_empty())
                 .unwrap_or(false);
 
-        let audio_bridge = if has_hardware_audio {
+        let is_mock = matches!(*self.mode.read().await, ConnectionMode::Mock);
+        let audio_bridge = if !is_mock && has_hardware_audio {
             crate::protocol::voice_session::AudioBridge::new_thread()
         } else {
             let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(64);
@@ -830,8 +832,7 @@ impl ClientManager {
 
             if already_existed {
                 log::info!(
-                    "[VoiceDiag] Chamada já existia no canal {}; outro lado ligou primeiro (não tocando), chamada_ja_existia=true",
-                    ch_str
+                    "[VoiceDiag] Chamada já existia no canal; outro lado ligou primeiro (não tocando), chamada_ja_existia=true"
                 );
             } else {
                 let mut confirm_rx = session.subscribe_entry_confirmed();
@@ -839,34 +840,97 @@ impl ClientManager {
                 let cm_ring = self.clone();
                 let session_weak = Arc::downgrade(&session);
                 tokio::spawn(async move {
-                    let mut confirmed = *confirm_rx.borrow();
-                    while !confirmed {
+                    let trigger_ring = || {
+                        let cm = cm_ring.clone();
+                        let ch = ch_str.clone();
+                        let r = recips.clone();
+                        let weak = session_weak.clone();
+                        async move {
+                            log::info!("[ClientManager] CALL_CREATE confirmado na chamada DM; disparando ring_call");
+                            if let Err(e) = cm.ring_call(&ch, Some(r)).await {
+                                let short_msg = "Não foi possível tocar a chamada".to_string();
+                                log::warn!("[VoiceRing] Falha ao tocar chamada (ring_call recusado): {}", e);
+                                if let Some(sess) = weak.upgrade() {
+                                    sess.set_call_warning(Some(short_msg));
+                                }
+                            } else {
+                                log::info!("[VoiceRing] ring_call enviado com sucesso para a chamada DM");
+                            }
+                        }
+                    };
+
+                    if *confirm_rx.borrow() {
+                        trigger_ring().await;
+                        return;
+                    }
+
+                    let is_connected = matches!(
+                        *state_rx.borrow(),
+                        crate::protocol::voice_session::VoiceSessionState::Connected
+                    );
+
+                    while !is_connected {
                         tokio::select! {
                             res = confirm_rx.changed() => {
                                 if res.is_ok() && *confirm_rx.borrow() {
-                                    confirmed = true;
-                                    break;
+                                    trigger_ring().await;
+                                    return;
                                 } else if res.is_err() {
-                                    break;
+                                    return;
                                 }
                             }
                             res = state_rx.changed() => {
-                                if res.is_ok() && matches!(*state_rx.borrow(), crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }) {
-                                    break;
+                                if res.is_err() {
+                                    return;
+                                }
+                                match *state_rx.borrow() {
+                                    crate::protocol::voice_session::VoiceSessionState::Connected => {
+                                        break;
+                                    }
+                                    crate::protocol::voice_session::VoiceSessionState::Disconnected { .. } => {
+                                        return;
+                                    }
+                                    _ => {}
                                 }
                             }
                         }
                     }
-                    if confirmed {
-                        log::info!("[ClientManager] CALL_CREATE confirmado na chamada DM; disparando ring_call");
-                        if let Err(e) = cm_ring.ring_call(&ch_str, Some(recips)).await {
-                            let short_msg = "Não foi possível tocar a chamada".to_string();
-                            log::warn!("[VoiceRing] Falha ao tocar chamada (ring_call recusado): {}", e);
-                            if let Some(sess) = session_weak.upgrade() {
-                                sess.set_call_warning(Some(short_msg));
+
+                    if *confirm_rx.borrow() {
+                        trigger_ring().await;
+                        return;
+                    }
+
+                    let timeout_duration = Duration::from_secs(10);
+                    let timeout_fut = tokio::time::sleep(timeout_duration);
+                    tokio::pin!(timeout_fut);
+
+                    loop {
+                        tokio::select! {
+                            _ = &mut timeout_fut => {
+                                log::warn!("[VoiceDiag] CALL_CREATE não chegou em 10s; toque não enviado");
+                                let short_msg = "Não foi possível tocar a chamada".to_string();
+                                if let Some(sess) = session_weak.upgrade() {
+                                    sess.set_call_warning(Some(short_msg));
+                                }
+                                return;
                             }
-                        } else {
-                            log::info!("[VoiceRing] ring_call enviado com sucesso para a chamada DM");
+                            res = confirm_rx.changed() => {
+                                if res.is_ok() && *confirm_rx.borrow() {
+                                    trigger_ring().await;
+                                    return;
+                                } else if res.is_err() {
+                                    return;
+                                }
+                            }
+                            res = state_rx.changed() => {
+                                if res.is_err() {
+                                    return;
+                                }
+                                if matches!(*state_rx.borrow(), crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }) {
+                                    return;
+                                }
+                            }
                         }
                     }
                 });

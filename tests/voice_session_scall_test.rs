@@ -817,6 +817,26 @@ async fn test_voice_logs_do_not_contain_secrets() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let _ = session.disconnect().await;
 
+    // Exercita também ClientManager com os mesmos IDs secretos para cobrir logs de chamada já existente
+    let (cm_secret, _) = ClientManager::new_with_transport(transport.clone());
+    let _ = transport.event_tx.send(TransportEvent::CallCreate {
+        channel_id: secret_channel_str.clone(),
+        message_id: None,
+        region: None,
+        ringing: vec![],
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let session_cm = cm_secret.start_voice_session(
+        None,
+        secret_channel_id,
+        secret_user_id,
+        false,
+        false,
+        Some(vec!["recip1".to_string()]),
+    ).await.expect("start_voice_session with secrets");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = session_cm.disconnect().await;
+
     // Coleta todos os logs capturados durante o fluxo
     let logs = get_captured_logs();
     assert!(!logs.is_empty(), "Logs devem ter sido capturados durante o fluxo de voz");
@@ -998,6 +1018,317 @@ async fn test_dm_call_no_ring_if_already_existed() {
         "Log deve indicar que a chamada já existia previamente e o toque foi omitido. Logs: {:?}",
         logs
     );
+
+    let target_channel_str = target_channel_id.to_string();
+    for l in &logs {
+        if l.contains("[VoiceDiag]") || l.contains("[VoiceRing]") || l.contains("[VoiceGateway]") {
+            assert!(
+                !l.contains(&target_channel_str),
+                "VIOLAÇÃO DE PRIVACIDADE: channel_id vazou no log de voz: {}",
+                l
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Servidor UDP de Teste em Loopback 127.0.0.1 para IP Discovery (74 bytes)
+// ============================================================================
+
+async fn spawn_test_udp_server(expected_ssrc: u32) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((len, client_addr)) => {
+                    // IP Discovery (74 bytes)
+                    if len == 74 && buf[0..2] == 1u16.to_be_bytes() {
+                        let mut resp = [0u8; 74];
+                        resp[0..2].copy_from_slice(&2u16.to_be_bytes());
+                        resp[2..4].copy_from_slice(&70u16.to_be_bytes());
+                        resp[4..8].copy_from_slice(&expected_ssrc.to_be_bytes());
+                        let ip = b"127.0.0.1";
+                        resp[8..8 + ip.len()].copy_from_slice(ip);
+                        resp[8 + ip.len()] = 0;
+                        resp[72..74].copy_from_slice(&addr.port().to_be_bytes());
+                        let _ = socket.send_to(&resp, client_addr).await;
+                        continue;
+                    }
+                    if len == 8 {
+                        continue;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (addr, handle)
+}
+
+// ============================================================================
+// TEST 7b: SCall2-fix1 - CALL_CREATE depois do VOICE_SERVER_UPDATE e Ready => toca
+// ============================================================================
+
+#[tokio::test]
+async fn test_call_create_after_voice_server_update_and_ready_rings() {
+    init_test_logger();
+    let transport = Arc::new(MockTransport::new());
+    let (cm, _rx) = ClientManager::new_with_transport(transport.clone());
+
+    let (udp_addr, _udp_handle) = spawn_test_udp_server(12345).await;
+    let udp_port = udp_addr.port();
+
+    cm.set_voice_gateway_factory(Some(Arc::new(move |_cfg| {
+        struct FastGateway {
+            event_tx: broadcast::Sender<VoiceGatewayEvent>,
+            udp_port: u16,
+        }
+        #[async_trait]
+        impl VoiceGatewayTransport for FastGateway {
+            async fn connect(&self) -> Result<()> {
+                let _ = self.event_tx.send(VoiceGatewayEvent::Connected);
+                Ok(())
+            }
+            async fn wait_for_ready(&self, _: Duration) -> Result<VoiceReady> {
+                Ok(VoiceReady {
+                    ssrc: 12345,
+                    ip: "127.0.0.1".to_string(),
+                    port: self.udp_port,
+                    modes: vec!["aead_aes256_gcm_rtpsize".to_string()],
+                })
+            }
+            async fn select_protocol(&self, _: &str, _: u16, mode: &str) -> Result<discord_rs::protocol::SessionDescription> {
+                Ok(discord_rs::protocol::SessionDescription {
+                    mode: mode.to_string(),
+                    secret_key: vec![0u8; 32],
+                    dave_protocol_version: None,
+                })
+            }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
+                self.event_tx.subscribe()
+            }
+            async fn disconnect(&self) -> Result<()> { Ok(()) }
+        }
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(FastGateway { event_tx: tx, udp_port })
+    }))).await;
+
+    let target_channel_id = 9988112233u64;
+    let target_user_id = 4455667788u64;
+    let recips = vec!["1122334455".to_string()];
+
+    let session = cm
+        .start_voice_session(
+            None,
+            target_channel_id,
+            target_user_id,
+            false,
+            false,
+            Some(recips.clone()),
+        )
+        .await
+        .expect("start_voice_session should succeed");
+
+    // Aguarda um instante para garantir que Opcode 4 foi despachado e os eventos foram subscritos
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 1. Envia VOICE_STATE_UPDATE
+    let mut my_voice_state = VoiceState::new(&target_user_id.to_string(), "sess-late-call");
+    my_voice_state.channel_id = Some(target_channel_id.to_string());
+    my_voice_state.guild_id = None;
+    transport
+        .event_tx
+        .send(TransportEvent::VoiceStateUpdate(my_voice_state))
+        .expect("send VoiceStateUpdate");
+
+    // 2. Envia VOICE_SERVER_UPDATE (ANTES de CALL_CREATE!)
+    transport
+        .event_tx
+        .send(TransportEvent::VoiceServerUpdate {
+            token: "tok-late".to_string(),
+            guild_id: None,
+            channel_id: Some(target_channel_id.to_string()),
+            endpoint: Some("voice.late.test:443".to_string()),
+        })
+        .expect("send VoiceServerUpdate");
+
+    // Aguarda a sessão conectar (passar por Ready e virar Connected)
+    session
+        .wait_until_connected(Duration::from_secs(3))
+        .await
+        .expect("conectar sessão de voz");
+    assert_eq!(session.state(), VoiceSessionState::Connected, "Sessão deve estar Connected");
+
+    // Até este momento, CALL_CREATE não chegou, logo toque NÃO deve ter saído
+    {
+        let calls = transport.ring_calls.lock().await;
+        assert_eq!(calls.len(), 0, "ring_call NÃO deve ser chamado antes de CALL_CREATE chegar");
+    }
+
+    // 3. Agora chega CALL_CREATE (depois de VOICE_SERVER_UPDATE e depois do Ready!)
+    transport
+        .event_tx
+        .send(TransportEvent::CallCreate {
+            channel_id: target_channel_id.to_string(),
+            message_id: None,
+            region: None,
+            ringing: recips.clone(),
+        })
+        .expect("send CallCreate");
+
+    // Aguarda o processamento
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // 4. Confirma que ring_call foi disparado com sucesso!
+    {
+        let calls = transport.ring_calls.lock().await;
+        assert_eq!(calls.len(), 1, "ring_call DEVE ser chamado após CALL_CREATE tardio");
+        assert_eq!(calls[0].0, target_channel_id.to_string());
+        assert_eq!(calls[0].1, Some(recips));
+    }
+
+    let _ = session.disconnect().await;
+}
+
+// ============================================================================
+// TEST 7c: SCall2-fix1 - Sem CALL_CREATE em 10s => não toca e aviso aparece
+// ============================================================================
+
+#[tokio::test]
+async fn test_no_call_create_within_10s_times_out_and_shows_warning_without_ring() {
+    init_test_logger();
+    clear_captured_logs();
+
+    let transport = Arc::new(MockTransport::new());
+    let (cm, _rx) = ClientManager::new_with_transport(transport.clone());
+
+    let (udp_addr, _udp_handle) = spawn_test_udp_server(12345).await;
+    let udp_port = udp_addr.port();
+
+    cm.set_voice_gateway_factory(Some(Arc::new(move |_cfg| {
+        struct FastGateway {
+            event_tx: broadcast::Sender<VoiceGatewayEvent>,
+            udp_port: u16,
+        }
+        #[async_trait]
+        impl VoiceGatewayTransport for FastGateway {
+            async fn connect(&self) -> Result<()> {
+                let _ = self.event_tx.send(VoiceGatewayEvent::Connected);
+                Ok(())
+            }
+            async fn wait_for_ready(&self, _: Duration) -> Result<VoiceReady> {
+                Ok(VoiceReady {
+                    ssrc: 12345,
+                    ip: "127.0.0.1".to_string(),
+                    port: self.udp_port,
+                    modes: vec!["aead_aes256_gcm_rtpsize".to_string()],
+                })
+            }
+            async fn select_protocol(&self, _: &str, _: u16, mode: &str) -> Result<discord_rs::protocol::SessionDescription> {
+                Ok(discord_rs::protocol::SessionDescription {
+                    mode: mode.to_string(),
+                    secret_key: vec![0u8; 32],
+                    dave_protocol_version: None,
+                })
+            }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
+                self.event_tx.subscribe()
+            }
+            async fn disconnect(&self) -> Result<()> { Ok(()) }
+        }
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(FastGateway { event_tx: tx, udp_port })
+    }))).await;
+
+    let target_channel_id = 8877665544u64;
+    let target_user_id = 2233445566u64;
+    let recips = vec!["3344556677".to_string()];
+
+    let session = cm
+        .start_voice_session(
+            None,
+            target_channel_id,
+            target_user_id,
+            false,
+            false,
+            Some(recips),
+        )
+        .await
+        .expect("start_voice_session should succeed");
+
+    // Aguarda um instante para garantir que Opcode 4 foi despachado e os eventos foram subscritos
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut my_voice_state = VoiceState::new(&target_user_id.to_string(), "sess-no-call");
+    my_voice_state.channel_id = Some(target_channel_id.to_string());
+    my_voice_state.guild_id = None;
+    transport
+        .event_tx
+        .send(TransportEvent::VoiceStateUpdate(my_voice_state))
+        .expect("send VoiceStateUpdate");
+
+    transport
+        .event_tx
+        .send(TransportEvent::VoiceServerUpdate {
+            token: "tok-no-call".to_string(),
+            guild_id: None,
+            channel_id: Some(target_channel_id.to_string()),
+            endpoint: Some("voice.nocall.test:443".to_string()),
+        })
+        .expect("send VoiceServerUpdate");
+
+    // Aguarda a sessão conectar
+    session
+        .wait_until_connected(Duration::from_secs(3))
+        .await
+        .expect("conectar sessão de voz");
+    assert_eq!(session.state(), VoiceSessionState::Connected);
+
+    // Antes dos 10s: toque não foi enviado e nenhum aviso foi registrado
+    {
+        let calls = transport.ring_calls.lock().await;
+        assert_eq!(calls.len(), 0);
+    }
+    assert_eq!(session.call_warning(), None);
+
+    // Aguarda o timeout de 10 segundos expirar (10,1 segundos)
+    tokio::time::sleep(Duration::from_millis(10_100)).await;
+
+    // Confirma que ring_call NUNCA foi chamado
+    {
+        let calls = transport.ring_calls.lock().await;
+        assert_eq!(
+            calls.len(),
+            0,
+            "ring_call NÃO deve ser chamado se CALL_CREATE não chegar em 10s"
+        );
+    }
+
+    // Confirma que o aviso curto foi registrado na sessão
+    assert_eq!(
+        session.call_warning(),
+        Some("Não foi possível tocar a chamada".to_string()),
+        "Aviso curto deve estar presente na sessão"
+    );
+
+    // Confirma que o log [VoiceDiag] correspondente foi emitido
+    let logs = get_captured_logs();
+    let has_diag_timeout = logs.iter().any(|l| {
+        l.contains("[VoiceDiag] CALL_CREATE não chegou em 10s; toque não enviado")
+    });
+    assert!(
+        has_diag_timeout,
+        "Log deve conter [VoiceDiag] CALL_CREATE não chegou em 10s; toque não enviado. Logs: {:?}",
+        logs
+    );
+
+    let _ = session.disconnect().await;
 }
 
 // ============================================================================

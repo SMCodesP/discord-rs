@@ -1290,7 +1290,12 @@ async fn run_voice_loop(
 
     while !stop_signal.load(Ordering::SeqCst) {
         let host = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
-        log::info!("[VoiceDiag] URL do gateway de voz: host={}", host);
+        let safe_host = if host.parse::<std::net::IpAddr>().is_ok() {
+            "[ip]"
+        } else {
+            host
+        };
+        log::info!("[VoiceDiag] URL do gateway de voz: host={}", safe_host);
         log::info!("Connecting to Voice Gateway WebSocket: {}", ws_url);
 
         let mut ws_config = WebSocketConfig::default();

@@ -948,6 +948,13 @@ impl Drop for VoiceSession {
     }
 }
 
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 // ============================================================================
 // 7. Loop de Execução e Handshake de Ponta a Ponta
 // ============================================================================
@@ -980,6 +987,31 @@ async fn run_voice_session(
     let initial_mute = self_mute.load(Ordering::Relaxed);
     let initial_deaf = self_deaf.load(Ordering::Relaxed);
 
+    // Escuta de CALL_CREATE / CALL_UPDATE durante toda a sessão (SCall2-fix1)
+    let mut call_events_rx = signaling.subscribe_events();
+    let target_channel_for_call = channel_str.clone();
+    let confirmed_tx_for_call = entry_confirmed_tx.clone();
+    let call_listener_task = tokio::spawn(async move {
+        loop {
+            match call_events_rx.recv().await {
+                Ok(TransportEvent::CallCreate { channel_id: ev_ch_id, ringing, .. })
+                    if ev_ch_id == target_channel_for_call => {
+                    log::info!("[VoiceDiag] CALL_CREATE recebido: sim, ringing_count={}", ringing.len());
+                    let _ = confirmed_tx_for_call.send(true);
+                }
+                Ok(TransportEvent::CallUpdate { channel_id: ev_ch_id, ringing, .. })
+                    if ev_ch_id == target_channel_for_call => {
+                    log::info!("[VoiceDiag] CALL_UPDATE recebido: ringing_count={}", ringing.len());
+                    let _ = confirmed_tx_for_call.send(true);
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    let _call_listener_guard = AbortOnDrop(call_listener_task);
+
     signaling
         .send_voice_state_update(guild_str.as_deref(), Some(&channel_str), initial_mute, initial_deaf)
         .await
@@ -994,7 +1026,6 @@ async fn run_voice_session(
     let mut captured_session_id: Option<String> = None;
     let mut captured_token: Option<String> = None;
     let mut captured_endpoint: Option<String> = None;
-    let mut call_create_received = false;
 
     let discovery_timeout = Duration::from_secs(15);
     let discovery_res = tokio::time::timeout(discovery_timeout, async {
@@ -1010,18 +1041,6 @@ async fn run_voice_session(
                     && !session_id.is_empty() => {
                     log::info!("[VoiceDiag] VOICE_STATE_UPDATE próprio recebido");
                     captured_session_id = Some(session_id);
-                }
-                Ok(TransportEvent::CallCreate { channel_id: ev_ch_id, ringing, .. })
-                    if ev_ch_id == channel_str => {
-                    log::info!("[VoiceDiag] CALL_CREATE recebido: sim, ringing_count={}", ringing.len());
-                    call_create_received = true;
-                    let _ = entry_confirmed_tx.send(true);
-                }
-                Ok(TransportEvent::CallUpdate { channel_id: ev_ch_id, ringing, .. })
-                    if ev_ch_id == channel_str => {
-                    log::info!("[VoiceDiag] CALL_UPDATE recebido: ringing_count={}", ringing.len());
-                    call_create_received = true;
-                    let _ = entry_confirmed_tx.send(true);
                 }
                 Ok(TransportEvent::VoiceServerUpdate {
                     token,
@@ -1079,7 +1098,7 @@ async fn run_voice_session(
     })
     .await;
 
-    if !call_create_received && config.guild_id.is_none() {
+    if !*entry_confirmed_tx.borrow() && config.guild_id.is_none() {
         log::info!("[VoiceDiag] CALL_CREATE recebido: não, ringing_count=0");
     }
 
