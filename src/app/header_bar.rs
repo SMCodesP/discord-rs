@@ -375,7 +375,6 @@ fn render_toolbar(
                     return;
                 }
 
-                let cm_opt = voice_entity.read(cx).client_manager.clone();
                 let cid = cid_v.clone();
                 let cname = cname_v.clone();
                 let recips = if recips_v.is_empty() {
@@ -385,32 +384,14 @@ fn render_toolbar(
                 };
                 let entity = voice_entity.clone();
 
-                // Ordem real (demonstrada em examples/voice_call_probe.rs:60-68 e doc Discord):
-                // 1. Entra na chamada do canal de DM com guild_id: None explicitamente (Opcode 4)
+                // Ordem real (demonstrada em docs/ROADMAP_DISCORD_VOICE_AND_PARITY.md e doc Discord):
+                // 1. Entra na chamada do canal de DM com guild_id: None explicitamente (Opcode 4).
+                // 2. O client_manager / voice_session aguarda a confirmação de entrada (VoiceStateConfirmed)
+                //    antes de disparar ring_call. Falhas no toque são tratadas como aviso não-fatal.
                 entity.update(cx, |state, cx| {
-                    state.connect_voice_dm(&cid, &cname);
+                    state.connect_voice_dm_with_ring(&cid, &cname, recips);
                     cx.notify();
                 });
-
-                // 2. Dispara o ring da chamada via POST /channels/{id}/call/ring
-                cx.spawn(|cx: &mut AsyncApp| {
-                    let cx = cx.clone();
-                    async move {
-                        if let Some(cm) = cm_opt {
-                            if let Err(e) = cm.ring_call(&cid, recips).await {
-                                let err_msg = format!("Falha ao tocar chamada (ring_call recusado): {}", e);
-                                log::error!("[HeaderBar] {}", err_msg);
-                                let _ = cx.update(|cx| {
-                                    entity.update(cx, |state, cx| {
-                                        state.set_call_fatal_error(err_msg);
-                                        cx.notify();
-                                    });
-                                });
-                            }
-                        }
-                    }
-                })
-                .detach();
             }),
         );
 

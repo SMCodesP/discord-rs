@@ -612,6 +612,8 @@ impl VoiceGatewayStateMachine {
             self.last_seq = s;
         }
 
+        log::debug!("[VoiceDiag] Opcode recebido: {}", payload.op);
+
         let mut actions = Vec::new();
 
         match VoiceOpcode::from_u8(payload.op) {
@@ -622,6 +624,7 @@ impl VoiceGatewayStateMachine {
 
                 let interval_ms = hello.heartbeat_interval.round() as u64;
                 self.heartbeat_interval_ms = Some(interval_ms);
+                log::info!("[VoiceDiag] Hello recebido: intervalo_ms={}", interval_ms);
                 actions.push(VoiceGatewayAction::StartHeartbeat { interval_ms });
 
                 // If we are in Resuming state, send Resume (Op 7). Otherwise send Identify (Op 0).
@@ -631,6 +634,8 @@ impl VoiceGatewayStateMachine {
                 } else {
                     self.state = VoiceConnectionState::Identifying;
                     let identify = self.generate_identify();
+                    let dave_v = self.config.max_dave_protocol_version.unwrap_or(DEFAULT_MAX_DAVE_PROTOCOL_VERSION);
+                    log::info!("[VoiceDiag] Identify enviado: campos=[server_id, user_id, session_id, token, max_dave_protocol_version], dave_version={}", dave_v);
                     actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&identify)?));
                 }
             }
@@ -645,6 +650,7 @@ impl VoiceGatewayStateMachine {
                     port: ready.port,
                     modes: ready.modes,
                 };
+                log::info!("[VoiceDiag] Ready recebido: ssrc={}, modos={:?}", voice_ready.ssrc, voice_ready.modes);
                 self.ready_data = Some(voice_ready.clone());
                 self.state = VoiceConnectionState::Ready(voice_ready.clone());
                 actions.push(VoiceGatewayAction::ReadyReceived(voice_ready));
@@ -889,6 +895,8 @@ pub struct VoiceGateway {
     ready_receiver: watch::Receiver<Option<VoiceReady>>,
     session_sender: watch::Sender<Option<SessionDescription>>,
     session_receiver: watch::Receiver<Option<SessionDescription>>,
+    closed_sender: watch::Sender<Option<(Option<u16>, String)>>,
+    closed_receiver: watch::Receiver<Option<(Option<u16>, String)>>,
     event_sender: broadcast::Sender<VoiceGatewayEvent>,
     outbound_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<WsMessage>>>>,
     connection_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -901,6 +909,7 @@ impl VoiceGateway {
     pub fn new(config: VoiceGatewayConfig) -> Self {
         let (ready_sender, ready_receiver) = watch::channel(None);
         let (session_sender, session_receiver) = watch::channel(None);
+        let (closed_sender, closed_receiver) = watch::channel(None);
         let (event_sender, _) = broadcast::channel(64);
         let state_machine = Arc::new(RwLock::new(VoiceGatewayStateMachine::new(config.clone())));
 
@@ -911,6 +920,8 @@ impl VoiceGateway {
             ready_receiver,
             session_sender,
             session_receiver,
+            closed_sender,
+            closed_receiver,
             event_sender,
             outbound_tx: Arc::new(RwLock::new(None)),
             connection_task: Arc::new(Mutex::new(None)),
@@ -950,6 +961,7 @@ impl VoiceGateway {
         let state_machine_clone = self.state_machine.clone();
         let ready_sender_clone = self.ready_sender.clone();
         let session_sender_clone = self.session_sender.clone();
+        let closed_sender_clone = self.closed_sender.clone();
         let event_sender_clone = self.event_sender.clone();
         let outbound_tx_clone = self.outbound_tx.clone();
         let is_connected_clone = self.is_connected.clone();
@@ -962,6 +974,7 @@ impl VoiceGateway {
                 state_machine_clone,
                 ready_sender_clone,
                 session_sender_clone,
+                closed_sender_clone,
                 event_sender_clone,
                 outbound_tx_clone,
                 is_connected_clone,
@@ -974,20 +987,73 @@ impl VoiceGateway {
         Ok(())
     }
 
+    /// Injeta encerramento de conexão para testes unitários determinísticos.
+    pub fn inject_close(&self, code: Option<u16>, reason: &str) {
+        let _ = self.closed_sender.send(Some((code, reason.to_string())));
+        let _ = self.event_sender.send(VoiceGatewayEvent::Disconnected {
+            code,
+            reason: reason.to_string(),
+            decision: VoiceCloseDecision::Fatal,
+        });
+    }
+
     /// Awaits receipt of `VoiceReady` with a timeout.
+    /// Returns immediately (< 1 s) with error code and description if gateway closes prematurely.
     pub async fn wait_for_ready(&self, timeout: Duration) -> Result<VoiceReady> {
-        let mut rx = self.ready_receiver.clone();
-        if let Some(ready) = rx.borrow().clone() {
+        let mut ready_rx = self.ready_receiver.clone();
+        if let Some(ready) = ready_rx.borrow().clone() {
             return Ok(ready);
         }
 
+        let mut closed_rx = self.closed_receiver.clone();
+        if let Some((code, reason)) = closed_rx.borrow().clone() {
+            if let Some(c) = code {
+                let desc = describe_voice_close_code(c);
+                bail!("Voice Gateway fechou com código {}: {}", c, desc);
+            } else {
+                bail!("Voice Gateway desconectado: {}", reason);
+            }
+        }
+
+        let mut event_rx = self.event_sender.subscribe();
+
         tokio::time::timeout(timeout, async {
-            while rx.changed().await.is_ok() {
-                if let Some(ready) = rx.borrow().clone() {
-                    return Ok(ready);
+            loop {
+                tokio::select! {
+                    res = ready_rx.changed() => {
+                        if res.is_ok() {
+                            if let Some(ready) = ready_rx.borrow().clone() {
+                                return Ok(ready);
+                            }
+                        }
+                    }
+                    res = closed_rx.changed() => {
+                        if res.is_ok() {
+                            if let Some((code, reason)) = closed_rx.borrow().clone() {
+                                if let Some(c) = code {
+                                    let desc = describe_voice_close_code(c);
+                                    bail!("Voice Gateway fechou com código {}: {}", c, desc);
+                                } else {
+                                    bail!("Voice Gateway desconectado: {}", reason);
+                                }
+                            }
+                        }
+                    }
+                    event = event_rx.recv() => {
+                        match event {
+                            Ok(VoiceGatewayEvent::Disconnected { code, reason, .. }) => {
+                                if let Some(c) = code {
+                                    let desc = describe_voice_close_code(c);
+                                    bail!("Voice Gateway fechou com código {}: {}", c, desc);
+                                } else {
+                                    bail!("Voice Gateway desconectado: {}", reason);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
-            bail!("Voice gateway ready channel closed");
         })
         .await
         .map_err(|_| anyhow::anyhow!("Timed out waiting for VoiceReady payload"))?
@@ -1137,6 +1203,7 @@ async fn run_voice_loop(
     state_machine: Arc<RwLock<VoiceGatewayStateMachine>>,
     ready_sender: watch::Sender<Option<VoiceReady>>,
     session_sender: watch::Sender<Option<SessionDescription>>,
+    closed_sender: watch::Sender<Option<(Option<u16>, String)>>,
     event_sender: broadcast::Sender<VoiceGatewayEvent>,
     outbound_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<WsMessage>>>>,
     is_connected: Arc<AtomicBool>,
@@ -1146,6 +1213,8 @@ async fn run_voice_loop(
     let mut backoff_seconds = 1;
 
     while !stop_signal.load(Ordering::SeqCst) {
+        let host = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+        log::info!("[VoiceDiag] URL do gateway de voz: host={}", host);
         log::info!("Connecting to Voice Gateway WebSocket: {}", ws_url);
 
         let mut ws_config = WebSocketConfig::default();
@@ -1154,6 +1223,7 @@ async fn run_voice_loop(
 
         match connect_async_with_config(&ws_url, Some(ws_config), false).await {
             Ok((ws_stream, _)) => {
+                log::info!("[VoiceDiag] WebSocket aberto");
                 log::info!("Connected to Discord Voice Gateway WebSocket");
                 is_connected.store(true, Ordering::SeqCst);
                 let _ = event_sender.send(VoiceGatewayEvent::Connected);
@@ -1282,11 +1352,13 @@ async fn run_voice_loop(
                                                     }
                                                     VoiceGatewayAction::CloseConnection { reason, can_resume } => {
                                                         log::warn!("Voice connection closing: {}", reason);
+                                                        log::info!("[VoiceDiag] Fechamento: codigo=None, motivo={}", reason);
                                                         let decision = if can_resume {
                                                             VoiceCloseDecision::Resume
                                                         } else {
                                                             VoiceCloseDecision::Fatal
                                                         };
+                                                        let _ = closed_sender.send(Some((None, reason.clone())));
                                                         let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
                                                             code: None,
                                                             reason: reason.clone(),
@@ -1349,6 +1421,11 @@ async fn run_voice_loop(
                                         format!("{}: {}", desc, raw_reason.trim())
                                     };
 
+                                    log::info!(
+                                        "[VoiceDiag] Fechamento: codigo=Some({}), motivo={}",
+                                        code,
+                                        raw_reason.trim()
+                                    );
                                     log::warn!(
                                         "Voice Gateway closed (code={}, decision={:?}): {}",
                                         code,
@@ -1356,6 +1433,7 @@ async fn run_voice_loop(
                                         full_reason
                                     );
 
+                                    let _ = closed_sender.send(Some((Some(code), full_reason.clone())));
                                     let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
                                         code: Some(code),
                                         reason: full_reason,
@@ -1370,19 +1448,24 @@ async fn run_voice_loop(
                                 }
                                 Some(Err(e)) => {
                                     log::error!("Voice Gateway stream error: {}", e);
+                                    log::info!("[VoiceDiag] Fechamento: codigo=Some(1006), motivo=Stream error");
                                     let mut sm = state_machine.write().await;
                                     sm.handle_disconnect(true);
+                                    let err_msg = format!("Stream error: {}", e);
+                                    let _ = closed_sender.send(Some((Some(1006), err_msg.clone())));
                                     let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
                                         code: Some(1006),
-                                        reason: format!("Stream error: {}", e),
+                                        reason: err_msg,
                                         decision: VoiceCloseDecision::Resume,
                                     });
                                     break;
                                 }
                                 None => {
                                     log::warn!("Voice Gateway stream EOF");
+                                    log::info!("[VoiceDiag] Fechamento: codigo=Some(1006), motivo=Stream EOF");
                                     let mut sm = state_machine.write().await;
                                     sm.handle_disconnect(true);
+                                    let _ = closed_sender.send(Some((Some(1006), "Stream EOF".to_string())));
                                     let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
                                         code: Some(1006),
                                         reason: "Stream EOF".to_string(),
@@ -1402,10 +1485,13 @@ async fn run_voice_loop(
             }
             Err(e) => {
                 log::error!("Failed to connect to Voice Gateway: {}", e);
+                log::info!("[VoiceDiag] Fechamento: codigo=None, motivo=Falha ao conectar");
+                let err_msg = format!("Connection error: {}", e);
+                let _ = closed_sender.send(Some((None, err_msg.clone())));
                 is_connected.store(false, Ordering::SeqCst);
                 let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
                     code: None,
-                    reason: format!("Connection error: {}", e),
+                    reason: err_msg,
                     decision: VoiceCloseDecision::Resume,
                 });
             }

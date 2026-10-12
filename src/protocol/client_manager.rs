@@ -637,6 +637,10 @@ impl ClientManager {
         if let Some(session) = session_opt {
             session.disconnect().await?;
         }
+        let rc = self.real_client.read().await;
+        if let Some(client) = rc.as_ref() {
+            client.clear_voice_session().await;
+        }
         let _ = self.voice_state_tx.send((
             crate::protocol::voice_session::VoiceSessionState::Disconnected {
                 reason: "Desconectado pelo usuário".into(),
@@ -654,6 +658,7 @@ impl ClientManager {
         user_id: u64,
         self_mute: bool,
         self_deaf: bool,
+        ring_recipients: Option<Vec<String>>,
     ) -> Result<Arc<crate::protocol::voice_session::VoiceSession>> {
         let device_manager = crate::media::devices::MediaDeviceManager::new();
         let has_hardware_audio = device_manager
@@ -780,6 +785,48 @@ impl ClientManager {
                 let _ = voice_evt_tx.send(evt);
             }
         });
+
+        // Se destinatários de toque foram fornecidos (chamada DM), aguarda confirmação de entrada
+        // no canal antes de disparar o ring_call. Se a confirmação não vier, o toque nunca sai.
+        if let Some(recips) = ring_recipients {
+            let mut confirm_rx = session.subscribe_entry_confirmed();
+            let mut state_rx = session.subscribe_state();
+            let cm_ring = self.clone();
+            let ch_str = channel_id.to_string();
+            let session_weak = Arc::downgrade(&session);
+            tokio::spawn(async move {
+                let mut confirmed = *confirm_rx.borrow();
+                while !confirmed {
+                    tokio::select! {
+                        res = confirm_rx.changed() => {
+                            if res.is_ok() && *confirm_rx.borrow() {
+                                confirmed = true;
+                                break;
+                            } else if res.is_err() {
+                                break;
+                            }
+                        }
+                        res = state_rx.changed() => {
+                            if res.is_ok() && matches!(*state_rx.borrow(), crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }) {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if confirmed {
+                    log::info!("[ClientManager] Entrada confirmada na chamada DM; disparando ring_call");
+                    if let Err(e) = cm_ring.ring_call(&ch_str, Some(recips)).await {
+                        let short_msg = "Não foi possível tocar a chamada".to_string();
+                        log::warn!("[VoiceRing] Falha ao tocar chamada (ring_call recusado): {}", e);
+                        if let Some(sess) = session_weak.upgrade() {
+                            sess.set_call_warning(Some(short_msg));
+                        }
+                    } else {
+                        log::info!("[VoiceRing] ring_call enviado com sucesso para a chamada DM");
+                    }
+                }
+            });
+        }
 
         if let Err(e) = session.start().await {
             let reason = format!("Falha ao iniciar sessão de voz: {}", e);
