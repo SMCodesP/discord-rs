@@ -6,20 +6,32 @@ use super::*;
 static QUICK_SEND_IN_FLIGHT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 fn is_quick_send_in_flight(user_id: &str) -> bool {
-    let mut lock = QUICK_SEND_IN_FLIGHT.lock().unwrap();
-    let set = lock.get_or_insert_with(HashSet::new);
-    if set.contains(user_id) {
-        true
+    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
+        let set = lock.get_or_insert_with(HashSet::new);
+        if set.contains(user_id) {
+            true
+        } else {
+            set.insert(user_id.to_string());
+            false
+        }
     } else {
-        set.insert(user_id.to_string());
         false
     }
 }
 
-fn clear_quick_send_in_flight(user_id: &str) {
+pub fn clear_quick_send_in_flight(user_id: &str) {
     if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
         if let Some(ref mut set) = *lock {
             set.remove(user_id);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn clear_all_quick_send_in_flight() {
+    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
+        if let Some(ref mut set) = *lock {
+            set.clear();
         }
     }
 }
@@ -213,12 +225,6 @@ impl ProfileQuickSend {
 }
 
 impl AppState {
-    /// Sets an error specifically on the active profile popout quick message
-    pub fn set_profile_popout_quick_message_error(&mut self, error: String) {
-        if let Some(ref mut popout) = self.profile_popout {
-            popout.error = Some(error);
-        }
-    }
 
     /// Returns whether a quick message send is currently in-flight for the open popout
     pub fn is_profile_popout_quick_message_sending(&self) -> bool {
@@ -331,27 +337,6 @@ impl AppState {
         }
     }
 
-    /// Synchronous convenience entry point for popout quick message send (called by root_view.rs:261).
-    /// Uses begin_profile_popout_quick_message to validate, block duplicate Enter and check connection.
-    /// When ClientManager is absent, records "Não conectado ao Discord." without injecting fake messages.
-    /// When ClientManager is present, dispatches asynchronously via ClientManager without optimistic injection.
-    pub fn send_profile_popout_quick_message(&mut self) {
-        if let Some(req) = self.begin_profile_popout_quick_message() {
-            let cm = req.client_manager.clone();
-            let target_cid = req.channel_id.clone();
-            let text = req.content.clone();
-            let uid = req.user_id.clone();
-            tokio::spawn(async move {
-                if let Err(e) = cm.send_message(&target_cid, &text).await {
-                    log::warn!("Falha ao enviar mensagem rápida no popout: {:?}", e);
-                    cm.emit_event(crate::protocol::transport::TransportEvent::UserProfileError {
-                        user_id: uid,
-                        error: e.to_string(),
-                    });
-                }
-            });
-        }
-    }
 
     /// Builds fallback profile data from local friends, members, or current_user
     pub fn build_fallback_profile_data(&self, user_id: &str, _guild_id: Option<&str>) -> Option<crate::domain::profile::UserProfileData> {

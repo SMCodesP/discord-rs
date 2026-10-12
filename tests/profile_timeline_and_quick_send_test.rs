@@ -319,3 +319,73 @@ async fn test_quick_send_failure_displays_error_and_preserves_field() {
     assert!(!err_str.is_empty(), "Mensagem de erro não deve ser vazia");
     assert!(!state.is_profile_popout_quick_message_sending(), "in_flight sending state deve ser resetado no término");
 }
+
+#[tokio::test]
+async fn test_double_enter_generates_single_send_and_subsequent_send_accepted_after_completion() {
+    let mut state = AppState::new();
+    let (cm, _rx) = ClientManager::new_mock();
+    state.client_manager = Some(cm);
+
+    let target_uid = "user_double_enter_target";
+    state.open_user_profile(target_uid, None);
+    state.profile_popout.as_mut().unwrap().quick_message = "Primeira mensagem".to_string();
+
+    // 1. Primeiro Enter: gera envio
+    let req1 = state
+        .begin_profile_popout_quick_message()
+        .expect("Primeiro Enter deve gerar ProfileQuickSend");
+    assert!(state.is_profile_popout_quick_message_sending(), "Deve marcar envio em andamento");
+
+    // 2. Segundo Enter imediato enquanto o primeiro está em voo: DEVE ser bloqueado (retorna None)
+    let req2 = state.begin_profile_popout_quick_message();
+    assert!(req2.is_none(), "Segundo Enter repetido em voo deve ser bloqueado");
+
+    // 3. Simula falha do primeiro envio: finish desmarca in_flight, exibe erro e preserva campo
+    state.finish_profile_popout_quick_message(&req1, Err("Falha simulada de rede".to_string()));
+    assert!(!state.is_profile_popout_quick_message_sending(), "Flag de envio deve ser desmarcada no erro");
+    assert!(state.profile_popout.is_some(), "Popout deve continuar aberto no erro");
+    assert_eq!(
+        state.profile_popout.as_ref().unwrap().error.as_deref(),
+        Some("Falha simulada de rede")
+    );
+    assert_eq!(
+        state.profile_popout.as_ref().unwrap().quick_message,
+        "Primeira mensagem"
+    );
+
+    // 4. Novo Enter após erro: DEVE ser aceito!
+    let req3 = state
+        .begin_profile_popout_quick_message()
+        .expect("Novo Enter após erro deve ser aceito");
+    assert!(state.is_profile_popout_quick_message_sending());
+
+    // Enter concorrente durante req3 também deve ser bloqueado
+    assert!(state.begin_profile_popout_quick_message().is_none());
+
+    // 5. Sucesso do envio req3: executa e finaliza
+    let res3 = req3.execute().await;
+    assert!(res3.is_ok());
+    state.finish_profile_popout_quick_message(&req3, res3);
+
+    // Popout fecha e flag é desmarcada
+    assert!(state.profile_popout.is_none(), "Popout deve fechar no sucesso");
+    assert!(!state.is_profile_popout_quick_message_sending());
+
+    // 6. Novo envio posterior para o mesmo usuário (ex.: reabrindo o popout): DEVE ser aceito!
+    state.open_user_profile(target_uid, None);
+    state.profile_popout.as_mut().unwrap().quick_message = "Segunda mensagem após sucesso".to_string();
+
+    let req4 = state
+        .begin_profile_popout_quick_message()
+        .expect("Novo envio após sucesso deve ser aceito");
+    assert!(state.is_profile_popout_quick_message_sending());
+
+    // Enter concorrente durante req4 bloqueado
+    assert!(state.begin_profile_popout_quick_message().is_none());
+
+    // Finaliza req4 com sucesso
+    let res4 = req4.execute().await;
+    state.finish_profile_popout_quick_message(&req4, res4);
+    assert!(state.profile_popout.is_none());
+    assert!(!state.is_profile_popout_quick_message_sending());
+}
