@@ -7,7 +7,7 @@
 use chrono::{Duration, NaiveDate, Utc};
 use discord_rs::app::{AppState, CategoryItemState, ChannelItemState, ChannelKind, GuildItemState};
 use discord_rs::chat::search::{
-    ApiSearchMessage, HasFilter, SearchPayload, SearchQuery,
+    ApiSearchMessage, HasFilter, SearchApiResponse, SearchPayload, SearchQuery, SearchSortOrder,
 };
 use discord_rs::domain::message::{Attachment, Message, MessageStickerItem};
 use discord_rs::domain::Author;
@@ -160,7 +160,7 @@ fn test_search_open_close_toggle() {
 #[test]
 fn test_search_clear() {
     let mut state = setup_test_app_state();
-    state.execute_search("rust");
+    state.execute_local_search_fallback("rust");
     assert!(!state.search_query.is_empty());
     assert!(!state.search_results.is_empty());
 
@@ -168,6 +168,10 @@ fn test_search_clear() {
     assert!(state.search_query.is_empty());
     assert!(state.search_results.is_empty());
     assert!(!state.is_searching);
+    assert_eq!(state.search_offset(), 0);
+    assert_eq!(state.search_total_results(), 0);
+    assert!(state.search_error().is_none());
+    assert!(!state.is_search_indexing());
 }
 
 #[test]
@@ -175,7 +179,7 @@ fn test_scoped_guild_search_and_chronological_ordering() {
     let mut state = setup_test_app_state();
     // Guild 1 is active (c-geral and c-dev belong to it).
     // Guild 2 (c-beta-chat) must NOT leak into search results!
-    state.execute_search("rust");
+    state.execute_local_search_fallback("rust");
 
     // Hits should be m-3 (c-dev, 5m ago), m-2 (c-geral, 10m ago), m-1 (c-geral, 20m ago)
     assert_eq!(state.search_results.len(), 3);
@@ -271,4 +275,140 @@ fn test_search_payload_conversion_and_api_params() {
     assert!(params.contains(&("channel_id", "456".to_string())));
     assert!(params.contains(&("has", "sticker".to_string())));
     assert!(params.contains(&("content", "crash".to_string())));
+}
+
+#[test]
+fn test_disconnected_search_sets_error_state() {
+    let mut state = setup_test_app_state();
+    // Initially no error
+    assert!(state.search_error().is_none());
+
+    // Execute search when not connected to gateway/API
+    state.execute_search("termo de teste");
+
+    // Must transition to error state without mocking results
+    assert_eq!(
+        state.search_error().as_deref(),
+        Some("Não conectado à API do Discord")
+    );
+    assert!(state.search_results.is_empty());
+    assert!(!state.is_searching);
+    assert!(!state.is_search_indexing());
+}
+
+#[test]
+fn test_synthetic_api_response_parsing_and_set_results() {
+    let mut state = setup_test_app_state();
+
+    let synthetic_json = r#"{
+        "total_results": 42,
+        "messages": [
+            [
+                {
+                    "id": "1000",
+                    "channel_id": "c-geral",
+                    "author": { "id": "u-alice", "username": "alice" },
+                    "content": "Contexto anterior",
+                    "timestamp": "2026-10-11T12:00:00Z",
+                    "hit": false
+                },
+                {
+                    "id": "1001",
+                    "channel_id": "c-geral",
+                    "author": { "id": "u-bob", "username": "bob" },
+                    "content": "Resultado da busca real",
+                    "timestamp": "2026-10-11T12:01:00Z",
+                    "hit": true
+                }
+            ]
+        ],
+        "analytics_id": "synthetic-analytics-id-123"
+    }"#;
+
+    let payload: SearchPayload = serde_json::from_str(synthetic_json).expect("valid synthetic json");
+    assert_eq!(payload.total_results, 42);
+    assert_eq!(payload.messages.len(), 1);
+
+    let groups = payload.into_result_groups();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].hit_message.id, "1001");
+    assert_eq!(groups[0].hit_message.content, "Resultado da busca real");
+    assert_eq!(groups[0].context_before.len(), 1);
+    assert_eq!(groups[0].context_before[0].id, "1000");
+
+    // Apply to AppState
+    state.set_search_results_api(42, 0, groups);
+    assert_eq!(state.search_total_results(), 42);
+    assert_eq!(state.search_offset(), 0);
+    assert_eq!(state.search_results.len(), 1);
+    assert_eq!(state.search_results[0].hit_message.id, "1001");
+    assert!(state.search_error().is_none());
+    assert!(!state.is_search_indexing());
+}
+
+#[test]
+fn test_http_202_indexing_state() {
+    let mut state = setup_test_app_state();
+    state.open_search();
+
+    // Simulate 202 Accepted response with retry_after = 3.5
+    let resp = SearchApiResponse::Indexing { retry_after: 3.5 };
+    match resp {
+        SearchApiResponse::Indexing { retry_after } => {
+            state.set_search_indexing(retry_after);
+        }
+        SearchApiResponse::Ready(_) => panic!("expected indexing"),
+    }
+
+    assert!(state.is_search_indexing());
+    assert_eq!(state.search_retry_after(), Some(3.5));
+    assert!(state.is_searching);
+    assert!(state.search_error().is_none());
+
+    // When ready, setting results clears indexing
+    state.set_search_results_api(0, 0, Vec::new());
+    assert!(!state.is_search_indexing());
+    assert_eq!(state.search_retry_after(), None);
+    assert!(!state.is_searching);
+}
+
+#[test]
+fn test_api_error_state_handling() {
+    let mut state = setup_test_app_state();
+    state.set_search_error(Some("Rate limited: HTTP 429".to_string()));
+
+    assert_eq!(state.search_error().as_deref(), Some("Rate limited: HTTP 429"));
+    assert!(!state.is_search_indexing());
+
+    // Clearing search clears error
+    state.clear_search();
+    assert!(state.search_error().is_none());
+}
+
+#[test]
+fn test_pagination_and_sort_order() {
+    let mut state = setup_test_app_state();
+
+    // Default pagination offset is 0, default order is Desc ("desc")
+    assert_eq!(state.search_offset(), 0);
+    assert_eq!(state.search_sort_order(), SearchSortOrder::Desc);
+    assert_eq!(state.search_sort_order().as_api_str(), "desc");
+
+    // Advance to page 2 (offset 25)
+    state.set_search_offset(25);
+    assert_eq!(state.search_offset(), 25);
+
+    // Advance to page 3 (offset 50)
+    state.set_search_offset(50);
+    assert_eq!(state.search_offset(), 50);
+
+    // Toggle sort order to Asc ("asc")
+    state.set_search_sort_order(SearchSortOrder::Asc);
+    assert_eq!(state.search_sort_order(), SearchSortOrder::Asc);
+    assert_eq!(state.search_sort_order().as_api_str(), "asc");
+
+    // Close and clear resets offset and order
+    state.clear_search();
+    assert_eq!(state.search_offset(), 0);
+    assert_eq!(state.search_sort_order(), SearchSortOrder::Desc);
 }

@@ -16,7 +16,6 @@
 //! `GET /api/v10/guilds/{guild_id}/messages/search`
 
 use chrono::NaiveDate;
-use gpui::component::popover::Popover;
 use gpui::component::Selectable;
 use gpui::*;
 use serde::{Deserialize, Serialize};
@@ -513,6 +512,32 @@ pub struct ApiSearchMessage {
     pub hit: bool,
 }
 
+/// Search sorting order (newest first vs oldest first)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchSortOrder {
+    #[default]
+    Desc,
+    Asc,
+}
+
+impl SearchSortOrder {
+    pub fn as_api_str(&self) -> &'static str {
+        match self {
+            Self::Desc => "desc",
+            Self::Asc => "asc",
+        }
+    }
+}
+
+/// Discord REST API search response.
+/// Can be either ready results (HTTP 200) or an indexing state (HTTP 202).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SearchApiResponse {
+    Ready(SearchPayload),
+    Indexing { retry_after: f64 },
+}
+
 /// In-memory local search engine for fast client-side query execution over cached messages.
 pub struct LocalSearchEngine;
 
@@ -698,7 +723,7 @@ impl RenderOnce for SearchFieldTrigger {
 }
 
 /// Popover content showing Discord's faceted search filters (search-popover.md spec: 356x335, r8, padding 12px 8px)
-fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
+pub fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
     let filters = [
         ("from:", "de um usuário específico", "from: usuário"),
         ("in:", "em um canal específico", "in: canal"),
@@ -919,6 +944,7 @@ fn render_search_flyout_close_button(app_entity: Entity<AppState>) -> AnyElement
         .hover(|s| s.bg(channel_hover()).text_color(white()))
         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
             app_entity.update(cx, |state, cx| {
+                state.clear_search();
                 state.close_search();
                 cx.notify();
             });
@@ -927,35 +953,34 @@ fn render_search_flyout_close_button(app_entity: Entity<AppState>) -> AnyElement
         .into_any_element()
 }
 
-/// Renders the top header row of the search flyout: Popover-anchored input + close button
+/// Renders the top header row of the search flyout: Results count + Sort tabs (Recentes / Antigos) + Close button
 fn render_search_flyout_header(
     app_entity: Entity<AppState>,
-    search_query: &str,
-    focus_handle: &FocusHandle,
+    state: &AppState,
 ) -> AnyElement {
-    let trigger = SearchFieldTrigger {
-        query: search_query.to_string(),
-        focus_handle: focus_handle.clone(),
-        app_entity: app_entity.clone(),
-        is_open: false,
+    let total = state.search_total_results();
+    let is_searching = state.is_searching;
+    let has_error = state.search_error().is_some();
+    let sort_order = state.search_sort_order();
+
+    let count_text = if is_searching {
+        "Buscando...".to_string()
+    } else if has_error {
+        "Erro na busca".to_string()
+    } else if total == 1 {
+        "1 Resultado".to_string()
+    } else {
+        format!("{} Resultados", total)
     };
 
-    let popover = Popover::new("search-flyout-popover")
-        .anchor(Anchor::BottomLeft)
-        .offset(px(6.0))
-        .trigger(trigger)
-        .content({
-            let entity = app_entity.clone();
-            move |_state, _window, _cx| {
-                render_search_popover_content(entity.clone())
-            }
-        });
+    let entity_recent = app_entity.clone();
+    let entity_old = app_entity.clone();
 
     div()
         .h(px(48.0))
-        .px(px(12.0))
+        .px(px(16.0))
         .border_b_1()
-        .border_color(bg_server())
+        .border_color(border_subtle())
         .flex()
         .flex_row()
         .items_center()
@@ -963,107 +988,77 @@ fn render_search_flyout_header(
         .gap(px(8.0))
         .child(
             div()
-                .flex_1()
-                .child(popover),
-        )
-        .child(render_search_flyout_close_button(app_entity))
-        .into_any_element()
-}
-
-/// Renders a single filter chip button
-fn render_filter_chip(
-    app_entity: Entity<AppState>,
-    prefix: &'static str,
-    hint: &'static str,
-) -> AnyElement {
-    div()
-        .h(px(24.0))
-        .px(px(8.0))
-        .rounded(px(4.0))
-        .bg(bg_server())
-        .border_1()
-        .border_color(channel_hover())
-        .hover(|s| s.bg(channel_hover()).border_color(blurple()))
-        .cursor_pointer()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(4.0))
-        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-            app_entity.update(cx, |state, cx| {
-                let current = state.search_query.trim();
-                if current.is_empty() {
-                    state.search_query = format!("{} ", prefix);
-                } else if !current.ends_with(prefix) {
-                    state.search_query = format!("{} {} ", current, prefix);
-                }
-                cx.notify();
-            });
-        })
-        .child(
-            div()
-                .text_color(blurple())
+                .text_color(text_titles())
                 .font_weight(FontWeight::BOLD)
-                .text_size(px(11.0))
-                .child(prefix),
-        )
-        .child(
-            div()
-                .text_color(text_muted())
-                .text_size(px(10.0))
-                .child(hint),
-        )
-        .into_any_element()
-}
-
-/// Renders results counter and interactive chips row
-fn render_search_chips_section(
-    app_entity: Entity<AppState>,
-    results_count: usize,
-    search_query: &str,
-) -> AnyElement {
-    let is_empty = search_query.trim().is_empty();
-    let counter_label = if is_empty {
-        "OPÇÕES DE PESQUISA".to_string()
-    } else if results_count == 1 {
-        "1 RESULTADO ENCONTRADO".to_string()
-    } else {
-        format!("{} RESULTADOS ENCONTRADOS", results_count)
-    };
-
-    div()
-        .px(px(12.0))
-        .py(px(8.0))
-        .border_b_1()
-        .border_color(bg_server())
-        .flex()
-        .flex_col()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .text_color(text_muted())
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(11.0))
-                        .child(counter_label),
-                ),
+                .text_size(px(14.0))
+                .child(count_text),
         )
         .child(
             div()
                 .flex()
                 .flex_row()
-                .flex_wrap()
-                .gap(px(6.0))
-                .children(
-                    DISCORD_SEARCH_CHIPS
-                        .iter()
-                        .map(|&(p, h)| render_filter_chip(app_entity.clone(), p, h)),
+                .items_center()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .bg(if sort_order == SearchSortOrder::Desc {
+                            channel_hover()
+                        } else {
+                            gpui::rgba(0x00000000)
+                        })
+                        .text_color(if sort_order == SearchSortOrder::Desc {
+                            text_titles()
+                        } else {
+                            text_muted()
+                        })
+                        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
+                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                            entity_recent.update(cx, |state, cx| {
+                                state.set_search_sort_order(SearchSortOrder::Desc);
+                                let q = state.search_query.clone();
+                                state.execute_search(&q);
+                                cx.notify();
+                            });
+                        })
+                        .child("Recentes"),
+                )
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .bg(if sort_order == SearchSortOrder::Asc {
+                            channel_hover()
+                        } else {
+                            gpui::rgba(0x00000000)
+                        })
+                        .text_color(if sort_order == SearchSortOrder::Asc {
+                            text_titles()
+                        } else {
+                            text_muted()
+                        })
+                        .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
+                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                            entity_old.update(cx, |state, cx| {
+                                state.set_search_sort_order(SearchSortOrder::Asc);
+                                let q = state.search_query.clone();
+                                state.execute_search(&q);
+                                cx.notify();
+                            });
+                        })
+                        .child("Antigos"),
                 ),
         )
+        .child(render_search_flyout_close_button(app_entity))
         .into_any_element()
 }
 
@@ -1157,7 +1152,80 @@ fn render_searching_state() -> Vec<AnyElement> {
                 div()
                     .text_color(text_muted())
                     .text_size(px(13.0))
-                    .child("Consultando histórico de mensagens."),
+                    .child("Consultando histórico de mensagens na API do Discord."),
+            )
+            .into_any_element(),
+    ]
+}
+
+/// Renders indexing state (HTTP 202 Accepted, retry_after)
+fn render_indexing_state(retry_after: f64) -> Vec<AnyElement> {
+    vec![
+        div()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon_search(px(32.0), blurple())),
+            )
+            .child(
+                div()
+                    .text_color(text_titles())
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(15.0))
+                    .child("Indexando mensagens..."),
+            )
+            .child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(13.0))
+                    .child(format!(
+                        "O Discord está preparando o índice de busca deste canal/servidor (tentando novamente em {:.1}s).",
+                        retry_after
+                    )),
+            )
+            .into_any_element(),
+    ]
+}
+
+/// Renders error state when search fails or client is disconnected
+fn render_search_error_state(error_message: &str) -> Vec<AnyElement> {
+    vec![
+        div()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon_info(px(32.0), status_dnd())),
+            )
+            .child(
+                div()
+                    .text_color(text_titles())
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(15.0))
+                    .child("Erro na busca"),
+            )
+            .child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(13.0))
+                    .child(error_message.to_string()),
             )
             .into_any_element(),
     ]
@@ -1306,7 +1374,13 @@ fn render_search_results_scroll_area(
     let items: Vec<AnyElement> = if is_empty_query {
         render_empty_guide_state(app_entity)
     } else if state.is_searching {
-        render_searching_state()
+        if state.is_search_indexing() {
+            render_indexing_state(state.search_retry_after().unwrap_or(2.5))
+        } else {
+            render_searching_state()
+        }
+    } else if let Some(ref err) = state.search_error() {
+        render_search_error_state(err)
     } else if has_no_results {
         render_no_results_state()
     } else {
@@ -1329,11 +1403,88 @@ fn render_search_results_scroll_area(
         .into_any_element()
 }
 
+/// Renders bottom pagination dock matching Discord's .paginationDock_a98f3b
+fn render_search_pagination_dock(
+    app_entity: Entity<AppState>,
+    state: &AppState,
+) -> Option<AnyElement> {
+    let total = state.search_total_results();
+    if total <= 25 {
+        return None;
+    }
+
+    let offset = state.search_offset();
+    let current_page = (offset / 25) + 1;
+    let total_pages = (total + 24) / 25;
+
+    let can_prev = offset >= 25;
+    let can_next = (offset as u64 + 25) < total;
+
+    let prev_entity = app_entity.clone();
+    let next_entity = app_entity.clone();
+
+    Some(
+        div()
+            .h(px(48.0))
+            .px(px(16.0))
+            .border_t_1()
+            .border_color(border_subtle())
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(12.0))
+                    .child(format!("Página {} de {}", current_page, total_pages)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        Button::new("search-prev-page", "Anterior")
+                            .size(ButtonSize::Sm)
+                            .variant(ButtonVariant::Gray)
+                            .disabled(!can_prev)
+                            .on_click(move |_ev, _window, cx| {
+                                prev_entity.update(cx, |state, cx| {
+                                    let new_offset = state.search_offset().saturating_sub(25);
+                                    state.set_search_offset(new_offset);
+                                    let q = state.search_query.clone();
+                                    state.execute_search(&q);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("search-next-page", "Próxima")
+                            .size(ButtonSize::Sm)
+                            .variant(ButtonVariant::Gray)
+                            .disabled(!can_next)
+                            .on_click(move |_ev, _window, cx| {
+                                next_entity.update(cx, |state, cx| {
+                                    let new_offset = state.search_offset() + 25;
+                                    state.set_search_offset(new_offset);
+                                    let q = state.search_query.clone();
+                                    state.execute_search(&q);
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .into_any_element(),
+    )
+}
+
 /// Renders the complete Discord Search Flyout Panel (418px width, Discord dark channels background)
 pub fn render_search_flyout(
     app_entity: Entity<AppState>,
     state: &AppState,
-    focus_handle: &FocusHandle,
+    _focus_handle: &FocusHandle,
 ) -> Div {
     let parsed_query = SearchQuery::parse(&state.search_query);
 
@@ -1348,18 +1499,16 @@ pub fn render_search_flyout(
         .flex_shrink_0()
         .child(render_search_flyout_header(
             app_entity.clone(),
-            &state.search_query,
-            focus_handle,
-        ))
-        .child(render_search_chips_section(
-            app_entity.clone(),
-            state.search_results.len(),
-            &state.search_query,
+            state,
         ))
         .child(render_search_results_scroll_area(
-            app_entity,
+            app_entity.clone(),
             state,
             &parsed_query,
+        ))
+        .children(render_search_pagination_dock(
+            app_entity,
+            state,
         ))
 }
 

@@ -2733,3 +2733,115 @@ mod avatar_decoration_parsing_tests {
         assert_eq!(bare_state.avatar_decoration_data, None);
     }
 }
+
+impl DiscordApiClient {
+    /// GET /api/v10/channels/{channel_id}/messages/search
+    pub async fn search_channel_messages(
+        &self,
+        channel_id: &str,
+        query: &crate::chat::search::SearchQuery,
+        offset: u32,
+        sort_order: Option<&str>,
+    ) -> Result<crate::chat::search::SearchApiResponse> {
+        let path = format!("/channels/{}/messages/search", channel_id);
+        let mut params = query.to_api_query_params();
+        if offset > 0 {
+            params.push(("offset", offset.to_string()));
+        }
+        if let Some(order) = sort_order {
+            params.push(("sort_by", "timestamp".to_string()));
+            params.push(("sort_order", order.to_string()));
+        }
+        let mut qs = String::new();
+        for (k, v) in &params {
+            if !qs.is_empty() {
+                qs.push('&');
+            }
+            let encoded: String = v.chars().flat_map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                    vec![c]
+                } else {
+                    format!("%{:02X}", c as u8).chars().collect()
+                }
+            }).collect();
+            qs.push_str(k);
+            qs.push('=');
+            qs.push_str(&encoded);
+        }
+        let full_path = if qs.is_empty() {
+            path
+        } else {
+            format!("{}?{}", path, qs)
+        };
+        let req = self.auth_request(reqwest::Method::GET, &full_path);
+        let resp = self.send_request(&full_path, req).await?;
+        if resp.status() == reqwest::StatusCode::ACCEPTED {
+            #[derive(serde::Deserialize)]
+            struct IndexingBody {
+                #[serde(default)]
+                retry_after: Option<f64>,
+            }
+            let body: IndexingBody = resp.json().await.unwrap_or(IndexingBody { retry_after: None });
+            let retry = body.retry_after.unwrap_or(2.5);
+            Ok(crate::chat::search::SearchApiResponse::Indexing { retry_after: retry })
+        } else {
+            let payload = resp.json::<crate::chat::search::SearchPayload>().await?;
+            Ok(crate::chat::search::SearchApiResponse::Ready(payload))
+        }
+    }
+
+    /// GET /api/v10/guilds/{guild_id}/messages/search
+    pub async fn search_guild_messages(
+        &self,
+        guild_id: &str,
+        query: &crate::chat::search::SearchQuery,
+        offset: u32,
+        sort_order: Option<&str>,
+    ) -> Result<crate::chat::search::SearchApiResponse> {
+        let path = format!("/guilds/{}/messages/search", guild_id);
+        let mut params = query.to_api_query_params();
+        if offset > 0 {
+            params.push(("offset", offset.to_string()));
+        }
+        if let Some(order) = sort_order {
+            params.push(("sort_by", "timestamp".to_string()));
+            params.push(("sort_order", order.to_string()));
+        }
+        let mut qs = String::new();
+        for (k, v) in &params {
+            if !qs.is_empty() {
+                qs.push('&');
+            }
+            let encoded: String = v.chars().flat_map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                    vec![c]
+                } else {
+                    format!("%{:02X}", c as u8).chars().collect()
+                }
+            }).collect();
+            qs.push_str(k);
+            qs.push('=');
+            qs.push_str(&encoded);
+        }
+        let full_path = if qs.is_empty() {
+            path
+        } else {
+            format!("{}?{}", path, qs)
+        };
+        let req = self.auth_request(reqwest::Method::GET, &full_path);
+        let resp = self.send_request(&full_path, req).await?;
+        if resp.status() == reqwest::StatusCode::ACCEPTED {
+            #[derive(serde::Deserialize)]
+            struct IndexingBody {
+                #[serde(default)]
+                retry_after: Option<f64>,
+            }
+            let body: IndexingBody = resp.json().await.unwrap_or(IndexingBody { retry_after: None });
+            let retry = body.retry_after.unwrap_or(2.5);
+            Ok(crate::chat::search::SearchApiResponse::Indexing { retry_after: retry })
+        } else {
+            let payload = resp.json::<crate::chat::search::SearchPayload>().await?;
+            Ok(crate::chat::search::SearchApiResponse::Ready(payload))
+        }
+    }
+}
