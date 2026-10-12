@@ -352,6 +352,82 @@ pub fn describe_voice_close_code(code: u16) -> &'static str {
     }
 }
 
+/// Extrai código de fechamento 4xxx de uma mensagem/string de erro se presente.
+pub fn extract_close_code(s: &str) -> Option<u16> {
+    for word in s.split(|c: char| !c.is_ascii_digit()) {
+        if let Ok(code) = word.parse::<u16>() {
+            if (4000..=4999).contains(&code) {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+/// Limite padrão de tentativas de reconexão do Voice Gateway.
+pub const DEFAULT_MAX_RECONNECT_ATTEMPTS: u32 = 5;
+/// Teto padrão de recuo exponencial em segundos.
+pub const DEFAULT_MAX_BACKOFF_SECS: u64 = 30;
+/// Recuo inicial padrão em segundos.
+pub const DEFAULT_INITIAL_BACKOFF_SECS: u64 = 1;
+
+/// Política determinística de recuo exponencial e limite de tentativas para reconexão do Voice Gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceReconnectPolicy {
+    pub max_attempts: u32,
+    pub max_backoff: Duration,
+    pub initial_backoff: Duration,
+    current_backoff: Duration,
+    attempts: u32,
+}
+
+impl Default for VoiceReconnectPolicy {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_RECONNECT_ATTEMPTS,
+            Duration::from_secs(DEFAULT_INITIAL_BACKOFF_SECS),
+            Duration::from_secs(DEFAULT_MAX_BACKOFF_SECS),
+        )
+    }
+}
+
+impl VoiceReconnectPolicy {
+    pub fn new(max_attempts: u32, initial_backoff: Duration, max_backoff: Duration) -> Self {
+        Self {
+            max_attempts,
+            max_backoff,
+            initial_backoff,
+            current_backoff: initial_backoff,
+            attempts: 0,
+        }
+    }
+
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    pub fn current_backoff(&self) -> Duration {
+        self.current_backoff
+    }
+
+    /// Redefine o recuo e contador após conexão estabelecida com sucesso (Ready/Resumed).
+    pub fn on_success(&mut self) {
+        self.attempts = 0;
+        self.current_backoff = self.initial_backoff;
+    }
+
+    /// Retorna o próximo tempo de espera exponencial, ou `None` se excedeu `max_attempts`.
+    pub fn next_delay(&mut self) -> Option<Duration> {
+        if self.attempts >= self.max_attempts {
+            return None;
+        }
+        let delay = self.current_backoff;
+        self.attempts += 1;
+        self.current_backoff = (delay * 2).min(self.max_backoff);
+        Some(delay)
+    }
+}
+
 /// Real-time events emitted by the Voice Gateway client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VoiceGatewayEvent {
@@ -812,13 +888,19 @@ impl VoiceGatewayStateMachine {
         code: u16,
         raw_reason: &str,
     ) -> (VoiceCloseDecision, Option<VoiceGatewayAction>) {
-        let decision = VoiceCloseDecision::from_close_code(code);
+        let mut decision = VoiceCloseDecision::from_close_code(code);
         let desc = describe_voice_close_code(code);
         let full_reason = if raw_reason.trim().is_empty() {
             desc.to_string()
         } else {
             format!("{}: {}", desc, raw_reason.trim())
         };
+
+        // 4006 antes do primeiro Ready = credenciais desta sessão não servem:
+        // NÃO reidentificar com os mesmos dados. Vira erro final da tentativa (Fatal).
+        if code == 4006 && self.ready_data.is_none() {
+            decision = VoiceCloseDecision::Fatal;
+        }
 
         match decision {
             VoiceCloseDecision::Resume => {
@@ -867,20 +949,14 @@ impl VoiceGatewayStateMachine {
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Formats the endpoint returned by Discord to the standard Voice Gateway v8 WebSocket URL.
-/// Strips unnecessary protocols, ports (`:443`, `:80`), and appends `/?v=8`.
+/// Formata o endpoint retornado pelo Discord para a URL WebSocket v8 do Voice Gateway.
+/// Conecta em `wss://{endpoint exatamente como veio}/?v=8`, preservando portas (inclusive :443 e não-padrão).
 pub fn format_voice_gateway_url(endpoint: &str) -> String {
     let clean = endpoint.trim();
     let clean = clean.strip_prefix("wss://").unwrap_or(clean);
     let clean = clean.strip_prefix("ws://").unwrap_or(clean);
-    let host = if let Some(stripped) = clean.strip_suffix(":443") {
-        stripped
-    } else if let Some(stripped) = clean.strip_suffix(":80") {
-        stripped
-    } else {
-        clean
-    };
-    format!("wss://{}/?v={}", host, VOICE_GATEWAY_VERSION)
+    let clean = clean.trim_end_matches('/');
+    format!("wss://{}/?v={}", clean, VOICE_GATEWAY_VERSION)
 }
 
 // ============================================================================
@@ -1210,7 +1286,7 @@ async fn run_voice_loop(
     stop_signal: Arc<AtomicBool>,
 ) {
     let ws_url = format_voice_gateway_url(&config.endpoint);
-    let mut backoff_seconds = 1;
+    let mut reconnect_policy = VoiceReconnectPolicy::default();
 
     while !stop_signal.load(Ordering::SeqCst) {
         let host = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
@@ -1227,7 +1303,6 @@ async fn run_voice_loop(
                 log::info!("Connected to Discord Voice Gateway WebSocket");
                 is_connected.store(true, Ordering::SeqCst);
                 let _ = event_sender.send(VoiceGatewayEvent::Connected);
-                backoff_seconds = 1;
 
                 let (mut ws_write, mut ws_read) = ws_stream.split();
                 let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<WsMessage>(32);
@@ -1309,6 +1384,7 @@ async fn run_voice_loop(
                                                         }
                                                     }
                                                     VoiceGatewayAction::ReadyReceived(ready) => {
+                                                        reconnect_policy.on_success();
                                                         let _ = ready_sender.send(Some(ready.clone()));
                                                         let _ = event_sender.send(VoiceGatewayEvent::Ready(ready));
                                                     }
@@ -1336,6 +1412,7 @@ async fn run_voice_loop(
                                                         let _ = event_sender.send(VoiceGatewayEvent::HeartbeatAck { latency_ms: latency });
                                                     }
                                                     VoiceGatewayAction::Resumed => {
+                                                        reconnect_policy.on_success();
                                                         let _ = event_sender.send(VoiceGatewayEvent::Resumed);
                                                     }
                                                     VoiceGatewayAction::DavePrepareTransition(prep) => {
@@ -1501,8 +1578,25 @@ async fn run_voice_loop(
             break;
         }
 
-        tokio::time::sleep(Duration::from_secs(backoff_seconds)).await;
-        backoff_seconds = (backoff_seconds * 2).min(15);
+        match reconnect_policy.next_delay() {
+            Some(delay) => {
+                log::info!(
+                    "[VoiceGateway] Aguardando {:?} antes de retentar conexão ({}/{})",
+                    delay,
+                    reconnect_policy.attempts(),
+                    reconnect_policy.max_attempts
+                );
+                tokio::time::sleep(delay).await;
+            }
+            None => {
+                log::warn!(
+                    "[VoiceGateway] Excedido o limite máximo de {} tentativas de reconexão; encerrando",
+                    reconnect_policy.max_attempts
+                );
+                stop_signal.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
     }
 }
 
@@ -1527,21 +1621,28 @@ mod tests {
 
     #[test]
     fn test_format_voice_gateway_url() {
+        // endpoint sem porta continua funcionando
         assert_eq!(
             format_voice_gateway_url("voice.discord.media"),
             "wss://voice.discord.media/?v=8"
         );
+        // endpoint com :443 mantém :443
         assert_eq!(
             format_voice_gateway_url("voice.discord.media:443"),
-            "wss://voice.discord.media/?v=8"
+            "wss://voice.discord.media:443/?v=8"
         );
         assert_eq!(
             format_voice_gateway_url("wss://voice.discord.media:443"),
-            "wss://voice.discord.media/?v=8"
+            "wss://voice.discord.media:443/?v=8"
+        );
+        // endpoint com porta não padrão gera URL com essa porta
+        assert_eq!(
+            format_voice_gateway_url("host.exemplo:2096"),
+            "wss://host.exemplo:2096/?v=8"
         );
         assert_eq!(
             format_voice_gateway_url("ws://voice.discord.media:80"),
-            "wss://voice.discord.media/?v=8"
+            "wss://voice.discord.media:80/?v=8"
         );
     }
 
@@ -1952,14 +2053,65 @@ mod tests {
     }
 
     #[test]
-    fn test_state_machine_handle_close_code_new_session() {
+    fn test_state_machine_handle_close_code_4006_before_ready_is_fatal() {
         let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        assert!(sm.ready_data().is_none());
+        let (decision, action) = sm.handle_close_code(4006, "Session is no longer valid");
+        assert_eq!(decision, VoiceCloseDecision::Fatal);
+        match sm.current_state() {
+            VoiceConnectionState::Failed(msg) => {
+                assert!(msg.contains("Session no longer valid"));
+            }
+            s => panic!("Expected Failed state, got {:?}", s),
+        }
+        if let Some(VoiceGatewayAction::CloseConnection { can_resume, .. }) = action {
+            assert!(!can_resume);
+        } else {
+            panic!("Expected CloseConnection action with can_resume: false");
+        }
+    }
+
+    #[test]
+    fn test_state_machine_handle_close_code_new_session_after_ready() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        sm.ready_data = Some(VoiceReady {
+            ssrc: 1234,
+            ip: "127.0.0.1".into(),
+            port: 1234,
+            modes: vec!["aead_aes256_gcm_rtpsize".into()],
+        });
         sm.last_seq = 42;
         let (decision, action) = sm.handle_close_code(4006, "Session expired");
         assert_eq!(decision, VoiceCloseDecision::NewSession);
         assert_eq!(action, None);
         assert_eq!(*sm.current_state(), VoiceConnectionState::WaitingForHello);
         assert_eq!(sm.last_seq(), -1); // Sequence reset to force Opcode 0 Identify
+    }
+
+    #[test]
+    fn test_reconnect_policy_exponential_backoff_and_ceiling() {
+        let mut policy = VoiceReconnectPolicy::new(
+            5,
+            Duration::from_secs(1),
+            Duration::from_secs(15),
+        );
+        assert_eq!(policy.attempts(), 0);
+        assert_eq!(policy.next_delay(), Some(Duration::from_secs(1)));
+        assert_eq!(policy.attempts(), 1);
+        assert_eq!(policy.next_delay(), Some(Duration::from_secs(2)));
+        assert_eq!(policy.attempts(), 2);
+        assert_eq!(policy.next_delay(), Some(Duration::from_secs(4)));
+        assert_eq!(policy.attempts(), 3);
+        assert_eq!(policy.next_delay(), Some(Duration::from_secs(8)));
+        assert_eq!(policy.attempts(), 4);
+        assert_eq!(policy.next_delay(), Some(Duration::from_secs(15))); // Teto atingido (15s)
+        assert_eq!(policy.attempts(), 5);
+        assert_eq!(policy.next_delay(), None); // Excedeu 5 tentativas
+
+        // Reset de sucesso ao receber Ready ou Resumed
+        policy.on_success();
+        assert_eq!(policy.attempts(), 0);
+        assert_eq!(policy.next_delay(), Some(Duration::from_secs(1)));
     }
 
     #[test]

@@ -102,6 +102,8 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
                 .items_center()
                 .justify_between()
                 .w_full()
+                .overflow_hidden()
+                .gap(px(8.0))
                 .child(render_channel_identity(call, cx))
                 .child(render_rtc_badge(call, cx)),
         )
@@ -162,18 +164,22 @@ fn render_channel_identity(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(px(10.0))
+        .min_w_0()
+        .overflow_hidden()
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
+                .min_w_0()
                 .child(icon_speaker(px(20.0), discord.text_titles))
                 .child(
                     div()
                         .text_color(discord.text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(18.0))
+                        .truncate()
                         .child(call.channel_name.clone()),
                 ),
         )
@@ -181,6 +187,7 @@ fn render_channel_identity(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
             div()
                 .text_color(discord.text_secondary)
                 .text_size(px(13.0))
+                .flex_shrink_0()
                 .child(format!("• {}", call.guild_name)),
         )
         .into_any_element()
@@ -200,7 +207,17 @@ fn render_rtc_badge(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
         VoiceSessionState::Connecting => (status_idle(), "Conectando ao RTC...".to_string()),
         VoiceSessionState::Reconnecting => (status_idle(), "Reconectando...".to_string()),
         VoiceSessionState::Disconnected { ref reason } => {
-            let label = if !reason.is_empty() && reason != "Sessão inicializada" {
+            let label = if let Some(code) = crate::protocol::voice_gateway::extract_close_code(reason) {
+                format!("Desconectado (código {})", code)
+            } else if reason.contains("4006") {
+                "Desconectado (código 4006)".to_string()
+            } else if reason.contains("Opcode 2") || reason.contains("Timed out") || reason.contains("Tempo limite") {
+                "Desconectado (tempo limite)".to_string()
+            } else if reason.contains("Missing Permissions") || reason.contains("50013") {
+                "Desconectado (sem permissão)".to_string()
+            } else if reason.contains('{') && reason.contains('}') {
+                "Desconectado (erro de conexão)".to_string()
+            } else if !reason.is_empty() && reason != "Sessão inicializada" {
                 format!("Desconectado ({})", reason)
             } else {
                 "Desconectado".to_string()
@@ -213,6 +230,9 @@ fn render_rtc_badge(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
         .flex()
         .flex_row()
         .items_center()
+        .flex_shrink_0()
+        .max_w(px(260.0))
+        .overflow_hidden()
         .gap(px(6.0))
         .px(px(8.0))
         .py(px(4.0))
@@ -231,9 +251,13 @@ fn render_rtc_badge(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
 }
 
 fn sanitize_user_error_message(raw: &str) -> String {
-    if raw.contains("Missing Permissions") || raw.contains("50013") {
+    if let Some(code) = crate::protocol::voice_gateway::extract_close_code(raw) {
+        format!("Não foi possível conectar à chamada (código {})", code)
+    } else if raw.contains("4006") {
+        "Não foi possível conectar à chamada (código 4006)".to_string()
+    } else if raw.contains("Missing Permissions") || raw.contains("50013") {
         "Permissões insuficientes no canal".to_string()
-    } else if raw.contains("Timed out waiting for VoiceReady") {
+    } else if raw.contains("Timed out waiting for VoiceReady") || raw.contains("Opcode 2") {
         "Tempo limite ao aguardar resposta do servidor de voz".to_string()
     } else if raw.contains('{') && raw.contains('}') {
         "Erro na comunicação com o servidor de voz".to_string()
@@ -266,7 +290,7 @@ fn render_fatal_error_banner(call: &ActiveVoiceCall, text_col: Rgba) -> AnyEleme
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(12.0))
                 .truncate()
-                .child(format!("Falha na chamada: {}", err_desc)),
+                .child(err_desc),
         )
         .into_any_element()
 }

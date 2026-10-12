@@ -950,7 +950,13 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                                     crate::protocol::voice_session::VoiceSessionState::Connecting => "Conectando ao RTC...".to_string(),
                                     crate::protocol::voice_session::VoiceSessionState::Reconnecting => "Reconectando...".to_string(),
                                     crate::protocol::voice_session::VoiceSessionState::Disconnected { ref reason } => {
-                                        if !reason.is_empty() && reason != "Sessão inicializada" {
+                                        if let Some(code) = crate::protocol::voice_gateway::extract_close_code(reason) {
+                                            format!("Desconectado (código {})", code)
+                                        } else if reason.contains("4006") {
+                                            "Desconectado (código 4006)".to_string()
+                                        } else if reason.contains("Opcode 2") || reason.contains("Timed out") || reason.contains("Tempo limite") {
+                                            "Desconectado (tempo limite)".to_string()
+                                        } else if !reason.is_empty() && reason != "Sessão inicializada" {
                                             format!("Desconectado ({})", reason)
                                         } else {
                                             "Desconectado".to_string()

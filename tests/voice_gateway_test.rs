@@ -34,15 +34,19 @@ fn test_voice_gateway_url_formatting() {
     );
     assert_eq!(
         format_voice_gateway_url("us-east1.discord.media:443"),
-        "wss://us-east1.discord.media/?v=8"
+        "wss://us-east1.discord.media:443/?v=8"
     );
     assert_eq!(
         format_voice_gateway_url("wss://us-east1.discord.media:443"),
-        "wss://us-east1.discord.media/?v=8"
+        "wss://us-east1.discord.media:443/?v=8"
     );
     assert_eq!(
         format_voice_gateway_url("ws://us-east1.discord.media:80"),
-        "wss://us-east1.discord.media/?v=8"
+        "wss://us-east1.discord.media:80/?v=8"
+    );
+    assert_eq!(
+        format_voice_gateway_url("host.exemplo:2096"),
+        "wss://host.exemplo:2096/?v=8"
     );
 }
 
@@ -439,12 +443,27 @@ fn test_state_machine_close_code_handling_offline() {
     assert_eq!(*sm.current_state(), VoiceConnectionState::Resuming);
     assert_eq!(sm.last_seq(), 100);
 
-    // Test 2: Code 4006 (Session invalid) -> NewSession, sequence reset to -1
+    // Test 2a: Code 4006 antes do primeiro Ready = credenciais inválidas -> Fatal (SCall2 item 2)
     let (decision, action) = sm.handle_close_code(4006, "Invalidated");
+    assert_eq!(decision, VoiceCloseDecision::Fatal);
+    assert!(matches!(*sm.current_state(), VoiceConnectionState::Failed(_)));
+    if let Some(VoiceGatewayAction::CloseConnection { can_resume, .. }) = action {
+        assert!(!can_resume);
+    } else {
+        panic!("Expected CloseConnection action with can_resume: false");
+    }
+
+    // Test 2b: Code 4006 após ter recebido Ready (sessão expirada mid-call) -> NewSession
+    let mut sm_active = VoiceGatewayStateMachine::new(mock_voice_config());
+    sm_active.set_last_seq(100);
+    // Simula Ready recebido anteriormente
+    let ready_text = r#"{"op": 2, "d": {"ssrc": 1234, "ip": "1.2.3.4", "port": 1234, "modes": ["aead_aes256_gcm_rtpsize"]}}"#;
+    let _ = sm_active.handle_incoming_text(ready_text);
+    let (decision, action) = sm_active.handle_close_code(4006, "Invalidated");
     assert_eq!(decision, VoiceCloseDecision::NewSession);
     assert_eq!(action, None);
-    assert_eq!(*sm.current_state(), VoiceConnectionState::WaitingForHello);
-    assert_eq!(sm.last_seq(), -1);
+    assert_eq!(*sm_active.current_state(), VoiceConnectionState::WaitingForHello);
+    assert_eq!(sm_active.last_seq(), -1);
 
     // Test 3: Code 4017 (DAVE Required) -> Fatal, state Failed, action CloseConnection
     let (decision, action) = sm.handle_close_code(4017, "");

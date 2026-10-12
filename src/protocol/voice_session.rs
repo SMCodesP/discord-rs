@@ -853,7 +853,7 @@ impl VoiceSession {
         let entry_confirmed_tx = self.entry_confirmed_tx.clone();
 
         let handle = tokio::spawn(async move {
-            if let Err(err) = run_voice_session(
+            let res = run_voice_session(
                 config,
                 signaling,
                 audio_bridge,
@@ -864,19 +864,26 @@ impl VoiceSession {
                 recv_packets,
                 gateway_factory,
                 state_tx.clone(),
-                active_gateway,
+                active_gateway.clone(),
                 self_mute,
                 self_deaf,
                 ssrc_to_user,
                 ping_ms,
                 entry_confirmed_tx,
             )
-            .await
-            {
+            .await;
+
+            if let Err(err) = res {
                 log::error!("[VoiceSession] Sessão encerrou com erro: {err:?}");
                 let _ = state_tx.send(VoiceSessionState::Disconnected {
                     reason: format!("{err:#}"),
                 });
+            }
+
+            // Garante parada definitiva do gateway de voz da sessão
+            let mut gw_lock = active_gateway.lock().await;
+            if let Some(gw) = gw_lock.take() {
+                let _ = gw.disconnect().await;
             }
         });
 
@@ -987,9 +994,10 @@ async fn run_voice_session(
     let mut captured_session_id: Option<String> = None;
     let mut captured_token: Option<String> = None;
     let mut captured_endpoint: Option<String> = None;
+    let mut call_create_received = false;
 
     let discovery_timeout = Duration::from_secs(15);
-    tokio::time::timeout(discovery_timeout, async {
+    let discovery_res = tokio::time::timeout(discovery_timeout, async {
         while captured_session_id.is_none() || captured_token.is_none() || captured_endpoint.is_none() {
             match transport_rx.recv().await {
                 Ok(TransportEvent::VoiceStateUpdate(VoiceState {
@@ -1002,10 +1010,17 @@ async fn run_voice_session(
                     && !session_id.is_empty() => {
                     log::info!("[VoiceDiag] VOICE_STATE_UPDATE próprio recebido");
                     captured_session_id = Some(session_id);
+                }
+                Ok(TransportEvent::CallCreate { channel_id: ev_ch_id, ringing, .. })
+                    if ev_ch_id == channel_str => {
+                    log::info!("[VoiceDiag] CALL_CREATE recebido: sim, ringing_count={}", ringing.len());
+                    call_create_received = true;
                     let _ = entry_confirmed_tx.send(true);
                 }
-                Ok(TransportEvent::CallCreate { channel_id: ev_ch_id, .. })
+                Ok(TransportEvent::CallUpdate { channel_id: ev_ch_id, ringing, .. })
                     if ev_ch_id == channel_str => {
+                    log::info!("[VoiceDiag] CALL_UPDATE recebido: ringing_count={}", ringing.len());
+                    call_create_received = true;
                     let _ = entry_confirmed_tx.send(true);
                 }
                 Ok(TransportEvent::VoiceServerUpdate {
@@ -1026,7 +1041,27 @@ async fn run_voice_session(
                     };
 
                     if matches_guild && matches_channel {
-                        log::info!("[VoiceDiag] VOICE_SERVER_UPDATE recebido: endpoint_presente={}", endpoint.is_some());
+                        let (porta_presente, porta) = match endpoint.as_deref() {
+                            Some(ep) => {
+                                let clean = ep.trim().trim_start_matches("wss://").trim_start_matches("ws://");
+                                if let Some((_, p)) = clean.rsplit_once(':') {
+                                    if let Ok(p_num) = p.split('/').next().unwrap_or("").parse::<u16>() {
+                                        (true, Some(p_num))
+                                    } else {
+                                        (false, None)
+                                    }
+                                } else {
+                                    (false, None)
+                                }
+                            }
+                            None => (false, None),
+                        };
+                        log::info!(
+                            "[VoiceDiag] VOICE_SERVER_UPDATE recebido: endpoint_presente={}, porta_presente={}, porta={:?}",
+                            endpoint.is_some(),
+                            porta_presente,
+                            porta
+                        );
                         captured_token = Some(token);
                         captured_endpoint = endpoint;
                     } else {
@@ -1042,19 +1077,20 @@ async fn run_voice_session(
         }
         Ok(())
     })
-    .await
-    .map_err(|_| anyhow!("Timeout aguardando session_id, token e endpoint do Discord"))??;
+    .await;
+
+    if !call_create_received && config.guild_id.is_none() {
+        log::info!("[VoiceDiag] CALL_CREATE recebido: não, ringing_count=0");
+    }
+
+    discovery_res.map_err(|_| anyhow!("Timeout aguardando session_id, token e endpoint do Discord"))??;
 
     let session_id = captured_session_id.unwrap();
     let token = captured_token.unwrap();
     let raw_endpoint = captured_endpoint.ok_or_else(|| anyhow!("Servidor não forneceu endpoint de voz"))?;
 
-    // Remove eventuais sufixos de porta (:80 ou :443) do endpoint
-    let endpoint = raw_endpoint
-        .split(':')
-        .next()
-        .unwrap_or(&raw_endpoint)
-        .to_string();
+    // Preserva a porta exatamente como veio no VOICE_SERVER_UPDATE (SCall2 / discord.py #10210)
+    let endpoint = raw_endpoint.trim().to_string();
 
     log::info!("[VoiceSession] Handshake inicial concluído com sucesso");
     let _ = events_tx.send(VoiceSessionEvent::VoiceServerReceived {
