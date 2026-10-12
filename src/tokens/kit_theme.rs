@@ -310,6 +310,16 @@ pub fn install(cx: &mut App) {
     install_with_palette(cx, &palette);
 }
 
+/// Selects and registers the palette corresponding to the account theme
+/// through `install_with_palette`.
+///
+/// Falls back to the standard dark palette for themes not yet implemented
+/// (e.g. Light or Midnight), as specified in `docs/THEME_PER_ACCOUNT.md`.
+pub fn install_for_account_theme(cx: &mut App, theme: crate::protocol::user_settings_proto::Theme) {
+    let palette = colors::DiscordPalette::for_theme(theme);
+    install_with_palette(cx, &palette);
+}
+
 // ============================================================================
 // DiscordExtras: Discord surfaces with no kit equivalent
 // ============================================================================
