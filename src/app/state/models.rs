@@ -436,3 +436,25 @@ pub struct MemberItemState {
     /// Avatar decoration equipped by the member, when the member payload carries it.
     pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
+
+impl MemberItemState {
+    /// Creates an unloaded slot representing a sparse position in the member list
+    pub fn unloaded(index: usize) -> Self {
+        Self {
+            id: format!("unloaded:{}", index),
+            name: String::new(),
+            avatar_text: String::new(),
+            presence: PresenceStatus::Offline,
+            role_group: String::new(),
+            role_color: 0,
+            is_bot: false,
+            activity: None,
+            avatar_decoration_data: None,
+        }
+    }
+
+    /// Returns true if this slot is an unloaded gap placeholder
+    pub fn is_unloaded(&self) -> bool {
+        self.id.starts_with("unloaded:")
+    }
+}

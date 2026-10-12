@@ -49,7 +49,7 @@ pub const DICTIONARY: &[(&str, &str)] = &[
 
     // Chat e Mensagens
     ("chat.placeholder", "Conversar em #{channel}"),
-    ("chat.placeholder_dm", "Conversar com @{user}"),
+    ("chat.placeholder_dm", "Conversar em @{user}"),
     ("chat.no_permission", "Você não tem permissão para enviar mensagens neste canal."),
     ("chat.reply", "Responder"),
     ("chat.edit", "Editar mensagem"),

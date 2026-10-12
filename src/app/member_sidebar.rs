@@ -20,6 +20,9 @@ enum MemberSidebarItem {
 pub struct MemberSidebar {
     state: Entity<AppState>,
     items: Vec<MemberSidebarItem>,
+    last_requested_ranges: Option<Vec<[usize; 2]>>,
+    current_guild_id: Option<String>,
+    current_channel_id: Option<String>,
 }
 
 impl MemberSidebar {
@@ -31,11 +34,21 @@ impl MemberSidebar {
         Self {
             state,
             items: Vec::new(),
+            last_requested_ranges: None,
+            current_guild_id: None,
+            current_channel_id: None,
         }
     }
 
     fn rebuild_items(&mut self, cx: &App) {
         let state = self.state.read(cx);
+        if self.current_guild_id != state.selected_guild_id
+            || self.current_channel_id != state.selected_channel_id
+        {
+            self.current_guild_id = state.selected_guild_id.clone();
+            self.current_channel_id = state.selected_channel_id.clone();
+            self.last_requested_ranges = None;
+        }
         let members = state.members.clone();
 
         let has_server_groups = members.iter().any(|m| m.id.starts_with("group:"));
@@ -43,6 +56,9 @@ impl MemberSidebar {
         if has_server_groups {
             let mut items = Vec::new();
             for m in members {
+                if m.is_unloaded() {
+                    continue;
+                }
                 if m.id.starts_with("group:") {
                     let count = m
                         .activity
@@ -66,6 +82,9 @@ impl MemberSidebar {
         let mut offline_list: Vec<MemberItemState> = Vec::new();
 
         for m in members {
+            if m.is_unloaded() {
+                continue;
+            }
             if m.presence == PresenceStatus::Offline {
                 offline_list.push(m);
             } else {
@@ -130,6 +149,8 @@ impl Render for MemberSidebar {
         let entity = cx.entity().clone();
         let app_entity = self.state.clone();
         let items = self.items.clone();
+        let active_gid = self.current_guild_id.clone();
+        let active_cid = self.current_channel_id.clone();
 
         div()
             .w(px(240.0))
@@ -146,8 +167,22 @@ impl Render for MemberSidebar {
                     entity,
                     "member-sidebar-virtual-list",
                     item_sizes,
-                    move |_this, range, _window, _cx| {
+                    move |this, range, _window, cx| {
                         let app = app_entity.clone();
+
+                        if let (Some(_gid), Some(_cid)) = (&active_gid, &active_cid) {
+                            let ranges = crate::protocol::cache::lazy_guilds::calculate_ranges_for_viewport(
+                                range.start,
+                                range.end,
+                            );
+                            if this.last_requested_ranges.as_ref() != Some(&ranges) {
+                                this.last_requested_ranges = Some(ranges.clone());
+                                app.update(cx, |state, _cx| {
+                                    state.update_member_viewport(ranges);
+                                });
+                            }
+                        }
+
                         range
                             .filter_map(|ix| items.get(ix))
                             .map(|item| match item {

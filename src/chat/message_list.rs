@@ -9,8 +9,10 @@
 //! - Attachments & rich embed rendering
 //! - Embedded reactions bar
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Utc};
 use gpui::component::menu::{PopupMenu, PopupMenuItem};
+use gpui::component::tooltip::Tooltip;
+use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
 
@@ -55,9 +57,8 @@ fn pt_month_name(month: u32) -> &'static str {
     }
 }
 
-/// Formats a date for the central date divider.
-pub fn format_date_separator(date: NaiveDate) -> String {
-    let today = Utc::now().date_naive();
+/// Formats a date for the central date divider with an explicit 'today' reference date.
+pub fn format_date_separator_with_today(date: NaiveDate, today: NaiveDate) -> String {
     let diff = today.signed_duration_since(date).num_days();
 
     if diff == 0 {
@@ -69,20 +70,81 @@ pub fn format_date_separator(date: NaiveDate) -> String {
     }
 }
 
-/// Formats message timestamp: "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 14:32".
-pub fn format_message_timestamp(dt: DateTime<Utc>) -> String {
-    let today = Utc::now().date_naive();
-    let msg_date = dt.date_naive();
+/// Formats a date for the central date divider using local machine timezone.
+pub fn format_date_separator(date: NaiveDate) -> String {
+    let today = Local::now().date_naive();
+    format_date_separator_with_today(date, today)
+}
+
+/// Formats message timestamp with explicit FixedOffset and reference local now time.
+/// E.g. "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 às 14:32".
+pub fn format_message_timestamp_with_offset(
+    dt: DateTime<Utc>,
+    offset: FixedOffset,
+    now: DateTime<FixedOffset>,
+) -> String {
+    let local_dt = dt.with_timezone(&offset);
+    let today = now.date_naive();
+    let msg_date = local_dt.date_naive();
     let diff = today.signed_duration_since(msg_date).num_days();
-    let time_str = dt.format("%H:%M").to_string();
+    let time_str = local_dt.format("%H:%M").to_string();
 
     if diff == 0 {
         format!("Hoje às {}", time_str)
     } else if diff == 1 {
         format!("Ontem às {}", time_str)
     } else {
-        format!("{} às {}", dt.format("%d/%m/%Y"), time_str)
+        format!("{} às {}", local_dt.format("%d/%m/%Y"), time_str)
     }
+}
+
+/// Formats message timestamp: "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 às 14:32" in local timezone.
+pub fn format_message_timestamp(dt: DateTime<Utc>) -> String {
+    let local_now = Local::now();
+    let offset = *local_now.offset();
+    format_message_timestamp_with_offset(dt, offset, local_now.with_timezone(&offset))
+}
+
+/// Returns weekday name in Portuguese.
+fn pt_weekday_name(wd: chrono::Weekday) -> &'static str {
+    match wd {
+        chrono::Weekday::Mon => "segunda-feira",
+        chrono::Weekday::Tue => "terça-feira",
+        chrono::Weekday::Wed => "quarta-feira",
+        chrono::Weekday::Thu => "quinta-feira",
+        chrono::Weekday::Fri => "sexta-feira",
+        chrono::Weekday::Sat => "sábado",
+        chrono::Weekday::Sun => "domingo",
+    }
+}
+
+/// Formats full message timestamp for hover tooltip with explicit FixedOffset (canonical Discord format: "domingo, 11 de outubro de 2026 às 15:30").
+pub fn format_message_full_timestamp_with_offset(
+    dt: DateTime<Utc>,
+    offset: FixedOffset,
+) -> String {
+    let local_dt = dt.with_timezone(&offset);
+    let weekday = pt_weekday_name(local_dt.weekday());
+    let month = pt_month_name(local_dt.month()).to_lowercase();
+    let time_str = local_dt.format("%H:%M").to_string();
+    format!("{}, {} de {} de {} às {}", weekday, local_dt.day(), month, local_dt.year(), time_str)
+}
+
+/// Formats full message timestamp for hover tooltip in local timezone (canonical Discord format: "domingo, 11 de outubro de 2026 às 15:30").
+pub fn format_message_full_timestamp(dt: DateTime<Utc>) -> String {
+    let local_now = Local::now();
+    let offset = *local_now.offset();
+    format_message_full_timestamp_with_offset(dt, offset)
+}
+
+/// Formats compact gutter time with explicit FixedOffset ("HH:MM").
+pub fn format_compact_gutter_time_with_offset(dt: DateTime<Utc>, offset: FixedOffset) -> String {
+    dt.with_timezone(&offset).format("%H:%M").to_string()
+}
+
+/// Formats compact gutter time in local timezone ("HH:MM").
+pub fn format_compact_gutter_time(dt: DateTime<Utc>) -> String {
+    dt.with_timezone(&Local).format("%H:%M").to_string()
 }
 
 /// Formats a file size in bytes to a human-readable string.
@@ -226,10 +288,12 @@ pub struct MessageContextMenuConfig {
     pub is_pinned: bool,
     pub is_own: bool,
     pub on_add_reaction: Option<MessageActionCallback>,
+    pub on_edit: Option<MessageActionCallback>,
     pub on_reply: Option<MessageActionCallback>,
     pub on_copy_text: Option<MessageActionCallback>,
     pub on_copy_link: Option<MessageActionCallback>,
     pub on_copy_id: Option<MessageActionCallback>,
+    pub on_mark_unread: Option<MessageActionCallback>,
     pub on_pin: Option<MessageActionCallback>,
     pub on_delete: Option<MessageActionCallback>,
     pub on_delete_shift: Option<MessageActionCallback>,
@@ -257,6 +321,15 @@ pub fn build_message_popup_menu(
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
+        if is_own {
+            if let Some(act) = config.on_edit.clone() {
+                let mid = msg_id.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Editar Mensagem")
+                        .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+                );
+            }
+        }
         if let Some(act) = config.on_reply.clone() {
             let mid = msg_id.clone();
             menu = menu.item(
@@ -276,6 +349,13 @@ pub fn build_message_popup_menu(
             let mid = msg_id.clone();
             menu = menu.item(
                 PopupMenuItem::new("Copiar Link da Mensagem")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        if let Some(act) = config.on_mark_unread.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Marcar como Não Lida")
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
@@ -321,6 +401,7 @@ fn render_menu_item(
     let msg_id = message_id.to_string();
     let label_str = label.to_string();
     let icon_str = icon.to_string();
+    let is_disabled = action.is_none() && action_shift.is_none();
 
     let mut item = div()
         .flex()
@@ -329,17 +410,24 @@ fn render_menu_item(
         .justify_between()
         .px(space_2())
         .py(px(6.0))
-        .rounded(radius_xs())
-        .cursor_pointer();
+        .rounded(radius_xs());
 
-    if is_danger {
+    if is_disabled {
         item = item
-            .text_color(control_critical_secondary_text_default())
-            .hover(|s| s.bg(status_danger()).text_color(white()));
+            .text_color(text_muted())
+            .opacity(0.4)
+            .cursor_not_allowed();
     } else {
-        item = item
-            .text_color(text_primary())
-            .hover(|s| s.bg(blurple()).text_color(white()));
+        item = item.cursor_pointer();
+        if is_danger {
+            item = item
+                .text_color(control_critical_secondary_text_default())
+                .hover(|s| s.bg(status_danger()).text_color(white()));
+        } else {
+            item = item
+                .text_color(text_primary())
+                .hover(|s| s.bg(blurple()).text_color(white()));
+        }
     }
 
     item = item
@@ -356,7 +444,7 @@ fn render_menu_item(
                 .child(icon_str),
         );
 
-    if action.is_some() || action_shift.is_some() || on_close.is_some() {
+    if !is_disabled && (action.is_some() || action_shift.is_some() || on_close.is_some()) {
         item = item.on_mouse_down(MouseButton::Left, move |ev, window, cx| {
             cx.stop_propagation();
             if ev.modifiers.shift {
@@ -405,9 +493,24 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             None,
             &config.message_id,
             config.on_close.clone(),
-        ))
+        ));
+
+    // 2. Editar Mensagem (apenas mensagem própria)
+    if config.is_own {
+        menu = menu.child(render_menu_item(
+            "Editar Mensagem",
+            "✏",
+            false,
+            config.on_edit,
+            None,
+            &config.message_id,
+            config.on_close.clone(),
+        ));
+    }
+
+    // 3. Responder
+    menu = menu
         .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
-        // 2. Responder
         .child(render_menu_item(
             "Responder",
             "↩",
@@ -418,7 +521,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             config.on_close.clone(),
         ))
         .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
-        // 3. Copiar Texto
+        // 4. Copiar Texto
         .child(render_menu_item(
             "Copiar Texto",
             "📋",
@@ -429,7 +532,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             config.on_close.clone(),
         ));
 
-    // 4. Copiar Link da Mensagem (se canal/guild conhecidos)
+    // 5. Copiar Link da Mensagem (se canal/guild conhecidos)
     if config.on_copy_link.is_some() {
         menu = menu.child(render_menu_item(
             "Copiar Link da Mensagem",
@@ -442,20 +545,29 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         ));
     }
 
-    // 5. Fixar Mensagem (apenas se houver callback implementado)
-    if config.on_pin.is_some() {
-        menu = menu.child(render_menu_item(
-            pin_label,
-            "📌",
-            false,
-            config.on_pin,
-            None,
-            &config.message_id,
-            config.on_close.clone(),
-        ));
-    }
+    // 6. Marcar como Não Lida (desabilitado até rota existir no backend)
+    menu = menu.child(render_menu_item(
+        "Marcar como Não Lida",
+        "✉",
+        false,
+        config.on_mark_unread,
+        None,
+        &config.message_id,
+        config.on_close.clone(),
+    ));
 
-    // 6. Excluir Mensagem (apenas mensagem própria)
+    // 7. Fixar Mensagem (desabilitado se on_pin for None até rota existir no backend)
+    menu = menu.child(render_menu_item(
+        pin_label,
+        "📌",
+        false,
+        config.on_pin,
+        None,
+        &config.message_id,
+        config.on_close.clone(),
+    ));
+
+    // 8. Excluir Mensagem (apenas mensagem própria)
     if config.is_own {
         menu = menu
             .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
@@ -470,7 +582,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             ));
     }
 
-    // 7. Copiar ID da Mensagem
+    // 9. Copiar ID da Mensagem
     menu = menu
         .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
         .child(render_menu_item(
@@ -796,7 +908,8 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
     // 1. Left Gutter (Avatar via crate::components::Avatar or hover timestamp - Cozy 48px spacing)
     let left_gutter = if config.is_grouped {
         // Grouped mode: gutter displays timestamp only on hover
-        let time_hh_mm = message.timestamp.format("%H:%M").to_string();
+        let time_hh_mm = format_compact_gutter_time(message.timestamp);
+        let full_timestamp = format_message_full_timestamp(message.timestamp);
         div()
             .w(px(48.0))
             .flex()
@@ -806,9 +919,12 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
             .flex_shrink_0()
             .child(
                 div()
+                    .id(ElementId::Name(format!("compact-time-{}", message.id).into()))
                     .text_size(px(10.0))
                     .text_color(text_muted())
                     .invisible()
+                    .cursor_default()
+                    .tooltip(move |window, cx| Tooltip::new(full_timestamp.clone()).build(window, cx))
                     .group_hover("message-row", |s| s.visible())
                     .child(time_hh_mm),
             )
@@ -895,10 +1011,14 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
             );
         }
 
+        let full_timestamp = format_message_full_timestamp(message.timestamp);
         header_row = header_row.child(
             div()
+                .id(ElementId::Name(format!("header-time-{}", message.id).into()))
                 .text_size(font_size_xs())
                 .text_color(text_muted())
+                .cursor_default()
+                .tooltip(move |window, cx| Tooltip::new(full_timestamp.clone()).build(window, cx))
                 .child(format_message_timestamp(message.timestamp)),
         );
 
@@ -975,7 +1095,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
 pub fn should_group_messages(prev: &Message, current: &Message) -> bool {
     prev.author.id == current.author.id
         && (current.timestamp - prev.timestamp).num_seconds().abs() < 300
-        && current.timestamp.date_naive() == prev.timestamp.date_naive()
+        && current.timestamp.with_timezone(&Local).date_naive() == prev.timestamp.with_timezone(&Local).date_naive()
 }
 
 /// Flattened item representation for virtualized chat streams
@@ -1002,7 +1122,7 @@ pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
     let mut prev_message: Option<&Message> = None;
 
     for (idx, msg) in messages.iter().enumerate() {
-        let msg_date = msg.timestamp.date_naive();
+        let msg_date = msg.timestamp.with_timezone(&Local).date_naive();
 
         // 1. Date Divider if date has changed
         if last_date.map_or(true, |d| d != msg_date) {
@@ -1135,7 +1255,7 @@ pub fn render_message_list(
     let mut last_date: Option<NaiveDate> = None;
 
     for msg in rendered_messages {
-        let msg_date = msg.timestamp.date_naive();
+        let msg_date = msg.timestamp.with_timezone(&Local).date_naive();
 
         // 1. Date Divider if date has changed
         if last_date.map_or(true, |d| d != msg_date) {
@@ -1313,10 +1433,12 @@ mod tests {
             is_pinned: false,
             is_own: true,
             on_add_reaction: None,
+            on_edit: None,
             on_reply: None,
             on_copy_text: None,
             on_copy_link: None,
             on_copy_id: None,
+            on_mark_unread: None,
             on_pin: None,
             on_delete: None,
             on_delete_shift: None,
@@ -1328,10 +1450,12 @@ mod tests {
             is_pinned: true,
             is_own: false,
             on_add_reaction: None,
+            on_edit: None,
             on_reply: None,
             on_copy_text: None,
             on_copy_link: None,
             on_copy_id: None,
+            on_mark_unread: None,
             on_pin: None,
             on_delete: None,
             on_delete_shift: None,

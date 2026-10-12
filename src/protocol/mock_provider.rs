@@ -17,6 +17,10 @@ struct MockState {
     connected: bool,
     next_message_id: u64,
     relationships: Vec<Relationship>,
+    recorded_viewport_updates: Vec<(String, String, Vec<[usize; 2]>)>,
+    recorded_member_requests: Vec<(String, Vec<String>)>,
+    recorded_message_edits: Vec<(String, String, String)>,
+    recorded_pins: Vec<(String, String)>,
 }
 
 /// Deterministic mock provider simulating Discord guilds, channels, messages, and gateway events.
@@ -451,12 +455,32 @@ impl MockDiscordProvider {
             connected: false,
             next_message_id: 1000,
             relationships,
+            recorded_viewport_updates: Vec::new(),
+            recorded_member_requests: Vec::new(),
+            recorded_message_edits: Vec::new(),
+            recorded_pins: Vec::new(),
         };
 
         Self {
             state: Arc::new(RwLock::new(state)),
             event_sender,
         }
+    }
+
+    pub async fn recorded_viewport_updates(&self) -> Vec<(String, String, Vec<[usize; 2]>)> {
+        self.state.read().await.recorded_viewport_updates.clone()
+    }
+
+    pub async fn recorded_member_requests(&self) -> Vec<(String, Vec<String>)> {
+        self.state.read().await.recorded_member_requests.clone()
+    }
+
+    pub async fn recorded_message_edits(&self) -> Vec<(String, String, String)> {
+        self.state.read().await.recorded_message_edits.clone()
+    }
+
+    pub async fn recorded_pins(&self) -> Vec<(String, String)> {
+        self.state.read().await.recorded_pins.clone()
     }
 
     /// Simulates receiving an external message from another user in real time.
@@ -485,6 +509,22 @@ impl MockDiscordProvider {
 
         let _ = self.event_sender.send(TransportEvent::MessageCreate(msg.clone()));
         Ok(msg)
+    }
+
+    pub async fn get_recorded_viewport_updates(&self) -> Vec<(String, String, Vec<[usize; 2]>)> {
+        self.state.read().await.recorded_viewport_updates.clone()
+    }
+
+    pub async fn get_recorded_member_requests(&self) -> Vec<(String, Vec<String>)> {
+        self.state.read().await.recorded_member_requests.clone()
+    }
+
+    pub async fn get_recorded_message_edits(&self) -> Vec<(String, String, String)> {
+        self.state.read().await.recorded_message_edits.clone()
+    }
+
+    pub async fn get_recorded_pins(&self) -> Vec<(String, String)> {
+        self.state.read().await.recorded_pins.clone()
     }
 }
 
@@ -858,6 +898,73 @@ impl DiscordTransport for MockDiscordProvider {
         } else {
             anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
         }
+    }
+
+    async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> anyhow::Result<Message> {
+        let mut state = self.state.write().await;
+        state.recorded_message_edits.push((
+            channel_id.to_string(),
+            message_id.to_string(),
+            content.to_string(),
+        ));
+        if let Some(list) = state.messages.get_mut(channel_id) {
+            if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
+                msg.content = content.to_string();
+                let updated = msg.clone();
+                let _ = self.event_sender.send(TransportEvent::MessageUpdate(updated.clone()));
+                return Ok(updated);
+            }
+        }
+        anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
+    }
+
+    async fn pin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        state.recorded_pins.push((channel_id.to_string(), message_id.to_string()));
+        if let Some(list) = state.messages.get_mut(channel_id) {
+            if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
+                msg.pinned = true;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
+    }
+
+    async fn unpin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        if let Some(list) = state.messages.get_mut(channel_id) {
+            if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
+                msg.pinned = false;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
+    }
+
+    async fn request_guild_members(
+        &self,
+        guild_id: &str,
+        user_ids: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        state.recorded_member_requests.push((guild_id.to_string(), user_ids));
+        Ok(())
+    }
+
+    async fn update_guild_member_viewport(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        state.recorded_viewport_updates.push((guild_id.to_string(), channel_id.to_string(), ranges));
+        Ok(())
     }
 
     async fn subscribe_guild_members(

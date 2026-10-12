@@ -306,6 +306,55 @@ pub fn render_active_reply_banner(
         )
 }
 
+/// Renders the active edit banner above the text input when editing a message.
+pub fn render_active_edit_banner(
+    on_cancel_edit: Option<EditorActionCallback>,
+) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .bg(bg_channels())
+        .border_b_1()
+        .border_color(channel_hover())
+        .rounded_t(radius_md())
+        .px(space_4())
+        .py(space_2())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space_2())
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(font_size_sm())
+                        .child("✏"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap(space_1())
+                        .text_size(font_size_sm())
+                        .child(
+                            div()
+                                .text_color(text_muted())
+                                .child("Editando mensagem • escape para cancelar • enter para salvar"),
+                        ),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(render_reply_close_button(on_cancel_edit)),
+        )
+}
+
 // ============================================================================
 // Typing Indicator Component
 // ============================================================================
@@ -370,6 +419,8 @@ pub struct ChatComposer {
     disabled: bool,
     on_toggle_mention: Option<EditorActionCallback>,
     on_cancel_reply: Option<EditorActionCallback>,
+    editing_message: Option<Message>,
+    on_cancel_edit: Option<EditorActionCallback>,
     on_attachment: Option<EditorActionCallback>,
     on_gif: Option<EditorActionCallback>,
     on_sticker: Option<EditorActionCallback>,
@@ -392,6 +443,8 @@ impl ChatComposer {
             disabled: false,
             on_toggle_mention: None,
             on_cancel_reply: None,
+            editing_message: None,
+            on_cancel_edit: None,
             on_attachment: None,
             on_gif: None,
             on_sticker: None,
@@ -469,16 +522,27 @@ impl ChatComposer {
         self.on_cancel_reply = handler;
         self
     }
+
+    pub fn editing_message(mut self, message: Option<Message>) -> Self {
+        self.editing_message = message;
+        self
+    }
+
+    pub fn on_cancel_edit(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_cancel_edit = handler;
+        self
+    }
 }
 
 impl RenderOnce for ChatComposer {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let has_reply = self.replying_to.is_some();
+        let has_edit = self.editing_message.is_some();
         let reply_msg_id = self.replying_to.as_ref().map(|m| m.id.clone());
 
         let ph = self.placeholder.unwrap_or_else(|| {
-            if self.channel_name.starts_with('@') {
-                format!("Conversar com {}", self.channel_name).into()
+            if self.channel_name.starts_with('@') || self.channel_name.starts_with('#') {
+                format!("Conversar em {}", self.channel_name).into()
             } else {
                 format!("Conversar em #{}", self.channel_name).into()
             }
@@ -493,14 +557,18 @@ impl RenderOnce for ChatComposer {
 
         let is_empty = self.state.read(cx).value().is_empty();
 
-        let reply_banner = self.replying_to.as_ref().map(|msg| {
-            render_active_reply_banner(
+        let top_banner = if has_edit {
+            Some(render_active_edit_banner(self.on_cancel_edit.clone()))
+        } else if let Some(ref msg) = self.replying_to {
+            Some(render_active_reply_banner(
                 msg,
                 self.mention_author,
                 self.on_toggle_mention.clone(),
                 self.on_cancel_reply.clone(),
-            )
-        });
+            ))
+        } else {
+            None
+        };
 
         let attach_btn = render_attach_button(self.on_attachment.clone());
         let gift_btn = render_gift_button();
@@ -537,7 +605,7 @@ impl RenderOnce for ChatComposer {
             .py(space_2())
             .bg(bg_input());
 
-        if has_reply {
+        if has_reply || has_edit {
             main_input = main_input.rounded_b(radius_md());
         } else {
             main_input = main_input.rounded(radius_md());
@@ -563,7 +631,7 @@ impl RenderOnce for ChatComposer {
             .px(space_4())
             .pb(space_4());
 
-        if let Some(banner) = reply_banner {
+        if let Some(banner) = top_banner {
             container = container.child(banner);
         }
 

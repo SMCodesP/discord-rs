@@ -251,6 +251,20 @@ impl AppState {
                     );
                 }
             }
+            TransportEvent::GuildMembersChunk { guild_id, members, not_found } => {
+                for uid in &not_found {
+                    crate::protocol::cache::lazy_guilds::mark_op8_requested(&guild_id, uid);
+                }
+                if self.selected_guild_id.as_deref() == Some(&guild_id) {
+                    for m in &members {
+                        if let Some(pos) = self.members.iter().position(|em| em.id == m.id) {
+                            if m.role_color != 0 {
+                                self.members[pos].role_color = m.role_color;
+                            }
+                        }
+                    }
+                }
+            }
             TransportEvent::ReactionAdd { channel_id, message_id, emoji, .. } => {
                 self.add_reaction_to_message(&channel_id, &message_id, &emoji);
             }

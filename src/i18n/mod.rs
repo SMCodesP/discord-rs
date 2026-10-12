@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(msg, "Conversar em #geral");
 
         let msg_dm = t_with("chat.placeholder_dm", &[("user", "Prism")]);
-        assert_eq!(msg_dm, "Conversar com @Prism");
+        assert_eq!(msg_dm, "Conversar em @Prism");
 
         let members = t_fmt("members.online_count", &[("count", "42")]);
         assert_eq!(members, "ONLINE — 42");

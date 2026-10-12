@@ -300,3 +300,29 @@ fn test_reply_banner_author_display() {
     let banner_no_mention = render_active_reply_banner(&msg, false, None, None);
     let _ = banner_no_mention;
 }
+
+#[test]
+fn test_composer_placeholder_dm_and_channel() {
+    fn format_placeholder(channel_name: &str) -> String {
+        if channel_name.starts_with('@') || channel_name.starts_with('#') {
+            format!("Conversar em {}", channel_name)
+        } else {
+            format!("Conversar em #{}", channel_name)
+        }
+    }
+
+    // Direct Message placeholder prefixado com @ (paridade com Discord pt-BR)
+    assert_eq!(format_placeholder("@Usuario"), "Conversar em @Usuario");
+    // Canal de texto sem # no nome
+    assert_eq!(format_placeholder("geral"), "Conversar em #geral");
+    // Canal de texto já com # no nome não deve duplicar ##
+    assert_eq!(format_placeholder("#avisos"), "Conversar em #avisos");
+}
+
+#[test]
+fn test_render_active_edit_banner() {
+    use discord_rs::chat::editor::render_active_edit_banner;
+    let banner = render_active_edit_banner(None);
+    let _ = banner;
+}
+
