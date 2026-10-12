@@ -1,7 +1,10 @@
+use gpui::component::input::{InputEvent, InputState};
+use gpui::component::popover::Popover;
+use gpui::component::Selectable;
 use gpui::prelude::*;
 use gpui::*;
 
-use crate::components::{Avatar, AvatarSize, IconButton};
+use crate::components::{Avatar, AvatarSize, IconButton, TextInput};
 use crate::tokens::colors::{self, border_subtle};
 use crate::tokens::icons::*;
 use crate::tokens::kit_theme::DiscordTheme;
@@ -10,6 +13,9 @@ use super::state::{ActiveModal, AppState, ChannelItemState};
 /// Chat and channel top header bar (49px high: 48px content + 1px subtle bottom border)
 pub struct HeaderBar {
     state: Entity<AppState>,
+    search_input_state: Option<Entity<InputState>>,
+    search_input_sub: Option<Subscription>,
+    search_popover_open: bool,
 }
 
 impl HeaderBar {
@@ -18,12 +24,101 @@ impl HeaderBar {
             cx.notify();
         })
         .detach();
-        Self { state }
+        Self {
+            state,
+            search_input_state: None,
+            search_input_sub: None,
+            search_popover_open: false,
+        }
+    }
+
+    fn ensure_search_input(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(ref st) = self.search_input_state {
+            return st.clone();
+        }
+        let initial_query = self.state.read(cx).search_query.clone();
+        let st = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_query)
+        });
+        let state_entity = self.state.clone();
+        let st_clone = st.clone();
+        let sub = cx.subscribe_in(&st, window, move |this, _input, event: &InputEvent, _window, cx| {
+            match event {
+                InputEvent::Focus => {
+                    let text = st_clone.read(cx).value().to_string();
+                    this.search_popover_open = text.is_empty();
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    this.search_popover_open = false;
+                    cx.notify();
+                }
+                InputEvent::Change => {
+                    let text = st_clone.read(cx).value().to_string();
+                    state_entity.update(cx, |s, cx| {
+                        s.search_query = text.clone();
+                        if text.is_empty() {
+                            s.clear_search();
+                        }
+                        cx.notify();
+                    });
+                    this.search_popover_open = text.is_empty();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.search_popover_open = false;
+                    let text = st_clone.read(cx).value().to_string();
+                    if text.trim().is_empty() {
+                        state_entity.update(cx, |s, cx| {
+                            s.clear_search();
+                            s.close_search();
+                            cx.notify();
+                        });
+                    } else {
+                        let maybe_req = state_entity.update(cx, |s, cx| {
+                            s.open_search();
+                            s.set_search_offset(0);
+                            let req = s.begin_search(&text);
+                            cx.notify();
+                            req
+                        });
+                        if let Some(req) = maybe_req {
+                            let app_weak = state_entity.downgrade();
+                            cx.spawn(|_header, cx: &mut AsyncApp| {
+                                let cx = cx.clone();
+                                async move {
+                                    req.run_loop(app_weak, cx).await;
+                                }
+                            })
+                            .detach();
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+        });
+        self.search_input_sub = Some(sub);
+        self.search_input_state = Some(st.clone());
+        st
     }
 }
 
 impl Render for HeaderBar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_input_st = self.ensure_search_input(window, cx);
+        let current_query = self.state.read(cx).search_query.clone();
+        if search_input_st.read(cx).value() != current_query.as_str() {
+            let q: SharedString = current_query.into();
+            search_input_st.update(cx, |s, cx| {
+                s.set_value(q, window, cx);
+            });
+        }
+        let is_search_popover_open = self.search_popover_open;
         let state = self.state.read(cx);
         let selected_channel_opt = if let Some((_, ch)) = state.get_selected_channel() {
             Some(ch.clone())
@@ -54,7 +149,13 @@ impl Render for HeaderBar {
                 state,
                 cx,
             ))
-            .child(render_toolbar(app_entity, state, cx))
+            .child(render_toolbar(
+                app_entity,
+                state,
+                &search_input_st,
+                is_search_popover_open,
+                cx,
+            ))
     }
 }
 
@@ -205,7 +306,13 @@ fn render_no_channel_header_items(cx: &App) -> Vec<AnyElement> {
     ]
 }
 
-fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> AnyElement {
+fn render_toolbar(
+    app_entity: Entity<AppState>,
+    state: &AppState,
+    search_input_st: &Entity<InputState>,
+    is_search_popover_open: bool,
+    cx: &App,
+) -> AnyElement {
     let show_members = state.show_members;
     let mut toolbar = div()
         .flex()
@@ -368,8 +475,9 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
     // 4. Search bar (Buscar)
     toolbar = toolbar.child(render_search_box(
         app_entity,
+        search_input_st,
+        is_search_popover_open,
         state.is_search_open,
-        state.search_query.clone(),
         cx,
     ));
 
@@ -425,63 +533,74 @@ fn render_login_button(entity: Entity<AppState>, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+#[derive(IntoElement)]
+struct HeaderSearchTrigger {
+    input_elem: AnyElement,
+    input_st: Entity<InputState>,
+    app_entity: Entity<AppState>,
+    is_open: bool,
+}
+
+impl Selectable for HeaderSearchTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.is_open = selected;
+        self
+    }
+    fn is_selected(&self) -> bool {
+        self.is_open
+    }
+}
+
+impl RenderOnce for HeaderSearchTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let state_entity = self.app_entity;
+        let input_st = self.input_st;
+        div()
+            .w(px(144.0))
+            .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" {
+                    input_st.update(cx, |s, cx| {
+                        s.set_value("", window, cx);
+                    });
+                    state_entity.update(cx, |s, cx| {
+                        s.clear_search();
+                        s.close_search();
+                        cx.notify();
+                    });
+                }
+            })
+            .child(self.input_elem)
+    }
+}
+
 fn render_search_box(
     entity: Entity<AppState>,
-    is_search_open: bool,
-    query: String,
-    cx: &App,
+    search_input_st: &Entity<InputState>,
+    is_popover_open: bool,
+    _is_search_open: bool,
+    _cx: &App,
 ) -> AnyElement {
-    let discord = cx.discord();
-    div()
-        .w(px(144.0))
-        .h(px(24.0))
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .bg(if is_search_open {
-            discord.channel_hover
-        } else {
-            discord.bg_server
+    let input_field = TextInput::new("header-search-input", search_input_st)
+        .placeholder("Buscar")
+        .show_paste(false)
+        .show_clear(true);
+
+    let trigger = HeaderSearchTrigger {
+        input_elem: input_field.into_any_element(),
+        input_st: search_input_st.clone(),
+        app_entity: entity.clone(),
+        is_open: is_popover_open,
+    };
+
+    let app_ent = entity.clone();
+    Popover::new("header-search-popover")
+        .trigger(trigger)
+        .open(is_popover_open)
+        .anchor(Anchor::TopLeft)
+        .offset(px(4.0))
+        .content(move |_state, _window, _cx| {
+            crate::chat::search::render_search_popover_content(app_ent.clone())
         })
-        .border_1()
-        .border_color(if is_search_open {
-            discord.blurple
-        } else {
-            discord.bg_server
-        })
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .cursor_pointer()
-        .hover(|s| s.bg(colors::channel_hover()))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            entity.update(cx, |state, cx| {
-                state.toggle_search();
-                cx.notify();
-            });
-        })
-        .child(
-            div()
-                .text_color(if !query.is_empty() {
-                    discord.text_titles
-                } else {
-                    discord.text_secondary
-                })
-                .text_size(px(12.0))
-                .child(if !query.is_empty() {
-                    query
-                } else {
-                    "Buscar".to_string()
-                }),
-        )
-        .child(icon_search(
-            px(14.0),
-            if is_search_open {
-                discord.white
-            } else {
-                discord.text_secondary
-            },
-        ))
         .into_any_element()
 }
 
