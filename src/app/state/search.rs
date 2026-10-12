@@ -28,7 +28,8 @@ impl AppState {
         }
     }
 
-    /// Executes search across active channel and all cached channels in memory
+    /// Executes search across active channel and cached channels within the active guild/DM scope.
+    /// Results are chronologically sorted (most recent first) matching Discord behavior.
     pub fn execute_search(&mut self, query_str: &str) {
         self.search_query = query_str.to_string();
         self.is_searching = true;
@@ -41,27 +42,57 @@ impl AppState {
         }
 
         let mut results = Vec::new();
+        let mut searched_channels = std::collections::HashSet::new();
 
-        // 1. Search in current channel first if selected
+        let is_dm_mode = self.selected_guild_id.is_none();
+        let current_gid = self.selected_guild_id.clone();
+
+        // 1. Search in current channel first if selected and in scope
         if let Some(ref current_cid) = self.selected_channel_id {
-            if let Some(msgs) = self.messages_by_channel.get(current_cid) {
-                let ch_name = self.find_channel(current_cid).map(|(_, c)| c.name.as_str())
-                    .or_else(|| self.dm_channels.iter().find(|d| &d.id == current_cid).map(|d| d.name.as_str()));
-                results.extend(crate::chat::search::LocalSearchEngine::search_channel_messages(
-                    msgs,
-                    &query,
-                    current_cid,
-                    ch_name,
-                    1,
-                ));
+            let channel_in_scope = if is_dm_mode {
+                self.dm_channels.iter().any(|d| &d.id == current_cid)
+                    || self.find_channel(current_cid).is_none()
+            } else if let Some(ref gid) = current_gid {
+                self.find_channel(current_cid).map(|(g, _)| &g.id == gid).unwrap_or(false)
+            } else {
+                true
+            };
+
+            if channel_in_scope {
+                if let Some(msgs) = self.messages_by_channel.get(current_cid) {
+                    let ch_name = self.find_channel(current_cid).map(|(_, c)| c.name.as_str())
+                        .or_else(|| self.dm_channels.iter().find(|d| &d.id == current_cid).map(|d| d.name.as_str()));
+                    results.extend(crate::chat::search::LocalSearchEngine::search_channel_messages(
+                        msgs,
+                        &query,
+                        current_cid,
+                        ch_name,
+                        1,
+                    ));
+                    searched_channels.insert(current_cid.clone());
+                }
             }
         }
 
-        // 2. Search across other cached channels
+        // 2. Search across other cached channels within the same scope
         for (cid, msgs) in &self.messages_by_channel {
-            if self.selected_channel_id.as_deref() == Some(cid) {
+            if searched_channels.contains(cid) {
                 continue;
             }
+
+            let channel_in_scope = if is_dm_mode {
+                self.dm_channels.iter().any(|d| &d.id == cid)
+                    || self.find_channel(cid).is_none()
+            } else if let Some(ref gid) = current_gid {
+                self.find_channel(cid).map(|(g, _)| &g.id == gid).unwrap_or(false)
+            } else {
+                true
+            };
+
+            if !channel_in_scope {
+                continue;
+            }
+
             let ch_name = self.find_channel(cid).map(|(_, c)| c.name.as_str())
                 .or_else(|| self.dm_channels.iter().find(|d| &d.id == cid).map(|d| d.name.as_str()));
             results.extend(crate::chat::search::LocalSearchEngine::search_channel_messages(
@@ -72,6 +103,9 @@ impl AppState {
                 1,
             ));
         }
+
+        // 3. Sort results chronologically descending (newest hit first, matching Discord specification)
+        results.sort_by(|a, b| b.hit_message.timestamp.cmp(&a.hit_message.timestamp));
 
         self.search_results = results;
         self.is_searching = false;
@@ -86,6 +120,12 @@ impl AppState {
 
     /// Jumps to and highlights a specific message in the chat
     pub fn jump_to_message(&mut self, channel_id: &str, message_id: &str) {
+        if let Some((guild, _)) = self.find_channel(channel_id) {
+            let gid = guild.id.clone();
+            if self.selected_guild_id.as_deref() != Some(&gid) {
+                self.selected_guild_id = Some(gid);
+            }
+        }
         if self.selected_channel_id.as_deref() != Some(channel_id) {
             self.select_channel(channel_id.to_string());
         }
