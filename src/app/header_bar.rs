@@ -80,12 +80,23 @@ impl HeaderBar {
                             cx.notify();
                         });
                     } else {
-                        state_entity.update(cx, |s, cx| {
+                        let maybe_req = state_entity.update(cx, |s, cx| {
                             s.open_search();
-                            let q = s.search_query.clone();
-                            s.execute_search(&q);
+                            s.set_search_offset(0);
+                            let req = s.begin_search(&text);
                             cx.notify();
+                            req
                         });
+                        if let Some(req) = maybe_req {
+                            let app_weak = state_entity.downgrade();
+                            cx.spawn(|_header, cx: &mut AsyncApp| {
+                                let cx = cx.clone();
+                                async move {
+                                    req.run_loop(app_weak, cx).await;
+                                }
+                            })
+                            .detach();
+                        }
                     }
                     cx.notify();
                 }

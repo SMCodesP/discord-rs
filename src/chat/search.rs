@@ -16,7 +16,6 @@
 //! `GET /api/v10/guilds/{guild_id}/messages/search`
 
 use chrono::NaiveDate;
-use gpui::component::Selectable;
 use gpui::*;
 use serde::{Deserialize, Serialize};
 
@@ -697,30 +696,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
     container
 }
 
-/// Selectable trigger wrapper for anchoring Popover to the search input pill
-#[derive(IntoElement)]
-pub struct SearchFieldTrigger {
-    pub query: String,
-    pub focus_handle: FocusHandle,
-    pub app_entity: Entity<AppState>,
-    pub is_open: bool,
-}
 
-impl Selectable for SearchFieldTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.is_open = selected;
-        self
-    }
-    fn is_selected(&self) -> bool {
-        self.is_open
-    }
-}
-
-impl RenderOnce for SearchFieldTrigger {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        render_search_input_box(self.app_entity, &self.query, &self.focus_handle)
-    }
-}
 
 /// Popover content showing Discord's faceted search filters (search-popover.md spec: 356x335, r8, padding 12px 8px)
 pub fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
@@ -809,127 +785,7 @@ pub fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement
         .into_any_element()
 }
 
-/// Renders the search input pill box inside the flyout header
-fn render_search_input_box(
-    app_entity: Entity<AppState>,
-    search_query: &str,
-    focus_handle: &FocusHandle,
-) -> Div {
-    let query_empty = search_query.is_empty();
-    let query_str = search_query.to_string();
 
-    div()
-        .flex_1()
-        .h(px(32.0))
-        .px(px(8.0))
-        .rounded(px(4.0))
-        .bg(bg_server())
-        .border_1()
-        .border_color(channel_hover())
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap(px(6.0))
-        .track_focus(focus_handle)
-        .cursor_text()
-        .on_mouse_down(MouseButton::Left, {
-            let fh = focus_handle.clone();
-            move |_ev, window, cx| {
-                window.focus(&fh, cx);
-            }
-        })
-        .on_key_down({
-            let entity = app_entity.clone();
-            let fh = focus_handle.clone();
-            move |ev: &KeyDownEvent, window, cx| {
-                window.focus(&fh, cx);
-                let key = &ev.keystroke.key;
-                let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
-                if is_ctrl {
-                    return;
-                }
-                entity.update(cx, |state, cx| {
-                    match key.as_str() {
-                        "backspace" => {
-                            state.search_query.pop();
-                            let q = state.search_query.clone();
-                            state.execute_search(&q);
-                            cx.notify();
-                        }
-                        "escape" => {
-                            state.close_search();
-                            cx.notify();
-                        }
-                        "enter" => {
-                            let q = state.search_query.clone();
-                            state.execute_search(&q);
-                            cx.notify();
-                        }
-                        "space" => {
-                            state.search_query.push(' ');
-                            let q = state.search_query.clone();
-                            state.execute_search(&q);
-                            cx.notify();
-                        }
-                        k if k.chars().count() == 1 => {
-                            state.search_query.push_str(k);
-                            let q = state.search_query.clone();
-                            state.execute_search(&q);
-                            cx.notify();
-                        }
-                        _ => {}
-                    }
-                });
-            }
-        })
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
-                .overflow_hidden()
-                .child(icon_search(px(14.0), text_muted()))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(if !query_empty {
-                            text_titles()
-                        } else {
-                            text_muted()
-                        })
-                        .child(if !query_empty {
-                            query_str
-                        } else {
-                            "Buscar".to_string()
-                        }),
-                ),
-        )
-        .children(if !query_empty {
-            let entity = app_entity.clone();
-            Some(
-                div()
-                    .size(px(16.0))
-                    .rounded(px(2.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(text_muted())
-                    .hover(|s| s.text_color(white()))
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                        entity.update(cx, |state, cx| {
-                            state.clear_search();
-                            cx.notify();
-                        });
-                    })
-                    .child(icon_close(px(12.0), text_muted())),
-            )
-        } else {
-            None
-        })
-}
 
 /// Renders the close button (✕) for the flyout panel
 fn render_search_flyout_close_button(app_entity: Entity<AppState>) -> AnyElement {
@@ -1019,12 +875,23 @@ fn render_search_flyout_header(
                         })
                         .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
                         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                            entity_recent.update(cx, |state, cx| {
+                            let maybe_req = entity_recent.update(cx, |state, cx| {
                                 state.set_search_sort_order(SearchSortOrder::Desc);
                                 let q = state.search_query.clone();
-                                state.execute_search(&q);
+                                let req = state.begin_search(&q);
                                 cx.notify();
+                                req
                             });
+                            if let Some(req) = maybe_req {
+                                let app_weak = entity_recent.downgrade();
+                                cx.spawn(|cx: &mut AsyncApp| {
+                                    let cx = cx.clone();
+                                    async move {
+                                        req.run_loop(app_weak, cx).await;
+                                    }
+                                })
+                                .detach();
+                            }
                         })
                         .child("Recentes"),
                 )
@@ -1048,12 +915,23 @@ fn render_search_flyout_header(
                         })
                         .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
                         .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                            entity_old.update(cx, |state, cx| {
+                            let maybe_req = entity_old.update(cx, |state, cx| {
                                 state.set_search_sort_order(SearchSortOrder::Asc);
                                 let q = state.search_query.clone();
-                                state.execute_search(&q);
+                                let req = state.begin_search(&q);
                                 cx.notify();
+                                req
                             });
+                            if let Some(req) = maybe_req {
+                                let app_weak = entity_old.downgrade();
+                                cx.spawn(|cx: &mut AsyncApp| {
+                                    let cx = cx.clone();
+                                    async move {
+                                        req.run_loop(app_weak, cx).await;
+                                    }
+                                })
+                                .detach();
+                            }
                         })
                         .child("Antigos"),
                 ),
@@ -1451,13 +1329,24 @@ fn render_search_pagination_dock(
                             .variant(ButtonVariant::Gray)
                             .disabled(!can_prev)
                             .on_click(move |_ev, _window, cx| {
-                                prev_entity.update(cx, |state, cx| {
+                                let maybe_req = prev_entity.update(cx, |state, cx| {
                                     let new_offset = state.search_offset().saturating_sub(25);
                                     state.set_search_offset(new_offset);
                                     let q = state.search_query.clone();
-                                    state.execute_search(&q);
+                                    let req = state.begin_search(&q);
                                     cx.notify();
+                                    req
                                 });
+                                if let Some(req) = maybe_req {
+                                    let app_weak = prev_entity.downgrade();
+                                    cx.spawn(|cx: &mut AsyncApp| {
+                                        let cx = cx.clone();
+                                        async move {
+                                            req.run_loop(app_weak, cx).await;
+                                        }
+                                    })
+                                    .detach();
+                                }
                             }),
                     )
                     .child(
@@ -1466,13 +1355,24 @@ fn render_search_pagination_dock(
                             .variant(ButtonVariant::Gray)
                             .disabled(!can_next)
                             .on_click(move |_ev, _window, cx| {
-                                next_entity.update(cx, |state, cx| {
+                                let maybe_req = next_entity.update(cx, |state, cx| {
                                     let new_offset = state.search_offset() + 25;
                                     state.set_search_offset(new_offset);
                                     let q = state.search_query.clone();
-                                    state.execute_search(&q);
+                                    let req = state.begin_search(&q);
                                     cx.notify();
+                                    req
                                 });
+                                if let Some(req) = maybe_req {
+                                    let app_weak = next_entity.downgrade();
+                                    cx.spawn(|cx: &mut AsyncApp| {
+                                        let cx = cx.clone();
+                                        async move {
+                                            req.run_loop(app_weak, cx).await;
+                                        }
+                                    })
+                                    .detach();
+                                }
                             }),
                     ),
             )
