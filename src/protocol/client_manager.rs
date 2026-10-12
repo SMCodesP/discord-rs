@@ -35,6 +35,7 @@ pub struct ClientManager {
     real_client: Arc<RwLock<Option<Arc<DiscordApiClient>>>>,
     active_voice: Arc<RwLock<Option<Arc<crate::protocol::voice_session::VoiceSession>>>>,
     voice_state_tx: broadcast::Sender<(crate::protocol::voice_session::VoiceSessionState, Option<u32>)>,
+    voice_event_tx: broadcast::Sender<crate::protocol::voice_session::VoiceSessionEvent>,
     voice_gateway_factory: Arc<RwLock<Option<crate::protocol::voice_session::VoiceGatewayFactory>>>,
 }
 
@@ -53,6 +54,7 @@ impl ClientManager {
         let idle = Arc::new(IdleTransport::new());
         let (event_tx, event_rx) = broadcast::channel(256);
         let (voice_state_tx, _) = broadcast::channel(64);
+        let (voice_event_tx, _) = broadcast::channel(64);
 
         let manager = Self {
             transport: Arc::new(RwLock::new(idle)),
@@ -61,6 +63,7 @@ impl ClientManager {
             real_client: Arc::new(RwLock::new(None)),
             active_voice: Arc::new(RwLock::new(None)),
             voice_state_tx,
+            voice_event_tx,
             voice_gateway_factory: Arc::new(RwLock::new(None)),
         };
 
@@ -73,6 +76,7 @@ impl ClientManager {
         let mock = Arc::new(MockDiscordProvider::new());
         let (event_tx, event_rx) = broadcast::channel(256);
         let (voice_state_tx, _) = broadcast::channel(64);
+        let (voice_event_tx, _) = broadcast::channel(64);
 
         let manager = Self {
             transport: Arc::new(RwLock::new(mock)),
@@ -81,6 +85,7 @@ impl ClientManager {
             real_client: Arc::new(RwLock::new(None)),
             active_voice: Arc::new(RwLock::new(None)),
             voice_state_tx,
+            voice_event_tx,
             voice_gateway_factory: Arc::new(RwLock::new(None)),
         };
 
@@ -594,6 +599,13 @@ impl ClientManager {
         self.voice_state_tx.subscribe()
     }
 
+    /// Subscribes to real-time voice session events (Speaking indicators, ping, etc).
+    pub fn subscribe_voice_events(
+        &self,
+    ) -> broadcast::Receiver<crate::protocol::voice_session::VoiceSessionEvent> {
+        self.voice_event_tx.subscribe()
+    }
+
     /// Disconnects the active voice session gracefully.
     pub async fn disconnect_voice_session(&self) -> Result<()> {
         let session_opt = {
@@ -648,6 +660,12 @@ impl ClientManager {
                         crate::protocol::voice_session::AudioBridgeCommand::StopSession => {}
                         crate::protocol::voice_session::AudioBridgeCommand::SetMuted(_) => {}
                         crate::protocol::voice_session::AudioBridgeCommand::SetDeafened(_) => {}
+                        crate::protocol::voice_session::AudioBridgeCommand::SwitchInputDevice { responder, .. } => {
+                            let _ = responder.send(Ok(()));
+                        }
+                        crate::protocol::voice_session::AudioBridgeCommand::SwitchOutputDevice { responder, .. } => {
+                            let _ = responder.send(Ok(()));
+                        }
                         crate::protocol::voice_session::AudioBridgeCommand::Shutdown => break,
                     }
                 }
@@ -705,9 +723,11 @@ impl ClientManager {
         // Bridge session state changes to voice_state_tx
         let mut state_rx = session.subscribe_state();
         let voice_tx = self.voice_state_tx.clone();
+        let session_ref = session.clone();
         tokio::spawn(async move {
             let initial = state_rx.borrow().clone();
-            let _ = voice_tx.send((initial, None));
+            let initial_ping = session_ref.ping_ms();
+            let _ = voice_tx.send((initial, initial_ping));
 
             while state_rx.changed().await.is_ok() {
                 let current_st = state_rx.borrow().clone();
@@ -715,18 +735,27 @@ impl ClientManager {
                     current_st,
                     crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }
                 );
-                let _ = voice_tx.send((current_st, None));
+                let current_ping = session_ref.ping_ms();
+                let _ = voice_tx.send((current_st, current_ping));
                 if is_term {
                     break;
                 }
             }
         });
 
-        // Subscribe to session events (speaking / SSRC mapping)
+        // Subscribe to session events (speaking / SSRC mapping / latency)
         let mut events_rx = session.subscribe_events();
+        let voice_evt_tx = self.voice_event_tx.clone();
+        let voice_tx_ack = self.voice_state_tx.clone();
+        let session_ref2 = session.clone();
         tokio::spawn(async move {
             while let Ok(evt) = events_rx.recv().await {
                 log::debug!("[ClientManager] VoiceSession event: {:?}", evt);
+                if let crate::protocol::voice_session::VoiceSessionEvent::HeartbeatAck { ping_ms } = evt {
+                    let current_st = session_ref2.state();
+                    let _ = voice_tx_ack.send((current_st, Some(ping_ms)));
+                }
+                let _ = voice_evt_tx.send(evt);
             }
         });
 

@@ -25,7 +25,7 @@
 //! contrato de integração com a implementação completa do agente VoiceGW.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -172,6 +172,16 @@ pub enum VoiceSessionEvent {
     DaveTransitionExecuted { transition_id: u16 },
     /// Conexão desconectada ou encerrada.
     Disconnected { code: Option<u16>, reason: String },
+    /// Evento de fala por participante (local ou remoto) com SSRC e ID de usuário mapeado.
+    Speaking {
+        ssrc: u32,
+        user_id: Option<u64>,
+        is_speaking: bool,
+    },
+    /// Latência RTT medida a partir do Heartbeat ACK do Voice Gateway.
+    HeartbeatAck {
+        ping_ms: u32,
+    },
 }
 
 // ============================================================================
@@ -351,6 +361,14 @@ pub enum AudioBridgeCommand {
     StopSession,
     SetMuted(bool),
     SetDeafened(bool),
+    SwitchInputDevice {
+        device_id: Option<String>,
+        responder: oneshot::Sender<Result<(), AudioError>>,
+    },
+    SwitchOutputDevice {
+        device_id: Option<String>,
+        responder: oneshot::Sender<Result<(), AudioError>>,
+    },
     ReceiveOpusPacket {
         ssrc: u32,
         sequence: u16,
@@ -398,6 +416,14 @@ impl AudioBridge {
                         }
                         AudioBridgeCommand::SetDeafened(deafened) => {
                             engine.set_deafened(deafened);
+                        }
+                        AudioBridgeCommand::SwitchInputDevice { device_id, responder } => {
+                            let res = engine.switch_input_device(device_id.as_deref());
+                            let _ = responder.send(res);
+                        }
+                        AudioBridgeCommand::SwitchOutputDevice { device_id, responder } => {
+                            let res = engine.switch_output_device(device_id.as_deref());
+                            let _ = responder.send(res);
                         }
                         AudioBridgeCommand::ReceiveOpusPacket { ssrc, opus_data, .. } => {
                             let _ = engine.receive_opus_packet(ssrc, &opus_data);
@@ -489,6 +515,42 @@ impl AudioBridge {
             .await;
     }
 
+    /// Troca dinamicamente o microfone ativo sem reiniciar a chamada.
+    pub async fn switch_input_device(&self, device_id: Option<String>) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(AudioBridgeCommand::SwitchInputDevice {
+                device_id,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Thread de áudio encerrada inesperadamente"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(anyhow!("Falha ao trocar dispositivo de entrada: {err}")),
+            Err(_) => Err(anyhow!("Sem resposta da thread de áudio")),
+        }
+    }
+
+    /// Troca dinamicamente o dispositivo de saída ativo sem reiniciar a chamada.
+    pub async fn switch_output_device(&self, device_id: Option<String>) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.command_tx
+            .send(AudioBridgeCommand::SwitchOutputDevice {
+                device_id,
+                responder: tx,
+            })
+            .await
+            .map_err(|_| anyhow!("Thread de áudio encerrada inesperadamente"))?;
+
+        match rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(anyhow!("Falha ao trocar dispositivo de saída: {err}")),
+            Err(_) => Err(anyhow!("Sem resposta da thread de áudio")),
+        }
+    }
+
     /// Encerra a thread de áudio.
     pub async fn shutdown(&self) {
         let _ = self.command_tx.send(AudioBridgeCommand::Shutdown).await;
@@ -534,6 +596,8 @@ pub struct VoiceSession {
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
     self_mute: Arc<AtomicBool>,
     self_deaf: Arc<AtomicBool>,
+    ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>>,
+    ping_ms: Arc<AtomicU32>,
 }
 
 impl VoiceSession {
@@ -552,6 +616,8 @@ impl VoiceSession {
         let self_deaf = Arc::new(AtomicBool::new(config.self_deaf));
         let sent_packets = Arc::new(AtomicU64::new(0));
         let recv_packets = Arc::new(AtomicU64::new(0));
+        let ssrc_to_user = Arc::new(RwLock::new(HashMap::new()));
+        let ping_ms = Arc::new(AtomicU32::new(u32::MAX));
 
         let dave_session = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(
             config.user_id,
@@ -575,6 +641,8 @@ impl VoiceSession {
             active_gateway: Arc::new(Mutex::new(None)),
             self_mute,
             self_deaf,
+            ssrc_to_user,
+            ping_ms,
         }
     }
 
@@ -671,6 +739,38 @@ impl VoiceSession {
         .map_err(|_| anyhow!("Timeout aguardando conexão da sessão de voz"))?
     }
 
+    /// Retorna a latência RTT atual medida via Heartbeat ACK (ou None se nenhum ACK recebido ainda).
+    pub fn ping_ms(&self) -> Option<u32> {
+        let val = self.ping_ms.load(Ordering::Relaxed);
+        if val == u32::MAX {
+            None
+        } else {
+            Some(val)
+        }
+    }
+
+    /// Retorna o ID de usuário mapeado para um dado SSRC, se conhecido.
+    pub async fn user_id_by_ssrc(&self, ssrc: u32) -> Option<u64> {
+        self.ssrc_to_user.read().await.get(&ssrc).copied()
+    }
+
+    /// Retorna uma referência para o mapa SSRC -> User ID.
+    pub fn ssrc_to_user_map(&self) -> Arc<RwLock<HashMap<u32, u64>>> {
+        self.ssrc_to_user.clone()
+    }
+
+    /// Troca dinamicamente o microfone ativo na sessão de áudio em andamento.
+    pub async fn switch_input_device(&self, device_id: Option<String>) -> Result<()> {
+        let bridge = self.audio_bridge.lock().await;
+        bridge.switch_input_device(device_id).await
+    }
+
+    /// Troca dinamicamente o dispositivo de saída ativo na sessão de áudio em andamento.
+    pub async fn switch_output_device(&self, device_id: Option<String>) -> Result<()> {
+        let bridge = self.audio_bridge.lock().await;
+        bridge.switch_output_device(device_id).await
+    }
+
     /// Altera o estado de microfone local (mute).
     pub async fn set_muted(&self, muted: bool) -> Result<()> {
         self.self_mute.store(muted, Ordering::Relaxed);
@@ -716,6 +816,8 @@ impl VoiceSession {
         let active_gateway = self.active_gateway.clone();
         let self_mute = self.self_mute.clone();
         let self_deaf = self.self_deaf.clone();
+        let ssrc_to_user = self.ssrc_to_user.clone();
+        let ping_ms = self.ping_ms.clone();
 
         let handle = tokio::spawn(async move {
             if let Err(err) = run_voice_session(
@@ -732,6 +834,8 @@ impl VoiceSession {
                 active_gateway,
                 self_mute,
                 self_deaf,
+                ssrc_to_user,
+                ping_ms,
             )
             .await
             {
@@ -820,6 +924,8 @@ async fn run_voice_session(
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
     self_mute: Arc<AtomicBool>,
     self_deaf: Arc<AtomicBool>,
+    ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>>,
+    ping_ms: Arc<AtomicU32>,
 ) -> Result<()> {
     // ------------------------------------------------------------------------
     // Passo 1: Subscrever eventos do transporte principal e disparar Opcode 4
@@ -1028,9 +1134,6 @@ async fn run_voice_session(
     let mut gateway_events_rx = gateway.subscribe_events();
     let local_ssrc = ready.ssrc;
 
-    // Mapa SSRC -> User ID alimentado pelos eventos de Speaking
-    let ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>> = Arc::new(RwLock::new(HashMap::new()));
-
     // Sessão agora está completamente conectada!
     let _ = state_tx.send(VoiceSessionState::Connected);
     log::info!("[VoiceSession] Sessão de voz completamente conectada e pronta para áudio.");
@@ -1107,10 +1210,20 @@ async fn run_voice_session(
                 match event {
                     SpeakingEvent::SpeakingStarted => {
                         let _ = gateway.set_speaking(true, 0, local_ssrc).await;
+                        let _ = events_tx.send(VoiceSessionEvent::Speaking {
+                            ssrc: local_ssrc,
+                            user_id: Some(config.user_id),
+                            is_speaking: true,
+                        });
                     }
                     SpeakingEvent::SpeakingStopped => {
                         let _ = gateway.set_speaking(false, 0, local_ssrc).await;
                         let _ = udp_sender.send_silence_frames().await;
+                        let _ = events_tx.send(VoiceSessionEvent::Speaking {
+                            ssrc: local_ssrc,
+                            user_id: Some(config.user_id),
+                            is_speaking: false,
+                        });
                     }
                 }
             }
@@ -1119,14 +1232,26 @@ async fn run_voice_session(
             Ok(gw_event) = gateway_events_rx.recv() => {
                 match gw_event {
                     VoiceGatewayEvent::Speaking(speaking_payload) => {
+                        let ssrc = speaking_payload.ssrc;
+                        let is_speaking = speaking_payload.speaking != 0;
+                        let mut resolved_uid = None;
                         if let Some(ref uid_str) = speaking_payload.user_id {
                             if let Ok(uid) = uid_str.parse::<u64>() {
-                                ssrc_to_user.write().await.insert(speaking_payload.ssrc, uid);
+                                ssrc_to_user.write().await.insert(ssrc, uid);
                                 if let Ok(mut dave) = dave_session.lock() {
-                                    dave.register_ssrc_user_mapping(speaking_payload.ssrc, uid);
+                                    dave.register_ssrc_user_mapping(ssrc, uid);
                                 }
+                                resolved_uid = Some(uid);
                             }
                         }
+                        if resolved_uid.is_none() {
+                            resolved_uid = ssrc_to_user.read().await.get(&ssrc).copied();
+                        }
+                        let _ = events_tx.send(VoiceSessionEvent::Speaking {
+                            ssrc,
+                            user_id: resolved_uid,
+                            is_speaking,
+                        });
                     }
                     VoiceGatewayEvent::DaveBinaryMessage(data) => {
                         if let Ok((_seq, opcode, payload)) = parse_server_binary_message(&data) {
@@ -1224,6 +1349,13 @@ async fn run_voice_session(
                                 close_reason = Some(reason);
                                 break;
                             }
+                        }
+                    }
+                    VoiceGatewayEvent::HeartbeatAck { latency_ms } => {
+                        if let Some(lat) = latency_ms {
+                            let lat_u32 = lat as u32;
+                            ping_ms.store(lat_u32, Ordering::Relaxed);
+                            let _ = events_tx.send(VoiceSessionEvent::HeartbeatAck { ping_ms: lat_u32 });
                         }
                     }
                     VoiceGatewayEvent::Connected | VoiceGatewayEvent::Resumed => {
