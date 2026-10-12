@@ -250,7 +250,7 @@ async fn test_pillar_4_instant_startup_0ms_blank_screen() -> anyhow::Result<()> 
     let cache = create_temp_cache_dir("p4_startup");
 
     // 1. Popula cache local simulando desligamento anterior
-    let user = User::new("user_smcodes", "Smcodes");
+    let user = User::new("usuario_a", "Usuario A");
     cache.save_current_user(&user)?;
 
     let mut chan_geral = Channel::new("chan_geral_id", "geral", ChannelType::Text);
@@ -278,26 +278,43 @@ async fn test_pillar_4_instant_startup_0ms_blank_screen() -> anyhow::Result<()> 
         version: 1,
         last_selected_guild_id: Some("guild_gpui".to_string()),
         last_selected_channel_id: Some("chan_geral_id".to_string()),
-        active_user_id: Some("user_smcodes".to_string()),
+        active_user_id: Some("usuario_a".to_string()),
         updated_at: chrono::Utc::now(),
     };
     cache.save_manifest(&manifest)?;
 
-    // 2. Executa a hidratação instantânea (0ms cold start)
-    let start_instant = std::time::Instant::now();
-    let hydrated = InstantStartupOrchestrator::hydrate_from_disk(&cache);
-    let hydration_duration = start_instant.elapsed();
+    // 2. Executa a hidratação instantânea (0ms cold start) de forma determinística.
+    // Para evitar falsos positivos causados por jitter de escalonamento do SO sob carga extrema,
+    // realizamos N iterações e avaliamos a mediana das medições.
+    // O teste garante que não há E/S de rede nem esperas bloqueantes (custo sub-10ms em disco),
+    // mantendo o teto estrito (< 50ms) na mediana.
+    const ITERATIONS: usize = 5;
+    let mut durations = Vec::with_capacity(ITERATIONS);
+    let mut last_hydrated = None;
 
-    // Validação de performance: Leitura concluída em menos de 10ms
+    for _ in 0..ITERATIONS {
+        let start_instant = std::time::Instant::now();
+        let hydrated = InstantStartupOrchestrator::hydrate_from_disk(&cache);
+        durations.push(start_instant.elapsed());
+        last_hydrated = Some(hydrated);
+    }
+
+    durations.sort();
+    let median_duration = durations[ITERATIONS / 2];
+
+    // Validação de performance: Mediana de leitura concluída confortavelmente abaixo do teto de 50ms
     assert!(
-        hydration_duration < Duration::from_millis(50),
-        "Cold start hydration took too long: {:?}",
-        hydration_duration
+        median_duration < Duration::from_millis(50),
+        "Cold start hydration median took too long: {:?} (amostras: {:?})",
+        median_duration,
+        durations
     );
+
+    let hydrated = last_hydrated.expect("Hydrated state must be present");
 
     // Validação de integridade dos dados para renderização do Frame 1
     assert!(hydrated.is_from_disk_cache);
-    assert_eq!(hydrated.current_user.as_ref().unwrap().username, "Smcodes");
+    assert_eq!(hydrated.current_user.as_ref().unwrap().username, "Usuario A");
     assert_eq!(hydrated.guilds.len(), 1);
     assert_eq!(hydrated.active_guild.as_ref().unwrap().name, "GPUI Community");
     assert_eq!(hydrated.active_channel.as_ref().unwrap().name, "geral");

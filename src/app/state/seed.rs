@@ -761,7 +761,7 @@ impl AppState {
                 AccountConnection {
                     platform: "github".into(),
                     id: "conn-gh-01".into(),
-                    name: "smcodes".into(),
+                    name: "usuario_a".into(),
                     verified: true,
                     show_on_profile: true,
                     show_activity: false,
