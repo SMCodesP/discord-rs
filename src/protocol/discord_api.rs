@@ -2502,6 +2502,31 @@ pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<Transp
                 activity.details = act.get("details").and_then(|v| v.as_str()).map(ToString::to_string);
                 activity.state = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
                 activity.created_at = act.get("created_at").and_then(|v| v.as_i64());
+                activity.application_id = act.get("application_id").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.sync_id = act.get("sync_id").and_then(|v| v.as_str()).map(ToString::to_string);
+
+                if let Some(ts) = act.get("timestamps") {
+                    let start = ts.get("start").and_then(|v| v.as_i64());
+                    let end = ts.get("end").and_then(|v| v.as_i64());
+                    if start.is_some() || end.is_some() {
+                        activity.timestamps = Some(crate::domain::user::ActivityTimestamps { start, end });
+                    }
+                }
+
+                if let Some(assets) = act.get("assets") {
+                    let large_image = assets.get("large_image").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let large_text = assets.get("large_text").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let small_image = assets.get("small_image").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let small_text = assets.get("small_text").and_then(|v| v.as_str()).map(ToString::to_string);
+                    if large_image.is_some() || large_text.is_some() || small_image.is_some() || small_text.is_some() {
+                        activity.assets = Some(crate::domain::user::ActivityAssets {
+                            large_image,
+                            large_text,
+                            small_image,
+                            small_text,
+                        });
+                    }
+                }
                 primary_activity = Some(activity);
             }
         }
@@ -2591,6 +2616,56 @@ mod presence_tests {
                 assert_eq!(
                     emoji.image_url(),
                     Some("https://cdn.discordapp.com/emojis/12345678.gif?size=48".to_string())
+                );
+            }
+            _ => panic!("Expected PresenceUpdate"),
+        }
+    }
+
+    #[test]
+    fn test_parse_presence_with_assets_and_timestamps() {
+        let json = serde_json::json!({
+            "user_id": "888777666",
+            "status": "online",
+            "activities": [
+                {
+                    "name": "Spotify",
+                    "type": 2,
+                    "details": "Song Title",
+                    "state": "Artist Name",
+                    "application_id": null,
+                    "sync_id": "track_123",
+                    "timestamps": {
+                        "start": 1712850000000i64,
+                        "end": 1712850230000i64
+                    },
+                    "assets": {
+                        "large_image": "spotify:ab67616d0000b273abcdef",
+                        "large_text": "Album Name"
+                    }
+                }
+            ]
+        });
+
+        let event = parse_presence_from_json(&json).expect("should parse presence");
+        match event {
+            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+                assert_eq!(user_id, "888777666");
+                assert_eq!(status, PresenceStatus::Online);
+                assert!(custom_status.is_none());
+                let act = activity.expect("activity should be present");
+                assert_eq!(act.name, "Spotify");
+                assert_eq!(act.details.as_deref(), Some("Song Title"));
+                assert_eq!(act.state.as_deref(), Some("Artist Name"));
+                assert_eq!(act.sync_id.as_deref(), Some("track_123"));
+                let ts = act.timestamps.as_ref().expect("timestamps should be present");
+                assert_eq!(ts.start, Some(1712850000000));
+                assert_eq!(ts.end, Some(1712850230000));
+                let assets = act.assets.as_ref().expect("assets should be present");
+                assert_eq!(assets.large_image.as_deref(), Some("spotify:ab67616d0000b273abcdef"));
+                assert_eq!(
+                    act.large_image_url(),
+                    Some("https://i.scdn.co/image/ab67616d0000b273abcdef".to_string())
                 );
             }
             _ => panic!("Expected PresenceUpdate"),

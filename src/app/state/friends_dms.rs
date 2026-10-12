@@ -186,6 +186,44 @@ impl AppState {
 
             let elapsed_time_text = if is_spotify { None } else { elapsed_bottom };
 
+            let large_image_url = act.large_image_url();
+            let large_image_text = act.assets.as_ref().and_then(|a| a.large_text.clone());
+            let small_image_url = act.small_image_url();
+            let small_image_text = act.assets.as_ref().and_then(|a| a.small_text.clone());
+            let timestamps_start = act.timestamps.as_ref().and_then(|t| t.start);
+            let timestamps_end = act.timestamps.as_ref().and_then(|t| t.end);
+            let application_id = act.application_id.clone();
+            let spotify_album = if is_spotify {
+                act.assets.as_ref().and_then(|a| a.large_text.clone())
+            } else {
+                None
+            };
+
+            let (spotify_progress_text, spotify_progress_pct) = if is_spotify {
+                if let (Some(start), Some(end)) = (timestamps_start, timestamps_end) {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let start_ms = if start < 100_000_000_000 { start * 1000 } else { start };
+                    let end_ms = if end < 100_000_000_000 { end * 1000 } else { end };
+                    if end_ms > start_ms {
+                        let total_ms = end_ms - start_ms;
+                        let elapsed_ms = (now_ms - start_ms).clamp(0, total_ms);
+                        let ratio = (elapsed_ms as f32 / total_ms as f32).clamp(0.0, 1.0);
+                        let cur_s = elapsed_ms / 1000;
+                        let tot_s = total_ms / 1000;
+                        (
+                            Some((format!("{}:{:02}", cur_s / 60, cur_s % 60), format!("{}:{:02}", tot_s / 60, tot_s % 60))),
+                            Some(ratio),
+                        )
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
             self.active_now_items.push(ActiveNowItem {
                 id: format!("act-{}", user_id),
                 user_id: user_id.to_string(),
@@ -203,13 +241,64 @@ impl AppState {
                 elapsed_time_text,
                 spotify_track: if is_spotify { act.details.clone() } else { None },
                 spotify_artist: if is_spotify { act.state.clone() } else { None },
-                spotify_album: None,
-                spotify_progress_text: None,
-                spotify_progress_pct: None,
+                spotify_album,
+                spotify_progress_text,
+                spotify_progress_pct,
                 button_text: None,
+                large_image_url,
+                large_image_text,
+                small_image_url,
+                small_image_text,
+                application_id,
+                timestamps_start,
+                timestamps_end,
                 avatar_decoration_data: friend.avatar_decoration_data.clone(),
             });
         }
+    }
+
+    /// Returns true if the Friends Hub is currently visible (Home with no channel selected)
+    /// and there is at least one Spotify activity with timestamps requiring a periodic clock update.
+    pub fn has_visible_spotify_progress(&self) -> bool {
+        self.selected_guild_id.is_none()
+            && self.selected_channel_id.is_none()
+            && self.active_now_items.iter().any(|item| {
+                item.kind == ActiveNowKind::Spotify
+                    && item.timestamps_start.is_some()
+                    && item.timestamps_end.is_some()
+            })
+    }
+
+    /// Updates dynamic Spotify progress for all active Spotify items with timestamps
+    /// based on the current system clock. Returns true if any item was updated.
+    pub fn tick_spotify_progress(&mut self) -> bool {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut updated = false;
+
+        for item in &mut self.active_now_items {
+            if item.kind == ActiveNowKind::Spotify {
+                if let (Some(start), Some(end)) = (item.timestamps_start, item.timestamps_end) {
+                    let start_ms = if start < 100_000_000_000 { start * 1000 } else { start };
+                    let end_ms = if end < 100_000_000_000 { end * 1000 } else { end };
+                    if end_ms > start_ms {
+                        let total_ms = end_ms - start_ms;
+                        let elapsed_ms = (now_ms - start_ms).clamp(0, total_ms);
+                        let ratio = (elapsed_ms as f32 / total_ms as f32).clamp(0.0, 1.0);
+                        let cur_s = elapsed_ms / 1000;
+                        let tot_s = total_ms / 1000;
+                        let text = Some((
+                            format!("{}:{:02}", cur_s / 60, cur_s % 60),
+                            format!("{}:{:02}", tot_s / 60, tot_s % 60),
+                        ));
+                        item.spotify_progress_text = text;
+                        item.spotify_progress_pct = Some(ratio);
+                        updated = true;
+                    }
+                }
+            }
+        }
+
+        updated
     }
 }
 

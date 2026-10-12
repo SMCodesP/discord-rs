@@ -81,6 +81,83 @@ impl ActivityType {
     }
 }
 
+/// Activity timestamps (start and end in milliseconds or seconds).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ActivityTimestamps {
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+}
+
+/// Rich Presence assets (large/small images and hover texts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ActivityAssets {
+    #[serde(default)]
+    pub large_image: Option<String>,
+    #[serde(default)]
+    pub large_text: Option<String>,
+    #[serde(default)]
+    pub small_image: Option<String>,
+    #[serde(default)]
+    pub small_text: Option<String>,
+}
+
+impl ActivityAssets {
+    /// Resolves the large image key into an absolute URL.
+    pub fn large_image_url(&self, application_id: Option<&str>) -> Option<String> {
+        self.large_image
+            .as_deref()
+            .and_then(|img| resolve_activity_asset_url(img, application_id))
+    }
+
+    /// Resolves the small image key into an absolute URL.
+    pub fn small_image_url(&self, application_id: Option<&str>) -> Option<String> {
+        self.small_image
+            .as_deref()
+            .and_then(|img| resolve_activity_asset_url(img, application_id))
+    }
+}
+
+/// Resolves a Discord activity asset key into a loadable CDN or proxy URL.
+///
+/// Official Discord URL resolution rules:
+/// 1. `mp:external/...`: Discord Media Proxy URL `https://media.discordapp.net/external/...`
+///    (used when an external URL was registered/cached via Discord's Media Proxy)
+/// 2. `spotify:...`: Spotify CDN URL `https://i.scdn.co/image/{id}`
+///    (used by Discord's native Spotify integration for album artwork)
+/// 3. Direct HTTP/HTTPS URL: used as-is.
+/// 4. Application Asset ID: `https://cdn.discordapp.com/app-assets/{application_id}/{asset_id}.png`
+///    (assets uploaded to Discord Developer Portal under Rich Presence)
+pub fn resolve_activity_asset_url(asset: &str, application_id: Option<&str>) -> Option<String> {
+    let trimmed = asset.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("mp:external/") {
+        return Some(format!("https://media.discordapp.net/external/{}", rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("mp:") {
+        return Some(format!("https://media.discordapp.net/{}", rest));
+    }
+    if let Some(rest) = trimmed.strip_prefix("spotify:") {
+        return Some(format!("https://i.scdn.co/image/{}", rest));
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Some(trimmed.to_string());
+    }
+    if let Some(app_id) = application_id {
+        let app_id_trimmed = app_id.trim();
+        if !app_id_trimmed.is_empty() {
+            return Some(format!(
+                "https://cdn.discordapp.com/app-assets/{}/{}.png",
+                app_id_trimmed, trimmed
+            ));
+        }
+    }
+    None
+}
+
 /// Rich activity information for a user (Rich Presence or Custom Status).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Activity {
@@ -98,6 +175,18 @@ pub struct Activity {
     /// Optional emoji for custom status.
     #[serde(default)]
     pub emoji: Option<CustomStatusEmoji>,
+    /// Application ID (snowflake) for Rich Presence / Game.
+    #[serde(default)]
+    pub application_id: Option<String>,
+    /// Timestamps (start/end) for activities like Spotify or elapsed game timer.
+    #[serde(default)]
+    pub timestamps: Option<ActivityTimestamps>,
+    /// Assets containing large/small images.
+    #[serde(default)]
+    pub assets: Option<ActivityAssets>,
+    /// Sync ID (e.g. Spotify track ID).
+    #[serde(default)]
+    pub sync_id: Option<String>,
 }
 
 impl Activity {
@@ -109,6 +198,10 @@ impl Activity {
             state: None,
             created_at: None,
             emoji: None,
+            application_id: None,
+            timestamps: None,
+            assets: None,
+            sync_id: None,
         }
     }
 
@@ -125,6 +218,10 @@ impl Activity {
             details: None,
             created_at: None,
             emoji: None,
+            application_id: None,
+            timestamps: None,
+            assets: None,
+            sync_id: None,
         }
     }
 
@@ -136,7 +233,25 @@ impl Activity {
             details: None,
             created_at: None,
             emoji,
+            application_id: None,
+            timestamps: None,
+            assets: None,
+            sync_id: None,
         }
+    }
+
+    /// Resolves the large image key into an absolute URL.
+    pub fn large_image_url(&self) -> Option<String> {
+        self.assets
+            .as_ref()
+            .and_then(|a| a.large_image_url(self.application_id.as_deref()))
+    }
+
+    /// Resolves the small image key into an absolute URL.
+    pub fn small_image_url(&self) -> Option<String> {
+        self.assets
+            .as_ref()
+            .and_then(|a| a.small_image_url(self.application_id.as_deref()))
     }
 }
 
@@ -425,5 +540,59 @@ mod tests {
         assert_eq!(presence.status, PresenceStatus::Online);
         assert_eq!(presence.custom_status, Some(cs));
         assert_eq!(presence.activity.unwrap().name, "Rust");
+    }
+
+    #[test]
+    fn test_activity_assets_and_url_resolution() {
+        // 1. mp:external/... -> https://media.discordapp.net/external/...
+        let mp_url = resolve_activity_asset_url("mp:external/abc1234/https/example.com/art.png", None);
+        assert_eq!(
+            mp_url,
+            Some("https://media.discordapp.net/external/abc1234/https/example.com/art.png".to_string())
+        );
+
+        // 2. spotify:... -> https://i.scdn.co/image/...
+        let spotify_url = resolve_activity_asset_url("spotify:ab67616d0000b2731234567890abcdef", None);
+        assert_eq!(
+            spotify_url,
+            Some("https://i.scdn.co/image/ab67616d0000b2731234567890abcdef".to_string())
+        );
+
+        // 3. Application asset ID with application_id
+        let app_asset_url = resolve_activity_asset_url("382910398472918273", Some("383508436472004608"));
+        assert_eq!(
+            app_asset_url,
+            Some("https://cdn.discordapp.com/app-assets/383508436472004608/382910398472918273.png".to_string())
+        );
+
+        // 4. Direct HTTP(S) URL
+        let direct_url = resolve_activity_asset_url("https://cdn.example.com/image.png", None);
+        assert_eq!(
+            direct_url,
+            Some("https://cdn.example.com/image.png".to_string())
+        );
+
+        // 5. Without application_id, raw numeric id returns None
+        assert_eq!(resolve_activity_asset_url("382910398472918273", None), None);
+        // Empty string returns None
+        assert_eq!(resolve_activity_asset_url("", Some("123")), None);
+
+        // Activity with assets
+        let mut act = Activity::playing("VS Code");
+        act.application_id = Some("383508436472004608".to_string());
+        act.assets = Some(ActivityAssets {
+            large_image: Some("mp:external/123/img.png".to_string()),
+            large_text: Some("Editing user.rs".to_string()),
+            small_image: Some("spotify:cover123".to_string()),
+            small_text: Some("Spotify small".to_string()),
+        });
+        assert_eq!(
+            act.large_image_url(),
+            Some("https://media.discordapp.net/external/123/img.png".to_string())
+        );
+        assert_eq!(
+            act.small_image_url(),
+            Some("https://i.scdn.co/image/cover123".to_string())
+        );
     }
 }
