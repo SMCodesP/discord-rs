@@ -277,7 +277,8 @@ mod tests {
         let mut bucket = TokenBucket::new("test_bucket");
         bucket.limit = 2;
         bucket.remaining = 2;
-        bucket.reset_at = Instant::now() + Duration::from_millis(50);
+        // Janela longa para garantir que a exaustão seja 100% determinística mesmo sob carga do SO
+        bucket.reset_at = Instant::now() + Duration::from_secs(60);
 
         // Primeiro token: instantâneo
         assert!(bucket.reserve().is_none());
@@ -287,10 +288,19 @@ mod tests {
         assert!(bucket.reserve().is_none());
         assert_eq!(bucket.remaining, 0);
 
-        // Terceiro token: deve esperar!
+        // Terceiro token: esgotado! Deve retornar espera com jitter protetor
         let wait = bucket.reserve();
         assert!(wait.is_some());
         assert!(wait.unwrap() >= Duration::from_millis(15));
+
+        // Após o reset (tempo além da janela), o bucket restaura os tokens e libera imediatamente
+        bucket.reset_at = Instant::now() - Duration::from_millis(10);
+        let wait_after_reset = bucket.reserve();
+        assert!(
+            wait_after_reset.is_none(),
+            "Após o reset da janela, o token deve ser concedido imediatamente"
+        );
+        assert_eq!(bucket.remaining, 1);
     }
 
     #[tokio::test]
