@@ -115,7 +115,7 @@ fn render_add_server_button(app_entity: &Entity<AppState>) -> AnyElement {
         .cursor_pointer()
         .bg(bg_chat())
         .text_color(status_online())
-        .rounded(px(20.0))
+        .rounded(radius_server_hover())
         .hover(|s| {
             s.rounded(radius_server_hover())
                 .bg(status_online())
@@ -144,7 +144,7 @@ fn render_explore_button(app_entity: &Entity<AppState>) -> AnyElement {
         .cursor_pointer()
         .bg(bg_chat())
         .text_color(status_online())
-        .rounded(px(20.0))
+        .rounded(radius_server_hover())
         .hover(|s| {
             s.rounded(radius_server_hover())
                 .bg(status_online())

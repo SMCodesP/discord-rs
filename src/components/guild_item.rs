@@ -145,12 +145,20 @@ impl RenderOnce for GuildItem {
     }
 }
 
-fn render_guild_item(item: GuildItem) -> AnyElement {
-    let icon_radius = if item.selected {
-        radius_server_hover() // 16px squircle
+fn guild_icon_image_source(url: &str) -> gpui::ImageSource {
+    if url.starts_with('/') {
+        std::path::PathBuf::from(url).into()
+    } else if let Some(stripped) = url.strip_prefix("file://") {
+        std::path::PathBuf::from(stripped).into()
     } else {
-        px(20.0) // 20px circle for 40x40 icon
-    };
+        url.to_string().into()
+    }
+}
+
+fn render_guild_item(item: GuildItem) -> AnyElement {
+    // Measured border radius from Discord DOM (.theme-dark visual-refresh):
+    // In rest, hover, and selected, the guild icon is a 40x40 squircle (radius_server_hover 16px).
+    let icon_radius = radius_server_hover();
 
     let icon_bg = if item.selected {
         blurple()
@@ -222,11 +230,19 @@ fn render_guild_item(item: GuildItem) -> AnyElement {
         );
     } else if let Some(url) = &item.icon_url {
         if !url.is_empty() {
-            icon_box = icon_box.child(
-                img(url.clone())
-                    .size_full()
-                    .object_fit(ObjectFit::Cover),
-            );
+            let img_src = guild_icon_image_source(url);
+            let mut icon_img = img(img_src)
+                .size_full()
+                .object_fit(ObjectFit::Cover)
+                .rounded(icon_radius);
+
+            if !item.selected {
+                icon_img = icon_img
+                    .group_hover("guild-item", |s| s.rounded(radius_server_hover()))
+                    .hover(|s| s.rounded(radius_server_hover()));
+            }
+
+            icon_box = icon_box.child(icon_img);
         } else {
             icon_box = icon_box.child(
                 div()
@@ -505,7 +521,7 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
         .h(px(40.0))
         .p(px(3.0))
         .gap(px(2.0))
-        .rounded(px(20.0))
+        .rounded(radius_server_hover())
         .bg(folder_bg)
         .border_1()
         .border_color(Rgba {
@@ -525,11 +541,23 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
                 })
         });
 
-    for child in folder.guilds.iter().take(4) {
+    for (idx, child) in folder.guilds.iter().take(4).enumerate() {
+        // Measured asymmetric corner radii from Discord DOM (.folderPreviewGuildIcon__48112)
+        // Top-left, top-right, bottom-left, bottom-right corners
+        let (tl, tr, bl, br) = match idx {
+            0 => (px(10.0), px(3.0), px(3.0), px(3.0)),
+            1 => (px(3.0), px(10.0), px(3.0), px(3.0)),
+            2 => (px(3.0), px(3.0), px(10.0), px(3.0)),
+            _ => (px(3.0), px(3.0), px(3.0), px(10.0)),
+        };
+
         let mut thumb = div()
             .w(px(15.0))
             .h(px(15.0))
-            .rounded(px(3.0))
+            .rounded_tl(tl)
+            .rounded_tr(tr)
+            .rounded_bl(bl)
+            .rounded_br(br)
             .bg(bg_server())
             .overflow_hidden()
             .flex()
@@ -539,9 +567,13 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
         if let Some(ref url) = child.icon_url {
             if !url.is_empty() {
                 thumb = thumb.child(
-                    img(url.clone())
+                    img(guild_icon_image_source(url))
                         .size_full()
-                        .object_fit(ObjectFit::Cover),
+                        .object_fit(ObjectFit::Cover)
+                        .rounded_tl(tl)
+                        .rounded_tr(tr)
+                        .rounded_bl(bl)
+                        .rounded_br(br),
                 );
             } else {
                 let single_letter: String = child.initials.chars().take(1).collect();
@@ -605,7 +637,7 @@ fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
         .w(rail_width())
         .py(px(4.0))
         .gap(px(6.0))
-        .rounded(radius_lg())
+        .rounded(radius_server_hover())
         .bg(folder_track_bg);
 
     let mut folder_header = div()
@@ -615,7 +647,7 @@ fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
         .justify_center()
         .w(px(40.0))
         .h(px(28.0))
-        .rounded(radius_sm())
+        .rounded(px(12.0))
         .bg(folder_bg)
         .cursor_pointer()
         .hover(|s| s.bg(channel_hover()))
