@@ -66,6 +66,13 @@ impl LazyGuildCoordinator {
         map.insert(channel_id.to_string(), vec![[0, 99]]);
     }
 
+    /// Limpa o estado do coordenador (ex.: desconexão ou logout)
+    pub async fn clear(&self) {
+        *self.active_guild_id.write().await = None;
+        *self.active_channel_id.write().await = None;
+        self.channel_ranges.write().await.clear();
+    }
+
     /// Retorna o ID da guilda atualmente ativa
     pub async fn active_guild_id(&self) -> Option<String> {
         self.active_guild_id.read().await.clone()
@@ -606,25 +613,33 @@ pub fn apply_member_list_update(
                     .collect();
 
                 let start = range[0];
-                if start == 0 {
-                    if existing_members.is_empty() || existing_members.len() <= converted.len() {
-                        *existing_members = converted;
-                    } else {
-                        existing_members.splice(0..converted.len(), converted);
+                // Pad any gap between current length and start with unloaded slots
+                if existing_members.len() < start {
+                    for i in existing_members.len()..start {
+                        existing_members.push(MemberItemState::unloaded(i));
                     }
-                } else if start <= existing_members.len() {
-                    let end_idx = (start + converted.len()).min(existing_members.len());
-                    existing_members.splice(start..end_idx, converted);
-                } else {
-                    existing_members.extend(converted);
+                }
+
+                for (offset, item) in converted.into_iter().enumerate() {
+                    let idx = start + offset;
+                    if idx < existing_members.len() {
+                        existing_members[idx] = item;
+                    } else {
+                        existing_members.push(item);
+                    }
                 }
             }
             MemberListOp::Insert { index, item } => {
                 let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
                 let idx = *index;
-                if idx <= existing_members.len() {
+                if idx < existing_members.len() {
                     existing_members.insert(idx, state);
+                } else if idx == existing_members.len() {
+                    existing_members.push(state);
                 } else {
+                    for i in existing_members.len()..idx {
+                        existing_members.push(MemberItemState::unloaded(i));
+                    }
                     existing_members.push(state);
                 }
             }
@@ -634,6 +649,9 @@ pub fn apply_member_list_update(
                 if idx < existing_members.len() {
                     existing_members[idx] = state;
                 } else {
+                    for i in existing_members.len()..idx {
+                        existing_members.push(MemberItemState::unloaded(i));
+                    }
                     existing_members.push(state);
                 }
             }
@@ -646,11 +664,11 @@ pub fn apply_member_list_update(
             MemberListOp::Invalidate { range } => {
                 let start = range[0];
                 let end = range[1];
-                if start == 0 && end >= existing_members.len() {
-                    existing_members.clear();
-                } else if start < existing_members.len() {
-                    let end_idx = (end + 1).min(existing_members.len());
-                    existing_members.drain(start..end_idx);
+                let max = end.min(existing_members.len().saturating_sub(1));
+                if start <= max {
+                    for idx in start..=max {
+                        existing_members[idx] = MemberItemState::unloaded(idx);
+                    }
                 }
             }
         }

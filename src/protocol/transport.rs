@@ -194,6 +194,11 @@ pub enum TransportEvent {
     },
     /// Lazy guild member list update dispatched by gateway
     GuildMemberListUpdate(crate::protocol::cache::lazy_guilds::GuildMemberListUpdate),
+    /// Member chunk returned by Gateway Opcode 8 (REQUEST_GUILD_MEMBERS)
+    GuildMembersChunk {
+        guild_id: String,
+        members: Vec<crate::protocol::cache::lazy_guilds::MemberListMember>,
+    },
 }
 
 /// Asynchronous transport abstraction for Discord communication.
@@ -291,6 +296,50 @@ pub trait DiscordTransport: Send + Sync {
 
     /// Delete a message from a channel (/channels/{channel_id}/messages/{message_id}).
     async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()>;
+
+    /// Edit an existing message (/channels/{channel_id}/messages/{message_id}).
+    async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> anyhow::Result<Message> {
+        let _ = (channel_id, message_id, content);
+        anyhow::bail!("edit_message não implementado no transporte atual")
+    }
+
+    /// Pin a message (/channels/{channel_id}/pins/{message_id}).
+    async fn pin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        let _ = (channel_id, message_id);
+        anyhow::bail!("pin_message não implementado no transporte atual")
+    }
+
+    /// Unpin a message (/channels/{channel_id}/pins/{message_id}).
+    async fn unpin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        let _ = (channel_id, message_id);
+        anyhow::bail!("unpin_message não implementado no transporte atual")
+    }
+
+    /// Request guild members for message authors missing from cache (Opcode 8).
+    async fn request_guild_members(
+        &self,
+        guild_id: &str,
+        user_ids: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let _ = (guild_id, user_ids);
+        Ok(())
+    }
+
+    /// Update active viewport member list ranges (Opcode 14).
+    async fn update_guild_member_viewport(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+    ) -> anyhow::Result<()> {
+        let _ = (guild_id, channel_id, ranges);
+        Ok(())
+    }
 
     /// Subscribes to guild members (Opcode 14 for user accounts, Opcode 8 for bot accounts).
     async fn subscribe_guild_members(

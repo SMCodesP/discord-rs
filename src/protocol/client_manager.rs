@@ -278,6 +278,7 @@ impl ClientManager {
             lock.clone()
         };
         let _ = current_transport.disconnect().await;
+        crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared().clear().await;
 
         let idle = Arc::new(IdleTransport::new());
         {
@@ -800,6 +801,95 @@ impl ClientManager {
             lock.clone()
         };
         transport.subscribe_guild_members(guild_id, channel_id).await
+    }
+
+    /// Edits an existing message (/channels/{channel_id}/messages/{message_id})
+    pub async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<Message> {
+        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(_) => channel_id.to_string(),
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.edit_message(&real_channel_id, message_id, content).await
+    }
+
+    /// Pins a message in a channel (/channels/{channel_id}/pins/{message_id})
+    pub async fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(_) => channel_id.to_string(),
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.pin_message(&real_channel_id, message_id).await
+    }
+
+    /// Unpins a message in a channel (/channels/{channel_id}/pins/{message_id})
+    pub async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(_) => channel_id.to_string(),
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.unpin_message(&real_channel_id, message_id).await
+    }
+
+    /// Requests guild members for message authors missing from cache (Gateway Opcode 8)
+    pub async fn request_guild_members(
+        &self,
+        guild_id: &str,
+        user_ids: Vec<String>,
+    ) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.request_guild_members(guild_id, user_ids).await
+    }
+
+    /// Updates guild member viewport ranges (Gateway Opcode 14)
+    pub async fn update_guild_member_viewport(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+    ) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.update_guild_member_viewport(guild_id, channel_id, ranges).await
     }
 }
 

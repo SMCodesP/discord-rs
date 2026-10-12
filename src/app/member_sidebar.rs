@@ -56,6 +56,9 @@ impl MemberSidebar {
         if has_server_groups {
             let mut items = Vec::new();
             for m in members {
+                if m.is_unloaded() {
+                    continue;
+                }
                 if m.id.starts_with("group:") {
                     let count = m
                         .activity
@@ -79,6 +82,9 @@ impl MemberSidebar {
         let mut offline_list: Vec<MemberItemState> = Vec::new();
 
         for m in members {
+            if m.is_unloaded() {
+                continue;
+            }
             if m.presence == PresenceStatus::Offline {
                 offline_list.push(m);
             } else {
