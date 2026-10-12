@@ -38,6 +38,7 @@ pub enum HasFilter {
     Video,
     Image,
     Sound,
+    Sticker,
 }
 
 impl HasFilter {
@@ -49,6 +50,7 @@ impl HasFilter {
             "video" => Some(Self::Video),
             "image" | "photo" | "picture" => Some(Self::Image),
             "sound" | "audio" => Some(Self::Sound),
+            "sticker" | "stickers" => Some(Self::Sticker),
             _ => None,
         }
     }
@@ -82,6 +84,7 @@ impl HasFilter {
                     || fn_lower.ends_with(".wav")
                     || fn_lower.ends_with(".flac")
             }),
+            Self::Sticker => !message.sticker_items.is_empty(),
         }
     }
 }
@@ -111,8 +114,65 @@ pub struct SearchQuery {
     pub pinned: Option<bool>,
 }
 
+fn tokenize_search_input(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == '"' {
+            chars.next();
+            let mut s = String::new();
+            while let Some(&c) = chars.peek() {
+                chars.next();
+                if c == '"' {
+                    break;
+                }
+                s.push(c);
+            }
+            if !s.is_empty() {
+                tokens.push(s);
+            }
+        } else {
+            let mut s = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                chars.next();
+                if c == '"' {
+                    while let Some(&qc) = chars.peek() {
+                        chars.next();
+                        if qc == '"' {
+                            break;
+                        }
+                        s.push(qc);
+                    }
+                } else {
+                    s.push(c);
+                }
+            }
+            if !s.is_empty() {
+                tokens.push(s);
+            }
+        }
+    }
+    tokens
+}
+
+fn parse_search_date(val: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(val, "%Y-%m-%d")
+        .or_else(|_| NaiveDate::parse_from_str(val, "%Y/%m/%d"))
+        .ok()
+}
+
 impl SearchQuery {
-    /// Parses a raw search string following Discord's query syntax.
+    /// Parses a raw search string following Discord's faceted query syntax.
+    /// Handles both `prefix:val` and `prefix: val`, quoted values, and free-text terms.
     pub fn parse(raw: &str) -> Self {
         let trimmed = raw.trim();
         let mut query = Self {
@@ -124,47 +184,99 @@ impl SearchQuery {
             return query;
         }
 
-        for token in trimmed.split_whitespace() {
-            if let Some(val) = token.strip_prefix("from:") {
-                let clean_val = val.trim_start_matches('@').to_lowercase();
-                if !clean_val.is_empty() {
-                    query.from = Some(clean_val);
-                }
-            } else if let Some(val) = token.strip_prefix("mentions:") {
-                let clean_val = val.trim_start_matches('@').to_lowercase();
-                if !clean_val.is_empty() {
-                    query.mentions = Some(clean_val);
-                }
-            } else if let Some(val) = token.strip_prefix("has:") {
-                if let Some(has) = HasFilter::parse(val) {
-                    query.has_filters.push(has);
-                }
-            } else if let Some(val) = token.strip_prefix("in:") {
-                let clean_val = val.trim_start_matches('#').to_lowercase();
-                if !clean_val.is_empty() {
-                    query.in_channel = Some(clean_val);
-                }
-            } else if let Some(val) = token.strip_prefix("before:") {
-                if let Ok(d) = NaiveDate::parse_from_str(val, "%Y-%m-%d") {
-                    query.before = Some(d);
-                }
-            } else if let Some(val) = token.strip_prefix("after:") {
-                if let Ok(d) = NaiveDate::parse_from_str(val, "%Y-%m-%d") {
-                    query.after = Some(d);
-                }
-            } else if let Some(val) = token.strip_prefix("during:") {
-                if let Ok(d) = NaiveDate::parse_from_str(val, "%Y-%m-%d") {
-                    query.during = Some(d);
-                }
-            } else if let Some(val) = token.strip_prefix("pinned:") {
-                match val.to_lowercase().as_str() {
-                    "true" | "yes" | "1" => query.pinned = Some(true),
-                    "false" | "no" | "0" => query.pinned = Some(false),
-                    _ => {}
-                }
+        let raw_tokens = tokenize_search_input(trimmed);
+        let mut idx = 0;
+
+        while idx < raw_tokens.len() {
+            let token = &raw_tokens[idx];
+
+            let (prefix, val_opt) = if let Some(stripped) = token.strip_prefix("from:") {
+                ("from:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("mentions:") {
+                ("mentions:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("has:") {
+                ("has:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("in:") {
+                ("in:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("before:") {
+                ("before:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("after:") {
+                ("after:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("during:") {
+                ("during:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
+            } else if let Some(stripped) = token.strip_prefix("pinned:") {
+                ("pinned:", if stripped.is_empty() { None } else { Some(stripped.to_string()) })
             } else {
+                ("", Some(token.clone()))
+            };
+
+            if prefix.is_empty() {
                 query.text_terms.push(token.to_lowercase());
+                idx += 1;
+                continue;
             }
+
+            // If value was attached (e.g. from:alice), use it; otherwise take next token if available
+            let filter_val = if let Some(v) = val_opt {
+                v
+            } else if idx + 1 < raw_tokens.len() {
+                idx += 1;
+                raw_tokens[idx].clone()
+            } else {
+                idx += 1;
+                continue;
+            };
+
+            match prefix {
+                "from:" => {
+                    let clean = filter_val.trim_start_matches('@').trim().to_lowercase();
+                    if !clean.is_empty() {
+                        query.from = Some(clean);
+                    }
+                }
+                "mentions:" => {
+                    let clean = filter_val.trim_start_matches('@').trim().to_lowercase();
+                    if !clean.is_empty() {
+                        query.mentions = Some(clean);
+                    }
+                }
+                "has:" => {
+                    if let Some(has) = HasFilter::parse(&filter_val) {
+                        query.has_filters.push(has);
+                    }
+                }
+                "in:" => {
+                    let clean = filter_val.trim_start_matches('#').trim().to_lowercase();
+                    if !clean.is_empty() {
+                        query.in_channel = Some(clean);
+                    }
+                }
+                "before:" => {
+                    if let Some(d) = parse_search_date(&filter_val) {
+                        query.before = Some(d);
+                    }
+                }
+                "after:" => {
+                    if let Some(d) = parse_search_date(&filter_val) {
+                        query.after = Some(d);
+                    }
+                }
+                "during:" => {
+                    if let Some(d) = parse_search_date(&filter_val) {
+                        query.during = Some(d);
+                    }
+                }
+                "pinned:" => {
+                    match filter_val.to_lowercase().as_str() {
+                        "true" | "yes" | "1" => query.pinned = Some(true),
+                        "false" | "no" | "0" => query.pinned = Some(false),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+
+            idx += 1;
         }
 
         query
@@ -183,9 +295,43 @@ impl SearchQuery {
             && self.pinned.is_none()
     }
 
+    /// Serializes query constraints into REST API query parameters for Discord search endpoints:
+    /// `GET /api/v10/channels/{channel_id}/messages/search` or `GET /api/v10/guilds/{guild_id}/messages/search`
+    pub fn to_api_query_params(&self) -> Vec<(&'static str, String)> {
+        let mut params = Vec::new();
+        if !self.text_terms.is_empty() {
+            params.push(("content", self.text_terms.join(" ")));
+        }
+        if let Some(ref from) = self.from {
+            params.push(("author_id", from.clone()));
+        }
+        if let Some(ref mentions) = self.mentions {
+            params.push(("mentions", mentions.clone()));
+        }
+        if let Some(ref ch) = self.in_channel {
+            params.push(("channel_id", ch.clone()));
+        }
+        for has in &self.has_filters {
+            let s = match has {
+                HasFilter::Link => "link",
+                HasFilter::Embed => "embed",
+                HasFilter::File => "file",
+                HasFilter::Video => "video",
+                HasFilter::Image => "image",
+                HasFilter::Sound => "sound",
+                HasFilter::Sticker => "sticker",
+            };
+            params.push(("has", s.to_string()));
+        }
+        if let Some(pinned) = self.pinned {
+            params.push(("pinned", pinned.to_string()));
+        }
+        params
+    }
+
     /// Checks if a message matches all query criteria.
     pub fn matches(&self, message: &Message, channel_name: Option<&str>) -> bool {
-        // 1. Text terms matching (all free text terms must be found in content or attachment filenames)
+        // 1. Text terms matching (all free text terms must be found in content, attachments, author, embeds, or stickers)
         let content_lower = message.content.to_lowercase();
         for term in &self.text_terms {
             let in_content = content_lower.contains(term);
@@ -201,8 +347,22 @@ impl SearchQuery {
                     .unwrap_or("")
                     .to_lowercase()
                     .contains(term);
+            let in_embed = message.embeds.iter().any(|e| {
+                e.title.as_deref().unwrap_or("").to_lowercase().contains(term)
+                    || e.description.as_deref().unwrap_or("").to_lowercase().contains(term)
+                    || e.fields.iter().any(|f| {
+                        f.name.to_lowercase().contains(term)
+                            || f.value.to_lowercase().contains(term)
+                    })
+                    || e.author.as_ref().map(|a| a.name.to_lowercase().contains(term)).unwrap_or(false)
+                    || e.footer.as_ref().map(|f| f.text.to_lowercase().contains(term)).unwrap_or(false)
+            });
+            let in_sticker = message
+                .sticker_items
+                .iter()
+                .any(|s| s.name.to_lowercase().contains(term));
 
-            if !in_content && !in_attachment && !in_author {
+            if !in_content && !in_attachment && !in_author && !in_embed && !in_sticker {
                 return false;
             }
         }
@@ -225,10 +385,11 @@ impl SearchQuery {
 
         // 3. Mentions filter (`mentions:`)
         if let Some(ref mention) = self.mentions {
-            // Discord mentions format: <@123456> or literal @username in text
             let mention_id_tag = format!("<@{}>", mention);
+            let mention_nick_tag = format!("<@!{}>", mention);
             let mention_name_tag = format!("@{}", mention);
             if !content_lower.contains(&mention_id_tag)
+                && !content_lower.contains(&mention_nick_tag)
                 && !content_lower.contains(&mention_name_tag)
                 && !content_lower.contains(mention)
             {
@@ -236,7 +397,7 @@ impl SearchQuery {
             }
         }
 
-        // 4. Has filters (`has:link`, `has:file`, etc.)
+        // 4. Has filters (`has:link`, `has:file`, `has:sticker`, etc.)
         for filter in &self.has_filters {
             if !filter.matches(message) {
                 return false;
@@ -316,6 +477,32 @@ pub struct SearchPayload {
     pub analytics_id: Option<String>,
 }
 
+impl SearchPayload {
+    /// Converts REST API response payload into UI-compatible SearchResultGroup structures
+    pub fn into_result_groups(self) -> Vec<SearchResultGroup> {
+        let mut groups = Vec::new();
+        for group in self.messages {
+            let hit_idx = group.iter().position(|m| m.hit).unwrap_or(0);
+            if let Some(hit_msg) = group.get(hit_idx) {
+                let context_before = group[..hit_idx].iter().map(|m| m.message.clone()).collect();
+                let context_after = if hit_idx + 1 < group.len() {
+                    group[hit_idx + 1..].iter().map(|m| m.message.clone()).collect()
+                } else {
+                    Vec::new()
+                };
+                groups.push(SearchResultGroup {
+                    channel_id: hit_msg.message.channel_id.clone(),
+                    channel_name: None,
+                    hit_message: hit_msg.message.clone(),
+                    context_before,
+                    context_after,
+                });
+            }
+        }
+        groups
+    }
+}
+
 /// Individual message element in API search result groups with the `hit` flag.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiSearchMessage {
@@ -384,6 +571,7 @@ pub const DISCORD_SEARCH_CHIPS: &[(&str, &str)] = &[
     ("has:", "link, anexo..."),
     ("in:", "canal"),
     ("before:", "YYYY-MM-DD"),
+    ("during:", "YYYY-MM-DD"),
     ("after:", "YYYY-MM-DD"),
     ("mentions:", "usuário"),
     ("pinned:", "true/false"),
@@ -460,6 +648,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
         if let Some(sub) = content.get(s..e) {
             container = container.child(
                 div()
+                    // COR ANTIGA SEM ORIGEM: legacy_fee75c (0xfee75c)
                     .bg(legacy_fee75c())
                     .text_color(bg_server())
                     .font_weight(FontWeight::BOLD)
@@ -508,7 +697,7 @@ impl RenderOnce for SearchFieldTrigger {
     }
 }
 
-/// Popover content showing Discord's 6 search filters (search-popover.md spec: 356x335, r8, padding 12px 8px)
+/// Popover content showing Discord's faceted search filters (search-popover.md spec: 356x335, r8, padding 12px 8px)
 fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
     let filters = [
         ("from:", "de um usuário específico", "from: usuário"),
@@ -516,7 +705,9 @@ fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
         ("has:", "contém link, anexo ou mídia", "has: link, embed, file..."),
         ("mentions:", "menciona um usuário", "mentions: usuário"),
         ("before:", "enviadas antes de uma data", "before: YYYY-MM-DD"),
+        ("during:", "enviadas em uma data específica", "during: YYYY-MM-DD"),
         ("after:", "enviadas após uma data", "after: YYYY-MM-DD"),
+        ("pinned:", "mensagens fixadas", "pinned: true/false"),
     ];
 
     div()
@@ -560,8 +751,6 @@ fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
                         } else if !current.ends_with(prefix) {
                             state.search_query = format!("{} {} ", current, prefix);
                         }
-                        let q = state.search_query.clone();
-                        state.execute_search(&q);
                         cx.notify();
                     });
                 })
@@ -580,7 +769,7 @@ fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement {
                         )
                         .child(
                             div()
-                                .text_color(legacy_949ba4())
+                                .text_color(text_muted())
                                 .text_size(px(12.0))
                                 .child(desc),
                         ),
@@ -648,6 +837,12 @@ fn render_search_input_box(
                             cx.notify();
                         }
                         "enter" => {
+                            let q = state.search_query.clone();
+                            state.execute_search(&q);
+                            cx.notify();
+                        }
+                        "space" => {
+                            state.search_query.push(' ');
                             let q = state.search_query.clone();
                             state.execute_search(&q);
                             cx.notify();
@@ -802,8 +997,6 @@ fn render_filter_chip(
                 } else if !current.ends_with(prefix) {
                     state.search_query = format!("{} {} ", current, prefix);
                 }
-                let q = state.search_query.clone();
-                state.execute_search(&q);
                 cx.notify();
             });
         })
@@ -816,7 +1009,7 @@ fn render_filter_chip(
         )
         .child(
             div()
-                .text_color(legacy_949ba4())
+                .text_color(text_muted())
                 .text_size(px(10.0))
                 .child(hint),
         )
@@ -832,6 +1025,8 @@ fn render_search_chips_section(
     let is_empty = search_query.trim().is_empty();
     let counter_label = if is_empty {
         "OPÇÕES DE PESQUISA".to_string()
+    } else if results_count == 1 {
+        "1 RESULTADO ENCONTRADO".to_string()
     } else {
         format!("{} RESULTADOS ENCONTRADOS", results_count)
     };
@@ -876,7 +1071,7 @@ fn render_search_chips_section(
 fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
     let mut guide = vec![
         div()
-            .text_color(legacy_949ba4())
+            .text_color(text_muted())
             .font_weight(FontWeight::BOLD)
             .text_size(px(12.0))
             .child("EU ESTOU PROCURANDO POR...")
@@ -885,9 +1080,10 @@ fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
 
     let filter_guides = [
         ("from:", "procura mensagens de um usuário específico (ex: from:ferran)"),
-        ("has:", "filtra por mídias: link, embed, file, video, image, sound"),
+        ("has:", "filtra por mídias: link, embed, file, video, image, sound, sticker"),
         ("in:", "filtra mensagens em um canal específico (ex: in:geral)"),
         ("before:", "mensagens enviadas antes de uma data (YYYY-MM-DD)"),
+        ("during:", "mensagens enviadas em uma data específica (YYYY-MM-DD)"),
         ("after:", "mensagens enviadas após uma data (YYYY-MM-DD)"),
         ("mentions:", "filtra mensagens que mencionam um usuário"),
         ("pinned:", "mensagens fixadas: pinned:true ou pinned:false"),
@@ -910,8 +1106,6 @@ fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
                 .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
                     entity.update(cx, |state, cx| {
                         state.search_query = format!("{} ", filter_key);
-                        let q = state.search_query.clone();
-                        state.execute_search(&q);
                         cx.notify();
                     });
                 })
@@ -924,7 +1118,7 @@ fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
                 )
                 .child(
                     div()
-                        .text_color(legacy_949ba4())
+                        .text_color(text_muted())
                         .text_size(px(11.0))
                         .child(desc),
                 )
@@ -932,6 +1126,41 @@ fn render_empty_guide_state(app_entity: Entity<AppState>) -> Vec<AnyElement> {
         );
     }
     guide
+}
+
+/// Renders searching state while local or remote search is executing
+fn render_searching_state() -> Vec<AnyElement> {
+    vec![
+        div()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon_search(px(32.0), blurple())),
+            )
+            .child(
+                div()
+                    .text_color(text_titles())
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(px(15.0))
+                    .child("Buscando mensagens..."),
+            )
+            .child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(13.0))
+                    .child("Consultando histórico de mensagens."),
+            )
+            .into_any_element(),
+    ]
 }
 
 /// Renders empty state when query returns 0 hits
@@ -988,11 +1217,11 @@ fn render_search_result_card(
 
     div()
         .p(px(12.0))
-        .rounded(px(6.0))
+        .rounded(px(8.0))
         .bg(bg_user_bar())
         .border_1()
         .border_color(border_subtle())
-        .hover(|s| s.border_color(channel_hover()).bg(legacy_282a2e()))
+        .hover(|s| s.border_color(channel_hover()).bg(bg_chat_hover()))
         .flex()
         .flex_col()
         .gap(px(8.0))
@@ -1076,6 +1305,8 @@ fn render_search_results_scroll_area(
 
     let items: Vec<AnyElement> = if is_empty_query {
         render_empty_guide_state(app_entity)
+    } else if state.is_searching {
+        render_searching_state()
     } else if has_no_results {
         render_no_results_state()
     } else {
@@ -1285,5 +1516,87 @@ mod tests {
 
         let msg_no_match = Message::new("m2", "c1", author, "Mensagem sem menção");
         assert!(!q.matches(&msg_no_match, None));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_space_separated_filter_syntax() {
+        let q = SearchQuery::parse("from: alice in: geral has: sticker during: 2026-03-15 pinned: true");
+        assert_eq!(q.from.as_deref(), Some("alice"));
+        assert_eq!(q.in_channel.as_deref(), Some("geral"));
+        assert_eq!(q.has_filters, vec![HasFilter::Sticker]);
+        assert_eq!(q.during, Some(NaiveDate::from_ymd_opt(2026, 3, 15).unwrap()));
+        assert_eq!(q.pinned, Some(true));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_quoted_filter_and_terms() {
+        let q = SearchQuery::parse("from: \"bob marley\" \"crash on start\" beta");
+        assert_eq!(q.from.as_deref(), Some("bob marley"));
+        assert_eq!(q.text_terms, vec!["crash on start", "beta"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_sticker_filter_matching() {
+        let author = Author::new("u1", "user1");
+        let mut msg = Message::new("m1", "c1", author, "mensagem com sticker");
+        assert!(!HasFilter::Sticker.matches(&msg));
+
+        msg.sticker_items.push(crate::domain::message::MessageStickerItem::new("s1", "wave", 1));
+        assert!(HasFilter::Sticker.matches(&msg));
+
+        let q = SearchQuery::parse("wave");
+        assert!(q.matches(&msg, None));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_embed_content_matching() {
+        let author = Author::new("u1", "user1");
+        let mut msg = Message::new("m1", "c1", author, "sem nada no corpo");
+        let q = SearchQuery::parse("anúncio");
+        assert!(!q.matches(&msg, None));
+
+        msg.embeds.push(crate::domain::Embed {
+            title: Some("Grande Anúncio da Comunidade".to_string()),
+            description: Some("Novo servidor disponível".to_string()),
+            ..Default::default()
+        });
+        assert!(q.matches(&msg, None));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_payload_into_result_groups() {
+        let author = Author::new("u1", "user1");
+        let m1 = Message::new("m1", "c1", author.clone(), "contexto antes");
+        let m2 = Message::new("m2", "c1", author.clone(), "hit alvo");
+        let m3 = Message::new("m3", "c1", author.clone(), "contexto depois");
+
+        let payload = SearchPayload {
+            total_results: 1,
+            messages: vec![vec![
+                ApiSearchMessage { message: m1.clone(), hit: false },
+                ApiSearchMessage { message: m2.clone(), hit: true },
+                ApiSearchMessage { message: m3.clone(), hit: false },
+            ]],
+            analytics_id: Some("tr-123".to_string()),
+        };
+
+        let groups = payload.into_result_groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].hit_message.id, "m2");
+        assert_eq!(groups[0].context_before.len(), 1);
+        assert_eq!(groups[0].context_before[0].id, "m1");
+        assert_eq!(groups[0].context_after.len(), 1);
+        assert_eq!(groups[0].context_after[0].id, "m3");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_to_api_query_params() {
+        let q = SearchQuery::parse("from:123 has:link in:456 pinned:true bug");
+        let params = q.to_api_query_params();
+        assert!(params.contains(&("author_id", "123".to_string())));
+        assert!(params.contains(&("channel_id", "456".to_string())));
+        assert!(params.contains(&("has", "link".to_string())));
+        assert!(params.contains(&("pinned", "true".to_string())));
+        assert!(params.contains(&("content", "bug".to_string())));
     }
 }

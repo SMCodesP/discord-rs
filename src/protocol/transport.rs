@@ -168,6 +168,11 @@ pub enum TransportEvent {
     },
     /// Pinned direct message (DM) channel IDs updated from user settings or cache
     PinnedDmsUpdated(Vec<String>),
+    /// Appearance theme and client theme settings updated from user settings proto
+    AccountThemeUpdated {
+        theme: crate::protocol::user_settings_proto::Theme,
+        client_theme_settings: Option<crate::protocol::user_settings_proto::ClientThemeSettings>,
+    },
     /// A user profile was fetched from the REST API
     UserProfileLoaded {
         user_id: String,

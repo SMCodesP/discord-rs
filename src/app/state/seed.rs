@@ -816,6 +816,8 @@ impl AppState {
                 },
             ],
             theme_choice: ThemeChoice::Dark,
+            account_theme: None,
+            account_client_theme_settings: None,
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),

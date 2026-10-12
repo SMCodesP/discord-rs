@@ -106,6 +106,10 @@ pub struct AppState {
     pub authorized_apps: Vec<AuthorizedApp>,
     pub family_center_links: Vec<FamilyCenterLink>,
     pub theme_choice: ThemeChoice,
+    /// Account appearance theme decoded from user_settings_proto
+    pub account_theme: Option<crate::protocol::user_settings_proto::Theme>,
+    /// Account client theme settings (gradient presets, custom colors) from user_settings_proto
+    pub account_client_theme_settings: Option<crate::protocol::user_settings_proto::ClientThemeSettings>,
     pub message_display_mode: MessageDisplayMode,
     pub accessibility_settings: AccessibilitySettings,
     pub media_cache: crate::protocol::media_cache::MediaCacheManager,
@@ -249,6 +253,8 @@ impl AppState {
             authorized_apps: Vec::new(),
             family_center_links: Vec::new(),
             theme_choice: ThemeChoice::Dark,
+            account_theme: None,
+            account_client_theme_settings: None,
             message_display_mode: MessageDisplayMode::Cozy,
             accessibility_settings: AccessibilitySettings::default(),
             media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
