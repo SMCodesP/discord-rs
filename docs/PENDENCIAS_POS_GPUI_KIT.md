@@ -135,6 +135,37 @@ vinha antes de "ção local". **Confirmar com o dono do projeto antes de começa
 Um palpite, sem base além do contexto: sincronização local, ou seja, as DMs
 fixadas, que hoje são só locais (seção 5.4).
 
+### 2.4 Ícones de servidor não ficam arredondados
+
+Apontado pelo dono do projeto em 2026-10-11: no trilho de servidores os ícones
+com imagem não aparecem arredondados.
+
+**O que o código faz hoje** (`src/components/guild_item.rs`):
+
+- Linhas 149-153 e 207: a caixa de 40x40 recebe raio de 20 px (círculo) em
+  repouso e `radius_server_hover()` (16 px) quando selecionada ou sob o cursor.
+- Linhas 223-229: a imagem do servidor é um `img(url).size_full()` **sem raio
+  próprio**, filho de uma caixa com `overflow_hidden()`. Hipótese a confirmar:
+  o recorte de `overflow_hidden` é retangular e não acompanha o raio da caixa,
+  então a imagem real sai com cantos retos. As capturas automáticas nunca
+  mostraram isso porque as fixtures não têm URL de ícone, só iniciais.
+- O mesmo padrão aparece nas miniaturas de pasta (linhas ~530-560) e na pasta
+  expandida.
+
+**Referência:** `~/.cache/discord-rs-parity/discord/guild-rail.png` mostra os
+ícones em repouso como quadrados de cantos arredondados, não círculos. O raio
+exato em repouso, selecionado e sob o cursor tem de ser medido no Discord
+(tema escuro padrão) antes de codificar; nenhum dos valores atuais (20 e 16 px)
+tem medição registrada em `guild-rail.md`.
+
+**O que fazer:**
+
+- Medir os três raios no Discord e gravar em `guild-rail.md`.
+- Fazer a imagem acompanhar o raio da caixa nos três estados, no ícone solto,
+  na miniatura de pasta e na pasta expandida.
+- Provar com captura usando uma imagem real de teste (arquivo local), não só
+  iniciais.
+
 ---
 
 ## 3. Voz: o que existe e o que nunca foi provado
@@ -283,3 +314,26 @@ trabalho dobrado.
 4. Palco de chamada (seção 6), sobre os componentes novos.
 5. Purga total de mocks (seção 4).
 6. Pendências menores da seção 5.
+
+---
+
+## 8. Situação em 2026-10-11 e distribuição das frentes
+
+A migração ao gpui-kit foi integrada (`main` em `07c030e`, 338 testes verdes).
+Ela já resolveu: 2.1 (popout ancorado), 2.2 (decoração e `Avatar` único), 5.6
+(`state.rs` quebrado em módulos) e a maior parte da seção 4 (estado inicial
+vazio, transporte ocioso em produção, configurações sem dados inventados,
+listas fixas de GIF/sticker/som removidas). Executores voltaram a ser
+Antigravity.
+
+| Frente | Itens deste documento | Arquivos (dono único) |
+|---|---|---|
+| `QStage` | 6 inteiro (inclui os botões de chamada de voz e vídeo no cabeçalho da DM) e o ping fixo da seção 4 | `app/voice_call_panel.rs`, `app/header_bar.rs`, `app/channel_sidebar.rs`, `app/root_view.rs`, `app/state/voice.rs`, `app/state/models.rs`, `protocol/client_manager.rs`, `i18n/*`, `examples/ui_shot.rs` |
+| `QGuild` | 2.4 | `components/guild_item.rs`, `app/guild_rail.rs` |
+| `QProfile` | 5.1 e 5.2 | `components/profile_effect.rs`, `app/user_profile_popout.rs`, `app/state/profile.rs` |
+| `QProto` | 5.4 (leitura do protobuf de configurações: DMs fixadas e tema da conta) | `protocol/user_settings_proto.rs` (novo), `protocol/discord_api.rs`, `protocol/transport.rs`, `app/state/gateway_events.rs`, `app/state/friends_dms.rs`, `app/state/guilds_channels.rs` |
+| `QLogin` | 4 (login falso `mock_`/`test`/`demo`) e 5.5 (teste instável) | `app/state/connection.rs`, `tests/cache_and_ratelimit_test.rs` |
+| Segunda onda | 5.3 ("Ativo agora") e o resto da seção 4 (textos de "Modo Demonstração", `MockDiscordProvider` só em testes) | depende de arquivos da primeira onda |
+
+Fora da distribuição: 2.3 (item cortado, precisa do dono) e os testes manuais
+da seção 3 (só o dono pode rodar; nenhum agente inicia chamada real).
