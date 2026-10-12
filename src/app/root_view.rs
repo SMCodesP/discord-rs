@@ -95,12 +95,17 @@ impl RootView {
         })
         .detach();
 
+        let cm_voice = client_manager.clone();
         cx.spawn(|_view, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
                 while let Ok((v_st, ping)) = voice_rx.recv().await {
+                    let maybe_session = cm_voice.active_voice_session().await;
                     let _ = cx.update(|cx| {
                         let _ = state_weak_voice.update(cx, |state, cx| {
+                            if let Some(session) = maybe_session {
+                                state.set_voice_session(session);
+                            }
                             state.update_voice_session_state(v_st, ping);
                             cx.notify();
                         });

@@ -1,6 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
-use gpui::component::popover::Popover;
+use gpui::component::tooltip::Tooltip;
 use gpui::component::Selectable;
 
 use super::state::{ActiveVoiceCall, AppState, VoiceParticipantState};
@@ -67,6 +67,27 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
     let discord = cx.discord();
     let has_fatal_error = call.fatal_error.is_some();
 
+    // Verificação de dispositivos de áudio reais de hardware (Zero mocks em produção)
+    let device_manager = MediaDeviceManager::new();
+    let has_input = device_manager
+        .list_input_devices()
+        .map(|d| !d.is_empty())
+        .unwrap_or(false);
+    let has_output = device_manager
+        .list_output_devices()
+        .map(|d| !d.is_empty())
+        .unwrap_or(false);
+
+    let device_warning = if !has_input && !has_output {
+        Some("Nenhum microfone ou saída de áudio detectados no sistema.")
+    } else if !has_input {
+        Some("Nenhum microfone de entrada detectado no sistema.")
+    } else if !has_output {
+        Some("Nenhum dispositivo de saída de áudio detectado no sistema.")
+    } else {
+        None
+    };
+
     div()
         .flex()
         .flex_col()
@@ -83,6 +104,29 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
                 .child(render_rtc_badge(call, cx)),
         )
         .children(has_fatal_error.then(|| render_fatal_error_banner(call, discord.white)))
+        .children(device_warning.map(|msg| render_audio_device_warning_banner(msg, discord.bg_server)))
+        .into_any_element()
+}
+
+fn render_audio_device_warning_banner(msg: &str, text_col: Rgba) -> AnyElement {
+    div()
+        .w_full()
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .bg(status_warning())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(icon_warning(px(16.0), text_col))
+        .child(
+            div()
+                .text_color(text_col)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(12.0))
+                .child(format!("Aviso de áudio: {}", msg)),
+        )
         .into_any_element()
 }
 
@@ -508,6 +552,7 @@ fn render_bottom_controls(
 
 /// Selectable trigger for popover arrow buttons
 #[derive(IntoElement)]
+#[allow(dead_code)]
 pub struct ArrowDropupTrigger {
     pub is_open: bool,
     pub id: SharedString,
@@ -566,6 +611,7 @@ fn render_mute_control(app_entity: Entity<AppState>, is_muted: bool, cx: &App) -
     };
 
     let mic_btn = div()
+        .id("call-mic-btn")
         .w(px(44.0))
         .h(px(44.0))
         .rounded(px(8.0))
@@ -576,6 +622,9 @@ fn render_mute_control(app_entity: Entity<AppState>, is_muted: bool, cx: &App) -
         .justify_center()
         .cursor_pointer()
         .hover(move |s| s.bg(hover_col))
+        .tooltip(move |window, cx| {
+            Tooltip::new(if is_muted { "Ativar microfone" } else { "Desativar microfone" }).build(window, cx)
+        })
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
             entity_btn.update(cx, |state, cx| {
                 state.toggle_mute();
@@ -588,20 +637,27 @@ fn render_mute_control(app_entity: Entity<AppState>, is_muted: bool, cx: &App) -
             icon_mic(px(20.0), discord.white)
         });
 
-    let arrow_trigger = ArrowDropupTrigger {
-        is_open: false,
-        id: "mic-arrow-trigger".into(),
-        bg_col: bg_col.into(),
-        hover_col: hover_col.into(),
-    };
-
-    let popover = Popover::new("mic-device-popover")
-        .anchor(Anchor::BottomLeft)
-        .offset(px(8.0))
-        .trigger(arrow_trigger)
-        .content(move |_state, _window, _cx| {
-            render_audio_device_menu()
-        });
+    // Seta desabilitada: troca de dispositivo em chamada não é suportada por AudioBridgeCommand (voice_session.rs:347)
+    let mic_arrow = div()
+        .id("call-mic-arrow")
+        .w(px(18.0))
+        .h(px(44.0))
+        .rounded(px(4.0))
+        .bg(bg_col)
+        .opacity(0.5)
+        .cursor_not_allowed()
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(|window, cx| {
+            Tooltip::new("Troca de dispositivo durante a chamada ainda não suportada").build(window, cx)
+        })
+        .child(
+            div()
+                .text_color(discord.white)
+                .text_size(px(10.0))
+                .child("▲"),
+        );
 
     div()
         .flex()
@@ -609,59 +665,50 @@ fn render_mute_control(app_entity: Entity<AppState>, is_muted: bool, cx: &App) -
         .items_center()
         .gap(px(2.0))
         .child(mic_btn)
-        .child(popover)
+        .child(mic_arrow)
         .into_any_element()
 }
 
-fn render_camera_control(app_entity: Entity<AppState>, is_camera_on: bool, cx: &App) -> AnyElement {
+fn render_camera_control(_app_entity: Entity<AppState>, _is_camera_on: bool, cx: &App) -> AnyElement {
     let discord = cx.discord();
-    let entity_btn = app_entity.clone();
 
-    let bg_col = if is_camera_on {
-        status_online()
-    } else {
-        control_secondary_bg_default()
-    };
-
-    let hover_col = if is_camera_on {
-        status_online()
-    } else {
-        control_secondary_bg_hover()
-    };
-
+    // Botão de câmera desabilitado: transmissão de vídeo ainda não suportada (Zero Mocks / Item 4)
     let cam_btn = div()
+        .id("call-cam-btn")
         .w(px(44.0))
         .h(px(44.0))
         .rounded(px(8.0))
-        .bg(bg_col)
-        .text_color(discord.white)
+        .bg(control_secondary_bg_default())
+        .opacity(0.5)
+        .cursor_not_allowed()
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover_col))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            entity_btn.update(cx, |state, cx| {
-                state.toggle_camera();
-                cx.notify();
-            });
+        .tooltip(|window, cx| {
+            Tooltip::new("Transmissão de vídeo ainda não suportada nesta versão").build(window, cx)
         })
         .child(render_camera_glyph(px(20.0), discord.white));
 
-    let arrow_trigger = ArrowDropupTrigger {
-        is_open: false,
-        id: "cam-arrow-trigger".into(),
-        bg_col: bg_col.into(),
-        hover_col: hover_col.into(),
-    };
-
-    let popover = Popover::new("cam-device-popover")
-        .anchor(Anchor::BottomLeft)
-        .offset(px(8.0))
-        .trigger(arrow_trigger)
-        .content(move |_state, _window, _cx| {
-            render_camera_device_menu()
-        });
+    let cam_arrow = div()
+        .id("call-cam-arrow")
+        .w(px(18.0))
+        .h(px(44.0))
+        .rounded(px(4.0))
+        .bg(control_secondary_bg_default())
+        .opacity(0.5)
+        .cursor_not_allowed()
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(|window, cx| {
+            Tooltip::new("Transmissão de vídeo ainda não suportada nesta versão").build(window, cx)
+        })
+        .child(
+            div()
+                .text_color(discord.white)
+                .text_size(px(10.0))
+                .child("▲"),
+        );
 
     div()
         .flex()
@@ -669,45 +716,32 @@ fn render_camera_control(app_entity: Entity<AppState>, is_camera_on: bool, cx: &
         .items_center()
         .gap(px(2.0))
         .child(cam_btn)
-        .child(popover)
+        .child(cam_arrow)
         .into_any_element()
 }
 
 fn render_screen_share_control(
-    app_entity: Entity<AppState>,
-    is_screen_sharing: bool,
+    _app_entity: Entity<AppState>,
+    _is_screen_sharing: bool,
     cx: &App,
 ) -> AnyElement {
     let discord = cx.discord();
-    let bg_col = if is_screen_sharing {
-        status_online()
-    } else {
-        control_secondary_bg_default()
-    };
 
-    let hover_col = if is_screen_sharing {
-        status_online()
-    } else {
-        control_secondary_bg_hover()
-    };
-
+    // Botão de compartilhar tela desabilitado: pipeline ainda não suportado nesta versão (Item 4)
     div()
+        .id("call-screen-share-btn")
         .h(px(44.0))
         .px(px(16.0))
         .rounded(px(8.0))
-        .bg(bg_col)
-        .text_color(discord.white)
+        .bg(control_secondary_bg_default())
+        .opacity(0.5)
+        .cursor_not_allowed()
         .flex()
         .items_center()
         .justify_center()
         .gap(px(8.0))
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover_col))
-        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-            app_entity.update(cx, |state, cx| {
-                state.toggle_screen_share();
-                cx.notify();
-            });
+        .tooltip(|window, cx| {
+            Tooltip::new("Compartilhamento de tela ainda não suportado nesta versão").build(window, cx)
         })
         .child(icon_screen_share(px(20.0), discord.white))
         .child(
@@ -754,6 +788,7 @@ fn render_disconnect_control(app_entity: Entity<AppState>, cx: &App) -> AnyEleme
 // Real Hardware Device Menus (MediaDeviceManager & CameraManager)
 // ============================================================================
 
+#[allow(dead_code)]
 fn render_audio_device_menu() -> AnyElement {
     let device_manager = MediaDeviceManager::new();
     let devices = device_manager.list_input_devices().unwrap_or_default();
@@ -816,6 +851,7 @@ fn render_audio_device_menu() -> AnyElement {
     menu.into_any_element()
 }
 
+#[allow(dead_code)]
 fn render_camera_device_menu() -> AnyElement {
     let devices = CameraManager::list_devices().unwrap_or_default();
 

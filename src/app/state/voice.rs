@@ -3,8 +3,24 @@ use crate::domain::voice::VoiceState;
 use crate::protocol::voice_session::VoiceSessionState;
 
 impl AppState {
-    /// Connects to a voice call
+    /// Connects to a voice call in a guild channel
     pub fn connect_voice(&mut self, channel_id: &str, channel_name: &str, guild_name: &str) {
+        let gid_opt = self.selected_guild_id.as_deref().and_then(|g| g.parse::<u64>().ok());
+        self.connect_voice_internal(channel_id, channel_name, guild_name, gid_opt);
+    }
+
+    /// Connects to a voice call in a DM channel with explicit guild_id = None
+    pub fn connect_voice_dm(&mut self, channel_id: &str, channel_name: &str) {
+        self.connect_voice_internal(channel_id, channel_name, "Mensagem Direta", None);
+    }
+
+    fn connect_voice_internal(
+        &mut self,
+        channel_id: &str,
+        channel_name: &str,
+        guild_name: &str,
+        explicit_guild_id: Option<u64>,
+    ) {
         let mut participants = Vec::new();
 
         // 1. Participantes reais vindos de voice_states_by_channel
@@ -53,6 +69,65 @@ impl AppState {
             });
         }
 
+        // Validação estrita de Snowflake numérico (Zero IDs inventados / fallback)
+        let channel_id_u64 = match channel_id.parse::<u64>() {
+            Ok(id) => id,
+            Err(e) => {
+                let err_msg = format!("ID do canal inválido: deve ser numérico (Snowflake): {}", e);
+                log::error!("[AppState] {}", err_msg);
+                self.active_voice_call = Some(ActiveVoiceCall {
+                    channel_id: channel_id.to_string(),
+                    channel_name: channel_name.to_string(),
+                    guild_name: guild_name.to_string(),
+                    ping_ms: None,
+                    is_muted: self.current_user.is_muted,
+                    is_deafened: self.current_user.is_deafened,
+                    is_screen_sharing: false,
+                    participants,
+                    connection_state: VoiceSessionState::Disconnected {
+                        reason: err_msg.clone(),
+                    },
+                    fatal_error: Some(err_msg),
+                    is_camera_on: false,
+                    focus_user_id: None,
+                    selected_input_device: None,
+                    selected_output_device: None,
+                    selected_camera_device: None,
+                    voice_session: None,
+                });
+                return;
+            }
+        };
+
+        let user_id_u64 = match self.current_user.id.parse::<u64>() {
+            Ok(id) => id,
+            Err(e) => {
+                let err_msg = format!("ID do usuário inválido: deve ser numérico (Snowflake): {}", e);
+                log::error!("[AppState] {}", err_msg);
+                self.active_voice_call = Some(ActiveVoiceCall {
+                    channel_id: channel_id.to_string(),
+                    channel_name: channel_name.to_string(),
+                    guild_name: guild_name.to_string(),
+                    ping_ms: None,
+                    is_muted: self.current_user.is_muted,
+                    is_deafened: self.current_user.is_deafened,
+                    is_screen_sharing: false,
+                    participants,
+                    connection_state: VoiceSessionState::Disconnected {
+                        reason: err_msg.clone(),
+                    },
+                    fatal_error: Some(err_msg),
+                    is_camera_on: false,
+                    focus_user_id: None,
+                    selected_input_device: None,
+                    selected_output_device: None,
+                    selected_camera_device: None,
+                    voice_session: None,
+                });
+                return;
+            }
+        };
+
         // 3. Cria ActiveVoiceCall com ping_ms: None (ZERO MOCKS: latência só com medida real)
         self.active_voice_call = Some(ActiveVoiceCall {
             channel_id: channel_id.to_string(),
@@ -76,19 +151,13 @@ impl AppState {
         // 4. Inicia a VoiceSession de verdade através do client_manager (se conectado)
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
-            let channel_id_u64 = channel_id.parse::<u64>().unwrap_or(987654321);
-            let user_id_u64 = self.current_user.id.parse::<u64>().unwrap_or(123456789);
-            let guild_id_u64 = self
-                .selected_guild_id
-                .as_deref()
-                .and_then(|g| g.parse::<u64>().ok());
             let self_mute = self.current_user.is_muted;
             let self_deaf = self.current_user.is_deafened;
 
             tokio::spawn(async move {
                 if let Err(e) = cm
                     .start_voice_session(
-                        guild_id_u64,
+                        explicit_guild_id,
                         channel_id_u64,
                         user_id_u64,
                         self_mute,
@@ -213,6 +282,21 @@ impl AppState {
         }
     }
 
+    /// Sets the active VoiceSession on the active voice call
+    pub fn set_voice_session(&mut self, session: std::sync::Arc<crate::protocol::voice_session::VoiceSession>) {
+        if let Some(ref mut call) = self.active_voice_call {
+            call.voice_session = Some(session);
+        }
+    }
+
+    /// Records a fatal error on the active call and marks connection state as Disconnected
+    pub fn set_call_fatal_error(&mut self, error_msg: String) {
+        if let Some(ref mut call) = self.active_voice_call {
+            call.fatal_error = Some(error_msg.clone());
+            call.connection_state = VoiceSessionState::Disconnected { reason: error_msg };
+        }
+    }
+
     /// Sets or clears focus on a specific participant (modo foco para compartilhamento de tela)
     pub fn set_focus_user(&mut self, user_id: Option<String>) {
         if let Some(ref mut call) = self.active_voice_call {
@@ -222,21 +306,14 @@ impl AppState {
 
     /// Toggles local camera broadcasting state
     pub fn toggle_camera(&mut self) {
-        if let Some(ref mut call) = self.active_voice_call {
-            call.is_camera_on = !call.is_camera_on;
-        }
+        // Transmissão de vídeo ainda não suportada (PATCH PENDENTE); não altera a flag para não fingir estado.
+        log::warn!("[AppState] toggle_camera acionado, mas transmissão de vídeo não está suportada nesta versão.");
     }
 
     /// Toggles local screen sharing state
     pub fn toggle_screen_share(&mut self) {
-        if let Some(ref mut call) = self.active_voice_call {
-            call.is_screen_sharing = !call.is_screen_sharing;
-            if call.is_screen_sharing {
-                call.focus_user_id = Some(self.current_user.id.clone());
-            } else if call.focus_user_id.as_deref() == Some(&self.current_user.id) {
-                call.focus_user_id = None;
-            }
-        }
+        // Compartilhamento de tela ainda não suportado (PATCH PENDENTE); não altera a flag para não fingir estado.
+        log::warn!("[AppState] toggle_screen_share acionado, mas compartilhamento de tela não está suportado nesta versão.");
     }
 
     /// Returns the slice of active voice states connected to a specific channel
@@ -273,6 +350,14 @@ impl AppState {
                 });
             }
         }
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            tokio::spawn(async move {
+                if let Some(session) = cm.active_voice_session().await {
+                    let _ = session.set_muted(is_muted).await;
+                }
+            });
+        }
     }
 
     /// Toggles self deafen
@@ -299,6 +384,14 @@ impl AppState {
                     let _ = session.set_deafened(is_deafened).await;
                 });
             }
+        }
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            tokio::spawn(async move {
+                if let Some(session) = cm.active_voice_session().await {
+                    let _ = session.set_deafened(is_deafened).await;
+                }
+            });
         }
     }
 }

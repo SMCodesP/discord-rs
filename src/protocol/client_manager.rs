@@ -722,7 +722,24 @@ impl ClientManager {
             }
         });
 
-        session.start().await?;
+        // Subscribe to session events (speaking / SSRC mapping)
+        let mut events_rx = session.subscribe_events();
+        tokio::spawn(async move {
+            while let Ok(evt) = events_rx.recv().await {
+                log::debug!("[ClientManager] VoiceSession event: {:?}", evt);
+            }
+        });
+
+        if let Err(e) = session.start().await {
+            let reason = format!("Falha ao iniciar sessão de voz: {}", e);
+            let _ = self.voice_state_tx.send((
+                crate::protocol::voice_session::VoiceSessionState::Disconnected {
+                    reason,
+                },
+                None,
+            ));
+            return Err(e);
+        }
         Ok(session)
     }
 }

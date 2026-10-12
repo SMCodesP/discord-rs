@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 
 use discord_rs::app::state::AppState;
 use discord_rs::domain::voice::VoiceState;
@@ -18,15 +18,16 @@ use discord_rs::protocol::{
 #[test]
 fn test_connect_voice_zero_invented_ping() {
     let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
 
     // 1. Initial state: zero voice call
     assert!(state.active_voice_call.is_none());
 
-    // 2. Connect voice to a channel
-    state.connect_voice("ch-voice-1", "Canal de Voz", "Servidor Teste");
+    // 2. Connect voice to a channel with a real numeric Snowflake
+    state.connect_voice("123456789012345678", "Canal de Voz", "Servidor Teste");
 
     let call = state.active_voice_call.as_ref().expect("ActiveVoiceCall must exist");
-    assert_eq!(call.channel_id, "ch-voice-1");
+    assert_eq!(call.channel_id, "123456789012345678");
     assert_eq!(call.channel_name, "Canal de Voz");
     assert_eq!(call.guild_name, "Servidor Teste");
 
@@ -40,9 +41,36 @@ fn test_connect_voice_zero_invented_ping() {
 }
 
 #[test]
+fn test_invalid_ids_no_session_and_fatal_error() {
+    let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
+
+    // 1. Non-numeric channel ID: must NOT start session and must record fatal_error
+    state.connect_voice("invalid-channel-id", "Canal Inválido", "Servidor");
+    let call = state.active_voice_call.as_ref().expect("ActiveVoiceCall must exist");
+    assert!(call.fatal_error.is_some(), "fatal_error must be recorded for non-numeric channel ID");
+    assert!(
+        matches!(call.connection_state, VoiceSessionState::Disconnected { .. }),
+        "connection_state must be Disconnected on invalid channel ID"
+    );
+
+    // 2. Non-numeric user ID: must NOT start session and must record fatal_error
+    let mut state2 = AppState::new();
+    state2.current_user.id = "non-numeric-user".into();
+    state2.connect_voice("123456789012345678", "Canal de Voz", "Servidor");
+    let call2 = state2.active_voice_call.as_ref().expect("ActiveVoiceCall must exist");
+    assert!(call2.fatal_error.is_some(), "fatal_error must be recorded for non-numeric user ID");
+    assert!(
+        matches!(call2.connection_state, VoiceSessionState::Disconnected { .. }),
+        "connection_state must be Disconnected on invalid user ID"
+    );
+}
+
+#[test]
 fn test_voice_session_state_transitions_and_active_call() {
     let mut state = AppState::new();
-    state.connect_voice("ch-voice-1", "Voz", "Guild");
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice("123456789012345678", "Voz", "Guild");
 
     // 1. Transition to Connected with real measured ping
     state.update_voice_session_state(VoiceSessionState::Connected, Some(35));
@@ -76,31 +104,33 @@ fn test_voice_session_state_transitions_and_active_call() {
             }
         );
         assert_eq!(call.ping_ms, None);
+        assert_eq!(call.fatal_error, Some("Perda de conexão UDP".into()));
     }
 }
 
 #[test]
 fn test_participant_sync_from_voice_states_by_channel() {
     let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
 
     // Popula estados de voz do canal antes da conexão
     let mut vs_bob = VoiceState::new("u-bob", "sess-bob");
     vs_bob.guild_id = Some("g-1".into());
-    vs_bob.channel_id = Some("ch-voice-1".into());
+    vs_bob.channel_id = Some("123456789012345678".into());
     vs_bob.user_name = Some("Bob".into());
     vs_bob.self_mute = true;
     vs_bob.self_video = true;
 
     let mut vs_carol = VoiceState::new("u-carol", "sess-carol");
     vs_carol.guild_id = Some("g-1".into());
-    vs_carol.channel_id = Some("ch-voice-1".into());
+    vs_carol.channel_id = Some("123456789012345678".into());
     vs_carol.user_name = Some("Carol".into());
 
     state.update_voice_state(vs_bob);
     state.update_voice_state(vs_carol);
 
     // Conecta na sala
-    state.connect_voice("ch-voice-1", "Voz Geral", "Guild 1");
+    state.connect_voice("123456789012345678", "Voz Geral", "Guild 1");
 
     let call = state.active_voice_call.as_ref().unwrap();
     // Participantes devem conter Bob, Carol e o usuário local
@@ -126,10 +156,11 @@ fn test_participant_sync_from_voice_states_by_channel() {
 #[test]
 fn test_speaking_ring_state_per_user() {
     let mut state = AppState::new();
-    state.connect_voice("ch-voice-1", "Voz", "Guild");
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice("123456789012345678", "Voz", "Guild");
 
     let mut vs_dave = VoiceState::new("u-dave", "sess-dave");
-    vs_dave.channel_id = Some("ch-voice-1".into());
+    vs_dave.channel_id = Some("123456789012345678".into());
     vs_dave.user_name = Some("Dave".into());
     state.update_voice_state(vs_dave);
 
@@ -160,7 +191,8 @@ fn test_speaking_ring_state_per_user() {
 #[test]
 fn test_focus_mode_and_media_controls() {
     let mut state = AppState::new();
-    state.connect_voice("ch-voice-1", "Voz", "Guild");
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice("123456789012345678", "Voz", "Guild");
 
     // Foco em usuário específico
     assert_eq!(state.active_voice_call.as_ref().unwrap().focus_user_id, None);
@@ -170,18 +202,105 @@ fn test_focus_mode_and_media_controls() {
         Some("u-streamer".into())
     );
 
-    // Toggle câmera e compartilhamento de tela
+    // Sem pipeline de vídeo/tela, toggle_camera e toggle_screen_share não alteram as flags (Zero mocks)
     assert!(!state.active_voice_call.as_ref().unwrap().is_camera_on);
     state.toggle_camera();
-    assert!(state.active_voice_call.as_ref().unwrap().is_camera_on);
+    assert!(
+        !state.active_voice_call.as_ref().unwrap().is_camera_on,
+        "is_camera_on não deve ser alterado sem pipeline real"
+    );
 
     assert!(!state.active_voice_call.as_ref().unwrap().is_screen_sharing);
     state.toggle_screen_share();
-    assert!(state.active_voice_call.as_ref().unwrap().is_screen_sharing);
+    assert!(
+        !state.active_voice_call.as_ref().unwrap().is_screen_sharing,
+        "is_screen_sharing não deve ser alterado sem pipeline real"
+    );
 
     // Desconectar voz limpa active_voice_call
     state.disconnect_voice();
     assert!(state.active_voice_call.is_none());
+}
+
+#[test]
+fn test_dm_call_ring_failure_sets_fatal_error() {
+    let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice_dm("123456789012345678", "DM Teste");
+
+    let err_msg = "Falha ao tocar chamada na DM: 403 Forbidden (ring_call recusado)".to_string();
+    state.set_call_fatal_error(err_msg.clone());
+
+    let call = state.active_voice_call.as_ref().expect("ActiveVoiceCall must exist");
+    assert_eq!(call.fatal_error, Some(err_msg.clone()));
+    assert_eq!(
+        call.connection_state,
+        VoiceSessionState::Disconnected { reason: err_msg }
+    );
+}
+
+#[tokio::test]
+async fn test_toggle_mute_and_deafen_dispatches_to_session() {
+    let (event_tx, _) = broadcast::channel(16);
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let signaling = Arc::new(MockSignaling {
+        events_tx: event_tx.clone(),
+        updates: updates.clone(),
+    });
+
+    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
+    let (_outgoing_tx, outgoing_rx) = tokio::sync::mpsc::channel(16);
+    let (_speaking_tx, speaking_rx) = tokio::sync::mpsc::channel(16);
+    let audio_bridge = AudioBridge::from_channels(outgoing_rx, speaking_rx, cmd_tx);
+
+    let cfg = VoiceSessionConfig {
+        guild_id: Some(12345),
+        channel_id: 67890,
+        user_id: 11111,
+        self_mute: false,
+        self_deaf: false,
+    };
+
+    let session = Arc::new(
+        discord_rs::protocol::voice_session::VoiceSession::new(
+            cfg,
+            signaling,
+            audio_bridge,
+        )
+        .with_gateway_factory(|_gw_cfg| {
+            let (tx, _) = broadcast::channel(16);
+            Arc::new(MockVoiceGatewayTransport { events_tx: tx })
+        }),
+    );
+
+    let mut state = AppState::new();
+    state.current_user.id = "11111".into();
+    state.connect_voice("67890", "Voz", "Guild");
+    state.set_voice_session(session.clone());
+
+    // 1. Toggle mute
+    state.toggle_mute();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    {
+        let up = updates.lock().await;
+        assert!(
+            up.iter().any(|(_g, _c, mute, deaf)| *mute && !*deaf),
+            "Comando set_muted(true) deve chegar à sinalização da VoiceSession"
+        );
+    }
+
+    // 2. Toggle deafen
+    state.toggle_deafen();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    {
+        let up = updates.lock().await;
+        assert!(
+            up.iter().any(|(_g, _c, mute, deaf)| *mute && *deaf),
+            "Comando set_deafened(true) deve chegar à sinalização da VoiceSession"
+        );
+    }
 }
 
 #[tokio::test]
@@ -262,17 +381,25 @@ impl VoiceGatewayTransport for MockVoiceGatewayTransport {
 
 struct MockSignaling {
     events_tx: broadcast::Sender<TransportEvent>,
+    updates: Arc<Mutex<Vec<(Option<String>, Option<String>, bool, bool)>>>,
 }
 
 #[async_trait]
 impl MainSignalingChannel for MockSignaling {
     async fn send_voice_state_update(
         &self,
-        _guild_id: Option<&str>,
-        _channel_id: Option<&str>,
-        _self_mute: bool,
-        _self_deaf: bool,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        self_mute: bool,
+        self_deaf: bool,
     ) -> Result<()> {
+        let mut l = self.updates.lock().await;
+        l.push((
+            guild_id.map(|s| s.to_string()),
+            channel_id.map(|s| s.to_string()),
+            self_mute,
+            self_deaf,
+        ));
         Ok(())
     }
 
@@ -284,8 +411,10 @@ impl MainSignalingChannel for MockSignaling {
 #[tokio::test]
 async fn test_voice_session_lifecycle_with_gateway_factory() {
     let (event_tx, _) = broadcast::channel(16);
+    let updates = Arc::new(Mutex::new(Vec::new()));
     let signaling = Arc::new(MockSignaling {
         events_tx: event_tx.clone(),
+        updates,
     });
 
     let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);

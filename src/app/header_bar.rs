@@ -240,7 +240,7 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
         let voice_entity = app_entity.clone();
         let cid_v = channel_id.clone();
         let cname_v = channel_name.clone();
-        let recips_v = recipient_ids.clone();
+        let recips_v = recipient_ids;
         toolbar = toolbar.child(
             IconButton::with_icon("header-btn-voice-call", |sz, col| {
                 icon_phone(sz, col).into_any_element()
@@ -250,6 +250,24 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
             .rounded(px(4.0))
             .tooltip("Iniciar chamada de voz")
             .on_click(move |_event, _window, cx| {
+                // Proteção contra clique duplo: se já conectando ou conectado nesta chamada, ignora
+                let is_already_connecting = {
+                    let s = voice_entity.read(cx);
+                    if let Some(ref call) = s.active_voice_call {
+                        call.channel_id == cid_v
+                            && !matches!(
+                                call.connection_state,
+                                crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }
+                            )
+                    } else {
+                        false
+                    }
+                };
+                if is_already_connecting {
+                    log::warn!("[HeaderBar] Chamada de voz já em andamento/conectando neste canal; ignorando duplo clique.");
+                    return;
+                }
+
                 let cm_opt = voice_entity.read(cx).client_manager.clone();
                 let cid = cid_v.clone();
                 let cname = cname_v.clone();
@@ -260,22 +278,27 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
                 };
                 let entity = voice_entity.clone();
 
+                // Ordem real (demonstrada em examples/voice_call_probe.rs:60-68 e doc Discord):
+                // 1. Entra na chamada do canal de DM com guild_id: None explicitamente (Opcode 4)
+                entity.update(cx, |state, cx| {
+                    state.connect_voice_dm(&cid, &cname);
+                    cx.notify();
+                });
+
+                // 2. Dispara o ring da chamada via POST /channels/{id}/call/ring
                 cx.spawn(|cx: &mut AsyncApp| {
                     let cx = cx.clone();
                     async move {
                         if let Some(cm) = cm_opt {
-                            match cm.ring_call(&cid, recips).await {
-                                Ok(()) => {
-                                    let _ = cx.update(|cx| {
-                                        entity.update(cx, |state, cx| {
-                                            state.connect_voice(&cid, &cname, "DM");
-                                            cx.notify();
-                                        });
+                            if let Err(e) = cm.ring_call(&cid, recips).await {
+                                let err_msg = format!("Falha ao tocar chamada (ring_call recusado): {}", e);
+                                log::error!("[HeaderBar] {}", err_msg);
+                                let _ = cx.update(|cx| {
+                                    entity.update(cx, |state, cx| {
+                                        state.set_call_fatal_error(err_msg);
+                                        cx.notify();
                                     });
-                                }
-                                Err(e) => {
-                                    log::error!("[HeaderBar] Falha ao iniciar chamada (ring_call recusado): {:?}", e);
-                                }
+                                });
                             }
                         }
                     }
@@ -284,10 +307,7 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
             }),
         );
 
-        let video_entity = app_entity.clone();
-        let cid_vid = channel_id.clone();
-        let cname_vid = channel_name.clone();
-        let recips_vid = recipient_ids;
+        // Botão de chamada de vídeo desabilitado: transmissão de vídeo ainda não suportada (Zero mocks)
         toolbar = toolbar.child(
             IconButton::with_icon("header-btn-video-call", |sz, col| {
                 render_video_camera_icon(sz, col)
@@ -295,41 +315,8 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
             .size(px(28.0))
             .icon_size(px(16.0))
             .rounded(px(4.0))
-            .tooltip("Iniciar chamada de vídeo")
-            .on_click(move |_event, _window, cx| {
-                let cm_opt = video_entity.read(cx).client_manager.clone();
-                let cid = cid_vid.clone();
-                let cname = cname_vid.clone();
-                let recips = if recips_vid.is_empty() {
-                    None
-                } else {
-                    Some(recips_vid.clone())
-                };
-                let entity = video_entity.clone();
-
-                cx.spawn(|cx: &mut AsyncApp| {
-                    let cx = cx.clone();
-                    async move {
-                        if let Some(cm) = cm_opt {
-                            match cm.ring_call(&cid, recips).await {
-                                Ok(()) => {
-                                    let _ = cx.update(|cx| {
-                                        entity.update(cx, |state, cx| {
-                                            state.connect_voice(&cid, &cname, "DM");
-                                            state.toggle_camera();
-                                            cx.notify();
-                                        });
-                                    });
-                                }
-                                Err(e) => {
-                                    log::error!("[HeaderBar] Falha ao iniciar chamada de vídeo (ring_call recusado): {:?}", e);
-                                }
-                            }
-                        }
-                    }
-                })
-                .detach();
-            }),
+            .disabled(true)
+            .tooltip("Chamada de vídeo ainda não suportada nesta versão"),
         );
     } else {
         // 1. Notifications / Bell button (Guild text/voice channels)
