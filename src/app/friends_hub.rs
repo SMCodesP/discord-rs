@@ -1871,7 +1871,7 @@ pub fn sync_spotify_progress_timer<V: 'static>(
     timer_slot: &mut Option<Task<()>>,
     state: &AppState,
     app_entity: &Entity<AppState>,
-    cx: &mut Context<V>,
+    cx: &Context<V>,
 ) {
     if state.has_visible_spotify_progress() {
         if timer_slot.is_none() {

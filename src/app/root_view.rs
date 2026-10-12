@@ -50,6 +50,7 @@ pub struct RootView {
     add_friend_sub: Option<Subscription>,
     active_modal_open: Option<ActiveModal>,
     profile_modal_open: bool,
+    spotify_timer: Option<gpui::Task<()>>,
 }
 
 impl RootView {
@@ -178,6 +179,7 @@ impl RootView {
             add_friend_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
+            spotify_timer: None,
         }
     }
 
@@ -221,6 +223,7 @@ impl RootView {
             add_friend_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
+            spotify_timer: None,
         }
     }
 }
@@ -687,8 +690,15 @@ impl Render for RootView {
                             .min_h(px(0.0))
                             .overflow_hidden()
                             .child(if show_voice_stage {
+                                self.spotify_timer = None;
                                 self.voice_panel.clone().into_any_element()
                             } else if state.selected_guild_id.is_none() && state.selected_channel_id.is_none() {
+                                super::friends_hub::sync_spotify_progress_timer(
+                                    &mut self.spotify_timer,
+                                    state,
+                                    &app_entity,
+                                    cx,
+                                );
                                 let search_state = self
                                     .friends_search_state
                                     .as_ref()
@@ -706,6 +716,7 @@ impl Render for RootView {
                                 )
                                 .into_any_element()
                             } else {
+                                self.spotify_timer = None;
                                 self.chat_view.clone().into_any_element()
                             }),
                     ),

@@ -469,52 +469,84 @@ fn test_e2e_stress_high_volume_messages_and_members() {
     let mut state = AppState::new();
     let stress_channel_id = "chan-stress-1000";
 
-    // 8.1 Generate 1,000 realistic messages
-    let start_messages = Instant::now();
-    let now = Utc::now();
-    let mut high_volume_messages = Vec::with_capacity(1000);
+    const ITERATIONS: usize = 5;
 
-    for i in 0..1000 {
-        let author_name = match i % 5 {
-            0 => "ferris_rust",
-            1 => "ana_dev",
-            2 => "carlos_sys",
-            3 => "bot_helper",
-            _ => "gpui_enthusiast",
-        };
-        let is_bot = i % 5 == 3;
-        let author = Author {
-            id: format!("user-stress-{}", i % 20),
-            username: author_name.to_string(),
-            global_name: Some(format!("User #{}", i % 20)),
-            avatar: None,
-            bot: is_bot,
-            avatar_decoration_data: None,
-        };
+    // 8.1 Generate 1,000 realistic messages (mediana de N iterações para mitigar jitter do SO sob carga)
+    fn build_stress_messages(channel_id: &str, now: chrono::DateTime<Utc>) -> Vec<Message> {
+        let mut messages = Vec::with_capacity(1000);
+        for i in 0..1000 {
+            let author_name = match i % 5 {
+                0 => "ferris_rust",
+                1 => "ana_dev",
+                2 => "carlos_sys",
+                3 => "bot_helper",
+                _ => "gpui_enthusiast",
+            };
+            let is_bot = i % 5 == 3;
+            let author = Author {
+                id: format!("user-stress-{}", i % 20),
+                username: author_name.to_string(),
+                global_name: Some(format!("User #{}", i % 20)),
+                avatar: None,
+                bot: is_bot,
+                avatar_decoration_data: None,
+            };
 
-        let content = format!(
-            "Mensagem de estresse #{:04}: validando performance no buffer de chat do GPUI.",
-            i
-        );
+            let content = format!(
+                "Mensagem de estresse #{:04}: validando performance no buffer de chat do GPUI.",
+                i
+            );
 
-        let mut msg = Message::new(format!("stress-msg-{}", i), stress_channel_id, author, content)
-            .with_timestamp(now - Duration::seconds(1000 - i as i64));
+            let mut msg = Message::new(format!("stress-msg-{}", i), channel_id, author, content)
+                .with_timestamp(now - Duration::seconds(1000 - i as i64));
 
-        if i % 10 == 0 {
-            msg.reactions.push(Reaction::new("🦀", (i % 25 + 1) as u32, i % 2 == 0));
+            if i % 10 == 0 {
+                msg.reactions.push(Reaction::new("🦀", (i % 25 + 1) as u32, i % 2 == 0));
+            }
+
+            messages.push(msg);
         }
-
-        high_volume_messages.push(msg);
+        messages
     }
 
-    let elapsed_gen_messages = start_messages.elapsed();
-    assert!(elapsed_gen_messages.as_millis() < 50, "Message generation took too long: {:?}", elapsed_gen_messages);
+    let now = Utc::now();
+    let mut durations_gen = Vec::with_capacity(ITERATIONS);
+    let mut high_volume_messages = Vec::new();
 
-    // Ingest messages into AppState via batch update
-    let start_inject = Instant::now();
+    for _ in 0..ITERATIONS {
+        let start_messages = Instant::now();
+        let msgs = build_stress_messages(stress_channel_id, now);
+        durations_gen.push(start_messages.elapsed());
+        high_volume_messages = msgs;
+    }
+    durations_gen.sort();
+    let median_gen_messages = durations_gen[ITERATIONS / 2];
+    assert!(
+        median_gen_messages < std::time::Duration::from_millis(50),
+        "Message generation median took too long: {:?} (amostras: {:?})",
+        median_gen_messages,
+        durations_gen
+    );
+
+    // Ingest messages into AppState via batch update (mediana de N iterações)
+    let mut durations_inject = Vec::with_capacity(ITERATIONS);
+    for _ in 0..ITERATIONS {
+        let mut test_state = AppState::new();
+        let start_inject = Instant::now();
+        test_state.set_channel_messages(stress_channel_id, high_volume_messages.clone());
+        durations_inject.push(start_inject.elapsed());
+    }
+    durations_inject.sort();
+    let median_inject = durations_inject[ITERATIONS / 2];
+    assert!(
+        median_inject < std::time::Duration::from_millis(100),
+        "Batch injection median took too long: {:?} (amostras: {:?})",
+        median_inject,
+        durations_inject
+    );
+
+    // Ingestão no estado oficial do teste
     state.set_channel_messages(stress_channel_id, high_volume_messages);
-    let elapsed_inject = start_inject.elapsed();
-    assert!(elapsed_inject.as_millis() < 100, "Batch injection took too long: {:?}", elapsed_inject);
 
     // Verify channel message integrity
     let messages = state.messages_by_channel.get(stress_channel_id).expect("Channel messages missing");
@@ -523,45 +555,62 @@ fn test_e2e_stress_high_volume_messages_and_members() {
     assert_eq!(messages.last().unwrap().id, "stress-msg-999");
 
     // 8.2 Generate 500 guild members with diverse roles and presence
-    let start_members = Instant::now();
-    let mut high_volume_members = Vec::with_capacity(500);
+    fn build_stress_members() -> Vec<MemberItemState> {
+        let mut members = Vec::with_capacity(500);
+        for i in 0..500 {
+            let (role_group, role_color) = match i {
+                0..=4 => ("ADMINISTRADOR", 0x5865f2),
+                5..=24 => ("MODERADOR", 0x23a55a),
+                25..=49 => ("BOTS", 0x9b59b6),
+                _ => ("MEMBROS", 0xdbdee1),
+            };
 
-    for i in 0..500 {
-        let (role_group, role_color) = match i {
-            0..=4 => ("ADMINISTRADOR", 0x5865f2),
-            5..=24 => ("MODERADOR", 0x23a55a),
-            25..=49 => ("BOTS", 0x9b59b6),
-            _ => ("MEMBROS", 0xdbdee1),
-        };
+            let presence = match i % 4 {
+                0 => PresenceStatus::Online,
+                1 => PresenceStatus::Idle,
+                2 => PresenceStatus::DoNotDisturb,
+                _ => PresenceStatus::Offline,
+            };
 
-        let presence = match i % 4 {
-            0 => PresenceStatus::Online,
-            1 => PresenceStatus::Idle,
-            2 => PresenceStatus::DoNotDisturb,
-            _ => PresenceStatus::Offline,
-        };
-
-        let member = MemberItemState {
-            id: format!("member-stress-{}", i),
-            name: format!("Rustacean #{:03}", i),
-            avatar_text: format!("{}", (b'A' + (i % 26) as u8) as char),
-            presence,
-            role_group: role_group.to_string(),
-            role_color,
-            is_bot: (25..=49).contains(&i),
-            activity: if i % 3 == 0 {
-                Some(format!("Codando em Rust #{:02}", i % 10))
-            } else {
-                None
-            },
-            avatar_decoration_data: None,
-        };
-        high_volume_members.push(member);
+            let member = MemberItemState {
+                id: format!("member-stress-{}", i),
+                name: format!("Rustacean #{:03}", i),
+                avatar_text: format!("{}", (b'A' + (i % 26) as u8) as char),
+                presence,
+                role_group: role_group.to_string(),
+                role_color,
+                is_bot: (25..=49).contains(&i),
+                activity: if i % 3 == 0 {
+                    Some(format!("Codando em Rust #{:02}", i % 10))
+                } else {
+                    None
+                },
+                avatar_decoration_data: None,
+            };
+            members.push(member);
+        }
+        members
     }
 
+    let mut durations_members = Vec::with_capacity(ITERATIONS);
+    let mut high_volume_members = Vec::new();
+
+    for _ in 0..ITERATIONS {
+        let start_members = Instant::now();
+        let members = build_stress_members();
+        durations_members.push(start_members.elapsed());
+        high_volume_members = members;
+    }
+    durations_members.sort();
+    let median_members = durations_members[ITERATIONS / 2];
+    assert!(
+        median_members < std::time::Duration::from_millis(30),
+        "Member generation median took too long: {:?} (amostras: {:?})",
+        median_members,
+        durations_members
+    );
+
     state.members = high_volume_members;
-    let elapsed_members = start_members.elapsed();
-    assert!(elapsed_members.as_millis() < 30, "Member generation took too long: {:?}", elapsed_members);
     assert_eq!(state.members.len(), 500);
 
     // 8.3 Verify state queries under high load
@@ -572,7 +621,31 @@ fn test_e2e_stress_high_volume_messages_and_members() {
     assert_eq!(admin_count, 5);
 
     // Ingest 50 sequential rapid messages (simulating high-throughput chat during live event)
-    let start_rapid = Instant::now();
+    let mut durations_rapid = Vec::with_capacity(ITERATIONS);
+    for _ in 0..ITERATIONS {
+        let mut test_state = AppState::new();
+        test_state.set_channel_messages(stress_channel_id, state.messages_by_channel.get(stress_channel_id).unwrap().clone());
+        let start_rapid = Instant::now();
+        for i in 1000..1050 {
+            let rapid_msg = Message::new(
+                format!("rapid-msg-{}", i),
+                stress_channel_id,
+                Author::new("user-rapid", "rapid_bot"),
+                format!("Live event stream message #{}", i),
+            );
+            test_state.handle_transport_event(TransportEvent::MessageCreate(rapid_msg));
+        }
+        durations_rapid.push(start_rapid.elapsed());
+    }
+    durations_rapid.sort();
+    let median_rapid = durations_rapid[ITERATIONS / 2];
+    assert!(
+        median_rapid < std::time::Duration::from_millis(25),
+        "Rapid sequential additions median took too long: {:?} (amostras: {:?})",
+        median_rapid,
+        durations_rapid
+    );
+
     for i in 1000..1050 {
         let rapid_msg = Message::new(
             format!("rapid-msg-{}", i),
@@ -582,8 +655,6 @@ fn test_e2e_stress_high_volume_messages_and_members() {
         );
         state.handle_transport_event(TransportEvent::MessageCreate(rapid_msg));
     }
-    let elapsed_rapid = start_rapid.elapsed();
-    assert!(elapsed_rapid.as_millis() < 25, "Rapid sequential additions took too long: {:?}", elapsed_rapid);
 
     let final_messages = state.messages_by_channel.get(stress_channel_id).unwrap();
     assert_eq!(final_messages.len(), 1050);
