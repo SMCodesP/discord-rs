@@ -38,13 +38,32 @@ impl Default for LazyGuildCoordinator {
     }
 }
 
+static SHARED_COORDINATOR: std::sync::OnceLock<LazyGuildCoordinator> = std::sync::OnceLock::new();
+
 impl LazyGuildCoordinator {
+    /// Returns the global shared `LazyGuildCoordinator` instance alive per session.
+    pub fn shared() -> &'static LazyGuildCoordinator {
+        SHARED_COORDINATOR.get_or_init(LazyGuildCoordinator::new)
+    }
+
     pub fn new() -> Self {
         Self {
             active_guild_id: Arc::new(RwLock::new(None)),
             active_channel_id: Arc::new(RwLock::new(None)),
             channel_ranges: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Retorna as faixas ativas para um canal específico
+    pub async fn active_ranges_for_channel(&self, channel_id: &str) -> Vec<[usize; 2]> {
+        let map = self.channel_ranges.read().await;
+        map.get(channel_id).cloned().unwrap_or_else(|| vec![[0, 99]])
+    }
+
+    /// Reinicia as faixas para um canal (ex.: troca de canal)
+    pub async fn reset_channel_ranges(&self, channel_id: &str) {
+        let mut map = self.channel_ranges.write().await;
+        map.insert(channel_id.to_string(), vec![[0, 99]]);
     }
 
     /// Retorna o ID da guilda atualmente ativa
@@ -546,6 +565,27 @@ pub fn convert_list_item_to_state(
     }
 }
 
+/// Calculates the member list ranges for Opcode 14 based on the visible viewport indices.
+/// Discord always includes the first chunk `[0, 99]` and the chunks covering the visible window.
+pub fn calculate_ranges_for_viewport(visible_start: usize, visible_end: usize) -> Vec<[usize; 2]> {
+    let mut ranges = Vec::new();
+    ranges.push([0, 99]);
+
+    let chunk_size = 100;
+    let min_chunk = visible_start / chunk_size;
+    let max_chunk = visible_end / chunk_size;
+
+    for chunk in min_chunk..=max_chunk {
+        let r = [chunk * chunk_size, (chunk + 1) * chunk_size - 1];
+        if !ranges.contains(&r) {
+            ranges.push(r);
+        }
+    }
+
+    ranges.sort_by_key(|r| r[0]);
+    ranges
+}
+
 /// Applies parsed `GuildMemberListUpdate` operations into the active member list
 pub fn apply_member_list_update(
     existing_members: &mut Vec<MemberItemState>,
@@ -567,7 +607,11 @@ pub fn apply_member_list_update(
 
                 let start = range[0];
                 if start == 0 {
-                    *existing_members = converted;
+                    if existing_members.is_empty() || existing_members.len() <= converted.len() {
+                        *existing_members = converted;
+                    } else {
+                        existing_members.splice(0..converted.len(), converted);
+                    }
                 } else if start <= existing_members.len() {
                     let end_idx = (start + converted.len()).min(existing_members.len());
                     existing_members.splice(start..end_idx, converted);

@@ -972,10 +972,12 @@ impl Render for ChatView {
                                                 is_pinned,
                                                 is_own,
                                                 on_add_reaction: on_cm_add_rx,
+                                                on_edit: None,
                                                 on_reply: on_cm_reply,
                                                 on_copy_text: on_cm_copy_text,
                                                 on_copy_link: on_cm_copy_link,
                                                 on_copy_id: on_cm_copy_id,
+                                                on_mark_unread: None,
                                                 on_pin: on_cm_pin,
                                                 on_delete: on_cm_delete,
                                                 on_delete_shift: on_cm_delete_shift,
@@ -1286,6 +1288,16 @@ impl Render for ChatView {
             None
         };
 
+        let composer_channel_name = if is_dm {
+            if channel_name.starts_with('@') {
+                channel_name.clone()
+            } else {
+                format!("@{}", channel_name)
+            }
+        } else {
+            channel_name.clone()
+        };
+
         let main_chat_col = div()
             .relative()
             .flex_1()
@@ -1313,7 +1325,7 @@ impl Render for ChatView {
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)
-                    .channel_name(channel_name)
+                    .channel_name(composer_channel_name)
                     .replying_to(self.replying_to.clone())
                     .mention_author(true)
                     .typing_users(typing_users)

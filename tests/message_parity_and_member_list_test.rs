@@ -49,10 +49,12 @@ fn test_context_menu_items_for_own_versus_other_message() {
         is_pinned: false,
         is_own: true,
         on_add_reaction: None,
+        on_edit: None,
         on_reply: None,
         on_copy_text: None,
         on_copy_link: Some(Arc::new(|_m, _w, _cx| {})),
         on_copy_id: None,
+        on_mark_unread: None,
         on_pin: None,
         on_delete: Some(Arc::new(move |_m, _w, _cx| {
             deleted_clone.store(true, Ordering::SeqCst);
@@ -69,10 +71,12 @@ fn test_context_menu_items_for_own_versus_other_message() {
         is_pinned: false,
         is_own: false,
         on_add_reaction: None,
+        on_edit: None,
         on_reply: None,
         on_copy_text: None,
         on_copy_link: Some(Arc::new(|_m, _w, _cx| {})),
         on_copy_id: None,
+        on_mark_unread: None,
         on_pin: None,
         on_delete: Some(Arc::new(|_m, _w, _cx| {
             panic!("Excluir não deve ser invocado em mensagem alheia");
@@ -487,4 +491,163 @@ fn test_message_create_author_role_color_cached_when_outside_member_list() {
     let color_zero = resolve_member_role_color(&no_color_roles, &roles);
     assert_eq!(color_zero, 0);
 }
+
+#[test]
+fn test_format_message_full_timestamp_pt_br() {
+    use chrono::DateTime;
+    use discord_rs::chat::message_list::format_message_full_timestamp;
+
+    // 2026-10-11T15:30:00Z -> domingo, 11 de outubro de 2026 às 15:30
+    let ts = DateTime::from_timestamp(1791732600, 0).unwrap();
+    let formatted = format_message_full_timestamp(ts);
+    assert!(formatted.contains("11 de outubro de 2026"), "Deve conter dia, mês e ano em pt-BR: {}", formatted);
+    assert!(formatted.contains("15:30"), "Deve conter horário formatado: {}", formatted);
+    assert!(formatted.contains("às"), "Deve conter 'às' no padrão canônico LLLL: {}", formatted);
+}
+
+#[test]
+fn test_opcode_14_calculate_ranges_for_viewport() {
+    use discord_rs::protocol::cache::lazy_guilds::calculate_ranges_for_viewport;
+
+    // Viewport no topo [0, 50] -> apenas primeira faixa [[0, 99]]
+    let r1 = calculate_ranges_for_viewport(0, 50);
+    assert_eq!(r1, vec![[0, 99]]);
+
+    // Viewport cruzando a fronteira dos 100 [80, 120] -> [[0, 99], [100, 199]]
+    let r2 = calculate_ranges_for_viewport(80, 120);
+    assert_eq!(r2, vec![[0, 99], [100, 199]]);
+
+    // Viewport dentro da segunda faixa [140, 180] -> mantém [0, 99] + [100, 199]
+    let r3 = calculate_ranges_for_viewport(140, 180);
+    assert_eq!(r3, vec![[0, 99], [100, 199]]);
+
+    // Viewport rolando até a terceira faixa [220, 260] -> mantém [0, 99] + [200, 299]
+    let r4 = calculate_ranges_for_viewport(220, 260);
+    assert_eq!(r4, vec![[0, 99], [200, 299]]);
+}
+
+#[test]
+fn test_apply_member_list_update_preserves_multirange_members() {
+    use discord_rs::protocol::cache::lazy_guilds::{
+        apply_member_list_update, GuildMemberListUpdate, MemberListItem, MemberListMember,
+        MemberListOp,
+    };
+    use discord_rs::app::state::{MemberItemState, PresenceStatus};
+
+    let mut members: Vec<MemberItemState> = Vec::new();
+
+    // 1. Simular primeiro SYNC de [0, 99] com 100 membros
+    let mut initial_items = Vec::new();
+    for i in 0..100 {
+        initial_items.push(MemberListItem::Member(Box::new(MemberListMember {
+            id: format!("user-{}", i),
+            username: format!("User {}", i),
+            global_name: None,
+            avatar: None,
+            avatar_decoration_data: None,
+            roles: Vec::new(),
+            presence: PresenceStatus::Online,
+            activity: None,
+            is_bot: false,
+        })));
+    }
+    let update_chunk_1 = GuildMemberListUpdate {
+        guild_id: "guild-multirange".into(),
+        id: "everyone".into(),
+        member_count: Some(200),
+        online_count: Some(200),
+        groups: Vec::new(),
+        ops: vec![MemberListOp::Sync {
+            range: [0, 99],
+            items: initial_items,
+        }],
+    };
+    apply_member_list_update(&mut members, &update_chunk_1, &[]);
+    assert_eq!(members.len(), 100);
+
+    // 2. Simular segundo SYNC de [100, 199] com mais 100 membros
+    let mut second_items = Vec::new();
+    for i in 100..200 {
+        second_items.push(MemberListItem::Member(Box::new(MemberListMember {
+            id: format!("user-{}", i),
+            username: format!("User {}", i),
+            global_name: None,
+            avatar: None,
+            avatar_decoration_data: None,
+            roles: Vec::new(),
+            presence: PresenceStatus::Online,
+            activity: None,
+            is_bot: false,
+        })));
+    }
+    let update_chunk_2 = GuildMemberListUpdate {
+        guild_id: "guild-multirange".into(),
+        id: "everyone".into(),
+        member_count: Some(200),
+        online_count: Some(200),
+        groups: Vec::new(),
+        ops: vec![MemberListOp::Sync {
+            range: [100, 199],
+            items: second_items,
+        }],
+    };
+    apply_member_list_update(&mut members, &update_chunk_2, &[]);
+    assert_eq!(members.len(), 200, "Lista total deve conter 200 membros após segundo chunk");
+
+    // 3. Simular atualização do primeiro chunk [0, 99]: NÃO pode destruir os membros [100..200]
+    let mut refreshed_items = Vec::new();
+    for i in 0..100 {
+        refreshed_items.push(MemberListItem::Member(Box::new(MemberListMember {
+            id: format!("user-{}-updated", i),
+            username: format!("User {} Updated", i),
+            global_name: None,
+            avatar: None,
+            avatar_decoration_data: None,
+            roles: Vec::new(),
+            presence: PresenceStatus::Online,
+            activity: None,
+            is_bot: false,
+        })));
+    }
+    let update_chunk_refresh = GuildMemberListUpdate {
+        guild_id: "guild-multirange".into(),
+        id: "everyone".into(),
+        member_count: Some(200),
+        online_count: Some(200),
+        groups: Vec::new(),
+        ops: vec![MemberListOp::Sync {
+            range: [0, 99],
+            items: refreshed_items,
+        }],
+    };
+    apply_member_list_update(&mut members, &update_chunk_refresh, &[]);
+    assert_eq!(members.len(), 200, "Atualizar [0, 99] NÃO deve truncar membros das faixas superiores!");
+    assert_eq!(members[0].name, "User 0 Updated");
+    assert_eq!(members[150].name, "User 150");
+}
+
+#[tokio::test]
+async fn test_lazy_guild_coordinator_singleton_and_viewport_ranges() {
+    use discord_rs::protocol::cache::lazy_guilds::LazyGuildCoordinator;
+
+    let coordinator = LazyGuildCoordinator::shared();
+
+    // Focar canal e guild inicializa com [[0, 99]]
+    let payload = coordinator.focus_guild_and_channel("g1", "c1").await;
+    assert_eq!(payload["op"], 14);
+    assert_eq!(payload["d"]["channels"]["c1"][0], serde_json::json!([0, 99]));
+
+    // Atualizar faixas para o canal c1 ao rolar a lista
+    let updated_payload = coordinator.update_viewport_ranges("g1", "c1", vec![[0, 99], [100, 199]]).await;
+    assert_eq!(updated_payload["d"]["channels"]["c1"].as_array().unwrap().len(), 2);
+
+    let active = coordinator.active_ranges_for_channel("c1").await;
+    assert_eq!(active, vec![[0, 99], [100, 199]]);
+
+    // Resetar faixas (ex.: troca de canal) reinicia para [[0, 99]]
+    coordinator.reset_channel_ranges("c1").await;
+    let reset_ranges = coordinator.active_ranges_for_channel("c1").await;
+    assert_eq!(reset_ranges, vec![[0, 99]]);
+}
+
 

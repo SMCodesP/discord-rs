@@ -477,8 +477,8 @@ impl RenderOnce for ChatComposer {
         let reply_msg_id = self.replying_to.as_ref().map(|m| m.id.clone());
 
         let ph = self.placeholder.unwrap_or_else(|| {
-            if self.channel_name.starts_with('@') {
-                format!("Conversar com {}", self.channel_name).into()
+            if self.channel_name.starts_with('@') || self.channel_name.starts_with('#') {
+                format!("Conversar em {}", self.channel_name).into()
             } else {
                 format!("Conversar em #{}", self.channel_name).into()
             }

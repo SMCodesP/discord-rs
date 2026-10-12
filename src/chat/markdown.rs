@@ -653,7 +653,7 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
                 div()
                     .p(space_4())
                     .text_size(font_size_sm())
-                    .text_color(rgb(0xe0e2e5))
+                    .text_color(text_primary())
                     .font_family(FONT_FAMILY_CODE)
                     .child(content.clone()),
             )
@@ -765,8 +765,8 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
 
         InlineSpan::InlineCode(code) => {
             div()
-                .bg(rgb(HEX_BG_USER_BAR))
-                .text_color(rgb(0xe0e2e5))
+                .bg(bg_user_bar())
+                .text_color(text_primary())
                 .rounded(radius_xs())
                 .px(space_2())
                 .py(px(1.0))
@@ -779,8 +779,8 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
         InlineSpan::Spoiler(children) => {
             // Discord spoiler pill: dark charcoal pill with masked text that reveals on hover
             div()
-                .bg(rgb(0x232428))
-                .hover(|s| s.bg(rgb(0x383a40)))
+                .bg(bg_user_bar())
+                .hover(|s| s.bg(bg_chat_hover()))
                 .rounded(radius_xs())
                 .px(space_2())
                 .py(px(1.0))
@@ -837,8 +837,8 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
 
         InlineSpan::Link { label, .. } => {
             div()
-                .text_color(rgb(0x00a8fc))
-                .hover(|s| s.border_b_1().border_color(rgb(0x00a8fc)))
+                .text_color(rgb(0x76aff6)) // TOKEN FALTANDO: --text-link
+                .hover(|s| s.border_b_1().border_color(rgb(0x76aff6))) // TOKEN FALTANDO: --text-link
                 .cursor_pointer()
                 .child(label.clone())
         }

@@ -28,6 +28,15 @@ impl AppState {
 
         if self.selected_guild_id != guild_id {
             self.members.clear();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
+                if let Some(ref cid) = self.selected_channel_id {
+                    let cid_clone = cid.clone();
+                    handle.spawn(async move {
+                        coordinator.reset_channel_ranges(&cid_clone).await;
+                    });
+                }
+            }
         }
         self.selected_guild_id = guild_id;
         if let Some(ref gid) = self.selected_guild_id {
@@ -269,6 +278,15 @@ impl AppState {
         if let Some((cid, cname, gname)) = voice_to_connect {
             self.connect_voice(&cid, &cname, &gname);
         }
+        if self.selected_channel_id.as_deref() != Some(&channel_id) {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
+                let cid_clone = channel_id.clone();
+                handle.spawn(async move {
+                    coordinator.reset_channel_ranges(&cid_clone).await;
+                });
+            }
+        }
         self.selected_channel_id = Some(channel_id.clone());
         self.typing_users = self.get_active_typing_users(&channel_id);
 
@@ -314,6 +332,20 @@ impl AppState {
                     if let Err(e) = cm_sub.subscribe_guild_members(&gid_sub, &cid_sub).await {
                         log::warn!("Falha ao assinar membros da guilda {} no canal {}: {:?}", gid_sub, cid_sub, e);
                     }
+                });
+            }
+        }
+    }
+
+    /// Atualiza as faixas de membros visíveis (Opcode 14 ao rolar a lista de membros além dos 100 primeiros)
+    pub fn update_member_viewport(&mut self, ranges: Vec<[usize; 2]>) {
+        if let (Some(gid), Some(cid)) = (&self.selected_guild_id, &self.selected_channel_id) {
+            let gid = gid.clone();
+            let cid = cid.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
+                handle.spawn(async move {
+                    let _payload = coordinator.update_viewport_ranges(&gid, &cid, ranges).await;
                 });
             }
         }
