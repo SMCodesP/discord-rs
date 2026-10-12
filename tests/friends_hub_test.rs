@@ -1,5 +1,5 @@
 use discord_rs::app::state::{
-    AppState, FriendItemState, FriendsTab, MessageRequestItem, MessageRequestsSubTab,
+    ActiveNowKind, AppState, FriendItemState, FriendsTab, MessageRequestItem, MessageRequestsSubTab,
     PresenceStatus,
 };
 use discord_rs::domain::user::{Activity, ActivityType, PresenceStatus as DomainPresenceStatus};
@@ -132,6 +132,7 @@ fn test_active_now_aggregation_from_presence() {
             state: Some("In Lobby".into()),
             created_at: Some(1700000000),
             emoji: None,
+            ..Default::default()
         }),
         custom_status: None,
     });
@@ -154,6 +155,7 @@ fn test_active_now_aggregation_from_presence() {
             state: Some("Artist Name".into()),
             created_at: None,
             emoji: None,
+            ..Default::default()
         }),
         custom_status: None,
     });
@@ -613,6 +615,167 @@ fn test_friends_search_filter_in_memory() {
     let rows_online_alice = discord_rs::app::friends_hub::collect_friend_rows(&state, "alice");
     assert_eq!(rows_online_alice.len(), 1);
     assert_eq!(rows_online_alice[0].user_id, "u-1");
+}
+
+#[test]
+fn test_active_now_presence_with_assets_and_timestamps() {
+    let mut state = AppState::new();
+    state.friends.clear();
+
+    state.friends.push(FriendItemState {
+        id: "friend-spotify".into(),
+        username: "music_fan".into(),
+        display_name: "MusicFan".into(),
+        avatar_url: None,
+        avatar_text: "M".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+
+    // 1. Spotify activity with album art and timestamps
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let start_ms = now_ms - 60_000;
+    let end_ms = now_ms + 120_000;
+
+    let mut act = Activity::new("Spotify", ActivityType::Listening);
+    act.details = Some("Bohemian Rhapsody".into());
+    act.state = Some("Queen".into());
+    act.timestamps = Some(discord_rs::domain::user::ActivityTimestamps {
+        start: Some(start_ms),
+        end: Some(end_ms),
+    });
+    act.assets = Some(discord_rs::domain::user::ActivityAssets {
+        large_image: Some("spotify:ab67616d0000b273deadbeef".into()),
+        large_text: Some("A Night at the Opera".into()),
+        small_image: None,
+        small_text: None,
+    });
+
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-spotify".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act),
+        custom_status: None,
+    });
+
+    assert_eq!(state.active_now_items.len(), 1);
+    let item = &state.active_now_items[0];
+    assert_eq!(item.user_id, "friend-spotify");
+    assert_eq!(item.kind, ActiveNowKind::Spotify);
+    assert_eq!(
+        item.large_image_url,
+        Some("https://i.scdn.co/image/ab67616d0000b273deadbeef".to_string())
+    );
+    assert_eq!(item.spotify_album.as_deref(), Some("A Night at the Opera"));
+    assert_eq!(item.timestamps_start, Some(start_ms));
+    assert_eq!(item.timestamps_end, Some(end_ms));
+    assert!(item.spotify_progress_text.is_some());
+    let (cur, tot) = item.spotify_progress_text.as_ref().unwrap();
+    assert_eq!(cur, "1:00");
+    assert_eq!(tot, "3:00");
+    let ratio = item.spotify_progress_pct.unwrap();
+    assert!((ratio - 0.333).abs() < 0.05);
+
+    // 2. Spotify without timestamps -> no progress bar (zero mocks)
+    let mut act_no_ts = Activity::new("Spotify", ActivityType::Listening);
+    act_no_ts.details = Some("Song without timestamps".into());
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-spotify".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act_no_ts),
+        custom_status: None,
+    });
+    assert_eq!(state.active_now_items.len(), 1);
+    let item_no_ts = &state.active_now_items[0];
+    assert_eq!(item_no_ts.large_image_url, None);
+    assert_eq!(item_no_ts.spotify_progress_text, None);
+    assert_eq!(item_no_ts.spotify_progress_pct, None);
+}
+
+#[test]
+fn test_active_now_presence_application_and_proxy_assets() {
+    let mut state = AppState::new();
+    state.friends.clear();
+
+    state.friends.push(FriendItemState {
+        id: "friend-gamer".into(),
+        username: "pro_gamer".into(),
+        display_name: "ProGamer".into(),
+        avatar_url: None,
+        avatar_text: "P".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+
+    // 1. Application asset (numeric snowflake application_id and asset ID)
+    let mut act_app = Activity::playing("Cool Game");
+    act_app.application_id = Some("123456789012345678".into());
+    act_app.assets = Some(discord_rs::domain::user::ActivityAssets {
+        large_image: Some("987654321098765432".into()),
+        large_text: Some("Level 50 Boss".into()),
+        small_image: Some("112233445566778899".into()),
+        small_text: Some("Warrior Class".into()),
+    });
+
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-gamer".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act_app),
+        custom_status: None,
+    });
+
+    assert_eq!(state.active_now_items.len(), 1);
+    let item_app = &state.active_now_items[0];
+    assert_eq!(
+        item_app.large_image_url,
+        Some("https://cdn.discordapp.com/app-assets/123456789012345678/987654321098765432.png".into())
+    );
+    assert_eq!(
+        item_app.small_image_url,
+        Some("https://cdn.discordapp.com/app-assets/123456789012345678/112233445566778899.png".into())
+    );
+    assert_eq!(item_app.large_image_text.as_deref(), Some("Level 50 Boss"));
+    assert_eq!(item_app.small_image_text.as_deref(), Some("Warrior Class"));
+
+    // 2. Media proxy asset (mp:external/...)
+    let mut act_proxy = Activity::playing("Custom RPC");
+    act_proxy.assets = Some(discord_rs::domain::user::ActivityAssets {
+        large_image: Some("mp:external/hash123/https/example.org/hero.png".into()),
+        large_text: None,
+        small_image: None,
+        small_text: None,
+    });
+
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-gamer".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act_proxy),
+        custom_status: None,
+    });
+
+    assert_eq!(state.active_now_items.len(), 1);
+    let item_proxy = &state.active_now_items[0];
+    assert_eq!(
+        item_proxy.large_image_url,
+        Some("https://media.discordapp.net/external/hash123/https/example.org/hero.png".into())
+    );
+
+    // 3. Activity without assets -> without image
+    let act_no_asset = Activity::playing("Offline Game");
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-gamer".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act_no_asset),
+        custom_status: None,
+    });
+    assert_eq!(state.active_now_items.len(), 1);
+    let item_no_asset = &state.active_now_items[0];
+    assert_eq!(item_no_asset.large_image_url, None);
+    assert_eq!(item_no_asset.small_image_url, None);
 }
 
 

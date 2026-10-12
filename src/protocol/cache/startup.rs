@@ -107,7 +107,7 @@ mod tests {
         let cache_dir = CacheDirectory::with_root(temp_dir);
 
         // Preenche cache simulando sessão anterior
-        let user = User::new("user_me", "Smcodes");
+        let user = User::new("user_me", "usuario_a");
         cache_dir.save_current_user(&user)?;
 
         let mut chan = Channel::new("chan_10", "geral", ChannelType::Text);
@@ -137,7 +137,7 @@ mod tests {
         let hydrated = InstantStartupOrchestrator::hydrate_from_disk(&cache_dir);
 
         assert!(hydrated.is_from_disk_cache);
-        assert_eq!(hydrated.current_user.unwrap().username, "Smcodes");
+        assert_eq!(hydrated.current_user.unwrap().username, "usuario_a");
         assert_eq!(hydrated.guilds.len(), 1);
         assert_eq!(hydrated.active_guild.unwrap().name, "Rust Brasil");
         assert_eq!(hydrated.active_channel.unwrap().name, "geral");

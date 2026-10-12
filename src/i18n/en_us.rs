@@ -112,8 +112,6 @@ pub const DICTIONARY: &[(&str, &str)] = &[
     ("auth.connect", "Connect"),
     ("auth.connecting", "Connecting..."),
     ("auth.connected", "Connected"),
-    ("auth.mock_mode", "Demo Mode (Mock)"),
-    ("auth.demo_mode", "Demo Mode (Mock)"),
     ("auth.disconnect", "Disconnect"),
     ("auth.failed", "Authentication failed"),
     ("auth.auth_failed", "Authentication failed"),
@@ -126,7 +124,6 @@ pub const DICTIONARY: &[(&str, &str)] = &[
     ("connection.connecting", "Connecting..."),
     ("connection.connected", "Connected"),
     ("connection.disconnected", "Disconnected"),
-    ("connection.mock", "Demo Mode (Mock)"),
     ("connection.disconnect", "Disconnect"),
     ("connection.failed", "Authentication failed"),
 

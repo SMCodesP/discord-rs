@@ -604,7 +604,7 @@ impl AppState {
         let connection_status = if has_token {
             "Conectando ao Discord...".to_string()
         } else {
-            "Modo Demonstração (Offline)".to_string()
+            "Não conectado".to_string()
         };
 
         let messages_by_channel = generate_seed_messages();
