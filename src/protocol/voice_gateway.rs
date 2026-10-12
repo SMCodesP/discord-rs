@@ -1170,10 +1170,12 @@ async fn run_voice_loop(
 
                 let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel::<()>();
                 let (hb_interval_tx, hb_interval_rx) = tokio::sync::oneshot::channel::<u64>();
+                let last_heartbeat_sent = Arc::new(Mutex::new(None::<std::time::Instant>));
 
                 // Heartbeat Background Task
                 let cmd_tx_hb = cmd_tx.clone();
                 let sm_hb = state_machine.clone();
+                let last_hb_sent_clone = last_heartbeat_sent.clone();
                 tokio::spawn(async move {
                     let interval_ms = match hb_interval_rx.await {
                         Ok(interval) => interval,
@@ -1185,6 +1187,7 @@ async fn run_voice_loop(
                         tokio::select! {
                             _ = interval_timer.tick() => {
                                 let timestamp = chrono::Utc::now().timestamp_millis() as u64;
+                                *last_hb_sent_clone.lock().await = Some(std::time::Instant::now());
                                 let action = {
                                     let mut sm = sm_hb.write().await;
                                     sm.trigger_heartbeat(Some(timestamp))
@@ -1247,10 +1250,19 @@ async fn run_voice_loop(
                                                         let _ = event_sender.send(VoiceGatewayEvent::Speaking(speaking));
                                                     }
                                                     VoiceGatewayAction::HeartbeatAckReceived { timestamp } => {
-                                                        let latency = timestamp.map(|t| {
-                                                            let now = chrono::Utc::now().timestamp_millis() as u64;
-                                                            now.saturating_sub(t)
+                                                        let now = chrono::Utc::now().timestamp_millis() as u64;
+                                                        let mut latency = timestamp.and_then(|t| {
+                                                            if now >= t && now - t < 60_000 {
+                                                                Some(now - t)
+                                                            } else {
+                                                                None
+                                                            }
                                                         });
+                                                        if latency.is_none() {
+                                                            if let Some(inst) = last_heartbeat_sent.lock().await.take() {
+                                                                latency = Some(inst.elapsed().as_millis() as u64);
+                                                            }
+                                                        }
                                                         let _ = event_sender.send(VoiceGatewayEvent::HeartbeatAck { latency_ms: latency });
                                                     }
                                                     VoiceGatewayAction::Resumed => {

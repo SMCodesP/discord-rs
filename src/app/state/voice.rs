@@ -304,6 +304,56 @@ impl AppState {
         }
     }
 
+    /// Sets selected audio input device (microfone) and dynamically switches hardware stream
+    pub fn set_input_device(&mut self, device_id: Option<String>) {
+        if let Some(ref mut call) = self.active_voice_call {
+            call.selected_input_device = device_id.clone();
+            if let Some(ref session) = call.voice_session {
+                let session = session.clone();
+                let dev_id = device_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = session.switch_input_device(dev_id).await {
+                        log::error!("[AppState] Falha ao trocar dispositivo de entrada: {:?}", e);
+                    }
+                });
+            }
+        }
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let dev_id = device_id.clone();
+            tokio::spawn(async move {
+                if let Some(session) = cm.active_voice_session().await {
+                    let _ = session.switch_input_device(dev_id).await;
+                }
+            });
+        }
+    }
+
+    /// Sets selected audio output device (alto-falante/fone) and dynamically switches hardware stream
+    pub fn set_output_device(&mut self, device_id: Option<String>) {
+        if let Some(ref mut call) = self.active_voice_call {
+            call.selected_output_device = device_id.clone();
+            if let Some(ref session) = call.voice_session {
+                let session = session.clone();
+                let dev_id = device_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = session.switch_output_device(dev_id).await {
+                        log::error!("[AppState] Falha ao trocar dispositivo de saída: {:?}", e);
+                    }
+                });
+            }
+        }
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let dev_id = device_id.clone();
+            tokio::spawn(async move {
+                if let Some(session) = cm.active_voice_session().await {
+                    let _ = session.switch_output_device(dev_id).await;
+                }
+            });
+        }
+    }
+
     /// Toggles local camera broadcasting state
     pub fn toggle_camera(&mut self) {
         // Transmissão de vídeo ainda não suportada (PATCH PENDENTE); não altera a flag para não fingir estado.
