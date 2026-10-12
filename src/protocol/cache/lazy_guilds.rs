@@ -122,6 +122,359 @@ impl LazyGuildCoordinator {
     }
 }
 
+// ============================================================================
+// GUILD_MEMBER_LIST_UPDATE Protocol Data Structures & Parser
+// ============================================================================
+
+use crate::app::state::{MemberItemState, PresenceStatus};
+use crate::domain::guild::Role;
+use crate::domain::user::AvatarDecorationData;
+
+/// Represents a parsed group header inside a GUILD_MEMBER_LIST_UPDATE event
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberListGroup {
+    pub id: String,
+    pub count: usize,
+}
+
+/// Represents an individual member received in a GUILD_MEMBER_LIST_UPDATE event
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberListMember {
+    pub id: String,
+    pub username: String,
+    pub global_name: Option<String>,
+    pub avatar: Option<String>,
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
+    pub roles: Vec<String>,
+    pub presence: PresenceStatus,
+    pub activity: Option<String>,
+    pub is_bot: bool,
+}
+
+/// An item inside an operation: either a role group header or a member
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberListItem {
+    Group(MemberListGroup),
+    Member(Box<MemberListMember>),
+}
+
+/// An operation inside GUILD_MEMBER_LIST_UPDATE
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberListOp {
+    Sync {
+        range: [usize; 2],
+        items: Vec<MemberListItem>,
+    },
+    Insert {
+        index: usize,
+        item: MemberListItem,
+    },
+    Update {
+        index: usize,
+        item: MemberListItem,
+    },
+    Delete {
+        index: usize,
+    },
+}
+
+/// Parsed `GUILD_MEMBER_LIST_UPDATE` Discord Gateway event
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildMemberListUpdate {
+    pub guild_id: String,
+    pub id: String,
+    pub member_count: Option<usize>,
+    pub online_count: Option<usize>,
+    pub groups: Vec<MemberListGroup>,
+    pub ops: Vec<MemberListOp>,
+}
+
+/// Resolves the canonical role color for a member given their assigned role IDs and the guild's roles.
+/// Sorts matched roles by `position` descending and returns the color of the highest role with non-zero color.
+pub fn resolve_member_role_color(member_roles: &[String], guild_roles: &[Role]) -> u32 {
+    let mut matched: Vec<&Role> = guild_roles
+        .iter()
+        .filter(|r| member_roles.iter().any(|rid| rid == &r.id))
+        .collect();
+
+    // Sort by role hierarchy position descending (highest role wins)
+    matched.sort_by(|a, b| b.position.cmp(&a.position));
+
+    for role in matched {
+        if role.color != 0 {
+            return role.color;
+        }
+    }
+    0
+}
+
+/// Resolves the hoisted group name for a member given their assigned role IDs and the guild's roles.
+/// Sorts hoisted roles by `position` descending and returns the highest role's name.
+pub fn resolve_member_role_group(member_roles: &[String], guild_roles: &[Role]) -> Option<String> {
+    let mut matched: Vec<&Role> = guild_roles
+        .iter()
+        .filter(|r| r.hoist && member_roles.iter().any(|rid| rid == &r.id))
+        .collect();
+
+    matched.sort_by(|a, b| b.position.cmp(&a.position));
+
+    matched.first().map(|r| r.name.clone())
+}
+
+/// Parses a `GUILD_MEMBER_LIST_UPDATE` Gateway event from raw JSON
+pub fn parse_guild_member_list_update(val: &serde_json::Value) -> Option<GuildMemberListUpdate> {
+    let d = val.get("d").unwrap_or(val);
+    let guild_id = d.get("guild_id")?.as_str()?.to_string();
+    let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("everyone").to_string();
+    let member_count = d.get("member_count").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let online_count = d.get("online_count").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+    let mut groups = Vec::new();
+    if let Some(groups_arr) = d.get("groups").and_then(|v| v.as_array()) {
+        for g in groups_arr {
+            if let (Some(gid), Some(cnt)) = (
+                g.get("id").and_then(|v| v.as_str()),
+                g.get("count").and_then(|v| v.as_u64()),
+            ) {
+                groups.push(MemberListGroup {
+                    id: gid.to_string(),
+                    count: cnt as usize,
+                });
+            }
+        }
+    }
+
+    let mut ops = Vec::new();
+    if let Some(ops_arr) = d.get("ops").and_then(|v| v.as_array()) {
+        for op_val in ops_arr {
+            let op_type = op_val.get("op").and_then(|v| v.as_str()).unwrap_or("");
+            match op_type {
+                "SYNC" => {
+                    let range_arr = op_val.get("range").and_then(|v| v.as_array());
+                    let range = if let Some(r) = range_arr {
+                        if r.len() >= 2 {
+                            [
+                                r[0].as_u64().unwrap_or(0) as usize,
+                                r[1].as_u64().unwrap_or(99) as usize,
+                            ]
+                        } else {
+                            [0, 99]
+                        }
+                    } else {
+                        [0, 99]
+                    };
+
+                    let mut items = Vec::new();
+                    if let Some(items_arr) = op_val.get("items").and_then(|v| v.as_array()) {
+                        for it in items_arr {
+                            if let Some(group_obj) = it.get("group") {
+                                if let (Some(gid), Some(cnt)) = (
+                                    group_obj.get("id").and_then(|v| v.as_str()),
+                                    group_obj.get("count").and_then(|v| v.as_u64()),
+                                ) {
+                                    items.push(MemberListItem::Group(MemberListGroup {
+                                        id: gid.to_string(),
+                                        count: cnt as usize,
+                                    }));
+                                }
+                            } else if let Some(member_obj) = it.get("member") {
+                                if let Some(parsed_m) = parse_member_obj(member_obj) {
+                                    items.push(MemberListItem::Member(Box::new(parsed_m)));
+                                }
+                            }
+                        }
+                    }
+                    ops.push(MemberListOp::Sync { range, items });
+                }
+                "INSERT" => {
+                    let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    if let Some(item_val) = op_val.get("item") {
+                        if let Some(group_obj) = item_val.get("group") {
+                            if let (Some(gid), Some(cnt)) = (
+                                group_obj.get("id").and_then(|v| v.as_str()),
+                                group_obj.get("count").and_then(|v| v.as_u64()),
+                            ) {
+                                ops.push(MemberListOp::Insert {
+                                    index,
+                                    item: MemberListItem::Group(MemberListGroup {
+                                        id: gid.to_string(),
+                                        count: cnt as usize,
+                                    }),
+                                });
+                            }
+                        } else if let Some(member_obj) = item_val.get("member") {
+                            if let Some(parsed_m) = parse_member_obj(member_obj) {
+                                ops.push(MemberListOp::Insert {
+                                    index,
+                                    item: MemberListItem::Member(Box::new(parsed_m)),
+                                });
+                            }
+                        }
+                    }
+                }
+                "UPDATE" => {
+                    let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    if let Some(item_val) = op_val.get("item") {
+                        if let Some(member_obj) = item_val.get("member") {
+                            if let Some(parsed_m) = parse_member_obj(member_obj) {
+                                ops.push(MemberListOp::Update {
+                                    index,
+                                    item: MemberListItem::Member(Box::new(parsed_m)),
+                                });
+                            }
+                        }
+                    }
+                }
+                "DELETE" => {
+                    let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    ops.push(MemberListOp::Delete { index });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Some(GuildMemberListUpdate {
+        guild_id,
+        id,
+        member_count,
+        online_count,
+        groups,
+        ops,
+    })
+}
+
+fn parse_member_obj(val: &serde_json::Value) -> Option<MemberListMember> {
+    let user = val.get("user")?;
+    let id = user.get("id")?.as_str()?.to_string();
+    let username = user.get("username")?.as_str()?.to_string();
+    let global_name = user.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
+    let avatar = user.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
+    let is_bot = user.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let avatar_decoration_data = user.get("avatar_decoration_data").and_then(|v| {
+        serde_json::from_value(v.clone()).ok()
+    });
+
+    let roles: Vec<String> = val
+        .get("roles")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let presence = if let Some(p) = val.get("presence") {
+        match p.get("status").and_then(|v| v.as_str()).unwrap_or("offline") {
+            "online" => PresenceStatus::Online,
+            "idle" => PresenceStatus::Idle,
+            "dnd" => PresenceStatus::DoNotDisturb,
+            _ => PresenceStatus::Offline,
+        }
+    } else {
+        PresenceStatus::Offline
+    };
+
+    let activity = val.get("presence").and_then(|p| {
+        p.get("activities")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|act| act.get("name").and_then(|v| v.as_str()))
+            .map(ToString::to_string)
+    });
+
+    Some(MemberListMember {
+        id,
+        username,
+        global_name,
+        avatar,
+        avatar_decoration_data,
+        roles,
+        presence,
+        activity,
+        is_bot,
+    })
+}
+
+/// Converts a `MemberListMember` into a `MemberItemState` resolving role color and group
+pub fn convert_member_to_item_state(
+    member: &MemberListMember,
+    guild_roles: &[Role],
+) -> MemberItemState {
+    let display = member.global_name.as_deref().unwrap_or(&member.username);
+    let avatar_text = display.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".to_string());
+    let role_color = resolve_member_role_color(&member.roles, guild_roles);
+    let role_group = resolve_member_role_group(&member.roles, guild_roles)
+        .unwrap_or_else(|| {
+            if member.presence == PresenceStatus::Offline {
+                "OFFLINE".to_string()
+            } else if member.is_bot {
+                "BOTS".to_string()
+            } else {
+                "DISPONÍVEL".to_string()
+            }
+        });
+
+    MemberItemState {
+        id: member.id.clone(),
+        name: display.to_string(),
+        avatar_text,
+        presence: member.presence,
+        role_group,
+        role_color,
+        is_bot: member.is_bot,
+        activity: member.activity.clone(),
+        avatar_decoration_data: member.avatar_decoration_data.clone(),
+    }
+}
+
+/// Applies parsed `GuildMemberListUpdate` operations into the active member list
+pub fn apply_member_list_update(
+    existing_members: &mut Vec<MemberItemState>,
+    update: &GuildMemberListUpdate,
+    guild_roles: &[Role],
+) {
+    for op in &update.ops {
+        match op {
+            MemberListOp::Sync { items, .. } => {
+                for it in items {
+                    if let MemberListItem::Member(m) = it {
+                        let state = convert_member_to_item_state(m, guild_roles);
+                        if let Some(pos) = existing_members.iter().position(|em| em.id == state.id) {
+                            existing_members[pos] = state;
+                        } else {
+                            existing_members.push(state);
+                        }
+                    }
+                }
+            }
+            MemberListOp::Insert { item, .. } => {
+                if let MemberListItem::Member(m) = item {
+                    let state = convert_member_to_item_state(m, guild_roles);
+                    if let Some(pos) = existing_members.iter().position(|em| em.id == state.id) {
+                        existing_members[pos] = state;
+                    } else {
+                        existing_members.push(state);
+                    }
+                }
+            }
+            MemberListOp::Update { item, .. } => {
+                if let MemberListItem::Member(m) = item {
+                    let state = convert_member_to_item_state(m, guild_roles);
+                    if let Some(pos) = existing_members.iter().position(|em| em.id == state.id) {
+                        existing_members[pos] = state;
+                    }
+                }
+            }
+            MemberListOp::Delete { .. } => {
+                // Positional deletion from ranged member list
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +501,88 @@ mod tests {
         let first_range = &general_ranges.as_array().unwrap()[0];
         assert_eq!(first_range[0].as_u64(), Some(0));
         assert_eq!(first_range[1].as_u64(), Some(99));
+    }
+
+    #[test]
+    fn test_resolve_member_role_color_hierarchy() {
+        let roles = vec![
+            Role::new("r1", "Admin").with_color(0xe91e63).with_position(10),
+            Role::new("r2", "Mod").with_color(0x2ecc71).with_position(5),
+            Role::new("r3", "Vip").with_color(0x3498db).with_position(3),
+            Role::new("r0", "NoColor").with_color(0).with_position(20),
+        ];
+
+        // Has NoColor (pos 20) and Mod (pos 5) -> returns Mod's color (0x2ecc71) because NoColor has color 0
+        let color = resolve_member_role_color(&["r0".into(), "r2".into()], &roles);
+        assert_eq!(color, 0x2ecc71);
+
+        // Has Admin (pos 10) and Mod (pos 5) -> returns Admin's color (0xe91e63) because pos 10 > 5
+        let color_admin = resolve_member_role_color(&["r1".into(), "r2".into()], &roles);
+        assert_eq!(color_admin, 0xe91e63);
+
+        // Has no roles with color -> 0
+        let color_none = resolve_member_role_color(&["r0".into()], &roles);
+        assert_eq!(color_none, 0);
+    }
+
+    #[test]
+    fn test_parse_guild_member_list_update() {
+        let raw = json!({
+            "op": 0,
+            "t": "GUILD_MEMBER_LIST_UPDATE",
+            "d": {
+                "guild_id": "guild_123",
+                "id": "everyone",
+                "member_count": 42,
+                "online_count": 10,
+                "groups": [
+                    { "id": "admin_role", "count": 2 },
+                    { "id": "online", "count": 8 }
+                ],
+                "ops": [
+                    {
+                        "op": "SYNC",
+                        "range": [0, 99],
+                        "items": [
+                            { "group": { "id": "admin_role", "count": 2 } },
+                            {
+                                "member": {
+                                    "user": {
+                                        "id": "u1",
+                                        "username": "ferris",
+                                        "global_name": "Ferris",
+                                        "avatar": null,
+                                        "bot": false
+                                    },
+                                    "roles": ["r_admin"],
+                                    "presence": { "status": "online" }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        let parsed = parse_guild_member_list_update(&raw).expect("Must parse successfully");
+        assert_eq!(parsed.guild_id, "guild_123");
+        assert_eq!(parsed.member_count, Some(42));
+        assert_eq!(parsed.groups.len(), 2);
+        assert_eq!(parsed.ops.len(), 1);
+
+        if let MemberListOp::Sync { range, items } = &parsed.ops[0] {
+            assert_eq!(*range, [0, 99]);
+            assert_eq!(items.len(), 2);
+            assert!(matches!(items[0], MemberListItem::Group(_)));
+            if let MemberListItem::Member(m) = &items[1] {
+                assert_eq!(m.id, "u1");
+                assert_eq!(m.username, "ferris");
+                assert_eq!(m.presence, PresenceStatus::Online);
+            } else {
+                panic!("Expected Member item");
+            }
+        } else {
+            panic!("Expected Sync op");
+        }
     }
 }

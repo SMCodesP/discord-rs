@@ -11,6 +11,10 @@ pub mod revalidation;
 pub mod startup;
 
 pub use directory::{AssetCasStore, AssetMetadata, CacheDirectory, CacheManifest};
-pub use lazy_guilds::{GuildSubscription, LazyGuildCoordinator, MemberRange};
+pub use lazy_guilds::{
+    apply_member_list_update, convert_member_to_item_state, parse_guild_member_list_update,
+    resolve_member_role_color, resolve_member_role_group, GuildMemberListUpdate,
+    GuildSubscription, LazyGuildCoordinator, MemberListItem, MemberListOp, MemberRange,
+};
 pub use revalidation::{CacheEntry, CacheRevalidator, HttpCacheValidation};
 pub use startup::{HydratedInitialState, InstantStartupOrchestrator};

@@ -224,12 +224,15 @@ pub struct MessageContextMenuConfig {
     pub message_id: String,
     pub message_content: String,
     pub is_pinned: bool,
+    pub is_own: bool,
     pub on_add_reaction: Option<MessageActionCallback>,
     pub on_reply: Option<MessageActionCallback>,
     pub on_copy_text: Option<MessageActionCallback>,
+    pub on_copy_link: Option<MessageActionCallback>,
     pub on_copy_id: Option<MessageActionCallback>,
     pub on_pin: Option<MessageActionCallback>,
     pub on_delete: Option<MessageActionCallback>,
+    pub on_delete_shift: Option<MessageActionCallback>,
     pub on_close: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>>,
 }
 
@@ -240,6 +243,7 @@ pub fn build_message_popup_menu(
     move |mut menu, _window, _cx| {
         let msg_id = config.message_id.clone();
         let is_pinned = config.is_pinned;
+        let is_own = config.is_own;
         let pin_label = if is_pinned {
             "Desafixar Mensagem"
         } else {
@@ -268,14 +272,13 @@ pub fn build_message_popup_menu(
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
-        if let Some(act) = config.on_copy_id.clone() {
+        if let Some(act) = config.on_copy_link.clone() {
             let mid = msg_id.clone();
             menu = menu.item(
-                PopupMenuItem::new("Copiar ID da Mensagem")
+                PopupMenuItem::new("Copiar Link da Mensagem")
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
-        menu = menu.separator();
         if let Some(act) = config.on_pin.clone() {
             let mid = msg_id.clone();
             menu = menu.item(
@@ -283,10 +286,21 @@ pub fn build_message_popup_menu(
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
-        if let Some(act) = config.on_delete.clone() {
+        if is_own {
+            menu = menu.separator();
+            if let Some(act) = config.on_delete.clone() {
+                let mid = msg_id.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("Excluir Mensagem")
+                        .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+                );
+            }
+        }
+        menu = menu.separator();
+        if let Some(act) = config.on_copy_id.clone() {
             let mid = msg_id.clone();
             menu = menu.item(
-                PopupMenuItem::new("Excluir Mensagem")
+                PopupMenuItem::new("Copiar ID da Mensagem")
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
@@ -300,6 +314,7 @@ fn render_menu_item(
     icon: &str,
     is_danger: bool,
     action: Option<MessageActionCallback>,
+    action_shift: Option<MessageActionCallback>,
     message_id: &str,
     on_close: Option<Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>>,
 ) -> Div {
@@ -341,9 +356,16 @@ fn render_menu_item(
                 .child(icon_str),
         );
 
-    if action.is_some() || on_close.is_some() {
-        item = item.on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-            if let Some(ref act) = action {
+    if action.is_some() || action_shift.is_some() || on_close.is_some() {
+        item = item.on_mouse_down(MouseButton::Left, move |ev, window, cx| {
+            cx.stop_propagation();
+            if ev.modifiers.shift {
+                if let Some(ref act_s) = action_shift {
+                    act_s(&msg_id, window, cx);
+                } else if let Some(ref act) = action {
+                    act(&msg_id, window, cx);
+                }
+            } else if let Some(ref act) = action {
                 act(&msg_id, window, cx);
             }
             if let Some(ref close) = on_close {
@@ -363,7 +385,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         "Fixar Mensagem"
     };
 
-    div()
+    let mut menu = div()
         .w(px(222.0))
         .bg(bg_floating())
         .border_1()
@@ -374,56 +396,92 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         .flex()
         .flex_col()
         .gap(px(2.0))
+        // 1. Reagir
         .child(render_menu_item(
             "Adicionar Reação",
             "☺",
             false,
             config.on_add_reaction,
+            None,
             &config.message_id,
             config.on_close.clone(),
         ))
+        .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
+        // 2. Responder
         .child(render_menu_item(
             "Responder",
             "↩",
             false,
             config.on_reply,
+            None,
             &config.message_id,
             config.on_close.clone(),
         ))
         .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
+        // 3. Copiar Texto
         .child(render_menu_item(
             "Copiar Texto",
             "📋",
             false,
             config.on_copy_text,
+            None,
             &config.message_id,
             config.on_close.clone(),
-        ))
+        ));
+
+    // 4. Copiar Link da Mensagem (se canal/guild conhecidos)
+    if config.on_copy_link.is_some() {
+        menu = menu.child(render_menu_item(
+            "Copiar Link da Mensagem",
+            "🔗",
+            false,
+            config.on_copy_link,
+            None,
+            &config.message_id,
+            config.on_close.clone(),
+        ));
+    }
+
+    // 5. Fixar Mensagem
+    menu = menu.child(render_menu_item(
+        pin_label,
+        "📌",
+        false,
+        config.on_pin,
+        None,
+        &config.message_id,
+        config.on_close.clone(),
+    ));
+
+    // 6. Excluir Mensagem (apenas mensagem própria)
+    if config.is_own {
+        menu = menu
+            .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
+            .child(render_menu_item(
+                "Excluir Mensagem",
+                "🗑️",
+                true,
+                config.on_delete,
+                config.on_delete_shift,
+                &config.message_id,
+                config.on_close.clone(),
+            ));
+    }
+
+    // 7. Copiar ID da Mensagem
+    menu = menu
+        .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
         .child(render_menu_item(
             "Copiar ID da Mensagem",
             "🆔",
             false,
             config.on_copy_id,
-            &config.message_id,
-            config.on_close.clone(),
-        ))
-        .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
-        .child(render_menu_item(
-            pin_label,
-            "📌",
-            false,
-            config.on_pin,
-            &config.message_id,
-            config.on_close.clone(),
-        ))
-        .child(render_menu_item(
-            "Excluir Mensagem",
-            "🗑️",
-            true,
-            config.on_delete,
+            None,
             &config.message_id,
             config.on_close,
-        ))
+        ));
+
+    menu
 }
 
 // ============================================================================
@@ -1251,24 +1309,30 @@ mod tests {
             message_id: "msg-101".into(),
             message_content: "Hello world".into(),
             is_pinned: false,
+            is_own: true,
             on_add_reaction: None,
             on_reply: None,
             on_copy_text: None,
+            on_copy_link: None,
             on_copy_id: None,
             on_pin: None,
             on_delete: None,
+            on_delete_shift: None,
             on_close: None,
         });
         let _pinned_menu = render_message_context_menu(MessageContextMenuConfig {
             message_id: "msg-101".into(),
             message_content: "Hello world".into(),
             is_pinned: true,
+            is_own: false,
             on_add_reaction: None,
             on_reply: None,
             on_copy_text: None,
+            on_copy_link: None,
             on_copy_id: None,
             on_pin: None,
             on_delete: None,
+            on_delete_shift: None,
             on_close: None,
         });
         drop(menu);
