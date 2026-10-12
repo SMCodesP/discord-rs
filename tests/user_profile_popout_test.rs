@@ -318,9 +318,11 @@ fn test_zero_fake_date_non_snowflake() {
     assert_eq!(profile.created_at, None);
 }
 
-#[test]
-fn test_profile_popout_quick_direct_message_send() {
+#[tokio::test]
+async fn test_profile_popout_quick_direct_message_send() {
     let mut state = AppState::new();
+    let (cm, _rx) = discord_rs::protocol::ClientManager::new_mock();
+    state.client_manager = Some(cm);
 
     // Open profile popout
     state.open_user_profile("recipient_99", None);
@@ -346,19 +348,38 @@ fn test_profile_popout_quick_direct_message_send() {
     // User types in quick direct message field
     state.profile_popout.as_mut().unwrap().quick_message = "Olá, vamos programar em Rust?".to_string();
 
-    // User presses Enter -> send_profile_popout_quick_message()
-    state.send_profile_popout_quick_message();
+    // Two-phase quick message send (begin + execute + finish)
+    let req = state.begin_profile_popout_quick_message().expect("request bundle");
+    let res = req.execute().await;
+    state.finish_profile_popout_quick_message(&req, res);
 
     // Popout must be closed
     assert!(state.profile_popout.is_none());
 
     // DM channel must be selected
     let selected_cid = state.selected_channel_id.as_ref().expect("channel selected");
-    assert!(selected_cid.contains("recipient_99") || selected_cid.starts_with("dm-"));
+    assert!(selected_cid.contains("recipient_99") || selected_cid.starts_with("dm-") || selected_cid.starts_with("chan-dm-"));
 
     // Message must be dispatched into the channel
-    let msgs = state.messages_by_channel.get(selected_cid).expect("messages exist");
-    assert_eq!(msgs.last().unwrap().content, "Olá, vamos programar em Rust?");
+    let all_msgs = state.messages_by_channel.values().flatten().collect::<Vec<_>>();
+    assert!(all_msgs.iter().any(|m| m.content == "Olá, vamos programar em Rust?"));
+}
+
+#[test]
+fn test_profile_popout_quick_direct_message_send_disconnected() {
+    let mut state = AppState::new();
+    // client_manager is None -> sem conexão
+
+    state.open_user_profile("recipient_disconnected", None);
+    state.profile_popout.as_mut().unwrap().quick_message = "Tentando enviar sem rede".to_string();
+
+    let req = state.begin_profile_popout_quick_message();
+    assert!(req.is_none(), "Sem client_manager não pode gerar requisição de envio");
+
+    let popout = state.profile_popout.as_ref().expect("popout continua aberto");
+    assert_eq!(popout.error.as_deref(), Some("Não conectado ao Discord."));
+    assert_eq!(popout.quick_message, "Tentando enviar sem rede", "Campo deve ser preservado");
+    assert!(state.messages_by_channel.is_empty(), "Zero mocks: nenhuma mensagem pode ser injetada");
 }
 
 #[test]

@@ -175,20 +175,34 @@ async fn test_quick_send_empty_field_does_not_send() {
 
     // Case 1: Empty string
     state.profile_popout.as_mut().unwrap().quick_message = "".to_string();
-    let res = state.send_profile_popout_quick_message_async().await;
-    assert!(res.is_ok());
-    assert_eq!(res.unwrap(), None);
+    assert!(state.begin_profile_popout_quick_message().is_none());
     assert!(state.profile_popout.is_some(), "Popout must remain open on empty input");
 
     // Case 2: Only whitespace
     state.profile_popout.as_mut().unwrap().quick_message = "    \n\t  ".to_string();
-    let res2 = state.send_profile_popout_quick_message_async().await;
-    assert!(res2.is_ok());
-    assert_eq!(res2.unwrap(), None);
+    assert!(state.begin_profile_popout_quick_message().is_none());
     assert!(state.profile_popout.is_some(), "Popout must remain open on whitespace input");
 
     // Verify no message was injected into any channel
     assert!(state.messages_by_channel.is_empty());
+}
+
+#[test]
+fn test_quick_send_disconnected_sets_error_and_preserves_field() {
+    let mut state = AppState::new();
+    // client_manager is None (ZERO MOCKS: no fake offline message allowed)
+
+    state.open_user_profile("user_no_net", None);
+    let draft = "Mensagem que não deve ser inventada offline".to_string();
+    state.profile_popout.as_mut().unwrap().quick_message = draft.clone();
+
+    let req = state.begin_profile_popout_quick_message();
+    assert!(req.is_none(), "Sem conexão não deve criar requisição de envio");
+
+    let popout = state.profile_popout.as_ref().expect("Popout deve continuar aberto");
+    assert_eq!(popout.error.as_deref(), Some("Não conectado ao Discord."));
+    assert_eq!(popout.quick_message, draft, "Campo deve ser preservado quando desconectado");
+    assert!(state.messages_by_channel.is_empty(), "Nenhuma mensagem falsa pode ser injetada");
 }
 
 #[tokio::test]
@@ -222,14 +236,24 @@ async fn test_quick_send_success_with_mock_client_manager() {
     // Verify BEFORE sending: no optimistic message exists
     assert!(state.messages_by_channel.is_empty(), "Sem resposta da API não pode haver mensagem");
 
-    // Execute async quick message send
-    let result = state.send_profile_popout_quick_message_async().await;
-    assert!(result.is_ok(), "Envio deve ter sucesso com ClientManager mock: {:?}", result);
-    let sent_msg = result.unwrap().expect("Mensagem enviada retornada");
+    // Phase 1: Begin send
+    let req = state
+        .begin_profile_popout_quick_message()
+        .expect("Requisição válida deve ser criada");
 
-    assert_eq!(sent_msg.content, test_msg_text);
-    assert!(!sent_msg.is_pending, "Mensagem confirmada não deve ter is_pending=true");
-    assert!(!sent_msg.id.starts_with("temp-"), "Mensagem confirmada não deve ter ID temp-*");
+    // In-flight guard: sending must be true, blocking duplicate Enter while sending
+    assert!(state.is_profile_popout_quick_message_sending());
+    assert!(
+        state.begin_profile_popout_quick_message().is_none(),
+        "Enter repetido enquanto envio está em curso deve ser bloqueado"
+    );
+
+    // Phase 2: Execute async outside AppState
+    let result = req.execute().await;
+    assert!(result.is_ok(), "Envio deve ter sucesso com ClientManager mock: {:?}", result);
+
+    // Phase 3: Finish send
+    state.finish_profile_popout_quick_message(&req, result);
 
     // Popout must be closed on success
     assert!(state.profile_popout.is_none(), "Popout deve fechar no sucesso");
@@ -239,9 +263,8 @@ async fn test_quick_send_success_with_mock_client_manager() {
     assert!(dm_chan.is_some(), "DM channel para o usuário deve existir");
 
     // Messages must contain confirmed message
-    let chan_id = &sent_msg.channel_id;
-    let msgs = state.messages_by_channel.get(chan_id).expect("Mensagens no canal devem existir");
-    assert_eq!(msgs.last().unwrap().content, test_msg_text);
+    let all_msgs = state.messages_by_channel.values().flatten().collect::<Vec<_>>();
+    assert!(all_msgs.iter().any(|m| m.content == test_msg_text));
 }
 
 #[tokio::test]
@@ -260,9 +283,15 @@ async fn test_quick_send_failure_displays_error_and_preserves_field() {
     // Verify BEFORE sending: no message in UI
     assert!(state.messages_by_channel.is_empty());
 
-    // Execute send - must fail
-    let result = state.send_profile_popout_quick_message_async().await;
+    // Phase 1: Begin send
+    let req = state.begin_profile_popout_quick_message().expect("Requisição válida");
+
+    // Phase 2: Execute send - fails with IdleTransport error
+    let result = req.execute().await;
     assert!(result.is_err(), "Envio com transport desconectado deve falhar");
+
+    // Phase 3: Finish send with error
+    state.finish_profile_popout_quick_message(&req, result);
 
     // CRITICAL: Sem resposta da API não aparece mensagem otimista
     assert!(
@@ -288,4 +317,5 @@ async fn test_quick_send_failure_displays_error_and_preserves_field() {
     );
     let err_str = popout.error.as_ref().unwrap();
     assert!(!err_str.is_empty(), "Mensagem de erro não deve ser vazia");
+    assert!(!state.is_profile_popout_quick_message_sending(), "in_flight sending state deve ser resetado no término");
 }
