@@ -10,10 +10,14 @@ use tokio::sync::{broadcast, Mutex};
 use discord_rs::app::state::AppState;
 use discord_rs::domain::voice::VoiceState;
 use discord_rs::protocol::client_manager::ClientManager;
+use discord_rs::protocol::voice_gateway::SpeakingPayload;
+use discord_rs::protocol::voice_session::VoiceSessionEvent;
 use discord_rs::protocol::{
-    AudioBridge, MainSignalingChannel, SessionDescription, TransportEvent, VoiceGatewayEvent,
-    VoiceGatewayTransport, VoiceReady, VoiceSessionConfig, VoiceSessionState,
+    AudioBridge, AudioBridgeCommand, MainSignalingChannel, SessionDescription, TransportEvent,
+    VoiceGatewayEvent, VoiceGatewayTransport, VoiceReady, VoiceSessionConfig, VoiceSessionState,
 };
+use std::net::SocketAddr;
+use tokio::net::UdpSocket;
 
 #[test]
 fn test_connect_voice_zero_invented_ping() {
@@ -246,6 +250,7 @@ async fn test_toggle_mute_and_deafen_dispatches_to_session() {
     let signaling = Arc::new(MockSignaling {
         events_tx: event_tx.clone(),
         updates: updates.clone(),
+        auto_reply_port: None,
     });
 
     let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
@@ -269,7 +274,11 @@ async fn test_toggle_mute_and_deafen_dispatches_to_session() {
         )
         .with_gateway_factory(|_gw_cfg| {
             let (tx, _) = broadcast::channel(16);
-            Arc::new(MockVoiceGatewayTransport { events_tx: tx })
+            Arc::new(MockVoiceGatewayTransport {
+                events_tx: tx,
+                udp_port: 50000,
+                ssrc: 12345,
+            })
         }),
     );
 
@@ -326,22 +335,58 @@ async fn test_client_manager_ring_call_reject_no_optimistic_ui() {
 // Mock de gateway para teste offline de VoiceSession e ClientManager
 // ---------------------------------------------------------------------------
 
+async fn spawn_test_udp_server(expected_ssrc: u32) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            match socket.recv_from(&mut buf).await {
+                Ok((len, client_addr)) => {
+                    if len == 74 && buf[0..2] == 1u16.to_be_bytes() {
+                        let mut resp = [0u8; 74];
+                        resp[0..2].copy_from_slice(&2u16.to_be_bytes());
+                        resp[2..4].copy_from_slice(&70u16.to_be_bytes());
+                        resp[4..8].copy_from_slice(&expected_ssrc.to_be_bytes());
+                        let ip = b"127.0.0.1";
+                        resp[8..8 + ip.len()].copy_from_slice(ip);
+                        resp[8 + ip.len()] = 0;
+                        resp[72..74].copy_from_slice(&addr.port().to_be_bytes());
+                        let _ = socket.send_to(&resp, client_addr).await;
+                        continue;
+                    }
+                    if len == 8 {
+                        continue;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (addr, handle)
+}
+
 struct MockVoiceGatewayTransport {
     events_tx: broadcast::Sender<VoiceGatewayEvent>,
+    udp_port: u16,
+    ssrc: u32,
 }
 
 #[async_trait]
 impl VoiceGatewayTransport for MockVoiceGatewayTransport {
     async fn connect(&self) -> Result<()> {
+        let _ = self.events_tx.send(VoiceGatewayEvent::Connected);
         Ok(())
     }
 
     async fn wait_for_ready(&self, _timeout: Duration) -> Result<VoiceReady> {
         Ok(VoiceReady {
-            ssrc: 12345,
+            ssrc: self.ssrc,
             ip: "127.0.0.1".into(),
-            port: 50000,
-            modes: vec!["aead_xchacha20_poly1305_rtpsize".into()],
+            port: self.udp_port,
+            modes: vec!["aead_aes256_gcm_rtpsize".into()],
         })
     }
 
@@ -349,11 +394,11 @@ impl VoiceGatewayTransport for MockVoiceGatewayTransport {
         &self,
         _external_ip: &str,
         _external_port: u16,
-        _mode: &str,
+        mode: &str,
     ) -> Result<SessionDescription> {
         Ok(SessionDescription {
-            mode: "aead_xchacha20_poly1305_rtpsize".into(),
-            secret_key: vec![0u8; 32],
+            mode: mode.into(),
+            secret_key: vec![0x42; 32],
             dave_protocol_version: None,
         })
     }
@@ -382,6 +427,7 @@ impl VoiceGatewayTransport for MockVoiceGatewayTransport {
 struct MockSignaling {
     events_tx: broadcast::Sender<TransportEvent>,
     updates: Arc<Mutex<Vec<(Option<String>, Option<String>, bool, bool)>>>,
+    auto_reply_port: Option<u16>,
 }
 
 #[async_trait]
@@ -400,6 +446,19 @@ impl MainSignalingChannel for MockSignaling {
             self_mute,
             self_deaf,
         ));
+
+        if let (Some(chan_id), Some(port)) = (channel_id, self.auto_reply_port) {
+            let mut vs = VoiceState::new("987654321098765432", "sess-test");
+            vs.guild_id = guild_id.map(|s| s.to_string());
+            vs.channel_id = Some(chan_id.to_string());
+            let _ = self.events_tx.send(TransportEvent::VoiceStateUpdate(vs));
+            let _ = self.events_tx.send(TransportEvent::VoiceServerUpdate {
+                token: "mock-token".into(),
+                guild_id: guild_id.map(|s| s.to_string()),
+                channel_id: Some(chan_id.to_string()),
+                endpoint: Some(format!("127.0.0.1:{port}")),
+            });
+        }
         Ok(())
     }
 
@@ -415,6 +474,7 @@ async fn test_voice_session_lifecycle_with_gateway_factory() {
     let signaling = Arc::new(MockSignaling {
         events_tx: event_tx.clone(),
         updates,
+        auto_reply_port: None,
     });
 
     let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::channel(16);
@@ -437,7 +497,11 @@ async fn test_voice_session_lifecycle_with_gateway_factory() {
     )
     .with_gateway_factory(|_gw_cfg| {
         let (tx, _) = broadcast::channel(16);
-        Arc::new(MockVoiceGatewayTransport { events_tx: tx })
+        Arc::new(MockVoiceGatewayTransport {
+            events_tx: tx,
+            udp_port: 50000,
+            ssrc: 12345,
+        })
     });
 
     assert_eq!(
@@ -455,4 +519,321 @@ async fn test_voice_session_lifecycle_with_gateway_factory() {
             reason: "Desconectado pelo usuário".into()
         }
     );
+}
+
+#[tokio::test]
+async fn test_opcode_5_speaking_lights_and_clears_participant() {
+    let ssrc = 0x1234;
+    let (udp_addr, _udp_handle) = spawn_test_udp_server(ssrc).await;
+
+    let (gw_tx, _) = broadcast::channel(32);
+    let (sig_tx, _) = broadcast::channel(32);
+    let signaling = Arc::new(MockSignaling {
+        events_tx: sig_tx,
+        updates: Arc::new(Mutex::new(Vec::new())),
+        auto_reply_port: Some(udp_addr.port()),
+    });
+
+    let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel(32);
+    let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(32);
+    let (_speaking_tx, speaking_rx) = tokio::sync::mpsc::channel(16);
+    let audio_bridge = AudioBridge::from_channels(audio_out_rx, speaking_rx, audio_cmd_tx);
+
+    let gw_tx_clone = gw_tx.clone();
+    let port = udp_addr.port();
+    let session = discord_rs::protocol::voice_session::VoiceSession::new(
+        VoiceSessionConfig {
+            guild_id: Some(111111),
+            channel_id: 222222,
+            user_id: 987654321098765432,
+            self_mute: false,
+            self_deaf: false,
+        },
+        signaling,
+        audio_bridge,
+    )
+    .with_gateway_factory(move |_gw_cfg| {
+        Arc::new(MockVoiceGatewayTransport {
+            events_tx: gw_tx_clone.clone(),
+            udp_port: port,
+            ssrc,
+        })
+    });
+
+    tokio::spawn(async move {
+        while let Some(cmd) = audio_cmd_rx.recv().await {
+            match cmd {
+                AudioBridgeCommand::StartSession { responder } => {
+                    let _ = responder.send(Ok(()));
+                }
+                AudioBridgeCommand::SwitchInputDevice { responder, .. } => {
+                    let _ = responder.send(Ok(()));
+                }
+                AudioBridgeCommand::SwitchOutputDevice { responder, .. } => {
+                    let _ = responder.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let mut session_events_rx = session.subscribe_events();
+    session.start().await.expect("start session");
+    session.wait_until_connected(Duration::from_secs(3)).await.expect("connect");
+
+    let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice("222222", "Canal de Voz", "Servidor Teste");
+
+    let mut vs_user = VoiceState::new("555555555555555555", "sess-555");
+    vs_user.channel_id = Some("222222".into());
+    vs_user.user_name = Some("Alice".into());
+    state.update_voice_state(vs_user);
+
+    // 1. Envia Opcode 5 (Speaking: true) pelo Voice Gateway
+    let _ = gw_tx.send(VoiceGatewayEvent::Speaking(SpeakingPayload {
+        speaking: 1,
+        delay: 0,
+        ssrc: 9999,
+        user_id: Some("555555555555555555".into()),
+    }));
+
+    // Verifica que VoiceSession emitiu VoiceSessionEvent::Speaking
+    let event = loop {
+        let ev = tokio::time::timeout(Duration::from_millis(500), session_events_rx.recv())
+            .await
+            .expect("timeout esperando evento Speaking")
+            .expect("evento Speaking");
+        if matches!(ev, VoiceSessionEvent::Speaking { .. }) {
+            break ev;
+        }
+    };
+
+    match event {
+        VoiceSessionEvent::Speaking { ssrc: ev_ssrc, user_id, is_speaking } => {
+            assert_eq!(ev_ssrc, 9999);
+            assert_eq!(user_id, Some(555555555555555555));
+            assert!(is_speaking);
+            state.set_participant_speaking(&user_id.unwrap().to_string(), is_speaking);
+        }
+        other => panic!("Esperado VoiceSessionEvent::Speaking, recebido: {:?}", other),
+    }
+
+    // Participante Alice acende (is_speaking == true)
+    {
+        let call = state.active_voice_call.as_ref().unwrap();
+        let alice = call.participants.iter().find(|p| p.id == "555555555555555555").unwrap();
+        assert!(alice.is_speaking, "Alice deve acender com anel de fala verde");
+    }
+
+    // 2. Envia Opcode 5 (Speaking: false / speaking == 0)
+    let _ = gw_tx.send(VoiceGatewayEvent::Speaking(SpeakingPayload {
+        speaking: 0,
+        delay: 0,
+        ssrc: 9999,
+        user_id: Some("555555555555555555".into()),
+    }));
+
+    let event_off = loop {
+        let ev = tokio::time::timeout(Duration::from_millis(500), session_events_rx.recv())
+            .await
+            .expect("timeout esperando evento Speaking off")
+            .expect("evento Speaking off");
+        if matches!(ev, VoiceSessionEvent::Speaking { .. }) {
+            break ev;
+        }
+    };
+
+    match event_off {
+        VoiceSessionEvent::Speaking { ssrc: ev_ssrc, user_id, is_speaking } => {
+            assert_eq!(ev_ssrc, 9999);
+            assert_eq!(user_id, Some(555555555555555555));
+            assert!(!is_speaking);
+            state.set_participant_speaking(&user_id.unwrap().to_string(), is_speaking);
+        }
+        other => panic!("Esperado VoiceSessionEvent::Speaking off, recebido: {:?}", other),
+    }
+
+    // Participante Alice apaga (is_speaking == false)
+    {
+        let call = state.active_voice_call.as_ref().unwrap();
+        let alice = call.participants.iter().find(|p| p.id == "555555555555555555").unwrap();
+        assert!(!alice.is_speaking, "Alice deve apagar o anel de fala verde");
+    }
+
+    session.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_heartbeat_ack_produces_rtt_latency() {
+    let ssrc = 0x5678;
+    let (udp_addr, _udp_handle) = spawn_test_udp_server(ssrc).await;
+
+    let (gw_tx, _) = broadcast::channel(32);
+    let (sig_tx, _) = broadcast::channel(32);
+    let signaling = Arc::new(MockSignaling {
+        events_tx: sig_tx,
+        updates: Arc::new(Mutex::new(Vec::new())),
+        auto_reply_port: Some(udp_addr.port()),
+    });
+
+    let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel(32);
+    let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(32);
+    let (_speaking_tx, speaking_rx) = tokio::sync::mpsc::channel(16);
+    let audio_bridge = AudioBridge::from_channels(audio_out_rx, speaking_rx, audio_cmd_tx);
+
+    let gw_tx_clone = gw_tx.clone();
+    let port = udp_addr.port();
+    let session = discord_rs::protocol::voice_session::VoiceSession::new(
+        VoiceSessionConfig {
+            guild_id: Some(111111),
+            channel_id: 222222,
+            user_id: 987654321098765432,
+            self_mute: false,
+            self_deaf: false,
+        },
+        signaling,
+        audio_bridge,
+    )
+    .with_gateway_factory(move |_gw_cfg| {
+        Arc::new(MockVoiceGatewayTransport {
+            events_tx: gw_tx_clone.clone(),
+            udp_port: port,
+            ssrc,
+        })
+    });
+
+    tokio::spawn(async move {
+        while let Some(cmd) = audio_cmd_rx.recv().await {
+            if let AudioBridgeCommand::StartSession { responder } = cmd {
+                let _ = responder.send(Ok(()));
+            }
+        }
+    });
+
+    let mut session_events_rx = session.subscribe_events();
+    session.start().await.expect("start session");
+    session.wait_until_connected(Duration::from_secs(3)).await.expect("connect");
+
+    // Zero mocks: antes de qualquer Heartbeat ACK, ping_ms é None
+    assert_eq!(session.ping_ms(), None);
+
+    let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice("222222", "Canal de Voz", "Servidor Teste");
+    assert_eq!(state.active_voice_call.as_ref().unwrap().ping_ms, None);
+
+    // Gateway de voz recebe Opcode 6 Heartbeat ACK com 28ms de RTT
+    let _ = gw_tx.send(VoiceGatewayEvent::HeartbeatAck { latency_ms: Some(28) });
+
+    let event = loop {
+        let ev = tokio::time::timeout(Duration::from_millis(500), session_events_rx.recv())
+            .await
+            .expect("timeout esperando HeartbeatAck")
+            .expect("HeartbeatAck");
+        if matches!(ev, VoiceSessionEvent::HeartbeatAck { .. }) {
+            break ev;
+        }
+    };
+
+    match event {
+        VoiceSessionEvent::HeartbeatAck { ping_ms } => {
+            assert_eq!(ping_ms, 28);
+        }
+        other => panic!("Esperado HeartbeatAck, recebido: {:?}", other),
+    }
+
+    // Sessão agora expõe o RTT real
+    assert_eq!(session.ping_ms(), Some(28));
+
+    // Estado da UI recebe o ping_ms atualizado
+    state.update_voice_session_state(VoiceSessionState::Connected, session.ping_ms());
+    assert_eq!(state.active_voice_call.as_ref().unwrap().ping_ms, Some(28));
+
+    session.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+async fn test_hot_device_swap_preserves_session_connected() {
+    let ssrc = 0x9abc;
+    let (udp_addr, _udp_handle) = spawn_test_udp_server(ssrc).await;
+
+    let (gw_tx, _) = broadcast::channel(32);
+    let (sig_tx, _) = broadcast::channel(32);
+    let signaling = Arc::new(MockSignaling {
+        events_tx: sig_tx,
+        updates: Arc::new(Mutex::new(Vec::new())),
+        auto_reply_port: Some(udp_addr.port()),
+    });
+
+    let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel(32);
+    let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(32);
+    let (_speaking_tx, speaking_rx) = tokio::sync::mpsc::channel(16);
+    let audio_bridge = AudioBridge::from_channels(audio_out_rx, speaking_rx, audio_cmd_tx);
+
+    let gw_tx_clone = gw_tx.clone();
+    let port = udp_addr.port();
+    let session = Arc::new(discord_rs::protocol::voice_session::VoiceSession::new(
+        VoiceSessionConfig {
+            guild_id: Some(111111),
+            channel_id: 222222,
+            user_id: 987654321098765432,
+            self_mute: false,
+            self_deaf: false,
+        },
+        signaling,
+        audio_bridge,
+    )
+    .with_gateway_factory(move |_gw_cfg| {
+        Arc::new(MockVoiceGatewayTransport {
+            events_tx: gw_tx_clone.clone(),
+            udp_port: port,
+            ssrc,
+        })
+    }));
+
+    tokio::spawn(async move {
+        while let Some(cmd) = audio_cmd_rx.recv().await {
+            match cmd {
+                AudioBridgeCommand::StartSession { responder } => {
+                    let _ = responder.send(Ok(()));
+                }
+                AudioBridgeCommand::SwitchInputDevice { responder, .. } => {
+                    let _ = responder.send(Ok(()));
+                }
+                AudioBridgeCommand::SwitchOutputDevice { responder, .. } => {
+                    let _ = responder.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    session.start().await.expect("start session");
+    session.wait_until_connected(Duration::from_secs(3)).await.expect("connect");
+    assert_eq!(session.state(), VoiceSessionState::Connected);
+
+    let mut state = AppState::new();
+    state.current_user.id = "987654321098765432".into();
+    state.connect_voice("222222", "Canal de Voz", "Servidor Teste");
+    state.update_voice_session_state(VoiceSessionState::Connected, None);
+    state.set_voice_session(session.clone());
+
+    // 1. Troca a quente de microfone (dispositivo de entrada)
+    session.switch_input_device(Some("Microfone USB HyperX".into())).await.expect("switch input");
+    assert_eq!(session.state(), VoiceSessionState::Connected, "Sessão deve permanecer Connected após troca de microfone");
+
+    state.set_input_device(Some("Microfone USB HyperX".into()));
+    assert_eq!(state.active_voice_call.as_ref().unwrap().connection_state, VoiceSessionState::Connected);
+    assert_eq!(state.active_voice_call.as_ref().unwrap().selected_input_device, Some("Microfone USB HyperX".into()));
+
+    // 2. Troca a quente de alto-falante (dispositivo de saída)
+    session.switch_output_device(Some("Fone de Ouvido Sony WH-1000XM4".into())).await.expect("switch output");
+    assert_eq!(session.state(), VoiceSessionState::Connected, "Sessão deve permanecer Connected após troca de fone");
+
+    state.set_output_device(Some("Fone de Ouvido Sony WH-1000XM4".into()));
+    assert_eq!(state.active_voice_call.as_ref().unwrap().connection_state, VoiceSessionState::Connected);
+    assert_eq!(state.active_voice_call.as_ref().unwrap().selected_output_device, Some("Fone de Ouvido Sony WH-1000XM4".into()));
+
+    session.disconnect().await.expect("disconnect");
 }

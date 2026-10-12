@@ -115,6 +115,31 @@ impl RootView {
         })
         .detach();
 
+        let state_weak_voice_evt = state.downgrade();
+        let mut voice_evt_rx = client_manager.subscribe_voice_events();
+        cx.spawn(|_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                while let Ok(evt) = voice_evt_rx.recv().await {
+                    if let crate::protocol::voice_session::VoiceSessionEvent::Speaking {
+                        user_id: Some(uid),
+                        is_speaking,
+                        ..
+                    } = evt
+                    {
+                        let uid_str = uid.to_string();
+                        let _ = cx.update(|cx| {
+                            let _ = state_weak_voice_evt.update(cx, |state, cx| {
+                                state.set_participant_speaking(&uid_str, is_speaking);
+                                cx.notify();
+                            });
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+
         cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 
         let guild_rail = cx.new(|cx| GuildRail::new(state.clone(), cx));

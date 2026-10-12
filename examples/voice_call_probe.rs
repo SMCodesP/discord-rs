@@ -129,6 +129,14 @@ async fn main() -> Result<()> {
                     AudioBridgeCommand::StopSession => {}
                     AudioBridgeCommand::SetMuted(_) => {}
                     AudioBridgeCommand::SetDeafened(_) => {}
+                    AudioBridgeCommand::SwitchInputDevice { responder, device_id } => {
+                        println!("[PROBE] -> Troca de dispositivo de entrada: {:?}", device_id);
+                        let _ = responder.send(Ok(()));
+                    }
+                    AudioBridgeCommand::SwitchOutputDevice { responder, device_id } => {
+                        println!("[PROBE] -> Troca de dispositivo de saída: {:?}", device_id);
+                        let _ = responder.send(Ok(()));
+                    }
                     AudioBridgeCommand::Shutdown => break,
                 }
             }
@@ -207,6 +215,16 @@ async fn main() -> Result<()> {
                                 "[PROBE] -> Estado DAVE: transição de época MLS executada com sucesso (Transition ID: {}).",
                                 transition_id
                             );
+                        }
+                        VoiceSessionEvent::Speaking { ssrc, user_id, is_speaking } => {
+                            let status = if is_speaking { "falando" } else { "silencioso" };
+                            match user_id {
+                                Some(uid) => println!("[PROBE] -> Speaking: usuário {} (SSRC {}) está {}.", uid, ssrc, status),
+                                None => println!("[PROBE] -> Speaking: SSRC {} está {}.", ssrc, status),
+                            }
+                        }
+                        VoiceSessionEvent::HeartbeatAck { ping_ms } => {
+                            println!("[PROBE] -> Heartbeat ACK recebido: RTT = {}ms.", ping_ms);
                         }
                         VoiceSessionEvent::Disconnected { code, reason } => {
                             println!(
