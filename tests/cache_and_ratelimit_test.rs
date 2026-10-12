@@ -250,7 +250,7 @@ async fn test_pillar_4_instant_startup_0ms_blank_screen() -> anyhow::Result<()> 
     let cache = create_temp_cache_dir("p4_startup");
 
     // 1. Popula cache local simulando desligamento anterior
-    let user = User::new("user_smcodes", "Smcodes");
+    let user = User::new("usuario_a", "Usuario A");
     cache.save_current_user(&user)?;
 
     let mut chan_geral = Channel::new("chan_geral_id", "geral", ChannelType::Text);
@@ -278,7 +278,7 @@ async fn test_pillar_4_instant_startup_0ms_blank_screen() -> anyhow::Result<()> 
         version: 1,
         last_selected_guild_id: Some("guild_gpui".to_string()),
         last_selected_channel_id: Some("chan_geral_id".to_string()),
-        active_user_id: Some("user_smcodes".to_string()),
+        active_user_id: Some("usuario_a".to_string()),
         updated_at: chrono::Utc::now(),
     };
     cache.save_manifest(&manifest)?;
@@ -314,7 +314,7 @@ async fn test_pillar_4_instant_startup_0ms_blank_screen() -> anyhow::Result<()> 
 
     // Validação de integridade dos dados para renderização do Frame 1
     assert!(hydrated.is_from_disk_cache);
-    assert_eq!(hydrated.current_user.as_ref().unwrap().username, "Smcodes");
+    assert_eq!(hydrated.current_user.as_ref().unwrap().username, "Usuario A");
     assert_eq!(hydrated.guilds.len(), 1);
     assert_eq!(hydrated.active_guild.as_ref().unwrap().name, "GPUI Community");
     assert_eq!(hydrated.active_channel.as_ref().unwrap().name, "geral");
