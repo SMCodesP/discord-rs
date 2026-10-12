@@ -40,7 +40,7 @@ impl AppState {
                     NitroTier::Full => "Discord Nitro Mensal (R$ 24,99)".into(),
                     NitroTier::None => "Sem Plano".into(),
                 },
-                payment_gateway: "Stripe".into(),
+                payment_gateway: String::new(),
             });
         }
     }
