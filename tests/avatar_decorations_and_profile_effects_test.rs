@@ -606,3 +606,61 @@ fn test_kavatardata_struct_json_backward_shapes() {
     .expect("null decoration relationship must deserialize");
     assert_eq!(rel_null.avatar_decoration_data, None);
 }
+
+// =========================================================================
+// QProfile (Etapa 5.1): Profile Effect timeline & reduced motion tests
+// =========================================================================
+
+#[test]
+fn test_qprofile_timeline_layer_visibility_and_reduced_motion() {
+    use discord_rs::components::profile_effect::{
+        is_layer_visible_at, render_profile_effect_for_user_with_motion,
+    };
+
+    let layer_intro = ProfileEffectLayer {
+        src: "synth_intro.png".to_string(),
+        is_looping: false,
+        duration: 2000,
+        start: 0,
+        loop_delay: 0,
+        z_index: 1,
+        randomized_sources: vec![],
+    };
+
+    let layer_loop = ProfileEffectLayer {
+        src: "synth_loop.png".to_string(),
+        is_looping: true,
+        duration: 3000,
+        start: 2000,
+        loop_delay: 1000,
+        z_index: 2,
+        randomized_sources: vec![],
+    };
+
+    // Before layer_loop starts
+    assert!(is_layer_visible_at(&layer_intro, 1000));
+    assert!(!is_layer_visible_at(&layer_loop, 1000));
+
+    // After layer_intro ends, layer_loop active
+    assert!(!is_layer_visible_at(&layer_intro, 2500));
+    assert!(is_layer_visible_at(&layer_loop, 2500));
+
+    // During layer_loop delay pause (2000 + 3000 = 5000 until 6000)
+    assert!(!is_layer_visible_at(&layer_loop, 5500));
+
+    // In second cycle of layer_loop (6000 until 9000)
+    assert!(is_layer_visible_at(&layer_loop, 6500));
+
+    // Reduced motion rendering test
+    let catalog = ProfileEffectCatalog::new();
+    let user_effect = UserProfileEffect::new("synth_sku_reduced");
+    let rendered_reduced = render_profile_effect_for_user_with_motion(
+        Some(&user_effect),
+        &catalog,
+        px(105.0),
+        Some(px(300.0)),
+        true,
+    );
+    let _ = rendered_reduced;
+}
+

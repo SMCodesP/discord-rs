@@ -24,7 +24,8 @@ use crate::app::state::{AppState, ProfileModalTab};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::button::{Button, ButtonSize};
 use crate::components::profile_effect::{
-    render_profile_effect_for_user, ProfileEffectCatalog, UserProfileEffect,
+    render_profile_effect_for_user, render_profile_effect_for_user_with_motion,
+    ProfileEffectCatalog, UserProfileEffect,
 };
 use crate::components::TextInput;
 pub use crate::domain::profile::{
@@ -879,11 +880,25 @@ fn render_popout_quick_input(
         .map(|d| d.user.username.clone())
         .unwrap_or_else(|| popout.user_id.clone());
 
-    div()
+    let mut container = div()
         .p(px(12.0))
         .border_t_1()
         .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
         .bg(bg_server())
+        .flex()
+        .flex_col()
+        .gap(px(6.0));
+
+    if let Some(ref err) = popout.error {
+        container = container.child(
+            div()
+                .text_size(px(12.0))
+                .text_color(status_danger())
+                .child(err.clone()),
+        );
+    }
+
+    container
         .child(
             TextInput::new("profile-quick-message-input", quick_state)
                 .placeholder(format!("Conversar com @{}...", target_uname))
@@ -916,6 +931,7 @@ pub fn build_user_profile_modal_dialog(
     let catalog = state.profile_effects_catalog.clone();
     let presence = state.presences_by_user.get(&popout.user_id).cloned();
     let active_tab = state.profile_modal_tab;
+    let reduce_motion = state.accessibility_settings.reduce_motion;
 
     let margin_top = (vh - px(704.0)).max(px(20.0)) / 2.0;
 
@@ -924,7 +940,7 @@ pub fn build_user_profile_modal_dialog(
         .overflow_hidden()
         .flex()
         .flex_col()
-        .child(render_modal_banner(&popout, &catalog))
+        .child(render_modal_banner(&popout, &catalog, reduce_motion))
         .child(render_modal_header(&popout, presence.as_ref()))
         .child(render_modal_tabs_bar(entity.clone(), &popout, active_tab))
         .child(render_modal_tab_content(&popout, active_tab));
@@ -953,6 +969,7 @@ pub fn build_user_profile_modal_dialog(
 fn render_modal_banner(
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
+    reduce_motion: bool,
 ) -> AnyElement {
     let banner_color_val = popout
         .data
@@ -992,11 +1009,12 @@ fn render_modal_banner(
         .as_ref()
         .and_then(|d| d.profile_effect_id.as_deref());
     let user_effect = profile_effect_id.map(UserProfileEffect::new);
-    let effect_overlay = render_profile_effect_for_user(
+    let effect_overlay = render_profile_effect_for_user_with_motion(
         user_effect.as_ref(),
         catalog,
         px(210.0),
         Some(px(1184.0)),
+        reduce_motion,
     );
     banner = banner.child(effect_overlay);
 

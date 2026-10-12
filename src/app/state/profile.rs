@@ -164,7 +164,110 @@ impl AppState {
         }
     }
 
-    /// Sends a quick message from the user profile popout input and closes the popout
+    /// Sets an error specifically on the active profile popout quick message
+    pub fn set_profile_popout_quick_message_error(&mut self, error: String) {
+        if let Some(ref mut popout) = self.profile_popout {
+            popout.error = Some(error);
+        }
+    }
+
+    /// Asynchronously sends a quick message from the user profile popout input:
+    /// - Returns Ok(None) if quick_message is empty (campo vazio não envia).
+    /// - Opens/creates DM channel for the recipient user.
+    /// - Does not insert optimistic message prior to API response.
+    /// - On API success: injects confirmed message, clears quick_message, closes popout, returns Ok(Some(msg)).
+    /// - On API error: sets popout.error, preserves quick_message, leaves popout open, returns Err(err).
+    pub async fn send_profile_popout_quick_message_async(
+        &mut self,
+    ) -> Result<Option<crate::domain::message::Message>, String> {
+        let (user_id, username, content) = {
+            let Some(ref popout) = self.profile_popout else {
+                return Ok(None);
+            };
+            let content = popout.quick_message.trim().to_string();
+            if content.is_empty() {
+                return Ok(None);
+            }
+            let user_id = popout.user_id.clone();
+            let username = popout
+                .data
+                .as_ref()
+                .map(|d| d.user.username.clone())
+                .unwrap_or_else(|| user_id.clone());
+            (user_id, username, content)
+        };
+
+        let channel_id = self.open_dm_with_user(&user_id, &username);
+
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            match cm.send_message(&channel_id, &content).await {
+                Ok(msg) => {
+                    let target_cid = if !msg.channel_id.is_empty() {
+                        &msg.channel_id
+                    } else {
+                        &channel_id
+                    };
+                    self.inject_message(target_cid, msg.clone());
+                    if let Some(dm) = self
+                        .dm_channels
+                        .iter_mut()
+                        .find(|c| c.id == channel_id || c.id == *target_cid)
+                    {
+                        dm.last_message_id =
+                            Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+                        self.sort_dm_channels();
+                    }
+                    if let Some(ref mut popout) = self.profile_popout {
+                        popout.quick_message.clear();
+                        popout.error = None;
+                    }
+                    self.close_profile_popout();
+                    Ok(Some(msg))
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    if let Some(ref mut popout) = self.profile_popout {
+                        popout.error = Some(err_msg.clone());
+                    }
+                    Err(err_msg)
+                }
+            }
+        } else {
+            // Offline fallback when ClientManager is absent (used in offline unit tests)
+            let new_id = format!("offline-{}", chrono::Utc::now().timestamp_millis());
+            let new_msg = crate::domain::message::Message::new(
+                new_id,
+                channel_id.clone(),
+                crate::domain::message::Author {
+                    id: self.current_user.id.clone(),
+                    username: self.current_user.username.clone(),
+                    global_name: Some(self.current_user.display_name.clone()),
+                    avatar: None,
+                    bot: false,
+                    avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
+                },
+                &content,
+            );
+            self.inject_message(&channel_id, new_msg.clone());
+            if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == channel_id) {
+                dm.last_message_id =
+                    Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+                self.sort_dm_channels();
+            }
+            if let Some(ref mut popout) = self.profile_popout {
+                popout.quick_message.clear();
+                popout.error = None;
+            }
+            self.close_profile_popout();
+            Ok(Some(new_msg))
+        }
+    }
+
+    /// Sends a quick message from the user profile popout input.
+    /// In offline mode (no client_manager), injects message and closes popout.
+    /// In connected mode (client_manager present), dispatches send_message asynchronously without
+    /// optimistic message, only closing popout and clearing field once confirmed.
     pub fn send_profile_popout_quick_message(&mut self) {
         let (user_id, username, content) = {
             let Some(ref popout) = self.profile_popout else {
@@ -184,8 +287,49 @@ impl AppState {
         };
 
         let channel_id = self.open_dm_with_user(&user_id, &username);
-        self.send_message(&channel_id, &content);
-        self.close_profile_popout();
+
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let target_cid = channel_id;
+            let text = content;
+            let uid = user_id;
+            tokio::spawn(async move {
+                if let Err(e) = cm.send_message(&target_cid, &text).await {
+                    log::warn!("Falha ao enviar mensagem rapida no popout: {:?}", e);
+                    cm.emit_event(crate::protocol::transport::TransportEvent::UserProfileError {
+                        user_id: uid,
+                        error: e.to_string(),
+                    });
+                }
+            });
+            // Sem resposta da API: não fecha popout nem insere mensagem otimista
+        } else {
+            // Offline fallback
+            let new_id = format!("offline-{}", chrono::Utc::now().timestamp_millis());
+            let new_msg = crate::domain::message::Message::new(
+                new_id,
+                channel_id.clone(),
+                crate::domain::message::Author {
+                    id: self.current_user.id.clone(),
+                    username: self.current_user.username.clone(),
+                    global_name: Some(self.current_user.display_name.clone()),
+                    avatar: None,
+                    bot: false,
+                    avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
+                },
+                &content,
+            );
+            self.inject_message(&channel_id, new_msg);
+            if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == channel_id) {
+                dm.last_message_id =
+                    Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+                self.sort_dm_channels();
+            }
+            if let Some(ref mut popout) = self.profile_popout {
+                popout.quick_message.clear();
+            }
+            self.close_profile_popout();
+        }
     }
 
     /// Builds fallback profile data from local friends, members, or current_user
