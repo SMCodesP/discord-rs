@@ -9,8 +9,8 @@
 //! - `XDG_CONFIG_HOME` is pointed at a fresh temp dir before any state is
 //!   built, so no token (`auth.json`) and no guild cache is ever read.
 //! - `DISCORD_TOKEN` / `DISCORD_TOKEN_IS_USER` are removed from the env.
-//! - `AppState::new()` seed content is cleared and `auth_token`,
-//!   `client_manager` are forced to `None`: no auto-login, no gateway.
+//! - `AppState::new()` starts empty in production; `apply_fixture` populates
+//!   fixture content and ensures `auth_token`, `client_manager` stay `None`.
 //! - The view is mounted with `RootView::with_state` (no `ClientManager`,
 //!   no event loop, no `connect_with_token` spawn).
 //! - Fixtures carry no URLs at all (no avatar/icon/attachment URLs), so the
@@ -422,9 +422,8 @@ fn build_message(channel_id: &str, f: &FixtureMessage, base: DateTime<Utc>) -> M
         .with_reactions(reactions)
 }
 
-/// Builds the full AppState from a fixture, replacing the `AppState::new()`
-/// demo seed: every collection taken over by the fixture is cleared first so
-/// the screenshot shows only fixture content.
+/// Builds the full AppState from a fixture, starting from the empty production
+/// state `AppState::new()`: every collection is populated from fixture content.
 fn apply_fixture(f: &ShotFixture) -> AppState {
     let mut s = AppState::new();
 

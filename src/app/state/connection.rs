@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use super::*;
 use crate::protocol::AuthToken;
 use crate::protocol::ConnectionMode;
@@ -76,15 +77,15 @@ impl AppState {
     pub fn disconnect_gateway(&mut self) {
         self.is_connected_to_gateway = false;
         self.auth_token = None;
-        self.connection_mode = ConnectionMode::Mock;
-        self.connection_status = "Modo Demonstração (Offline)".to_string();
-        self.messages_by_channel = super::seed::generate_seed_messages();
+        self.connection_mode = ConnectionMode::Disconnected("Desconectado".to_string());
+        self.connection_status = "Desconectado".to_string();
+        self.messages_by_channel = HashMap::new();
         self.dm_channels = Vec::new();
 
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
             tokio::spawn(async move {
-                let _ = cm.connect_mock().await;
+                let _ = cm.disconnect().await;
             });
         }
     }

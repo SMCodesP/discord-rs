@@ -231,7 +231,9 @@ pub(super) fn organize_channels_into_categories(
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    /// Somente testes/fixtures; nunca chamar em produção.
+    #[doc(hidden)]
+    pub fn seeded_for_tests() -> Self {
         let rust_brasil = GuildItemState {
             id: "guild-rust-br".into(),
             name: "Rust Brasil".into(),

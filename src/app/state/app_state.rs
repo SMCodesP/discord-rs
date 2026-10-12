@@ -131,3 +131,136 @@ impl Default for AppState {
         Self::new()
     }
 }
+
+impl AppState {
+    /// Devolve o estado inicial vazio de produção (Zero Mocks).
+    /// Mantém apenas a leitura do token salvo (TokenStorage), cache de guilds em disco
+    /// e preferências do usuário.
+    pub fn new() -> Self {
+        let token_storage = crate::protocol::TokenStorage::default();
+        let (stored_token, is_user) = match token_storage.load() {
+            Ok(Some(t)) => (t.secret().to_string(), t.token_type == crate::protocol::TokenType::User),
+            _ => (String::new(), false),
+        };
+        let has_token = !stored_token.is_empty();
+
+        let cached_cache = load_guilds_from_disk();
+        let (mut guilds, guild_folders) = if let Some(cache) = cached_cache {
+            (cache.guilds, cache.guild_folders)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        if !guild_folders.is_empty() {
+            let mut order_map = HashMap::new();
+            let mut idx = 0;
+            for folder in &guild_folders {
+                for gid in &folder.guild_ids {
+                    order_map.entry(gid.clone()).or_insert(idx);
+                    idx += 1;
+                }
+            }
+            guilds.sort_by_key(|g| {
+                order_map.get(&g.id).copied().unwrap_or(usize::MAX)
+            });
+        }
+
+        let selected_guild_id = guilds.first().map(|g| g.id.clone());
+        let selected_channel_id = guilds.first().and_then(|g| {
+            for cat in &g.categories {
+                if let Some(ch) = cat.channels.iter().find(|c| c.kind == ChannelKind::Text) {
+                    return Some(ch.id.clone());
+                }
+            }
+            g.categories.first().and_then(|c| c.channels.first().map(|ch| ch.id.clone()))
+        });
+
+        let is_connecting = has_token;
+        let (connection_status, connection_mode) = if has_token {
+            ("Conectando ao Discord...".to_string(), ConnectionMode::Connecting)
+        } else {
+            ("Não conectado".to_string(), ConnectionMode::Disconnected("Não conectado".to_string()))
+        };
+
+        let mut state = Self {
+            selected_guild_id,
+            selected_channel_id,
+            active_voice_call: None,
+            show_members: true,
+            active_modal: None,
+            user_settings_tab: SettingsTab::MyAccount,
+            collapsed_categories: HashSet::new(),
+            current_user: CurrentUserProfile {
+                id: String::new(),
+                username: String::new(),
+                display_name: String::new(),
+                discriminator: None,
+                avatar_text: String::new(),
+                avatar_url: None,
+                custom_status: None,
+                presence: PresenceStatus::Offline,
+                is_muted: false,
+                is_deafened: false,
+                avatar_decoration_data: None,
+            },
+            guilds,
+            members: Vec::new(),
+            search_query: String::new(),
+            is_search_open: false,
+            search_results: Vec::new(),
+            is_searching: false,
+            target_message_id: None,
+            typing_tracker: HashMap::new(),
+            is_connected_to_gateway: false,
+            auth_token: if has_token { Some(stored_token.clone()) } else { None },
+            connection_status,
+            connection_mode,
+            client_manager: None,
+            messages_by_channel: HashMap::new(),
+            active_draft: String::new(),
+            replying_to_message: None,
+            typing_users: Vec::new(),
+            token_input: stored_token,
+            is_user_token: is_user,
+            save_token_to_disk: true,
+            auth_error: None,
+            is_connecting,
+            dm_channels: Vec::new(),
+            presences_by_user: HashMap::new(),
+            pinned_dms: Vec::new(),
+            pinned_dms_path: None,
+            guild_folders,
+            expanded_folders: std::collections::HashSet::new(),
+            friends: Vec::new(),
+            friends_tab: FriendsTab::Online,
+            add_friend_input: String::new(),
+            add_friend_feedback: None,
+            is_sending_friend_request: false,
+            pending_relationship_actions: HashSet::new(),
+            message_requests_subtab: MessageRequestsSubTab::YouMayKnow,
+            message_requests: Vec::new(),
+            active_now_items: Vec::new(),
+            telemetry: Some(crate::telemetry::global().clone()),
+
+            nitro_tier: NitroTier::None,
+            active_subscription: None,
+            server_boosts: Vec::new(),
+            connections: Vec::new(),
+            authorized_apps: Vec::new(),
+            family_center_links: Vec::new(),
+            theme_choice: ThemeChoice::Dark,
+            message_display_mode: MessageDisplayMode::Cozy,
+            accessibility_settings: AccessibilitySettings::default(),
+            media_cache: crate::protocol::media_cache::MediaCacheManager::default_path(),
+            profile_popout: None,
+            profile_anchor: None,
+            profile_modal_open: false,
+            profile_modal_tab: ProfileModalTab::AboutMe,
+            profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
+            voice_states_by_channel: HashMap::new(),
+        };
+        state.sync_guild_media();
+        state
+    }
+}
+

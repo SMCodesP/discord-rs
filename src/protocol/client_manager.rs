@@ -8,9 +8,11 @@ use anyhow::Result;
 use log::{info, warn, error};
 
 use crate::domain::channel::{Channel, ChannelType};
+use crate::domain::guild::Guild;
 use crate::domain::message::Message;
 use crate::protocol::auth::AuthToken;
 use crate::protocol::discord_api::DiscordApiClient;
+use crate::protocol::idle_transport::IdleTransport;
 use crate::protocol::mock_provider::MockDiscordProvider;
 use crate::protocol::transport::{DiscordTransport, Relationship, TransportEvent};
 
@@ -42,7 +44,24 @@ impl std::fmt::Debug for ClientManager {
 }
 
 impl ClientManager {
-    /// Creates a new ClientManager initialized with the deterministic Mock provider
+    /// Creates a new production ClientManager initialized with an idle transport.
+    /// Mode starts as Disconnected("Não conectado").
+    pub fn new() -> (Self, broadcast::Receiver<TransportEvent>) {
+        let idle = Arc::new(IdleTransport::new());
+        let (event_tx, event_rx) = broadcast::channel(256);
+
+        let manager = Self {
+            transport: Arc::new(RwLock::new(idle)),
+            mode: Arc::new(RwLock::new(ConnectionMode::Disconnected("Não conectado".to_string()))),
+            event_tx,
+            real_client: Arc::new(RwLock::new(None)),
+        };
+
+        (manager, event_rx)
+    }
+
+    /// Somente testes: cria um ClientManager inicializado com o provedor Mock determinístico.
+    #[doc(hidden)]
     pub fn new_mock() -> (Self, broadcast::Receiver<TransportEvent>) {
         let mock = Arc::new(MockDiscordProvider::new());
         let (event_tx, event_rx) = broadcast::channel(256);
@@ -70,6 +89,13 @@ impl ClientManager {
         // Connect gateway loop
         if let Err(e) = real_client.connect().await {
             error!("Falha ao conectar Gateway do Discord: {:?}", e);
+            let idle = Arc::new(IdleTransport::new());
+            {
+                let mut current = self.transport.write().await;
+                *current = idle;
+                let mut rc = self.real_client.write().await;
+                *rc = None;
+            }
             let mut mode = self.mode.write().await;
             *mode = ConnectionMode::Disconnected(e.to_string());
             let _ = self.event_tx.send(TransportEvent::Disconnected(e.to_string()));
@@ -117,6 +143,8 @@ impl ClientManager {
         let client_clone = real_client.clone();
         let event_tx_clone = self.event_tx.clone();
         let mode_clone = self.mode.clone();
+        let transport_bg_ref = self.transport.clone();
+        let real_client_bg_ref = self.real_client.clone();
 
         tokio::spawn(async move {
             info!("Buscando dados iniciais da API do Discord (@me, guilds, canais, mensagens)...");
@@ -132,6 +160,13 @@ impl ClientManager {
                 Err(e) => {
                     let err_msg = "Falha na autenticação: Token inválido ou não autorizado (401)".to_string();
                     warn!("{}: {:?}", err_msg, e);
+                    let idle = Arc::new(IdleTransport::new());
+                    {
+                        let mut current = transport_bg_ref.write().await;
+                        *current = idle;
+                        let mut rc = real_client_bg_ref.write().await;
+                        *rc = None;
+                    }
                     {
                         let mut m = mode_clone.write().await;
                         *m = ConnectionMode::Disconnected(err_msg.clone());
@@ -220,7 +255,31 @@ impl ClientManager {
         Ok(())
     }
 
-    /// Swaps back to deterministic mock provider
+    /// Disconnects the active client and switches to the idle transport.
+    pub async fn disconnect(&self) -> Result<()> {
+        let current_transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        let _ = current_transport.disconnect().await;
+
+        let idle = Arc::new(IdleTransport::new());
+        {
+            let mut current = self.transport.write().await;
+            *current = idle;
+            let mut rc = self.real_client.write().await;
+            *rc = None;
+        }
+        {
+            let mut mode = self.mode.write().await;
+            *mode = ConnectionMode::Disconnected("Desconectado".to_string());
+        }
+        let _ = self.event_tx.send(TransportEvent::Disconnected("Desconectado".to_string()));
+        Ok(())
+    }
+
+    /// Somente testes: alterna para o provedor mock determinístico.
+    #[doc(hidden)]
     pub async fn connect_mock(&self) -> Result<()> {
         info!("Alternando para provedor local determinístico...");
         let mock = Arc::new(MockDiscordProvider::new());
@@ -399,6 +458,15 @@ impl ClientManager {
             lock.clone()
         };
         transport.get_messages(&real_channel_id, limit).await
+    }
+
+    /// Lists all available guilds using the active transport
+    pub async fn list_guilds(&self) -> Result<Vec<Guild>> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.list_guilds().await
     }
 
     /// Lists channels for a guild using the active transport

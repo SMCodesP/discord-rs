@@ -143,7 +143,7 @@ fn test_e2e_initialization_with_guild_cache_and_token() {
     assert_eq!(loaded_cache.guild_folders[0].guild_ids, vec!["guild-2", "guild-1"]);
 
     // 1.3 AppState default initialization
-    let state = AppState::new();
+    let state = AppState::seeded_for_tests();
     assert_eq!(state.current_user.id, "user-me");
     assert_eq!(state.current_user.username, "vanguard_dev");
     assert!(!state.guilds.is_empty(), "Initial state must have guilds");

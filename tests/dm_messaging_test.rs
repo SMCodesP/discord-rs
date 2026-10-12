@@ -209,7 +209,7 @@ fn test_no_hardcoded_ferris_dm_and_clean_state() {
 
 #[test]
 fn test_guild_messages_do_not_leak_into_dms() {
-    let mut state = AppState::new();
+    let mut state = AppState::seeded_for_tests();
 
     // 1. Setup a bot DM channel and a user DM channel
     let bot_dm_id = "dm-chan-bot-dyno-999".to_string();
