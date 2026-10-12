@@ -1,6 +1,7 @@
 use gpui::prelude::*;
 use gpui::*;
 use gpui::component::tooltip::Tooltip;
+use gpui::component::popover::Popover;
 use gpui::component::Selectable;
 
 use super::state::{ActiveVoiceCall, AppState, VoiceParticipantState};
@@ -538,7 +539,7 @@ fn render_bottom_controls(
                 .p(px(8.0))
                 .rounded(px(12.0))
                 .bg(discord.bg_server)
-                .child(render_mute_control(app_entity.clone(), call.is_muted, cx))
+                .child(render_mute_control(app_entity.clone(), call, cx))
                 .child(render_camera_control(app_entity.clone(), call.is_camera_on, cx))
                 .child(render_screen_share_control(
                     app_entity.clone(),
@@ -556,8 +557,8 @@ fn render_bottom_controls(
 pub struct ArrowDropupTrigger {
     pub is_open: bool,
     pub id: SharedString,
-    pub bg_col: Hsla,
-    pub hover_col: Hsla,
+    pub bg_col: Rgba,
+    pub hover_col: Rgba,
 }
 
 impl Selectable for ArrowDropupTrigger {
@@ -585,6 +586,9 @@ impl RenderOnce for ArrowDropupTrigger {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(self.hover_col))
+            .tooltip(|window, cx| {
+                Tooltip::new("Dispositivos de áudio").build(window, cx)
+            })
             .child(
                 div()
                     .text_color(discord.white)
@@ -594,9 +598,14 @@ impl RenderOnce for ArrowDropupTrigger {
     }
 }
 
-fn render_mute_control(app_entity: Entity<AppState>, is_muted: bool, cx: &App) -> AnyElement {
+fn render_mute_control(
+    app_entity: Entity<AppState>,
+    call: &ActiveVoiceCall,
+    cx: &App,
+) -> AnyElement {
     let discord = cx.discord();
     let entity_btn = app_entity.clone();
+    let is_muted = call.is_muted;
 
     let bg_col = if is_muted {
         control_critical_primary_bg_default()
@@ -637,27 +646,23 @@ fn render_mute_control(app_entity: Entity<AppState>, is_muted: bool, cx: &App) -
             icon_mic(px(20.0), discord.white)
         });
 
-    // Seta desabilitada: troca de dispositivo em chamada não é suportada por AudioBridgeCommand (voice_session.rs:347)
-    let mic_arrow = div()
-        .id("call-mic-arrow")
-        .w(px(18.0))
-        .h(px(44.0))
-        .rounded(px(4.0))
-        .bg(bg_col)
-        .opacity(0.5)
-        .cursor_not_allowed()
-        .flex()
-        .items_center()
-        .justify_center()
-        .tooltip(|window, cx| {
-            Tooltip::new("Troca de dispositivo durante a chamada ainda não suportada").build(window, cx)
-        })
-        .child(
-            div()
-                .text_color(discord.white)
-                .text_size(px(10.0))
-                .child("▲"),
-        );
+    let trigger = ArrowDropupTrigger {
+        is_open: false,
+        id: "call-mic-arrow".into(),
+        bg_col,
+        hover_col,
+    };
+
+    let mic_arrow = Popover::new("call-mic-device-popover")
+        .anchor(Anchor::TopCenter)
+        .offset(px(6.0))
+        .trigger(trigger)
+        .content({
+            let entity = app_entity.clone();
+            move |_state, _window, cx| {
+                render_audio_device_menu(entity.clone(), cx)
+            }
+        });
 
     div()
         .flex()
@@ -788,39 +793,57 @@ fn render_disconnect_control(app_entity: Entity<AppState>, cx: &App) -> AnyEleme
 // Real Hardware Device Menus (MediaDeviceManager & CameraManager)
 // ============================================================================
 
-#[allow(dead_code)]
-fn render_audio_device_menu() -> AnyElement {
+fn render_audio_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElement {
+    let (selected_input, selected_output) = {
+        let state = app_entity.read(cx);
+        let call = state.active_voice_call.as_ref();
+        (
+            call.and_then(|c| c.selected_input_device.clone()),
+            call.and_then(|c| c.selected_output_device.clone()),
+        )
+    };
+
     let device_manager = MediaDeviceManager::new();
-    let devices = device_manager.list_input_devices().unwrap_or_default();
+    let input_devices = device_manager.list_input_devices().unwrap_or_default();
+    let output_devices = device_manager.list_output_devices().unwrap_or_default();
 
     let mut menu = div()
         .flex()
         .flex_col()
         .gap(px(4.0))
         .p(px(8.0))
-        .min_w(px(220.0))
+        .min_w(px(240.0))
         .rounded(px(8.0))
         .bg(bg_floating())
         .border_1()
         .border_color(borders())
+        .shadow_lg()
         .child(
             div()
                 .text_color(text_secondary())
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(11.0))
+                .px(px(6.0))
                 .child("DISPOSITIVOS DE ENTRADA"),
         );
 
-    if devices.is_empty() {
+    if input_devices.is_empty() {
         menu = menu.child(
             div()
                 .text_color(text_muted())
                 .text_size(px(12.0))
+                .px(px(6.0))
                 .py(px(4.0))
                 .child("Nenhum microfone encontrado"),
         );
     } else {
-        for dev in devices {
+        for dev in input_devices {
+            let is_selected = match selected_input {
+                Some(ref sel) => sel == &dev.id,
+                None => dev.is_default,
+            };
+            let dev_id = dev.id.clone();
+            let entity = app_entity.clone();
             menu = menu.child(
                 div()
                     .flex()
@@ -832,17 +855,91 @@ fn render_audio_device_menu() -> AnyElement {
                     .rounded(px(4.0))
                     .hover(|s| s.bg(channel_hover()))
                     .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                        let dev_id = dev_id.clone();
+                        entity.update(cx, |state, cx| {
+                            state.set_input_device(Some(dev_id));
+                            cx.notify();
+                        });
+                    })
                     .child(
                         div()
-                            .text_color(text_primary())
+                            .text_color(if is_selected { text_primary() } else { text_secondary() })
                             .text_size(px(13.0))
                             .child(dev.name),
                     )
-                    .children(dev.is_default.then(|| {
+                    .children(is_selected.then(|| {
                         div()
                             .text_color(status_online())
-                            .text_size(px(11.0))
-                            .child("Padrão")
+                            .text_size(px(12.0))
+                            .child("✓")
+                    })),
+            );
+        }
+    }
+
+    menu = menu.child(
+        div()
+            .h(px(1.0))
+            .my(px(4.0))
+            .bg(borders()),
+    );
+
+    menu = menu.child(
+        div()
+            .text_color(text_secondary())
+            .font_weight(FontWeight::BOLD)
+            .text_size(px(11.0))
+            .px(px(6.0))
+            .child("DISPOSITIVOS DE SAÍDA"),
+    );
+
+    if output_devices.is_empty() {
+        menu = menu.child(
+            div()
+                .text_color(text_muted())
+                .text_size(px(12.0))
+                .px(px(6.0))
+                .py(px(4.0))
+                .child("Nenhum alto-falante encontrado"),
+        );
+    } else {
+        for dev in output_devices {
+            let is_selected = match selected_output {
+                Some(ref sel) => sel == &dev.id,
+                None => dev.is_default,
+            };
+            let dev_id = dev.id.clone();
+            let entity = app_entity.clone();
+            menu = menu.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .hover(|s| s.bg(channel_hover()))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                        let dev_id = dev_id.clone();
+                        entity.update(cx, |state, cx| {
+                            state.set_output_device(Some(dev_id));
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        div()
+                            .text_color(if is_selected { text_primary() } else { text_secondary() })
+                            .text_size(px(13.0))
+                            .child(dev.name),
+                    )
+                    .children(is_selected.then(|| {
+                        div()
+                            .text_color(status_online())
+                            .text_size(px(12.0))
+                            .child("✓")
                     })),
             );
         }
