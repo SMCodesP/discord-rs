@@ -1412,6 +1412,16 @@ async fn handle_dispatch(
                 }
             }
 
+            // Extract appearance settings from user_settings_proto if present in READY
+            let mut account_theme = None;
+            let mut client_theme = None;
+            if let Some(proto_b64) = data.get("user_settings_proto").and_then(|v| v.as_str()) {
+                if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(proto_b64) {
+                    account_theme = settings.theme();
+                    client_theme = settings.appearance.as_ref().and_then(|a| a.client_theme_settings.clone());
+                }
+            }
+
             let _ = event_tx.send(TransportEvent::Ready {
                 user,
                 guilds,
@@ -1442,6 +1452,13 @@ async fn handle_dispatch(
 
             if !pinned_dms.is_empty() {
                 let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
+            }
+
+            if let Some(theme) = account_theme {
+                let _ = event_tx.send(TransportEvent::AccountThemeUpdated {
+                    theme,
+                    client_theme_settings: client_theme,
+                });
             }
 
             // Popula voice_states iniciais a partir do snapshot do READY
@@ -1735,6 +1752,20 @@ async fn handle_dispatch(
                 *current_user_id.write().await = Some(user.id.clone());
                 cache_engine.save_current_user(&user);
                 let _ = event_tx.send(TransportEvent::CurrentUserUpdated(user));
+            }
+        }
+        "USER_SETTINGS_PROTO_UPDATE" => {
+            // Live protobuf user settings update from Discord Gateway:
+            // payload contains { "settings": "<base64_string>", "partial": bool }
+            if let Some(settings_b64) = data.get("settings").and_then(|v| v.as_str()) {
+                if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(settings_b64) {
+                    if let Some(theme) = settings.theme() {
+                        let _ = event_tx.send(TransportEvent::AccountThemeUpdated {
+                            theme,
+                            client_theme_settings: settings.appearance.as_ref().and_then(|a| a.client_theme_settings.clone()),
+                        });
+                    }
+                }
             }
         }
         _ => {}

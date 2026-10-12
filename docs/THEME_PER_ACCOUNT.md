@@ -1,8 +1,10 @@
 # Especificação de Tema por Conta no Discord (Theme per Account)
 
-Este documento descreve como o cliente oficial do Discord recebe e persiste as configurações de tema da conta do usuário via Gateway e API REST, e o que é necessário para suportar esse fluxo no `discord-rs`.
+Este documento descreve como o cliente oficial do Discord recebe as configurações de tema da conta do usuário via Gateway WebSocket, o esquema oficial Protobuf verificado, o tratamento de DMs fixadas e como o `discord-rs` implementa a leitura segura dessas preferências em conformidade com as regras do projeto.
 
-> **Nota de Privacidade**: Nenhuma informação confidencial da conta inspecionada (tokens de autenticação, IDs de usuário, cores ou hashes de tema personalizados) é incluída neste documento.
+> **Nota de Privacidade**: Nenhuma informação confidencial de conta de usuário (tokens de autenticação, IDs reais, e-mails ou conteúdo privado) é incluída neste documento ou código. Todos os testes utilizam exclusivamente bytes sintéticos construídos no próprio código de teste.
+>
+> **Fronteira de Somente Leitura (Zero Writes)**: O `discord-rs` opera estritamente em modo de leitura para as configurações de usuário. Nenhuma requisição `PATCH` em endpoints de settings-proto é realizada. Fixações e desfixações manuais de canais pelo usuário continuam operando exclusivamente de forma local no cache (`~/.config/discord-rs/cache/pinned_dms.json`).
 
 ---
 
@@ -14,52 +16,71 @@ O Discord não armazena as preferências modernas de aparência em campos JSON c
 - **Evento**: `READY` (Opcode 0 - Dispatch)
 - **Campo de dados**: `user_settings_proto`
 - **Formato**: String Base64 contendo a mensagem serializada Protobuf `PreloadedUserSettings`.
-- **Evento de atualização**: `USER_SETTINGS_PROTO_UPDATE`
-  - Emitido pelo Gateway sempre que o usuário altera configurações em qualquer cliente conectado.
-  - Payload contém o campo `settings` com a string Base64 atualizada e `partial` (booleano).
 
-### B. Endpoints REST API
+### B. Gateway WebSocket (Evento `USER_SETTINGS_PROTO_UPDATE`)
+- **Evento**: `USER_SETTINGS_PROTO_UPDATE`
+- Emitido pelo Gateway sempre que o usuário altera configurações em qualquer cliente conectado.
+- Payload contém:
+  - `settings`: String Base64 contendo `PreloadedUserSettings` atualizado.
+  - `partial`: Booleano indicando se o payload contém apenas campos modificados (`true`) ou o snapshot completo (`false`).
+  - **Tratamento de parcial**: Quando `partial: true` e o subcampo `appearance` não está presente no buffer, o `discord-rs` **não** apaga o tema já registrado no `AppState`.
+
+### C. Endpoints REST API (Informativo / Sem escrita)
 - **Endpoint**: `PATCH /api/v9/users/@me/settings-proto/1`
-  - Utilizado pelo cliente oficial ao salvar configurações de aparência / tema.
-  - O sufixo `/1` indica o tipo de proto: `1` para `PreloadedUserSettings` (configurações gerais), `2` para `FrecencyUserSettings`.
-  - Corpo da requisição: `{"settings": "<base64_string>"}`.
+  - Utilizado pelo cliente oficial web/desktop ao salvar configurações de aparência / tema.
+  - **Limite do discord-rs**: Proibido escrever na conta de usuário. Nenhuma chamada de escrita ou mutação é efetuada pelo cliente.
 - **Endpoint de consulta**: `GET /api/v9/users/@me/settings-proto/1`
   - Retorna o payload encapsulado: `{"settings": "<base64_string>"}`.
 
 ---
 
-## 2. Esquema da Mensagem Protobuf (`PreloadedUserSettings`)
+## 2. Esquema Oficial Protobuf Verificado (`PreloadedUserSettings.proto`)
 
-O buffer binário decodificado corresponde à estrutura `discord_protos.discord_users.v1.PreloadedUserSettings`:
+Fonte oficial verificada:
+Arquivo `/home/smcodes/.cache/discord-rs-parity/orch/PreloadedUserSettings.proto` (pacote `discord_protos.discord_users.v1`), extraído do cliente oficial do Discord pelo projeto `discord-userdoccers/discord-protos`.
 
-### Campos Relevantes para Tema:
-1. **`appearance`** (Mensagem `AppearanceSettings`):
-   - `theme`: Enum / string de tema básico (`THEME_DARK`, `THEME_LIGHT`, `THEME_MIDNIGHT`).
-2. **`client_theme_settings`** (Mensagem `ClientThemeSettings`):
-   - `background_gradient_preset_id`: Identificador numérico do preset de gradiente selecionado pelo usuário (quando aplicável).
-   - `custom_theme_colors`: Lista / array de inteiros de 32 bits (representando cores em formato numérico `0xRRGGBB` para os pontos de interpolação do gradiente de fundo).
+### Campos e Linhas Exatas do Esquema:
 
-*Status de verificação em inspeção*:
-- Nomes dos endpoints: Confirmados (`/api/v9/users/@me/settings-proto/1`, evento `READY.user_settings_proto`).
-- Nomes dos campos: `appearance.theme`, `client_theme_settings.background_gradient_preset_id`, `client_theme_settings.custom_theme_colors`.
-- Valores específicos da conta: *Omitidos intencionalmente por política de zero vazamento*.
+| Mensagem | Campo | Nº Campo | Tipo de Fio (Wire Type) | Linha no `.proto` | Descrição |
+|---|---|---|---|---|---|
+| `PreloadedUserSettings` | `appearance` | **13** | 2 (Length-delimited) | Linha 607 | Container de configurações de aparência |
+| `AppearanceSettings` | `theme` | **1** | 0 (Varint) | Linha 438 | Enum `Theme` selecionado |
+| `AppearanceSettings` | `client_theme_settings` | **3** | 2 (Length-delimited) | Linha 440 | Presets de gradiente e cores customizadas |
+| `ClientThemeSettings` | `background_gradient_preset_id` | **2** | 2 (Length-delimited `UInt32Value`) | Linha 406 | ID numérico do preset de gradiente de fundo |
+| `ClientThemeSettings` | `custom_user_theme_settings` | **4** | 2 (Length-delimited `CustomUserThemeSettings`) | Linha 407 | Cores personalizadas do gradiente |
+| `CustomUserThemeSettings` | `colors` | **1** | 2 (Repeated `string`) | Linha 399 | Lista de cores hexadecimais (ex.: `"#1e1f22"`) |
+| `CustomUserThemeSettings` | `gradient_color_stops` | **2** | 5 (Fixed32) ou 2 (Packed `float`) | Linha 400 | Pontos de parada do gradiente |
+| `CustomUserThemeSettings` | `gradient_angle` | **3** | 0 (Varint `int32`) | Linha 401 | Ângulo do gradiente em graus |
+| `CustomUserThemeSettings` | `base_mix` | **4** | 0 (Varint `int32`) | Linha 402 | Mix base de interpolação |
+
+### Valores do Enum `Theme` (`PreloadedUserSettings.proto:390-396`):
+- `THEME_UNSET = 0` (Linha 391)
+- `THEME_DARK = 1` (Linha 392)
+- `THEME_LIGHT = 2` (Linha 393)
+- `THEME_DARKER = 3` (Linha 394)
+- `THEME_MIDNIGHT = 4` (Linha 395)
 
 ---
 
-## 3. Lacunas no `src/protocol` do `discord-rs`
+## 3. DMs Fixadas: Análise do Esquema e Persistência Local
 
-Atualmente, o `src/protocol` do `discord-rs` não consegue desserializar nem aplicar temas por conta:
+A auditoria contra `/home/smcodes/.cache/discord-rs-parity/orch/PreloadedUserSettings.proto` demonstrou que:
+1. **Ausência no Esquema Protobuf**: Executando busca por `pin` no arquivo `.proto` (`grep -n -i pin PreloadedUserSettings.proto`), não existe **nenhum** campo relativo a canais fixados ou DMs fixadas.
+2. **Diferenciação com `Favorites`**: O campo `Favorites favorites = 15;` (linhas 481-486, 609) representa a funcionalidade de "Favoritos" de servidor do Discord (`guild_visible`, `auto_add_joined_threads`, `FavoriteChannel.collapsed`), onde `FavoriteChannel` contém `nickname = 1`, `type = 2`, `position = 3`, `parent_id = 4`, `channel_type = 5`, `collapsed = 6`. Não se trata de fixação de DMs.
+3. **Evidência de DMs Fixadas no Discord Oficial**: Nenhuma rota ou campo no `PreloadedUserSettings` armazena DMs fixadas da lista lateral de mensagens diretas no cliente Discord oficial inspecionado.
+4. **Decisão Arquitetural no `discord-rs`**:
+   - As DMs fixadas permanecem estritamente **locais**.
+   - O arquivo de persistência em disco `~/.config/discord-rs/cache/pinned_dms.json` é a autoridade local de ordenação das DMs fixadas no cliente.
+   - Nenhuma ligação fictícia de favoritos com pins de DM é mantida.
 
-1. **Parser de Protobuf**:
-   - O projeto utiliza `serde_json` para payloads do Gateway e REST.
-   - Não há dependência de decodificador Protobuf (ex.: `prost` ou `protobuf-codegen`) no `Cargo.toml`.
-2. **Decodificação Base64**:
-   - É necessário integrar a decodificação da string Base64 de `user_settings_proto` para bytes antes da desserialização do protobuf.
-3. **Tratamento no Gateway Dispatch**:
-   - Em `src/protocol/discord_api.rs:1361-1405`, o manipulador do evento `READY` tenta extrair `user_settings` como objeto JSON legado. O campo `user_settings_proto` é ignorado.
-   - O evento `USER_SETTINGS_PROTO_UPDATE` não possui manipulador em `src/protocol/discord_api.rs`.
-4. **Clientes REST**:
-   - Não existem rotas mapeadas em `src/protocol/discord_api.rs` para interagir com `/api/v9/users/@me/settings-proto/1`.
-5. **Integração com o Sistema de Tokens**:
-   - A infraestrutura de tokens em `src/tokens/` agora está preparada via `DiscordPalette` e `install_with_palette(cx, palette)`.
-   - Quando o `src/protocol` for capaz de ler `PreloadedUserSettings`, ele poderá instanciar uma `DiscordPalette` customizada e chamar `DiscordExtras::install_with_palette(cx, palette)`.
+---
+
+## 4. Integração no `discord-rs` e Próximos Passos
+
+1. **Decodificação no Protocolo**:
+   - `src/protocol/user_settings_proto.rs` decodifica com segurança o buffer binário de `user_settings_proto` (Base64) extraindo `appearance.theme` e `appearance.client_theme_settings`.
+2. **Armazenamento no Estado**:
+   - O tema da conta é mantido em `AppState::account_theme` e `AppState::account_client_theme_settings`.
+   - **Não sobrescrever a escolha exibida**: A preferência de UI `AppState::theme_choice` não é alterada automaticamente pelo evento `AccountThemeUpdated` para evitar exibir "Claro" selecionado na interface de configurações quando apenas a paleta escura canônica (`DiscordPalette::dark()`) está implementada.
+3. **Próximos Passos (Próxima Fase)**:
+   - Quando paletas completas adicionais (ex.: Clara ou Midnight) forem desenhadas com paridade oficial e auditadas, uma camada de renderização poderá ligar `account_theme` a `DiscordExtras::install_with_palette(cx, palette)`.
