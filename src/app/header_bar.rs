@@ -219,16 +219,117 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
         toolbar = toolbar.child(render_login_button(app_entity.clone(), cx));
     }
 
-    // 1. Notifications / Bell button
-    toolbar = toolbar.child(
-        IconButton::with_icon("header-btn-notifications", |sz, col| {
-            icon_bell(sz, col).into_any_element()
-        })
-        .size(px(28.0))
-        .icon_size(px(16.0))
-        .rounded(px(4.0))
-        .tooltip("Notification Settings"),
-    );
+    let is_dm_channel = state.selected_guild_id.is_none() && state.selected_channel_id.is_some();
+
+    // Voice and Video call buttons (Only in DM / Group DM)
+    if is_dm_channel {
+        let channel_id = state.selected_channel_id.clone().unwrap_or_default();
+        let channel_name = state
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "DM".into());
+        let recipient_ids = state
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.recipient_ids.clone())
+            .unwrap_or_default();
+
+        let voice_entity = app_entity.clone();
+        let cid_v = channel_id.clone();
+        let cname_v = channel_name.clone();
+        let recips_v = recipient_ids;
+        toolbar = toolbar.child(
+            IconButton::with_icon("header-btn-voice-call", |sz, col| {
+                icon_phone(sz, col).into_any_element()
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(px(4.0))
+            .tooltip("Iniciar chamada de voz")
+            .on_click(move |_event, _window, cx| {
+                // Proteção contra clique duplo: se já conectando ou conectado nesta chamada, ignora
+                let is_already_connecting = {
+                    let s = voice_entity.read(cx);
+                    if let Some(ref call) = s.active_voice_call {
+                        call.channel_id == cid_v
+                            && !matches!(
+                                call.connection_state,
+                                crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }
+                            )
+                    } else {
+                        false
+                    }
+                };
+                if is_already_connecting {
+                    log::warn!("[HeaderBar] Chamada de voz já em andamento/conectando neste canal; ignorando duplo clique.");
+                    return;
+                }
+
+                let cm_opt = voice_entity.read(cx).client_manager.clone();
+                let cid = cid_v.clone();
+                let cname = cname_v.clone();
+                let recips = if recips_v.is_empty() {
+                    None
+                } else {
+                    Some(recips_v.clone())
+                };
+                let entity = voice_entity.clone();
+
+                // Ordem real (demonstrada em examples/voice_call_probe.rs:60-68 e doc Discord):
+                // 1. Entra na chamada do canal de DM com guild_id: None explicitamente (Opcode 4)
+                entity.update(cx, |state, cx| {
+                    state.connect_voice_dm(&cid, &cname);
+                    cx.notify();
+                });
+
+                // 2. Dispara o ring da chamada via POST /channels/{id}/call/ring
+                cx.spawn(|cx: &mut AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                        if let Some(cm) = cm_opt {
+                            if let Err(e) = cm.ring_call(&cid, recips).await {
+                                let err_msg = format!("Falha ao tocar chamada (ring_call recusado): {}", e);
+                                log::error!("[HeaderBar] {}", err_msg);
+                                let _ = cx.update(|cx| {
+                                    entity.update(cx, |state, cx| {
+                                        state.set_call_fatal_error(err_msg);
+                                        cx.notify();
+                                    });
+                                });
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }),
+        );
+
+        // Botão de chamada de vídeo desabilitado: transmissão de vídeo ainda não suportada (Zero mocks)
+        toolbar = toolbar.child(
+            IconButton::with_icon("header-btn-video-call", |sz, col| {
+                render_video_camera_icon(sz, col)
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(px(4.0))
+            .disabled(true)
+            .tooltip("Chamada de vídeo ainda não suportada nesta versão"),
+        );
+    } else {
+        // 1. Notifications / Bell button (Guild text/voice channels)
+        toolbar = toolbar.child(
+            IconButton::with_icon("header-btn-notifications", |sz, col| {
+                icon_bell(sz, col).into_any_element()
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(px(4.0))
+            .tooltip("Notification Settings"),
+        );
+    }
 
     // 2. Pinned messages button
     toolbar = toolbar.child(
@@ -383,3 +484,34 @@ fn render_search_box(
         ))
         .into_any_element()
 }
+
+fn render_video_camera_icon(size: Pixels, color: Rgba) -> AnyElement {
+    div()
+        .size(size)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .w(px(10.0))
+                        .h(px(8.0))
+                        .rounded(px(1.5))
+                        .bg(color),
+                )
+                .child(
+                    div()
+                        .w(px(3.0))
+                        .h(px(6.0))
+                        .rounded(px(1.0))
+                        .bg(color),
+                ),
+        )
+        .into_any_element()
+}
+

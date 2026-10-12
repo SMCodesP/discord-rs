@@ -308,25 +308,81 @@ pub struct VoiceParticipantState {
     pub id: String,
     pub name: String,
     pub avatar_text: String,
+    pub avatar_url: Option<String>,
     pub is_speaking: bool,
     pub is_muted: bool,
     pub is_deafened: bool,
+    pub is_camera_on: bool,
+    pub is_screen_sharing: bool,
     /// Avatar decoration equipped by the participant, when known.
     pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 /// Active voice call session
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ActiveVoiceCall {
     pub channel_id: String,
     pub channel_name: String,
     pub guild_name: String,
-    pub ping_ms: u32,
+    pub ping_ms: Option<u32>,
     pub is_muted: bool,
     pub is_deafened: bool,
     pub is_screen_sharing: bool,
     pub participants: Vec<VoiceParticipantState>,
+    pub connection_state: crate::protocol::voice_session::VoiceSessionState,
+    pub fatal_error: Option<String>,
+    pub is_camera_on: bool,
+    pub focus_user_id: Option<String>,
+    pub selected_input_device: Option<String>,
+    pub selected_output_device: Option<String>,
+    pub selected_camera_device: Option<String>,
+    pub voice_session: Option<std::sync::Arc<crate::protocol::voice_session::VoiceSession>>,
 }
+
+impl std::fmt::Debug for ActiveVoiceCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveVoiceCall")
+            .field("channel_id", &self.channel_id)
+            .field("channel_name", &self.channel_name)
+            .field("guild_name", &self.guild_name)
+            .field("ping_ms", &self.ping_ms)
+            .field("is_muted", &self.is_muted)
+            .field("is_deafened", &self.is_deafened)
+            .field("is_screen_sharing", &self.is_screen_sharing)
+            .field("participants", &self.participants)
+            .field("connection_state", &self.connection_state)
+            .field("fatal_error", &self.fatal_error)
+            .field("is_camera_on", &self.is_camera_on)
+            .field("focus_user_id", &self.focus_user_id)
+            .field("selected_input_device", &self.selected_input_device)
+            .field("selected_output_device", &self.selected_output_device)
+            .field("selected_camera_device", &self.selected_camera_device)
+            .field("has_voice_session", &self.voice_session.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for ActiveVoiceCall {
+    fn eq(&self, other: &Self) -> bool {
+        self.channel_id == other.channel_id
+            && self.channel_name == other.channel_name
+            && self.guild_name == other.guild_name
+            && self.ping_ms == other.ping_ms
+            && self.is_muted == other.is_muted
+            && self.is_deafened == other.is_deafened
+            && self.is_screen_sharing == other.is_screen_sharing
+            && self.participants == other.participants
+            && self.connection_state == other.connection_state
+            && self.fatal_error == other.fatal_error
+            && self.is_camera_on == other.is_camera_on
+            && self.focus_user_id == other.focus_user_id
+            && self.selected_input_device == other.selected_input_device
+            && self.selected_output_device == other.selected_output_device
+            && self.selected_camera_device == other.selected_camera_device
+    }
+}
+
+impl Eq for ActiveVoiceCall {}
 
 /// Current logged in user profile
 #[derive(Debug, Clone, PartialEq, Eq)]

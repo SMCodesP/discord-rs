@@ -1,0 +1,93 @@
+{
+  "screen": "voice_stage",
+  "connected": true,
+  "connection_status": "Conectado",
+  "selected_guild_id": "g-voice",
+  "selected_channel_id": "c-voice-1",
+  "show_members": false,
+  "friends_tab": "Online",
+  "current_user": {
+    "id": "u-alice",
+    "username": "alice",
+    "display_name": "Alice",
+    "presence": "Online",
+    "custom_status": "Em chamada"
+  },
+  "guilds": [
+    {
+      "id": "g-voice",
+      "name": "Servidor de Teste",
+      "acronym": "ST",
+      "categories": [
+        {
+          "id": "cat-voice",
+          "name": "CANAIS DE VOZ",
+          "channels": [
+            {
+              "id": "c-voice-1",
+              "name": "Sala de Reunião",
+              "kind": "Voice",
+              "topic": "Canal de voz principal"
+            }
+          ]
+        }
+      ],
+      "emojis": []
+    }
+  ],
+  "dm_channels": [],
+  "messages": {},
+  "members": [],
+  "friends": [],
+  "active_modal": null,
+  "user_settings_tab": "MyAccount",
+  "profile_popout": null,
+  "is_search_open": false,
+  "search_query": "",
+  "search_results": [],
+  "media_picker": null,
+  "connections": [],
+  "voice_call": {
+    "channel_id": "c-voice-1",
+    "channel_name": "Sala de Reunião",
+    "guild_name": "Servidor de Teste",
+    "ping_ms": 24,
+    "is_muted": false,
+    "is_deafened": false,
+    "is_camera_on": false,
+    "is_screen_sharing": false,
+    "connection_state": "Connected",
+    "participants": [
+      {
+        "id": "u-alice",
+        "name": "Alice",
+        "avatar_text": "A",
+        "is_speaking": true,
+        "is_muted": false,
+        "is_deafened": false,
+        "is_camera_on": false,
+        "is_screen_sharing": false
+      },
+      {
+        "id": "u-bob",
+        "name": "Bob",
+        "avatar_text": "B",
+        "is_speaking": false,
+        "is_muted": true,
+        "is_deafened": false,
+        "is_camera_on": false,
+        "is_screen_sharing": false
+      },
+      {
+        "id": "u-carol",
+        "name": "Carol",
+        "avatar_text": "C",
+        "is_speaking": false,
+        "is_muted": false,
+        "is_deafened": false,
+        "is_camera_on": false,
+        "is_screen_sharing": false
+      }
+    ]
+  }
+}
