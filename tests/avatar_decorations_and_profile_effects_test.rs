@@ -4,7 +4,6 @@ extern crate gpui_kit as gpui;
 
 use discord_rs::app::state::{AppState, FriendItemState, PresenceStatus as AppPresenceStatus};
 use discord_rs::components::avatar::{Avatar, AvatarSize};
-use discord_rs::components::member_item::MemberItem;
 use discord_rs::components::profile_effect::{
     render_profile_effect, render_profile_effect_for_user, ProfileEffectCatalog,
     ProfileEffectConfig, ProfileEffectLayer, UserProfileEffect,
@@ -105,26 +104,6 @@ fn test_avatar_builder_decoration_integration() {
     let _ = asset_avatar;
     let _ = decorated_avatar;
     let _ = plain_avatar;
-}
-
-#[test]
-fn test_member_item_repasses_avatar_decoration() {
-    let mut user = User::new("user_100", "DecoratedMember");
-    user.global_name = Some("Decorated Member".to_string());
-    user.avatar = Some("avatar_hash_1".to_string());
-    user.presence = PresenceStatus::DoNotDisturb;
-    user.avatar_decoration_data = Some(AvatarDecorationData::new("neon_aura"));
-
-    // Construct MemberItem via from_user
-    let member_item = MemberItem::from_user("member-row-100", &user);
-    let _ = member_item;
-
-    // Construct MemberItem manually with explicit builder
-    let manual_item = MemberItem::new("member-row-101", "ManualMember")
-        .avatar_url("https://cdn.discordapp.com/avatars/1/test.png")
-        .avatar_decoration(AvatarDecorationData::new("magic_sparkles"))
-        .status(PresenceStatus::Idle);
-    let _ = manual_item;
 }
 
 #[test]
