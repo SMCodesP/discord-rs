@@ -181,7 +181,7 @@ fn test_hygiene_no_invented_mocks_outside_allowed() {
 }
 
 #[tokio::test]
-async fn test_client_manager_new_starts_idle_disconnected() {
+async fn test_client_manager_new_starts_idle_and_disconnect_lifecycle() {
     let (cm, _rx) = discord_rs::protocol::ClientManager::new();
     assert_eq!(
         cm.current_mode().await,
@@ -191,5 +191,15 @@ async fn test_client_manager_new_starts_idle_disconnected() {
     assert!(cm.list_dm_channels().await.unwrap().is_empty());
     assert!(cm.list_relationships().await.unwrap().is_empty());
     assert!(cm.get_messages("chan-1", 10).await.unwrap().is_empty());
+    assert!(cm.send_message("chan-1", "hello").await.is_err());
+    assert!(cm.create_or_get_dm_channel("user-1").await.is_err());
+
+    // Explicit disconnect leaves mode Disconnected("Desconectado") and maintains idle transport
+    cm.disconnect().await.expect("disconnect on idle manager should succeed");
+    assert_eq!(
+        cm.current_mode().await,
+        discord_rs::protocol::ConnectionMode::Disconnected("Desconectado".to_string())
+    );
+    assert!(cm.list_guilds().await.unwrap().is_empty());
     assert!(cm.send_message("chan-1", "hello").await.is_err());
 }

@@ -106,8 +106,6 @@ impl ClientManager {
         let mut gateway_rx = real_client.subscribe_events();
         let event_tx = self.event_tx.clone();
         let mode_ref = self.mode.clone();
-        let transport_event_ref = self.transport.clone();
-        let real_client_event_ref = self.real_client.clone();
 
         tokio::spawn(async move {
             while let Ok(evt) = gateway_rx.recv().await {
@@ -121,13 +119,6 @@ impl ClientManager {
                         info!("Discord Gateway WebSocket conectado.");
                     }
                     TransportEvent::Disconnected(reason) => {
-                        let idle = Arc::new(IdleTransport::new());
-                        {
-                            let mut current = transport_event_ref.write().await;
-                            *current = idle;
-                            let mut rc = real_client_event_ref.write().await;
-                            *rc = None;
-                        }
                         let mut m = mode_ref.write().await;
                         *m = ConnectionMode::Disconnected(reason.clone());
                         warn!("Discord Gateway desconectado: {}", reason);
