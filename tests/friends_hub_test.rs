@@ -778,4 +778,88 @@ fn test_active_now_presence_application_and_proxy_assets() {
     assert_eq!(item_no_asset.small_image_url, None);
 }
 
+#[test]
+fn test_has_visible_spotify_progress_and_tick() {
+    let mut state = AppState::new();
+    state.friends.clear();
+    state.active_now_items.clear();
+    state.selected_guild_id = None;
+    state.selected_channel_id = None;
+
+    // 1. Without friends/items, has_visible_spotify_progress is false
+    assert!(!state.has_visible_spotify_progress());
+    assert!(!discord_rs::app::friends_hub::has_spotify_with_timestamps(&state));
+
+    state.friends.push(FriendItemState {
+        id: "friend-spotify".into(),
+        username: "music_lover".into(),
+        display_name: "Music Lover".into(),
+        avatar_url: None,
+        avatar_text: "M".into(),
+        presence: PresenceStatus::Online,
+        custom_status: None,
+        avatar_decoration_data: None,
+        relationship_type: 1,
+    });
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let start_ms = now_ms - 60_000;
+    let end_ms = now_ms + 120_000;
+
+    let mut act = Activity::new("Spotify", ActivityType::Listening);
+    act.details = Some("Song".into());
+    act.state = Some("Artist".into());
+    act.timestamps = Some(discord_rs::domain::user::ActivityTimestamps {
+        start: Some(start_ms),
+        end: Some(end_ms),
+    });
+
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-spotify".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act),
+        custom_status: None,
+    });
+
+    // On Home with no channel/guild selected -> visible!
+    assert!(state.has_visible_spotify_progress());
+    assert!(discord_rs::app::friends_hub::has_spotify_with_timestamps(&state));
+
+    // When navigating to a guild -> hub is not visible, progress timer cancels
+    state.selected_guild_id = Some("guild-123".into());
+    assert!(!state.has_visible_spotify_progress());
+    state.selected_guild_id = None;
+    assert!(state.has_visible_spotify_progress());
+
+    // When navigating to a DM channel -> hub is not visible
+    state.selected_channel_id = Some("dm-456".into());
+    assert!(!state.has_visible_spotify_progress());
+    state.selected_channel_id = None;
+    assert!(state.has_visible_spotify_progress());
+
+    // Test ticking progress updates ratio
+    let updated = state.tick_spotify_progress();
+    assert!(updated);
+    let item = &state.active_now_items[0];
+    assert!(item.spotify_progress_text.is_some());
+    let (cur, tot) = item.spotify_progress_text.as_ref().unwrap();
+    assert_eq!(cur, "1:00");
+    assert_eq!(tot, "3:00");
+    assert!(item.spotify_progress_pct.is_some());
+    let pct = item.spotify_progress_pct.unwrap();
+    assert!((pct - 0.333).abs() < 0.05);
+
+    // Spotify activity without timestamps -> has_visible_spotify_progress is false
+    let mut act_no_ts = Activity::new("Spotify", ActivityType::Listening);
+    act_no_ts.details = Some("No Timestamps Song".into());
+    state.handle_transport_event(TransportEvent::PresenceUpdate {
+        user_id: "friend-spotify".into(),
+        status: DomainPresenceStatus::Online,
+        activity: Some(act_no_ts),
+        custom_status: None,
+    });
+    assert!(!state.has_visible_spotify_progress());
+    assert!(!discord_rs::app::friends_hub::has_spotify_with_timestamps(&state));
+}
+
 

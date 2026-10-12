@@ -1713,7 +1713,11 @@ fn render_active_now_app_icon(item: &ActiveNowItem) -> AnyElement {
             .rounded(px(8.0))
             .overflow_hidden()
             .flex_shrink_0()
-            .child(img(url.clone()).size_full());
+            .child(
+                img(url.clone())
+                    .size_full()
+                    .rounded(px(8.0)),
+            );
 
         if let Some(ref small_url) = item.small_image_url {
             base = base.child(
@@ -1726,7 +1730,11 @@ fn render_active_now_app_icon(item: &ActiveNowItem) -> AnyElement {
                     .border_2()
                     .border_color(bg_input())
                     .overflow_hidden()
-                    .child(img(small_url.clone()).size_full()),
+                    .child(
+                        img(small_url.clone())
+                            .size_full()
+                            .rounded_full(),
+                    ),
             );
         }
 
@@ -1837,4 +1845,67 @@ fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
             )
             .into_any_element(),
     )
+}
+
+/// Helper to check if any active Spotify item with timestamps is present in state.
+pub fn has_spotify_with_timestamps(state: &AppState) -> bool {
+    state.active_now_items.iter().any(|item| {
+        item.kind == ActiveNowKind::Spotify
+            && item.timestamps_start.is_some()
+            && item.timestamps_end.is_some()
+    })
+}
+
+/// Synchronizes a 1-second GPUI timer task for dynamic Spotify progress updates.
+///
+/// When `state.has_visible_spotify_progress()` is true:
+/// If `timer_slot` is empty, spawns an asynchronous periodic task via GPUI's executor
+/// that sleeps for 1 second (`cx.background_executor().timer(1s).await`), calls `tick_spotify_progress()`,
+/// and emits `cx.notify()`.
+///
+/// When `state.has_visible_spotify_progress()` is false (either no Spotify items with timestamps
+/// exist or the Friends Hub is not visible):
+/// Sets `*timer_slot = None`, which drops the `Task<()>`, cleanly cancelling the GPUI task
+/// without running an external thread.
+pub fn sync_spotify_progress_timer<V: 'static>(
+    timer_slot: &mut Option<Task<()>>,
+    state: &AppState,
+    app_entity: &Entity<AppState>,
+    cx: &mut Context<V>,
+) {
+    if state.has_visible_spotify_progress() {
+        if timer_slot.is_none() {
+            let app_weak = app_entity.downgrade();
+            let task = cx.spawn(|_view, cx: &mut AsyncApp| {
+                let cx = cx.clone();
+                async move {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        let keep_going = cx.update(|cx| {
+                            app_weak
+                                .update(cx, |state, cx| {
+                                    if state.has_visible_spotify_progress() {
+                                        state.tick_spotify_progress();
+                                        cx.notify();
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false)
+                        });
+
+                        if !keep_going {
+                            break;
+                        }
+                    }
+                }
+            });
+            *timer_slot = Some(task);
+        }
+    } else {
+        *timer_slot = None;
+    }
 }
