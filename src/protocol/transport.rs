@@ -186,6 +186,14 @@ pub enum TransportEvent {
     /// The current user object changed live (gateway USER_UPDATE dispatch).
     /// Carries the updated user; AppState refreshes CurrentUserProfile from it.
     CurrentUserUpdated(User),
+    /// Message delete action failed
+    MessageDeleteFailed {
+        channel_id: String,
+        message_id: String,
+        error: String,
+    },
+    /// Lazy guild member list update dispatched by gateway
+    GuildMemberListUpdate(crate::protocol::cache::lazy_guilds::GuildMemberListUpdate),
 }
 
 /// Asynchronous transport abstraction for Discord communication.
@@ -280,6 +288,19 @@ pub trait DiscordTransport: Send + Sync {
         message_id: &str,
         emoji: &str,
     ) -> anyhow::Result<()>;
+
+    /// Delete a message from a channel (/channels/{channel_id}/messages/{message_id}).
+    async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()>;
+
+    /// Subscribes to guild members (Opcode 14 for user accounts, Opcode 8 for bot accounts).
+    async fn subscribe_guild_members(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<()> {
+        let _ = (guild_id, channel_id);
+        Ok(())
+    }
 
     /// Send Opcode 4 Voice State Update to Discord Gateway.
     async fn send_voice_state_update(

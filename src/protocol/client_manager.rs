@@ -743,3 +743,34 @@ impl ClientManager {
         Ok(session)
     }
 }
+
+impl ClientManager {
+    /// Deletes a message from a channel using the active transport
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(_) => channel_id.to_string(),
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.delete_message(&real_channel_id, message_id).await
+    }
+
+    /// Subscribes to lazy guild members / viewport for a guild and channel
+    pub async fn subscribe_guild_members(&self, guild_id: &str, channel_id: &str) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.subscribe_guild_members(guild_id, channel_id).await
+    }
+}
+

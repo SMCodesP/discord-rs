@@ -34,6 +34,9 @@ impl AppState {
                 self.messages_by_channel.clear();
 
                 if !guilds.is_empty() {
+                    for g in &guilds {
+                        crate::protocol::cache::lazy_guilds::cache_guild_roles(&g.id, g.roles.clone());
+                    }
                     let mut new_guilds = Vec::new();
                     for g in guilds {
                         let icon_url = g.icon_url();
@@ -235,6 +238,19 @@ impl AppState {
                     msgs.retain(|m| m.id != message_id);
                 }
             }
+            TransportEvent::MessageDeleteFailed { channel_id, message_id, error } => {
+                log::warn!("Falha ao deletar mensagem {} em {}: {}", message_id, channel_id, error);
+            }
+            TransportEvent::GuildMemberListUpdate(update) => {
+                if self.selected_guild_id.as_deref() == Some(&update.guild_id) {
+                    let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(&update.guild_id);
+                    crate::protocol::cache::lazy_guilds::apply_member_list_update(
+                        &mut self.members,
+                        &update,
+                        &guild_roles,
+                    );
+                }
+            }
             TransportEvent::ReactionAdd { channel_id, message_id, emoji, .. } => {
                 self.add_reaction_to_message(&channel_id, &message_id, &emoji);
             }
@@ -277,6 +293,7 @@ impl AppState {
                 }
             }
             TransportEvent::GuildCreate(g) => {
+                crate::protocol::cache::lazy_guilds::cache_guild_roles(&g.id, g.roles.clone());
                 let icon_url = g.icon_url();
                 let icon_hash = g.icon.clone();
                 let categories = super::seed::organize_channels_into_categories(&g.id, g.channels);

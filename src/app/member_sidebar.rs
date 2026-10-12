@@ -12,7 +12,7 @@ use crate::tokens::spacing::*;
 /// An item row in the member sidebar virtual list
 #[derive(Clone)]
 enum MemberSidebarItem {
-    Header { title: &'static str, count: usize },
+    Header { title: SharedString, count: usize },
     Member(MemberItemState),
 }
 
@@ -38,38 +38,74 @@ impl MemberSidebar {
         let state = self.state.read(cx);
         let members = state.members.clone();
 
-        let mut groups: Vec<(&'static str, Vec<MemberItemState>)> = vec![
-            ("ADMINISTRADOR", Vec::new()),
-            ("MODERADOR", Vec::new()),
-            ("BOTS", Vec::new()),
-            ("DISPONÍVEL", Vec::new()),
-            ("OFFLINE", Vec::new()),
-        ];
+        let has_server_groups = members.iter().any(|m| m.id.starts_with("group:"));
+
+        if has_server_groups {
+            let mut items = Vec::new();
+            for m in members {
+                if m.id.starts_with("group:") {
+                    let count = m
+                        .activity
+                        .as_deref()
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    items.push(MemberSidebarItem::Header {
+                        title: m.name.into(),
+                        count,
+                    });
+                } else {
+                    items.push(MemberSidebarItem::Member(m));
+                }
+            }
+            self.items = items;
+            return;
+        }
+
+        let mut group_order: Vec<String> = Vec::new();
+        let mut group_map: std::collections::HashMap<String, Vec<MemberItemState>> = std::collections::HashMap::new();
+        let mut offline_list: Vec<MemberItemState> = Vec::new();
 
         for m in members {
             if m.presence == PresenceStatus::Offline {
-                groups[4].1.push(m);
-            } else if m.role_group == "ADMINISTRADOR" {
-                groups[0].1.push(m);
-            } else if m.role_group == "MODERADOR" {
-                groups[1].1.push(m);
-            } else if m.is_bot {
-                groups[2].1.push(m);
+                offline_list.push(m);
             } else {
-                groups[3].1.push(m);
+                let group_name = if !m.role_group.trim().is_empty() {
+                    m.role_group.clone()
+                } else if m.is_bot {
+                    "BOTS".to_string()
+                } else {
+                    "DISPONÍVEL".to_string()
+                };
+
+                if !group_map.contains_key(&group_name) {
+                    group_order.push(group_name.clone());
+                }
+                group_map.entry(group_name).or_default().push(m);
             }
         }
 
         let mut items = Vec::new();
-        for (title, list) in groups {
-            if !list.is_empty() {
-                items.push(MemberSidebarItem::Header {
-                    title,
-                    count: list.len(),
-                });
-                for member in list {
-                    items.push(MemberSidebarItem::Member(member));
+        for title in group_order {
+            if let Some(list) = group_map.get(&title) {
+                if !list.is_empty() {
+                    items.push(MemberSidebarItem::Header {
+                        title: title.into(),
+                        count: list.len(),
+                    });
+                    for member in list {
+                        items.push(MemberSidebarItem::Member(member.clone()));
+                    }
                 }
+            }
+        }
+
+        if !offline_list.is_empty() {
+            items.push(MemberSidebarItem::Header {
+                title: "OFFLINE".into(),
+                count: offline_list.len(),
+            });
+            for member in offline_list {
+                items.push(MemberSidebarItem::Member(member));
             }
         }
 
@@ -85,7 +121,7 @@ impl Render for MemberSidebar {
             self.items
                 .iter()
                 .map(|item| match item {
-                    MemberSidebarItem::Header { .. } => size(px(224.0), px(34.0)),
+                    MemberSidebarItem::Header { .. } => size(px(224.0), px(40.0)),
                     MemberSidebarItem::Member(_) => size(px(224.0), px(44.0)),
                 })
                 .collect(),
@@ -116,7 +152,7 @@ impl Render for MemberSidebar {
                             .filter_map(|ix| items.get(ix))
                             .map(|item| match item {
                                 MemberSidebarItem::Header { title, count } => {
-                                    render_group_header(title, *count)
+                                    render_group_header(title.clone(), *count)
                                 }
                                 MemberSidebarItem::Member(member) => {
                                     render_member_row(member, &app)
@@ -129,17 +165,17 @@ impl Render for MemberSidebar {
     }
 }
 
-fn render_group_header(title: &'static str, count: usize) -> AnyElement {
+fn render_group_header(title: SharedString, count: usize) -> AnyElement {
     div()
         .w_full()
         .min_w(px(0.0))
-        .h(px(34.0))
-        .pt(px(14.0))
+        .h(px(40.0))
+        .pt(px(20.0))
         .pb(px(4.0))
-        .px(px(8.0))
+        .px(px(16.0))
         .text_color(text_muted())
-        .font_weight(FontWeight::BOLD)
-        .text_size(px(11.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(12.0))
         .child(format!("{} — {}", title, count))
         .into_any_element()
 }

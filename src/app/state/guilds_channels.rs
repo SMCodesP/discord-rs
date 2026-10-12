@@ -26,6 +26,9 @@ impl AppState {
             tel.track_guild_select(guild_id.clone().unwrap_or_else(|| "home".into()), guild_name, 0);
         }
 
+        if self.selected_guild_id != guild_id {
+            self.members.clear();
+        }
         self.selected_guild_id = guild_id;
         if let Some(ref gid) = self.selected_guild_id {
             let gid_clone = gid.clone();
@@ -276,9 +279,10 @@ impl AppState {
             if cid.starts_with("dm-") && !cid.starts_with("dm-group-") {
                 let uid = cid.trim_start_matches("dm-").to_string();
                 let temp_id = cid.clone();
+                let cm_dm = cm.clone();
                 tokio::spawn(async move {
-                    if let Ok(ch) = cm.create_or_get_dm_channel(&uid).await {
-                        cm.emit_event(TransportEvent::DmChannelResolved {
+                    if let Ok(ch) = cm_dm.create_or_get_dm_channel(&uid).await {
+                        cm_dm.emit_event(TransportEvent::DmChannelResolved {
                             temp_id,
                             channel: ch,
                         });
@@ -287,17 +291,30 @@ impl AppState {
             } else if self.is_connected_to_gateway {
                 let has_messages = self.messages_by_channel.get(&cid).map_or(false, |msgs| !msgs.is_empty());
                 if !has_messages {
+                    let cm_msg = cm.clone();
                     tokio::spawn(async move {
-                        if let Ok(mut msgs) = cm.get_messages(&cid, 50).await {
+                        if let Ok(mut msgs) = cm_msg.get_messages(&cid, 50).await {
                             // Assegurar ordenação cronológica ascendente (mais antiga para mais nova)
                             msgs.sort_by_key(|m| m.timestamp);
-                            cm.emit_event(TransportEvent::ChannelMessagesLoaded {
+                            cm_msg.emit_event(TransportEvent::ChannelMessagesLoaded {
                                 channel_id: cid,
                                 messages: msgs,
                             });
                         }
                     });
                 }
+            }
+
+            // Assina membros da guilda sob demanda (Opcode 14 no Gateway do Discord)
+            if let Some(ref gid) = self.selected_guild_id {
+                let gid_sub = gid.clone();
+                let cid_sub = channel_id.clone();
+                let cm_sub = cm.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = cm_sub.subscribe_guild_members(&gid_sub, &cid_sub).await {
+                        log::warn!("Falha ao assinar membros da guilda {} no canal {}: {:?}", gid_sub, cid_sub, e);
+                    }
+                });
             }
         }
     }

@@ -684,6 +684,36 @@ impl DiscordApiClient {
     pub async fn current_voice_server(&self) -> Option<crate::protocol::VoiceServerData> {
         self.last_voice_server.read().await.clone()
     }
+
+    /// Deletes a message from a channel (/channels/{channel_id}/messages/{message_id})
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let path = format!("/channels/{}/messages/{}", channel_id, message_id);
+        let req = self.auth_request(reqwest::Method::DELETE, &path);
+        let _resp = self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Subscribes to lazy guild members / viewport for a guild and channel.
+    /// User account sends Gateway Opcode 14 (Guild Subscriptions) with [[0, 99]].
+    /// Bot account uses standard guild members chunk / request members.
+    pub async fn subscribe_guild_members(&self, guild_id: &str, channel_id: &str) -> Result<()> {
+        if self.token.token_type == TokenType::User {
+            let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::new();
+            let payload = coordinator.focus_guild_and_channel(guild_id, channel_id).await;
+            self.send_gateway_payload(&payload).await
+        } else {
+            // For Bot token, Opcode 14 does not exist; send Opcode 8 (Request Guild Members)
+            let payload = json!({
+                "op": 8,
+                "d": {
+                    "guild_id": guild_id,
+                    "query": "",
+                    "limit": 100
+                }
+            });
+            self.send_gateway_payload(&payload).await
+        }
+    }
 }
 
 #[async_trait]
@@ -938,6 +968,18 @@ impl DiscordTransport for DiscordApiClient {
 
         let mut messages = Vec::new();
         for val in raw_messages.into_iter().rev() {
+            if let Some(author_id) = val.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()) {
+                let guild_id = val.get("guild_id").and_then(|v| v.as_str());
+                if let (Some(gid), Some(member_obj)) = (guild_id, val.get("member")) {
+                    if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
+                        let role_ids: Vec<String> = roles_arr
+                            .iter()
+                            .filter_map(|r| r.as_str().map(ToString::to_string))
+                            .collect();
+                        crate::protocol::cache::lazy_guilds::cache_author_roles(gid, author_id, role_ids);
+                    }
+                }
+            }
             if let Some(msg) = parse_message_from_json(&val) {
                 messages.push(msg);
             }
@@ -1030,6 +1072,18 @@ impl DiscordTransport for DiscordApiClient {
         let req = self.auth_request(reqwest::Method::DELETE, &path);
         self.send_request(&path, req).await?;
         Ok(())
+    }
+
+    async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        self.delete_message(channel_id, message_id).await
+    }
+
+    async fn subscribe_guild_members(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+    ) -> anyhow::Result<()> {
+        self.subscribe_guild_members(guild_id, channel_id).await
     }
 
     async fn send_voice_state_update(
@@ -1596,7 +1650,24 @@ async fn handle_dispatch(
                 }
             }
         }
+        "GUILD_MEMBER_LIST_UPDATE" => {
+            if let Some(update) = crate::protocol::cache::lazy_guilds::parse_guild_member_list_update(&data) {
+                let _ = event_tx.send(TransportEvent::GuildMemberListUpdate(update));
+            }
+        }
         "MESSAGE_CREATE" => {
+            if let Some(author_id) = data.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()) {
+                let guild_id = data.get("guild_id").and_then(|v| v.as_str());
+                if let (Some(gid), Some(member_obj)) = (guild_id, data.get("member")) {
+                    if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
+                        let role_ids: Vec<String> = roles_arr
+                            .iter()
+                            .filter_map(|r| r.as_str().map(ToString::to_string))
+                            .collect();
+                        crate::protocol::cache::lazy_guilds::cache_author_roles(gid, author_id, role_ids);
+                    }
+                }
+            }
             if let Some(msg) = parse_message_from_json(&data) {
                 let cache = cache_engine.clone();
                 let msg_clone = msg.clone();

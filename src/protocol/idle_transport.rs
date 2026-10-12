@@ -116,6 +116,18 @@ impl DiscordTransport for IdleTransport {
         anyhow::bail!("Não conectado ao Discord")
     }
 
+    async fn delete_message(&self, _channel_id: &str, _message_id: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Não conectado ao Discord")
+    }
+
+    async fn subscribe_guild_members(
+        &self,
+        _guild_id: &str,
+        _channel_id: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("Não conectado ao Discord")
+    }
+
     async fn send_voice_state_update(
         &self,
         _guild_id: Option<&str>,

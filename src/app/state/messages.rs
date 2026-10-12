@@ -40,10 +40,44 @@ impl AppState {
         }
     }
 
-    /// Deletes a message by ID from the specified channel
+    /// Deletes a message by ID from the specified channel in local state.
+    /// Used when the API or Gateway confirms deletion via `TransportEvent::MessageDelete`.
     pub fn delete_message(&mut self, channel_id: &str, message_id: &str) {
         if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
             messages.retain(|m| m.id != message_id);
+        }
+    }
+
+    /// Dispatches message deletion request asynchronously through the ClientManager / DiscordTransport.
+    /// Uses the official rate limiter, User-Agent, and headers of DiscordApiClient (or MockProvider).
+    /// ONLY upon successful API response or Gateway event is the message removed from state.
+    pub fn request_delete_message(&mut self, channel_id: &str, message_id: &str) {
+        let cid = channel_id.to_string();
+        let mid = message_id.to_string();
+        if let Some(ref cm) = self.client_manager {
+            let cm_clone = cm.clone();
+            tokio::spawn(async move {
+                match cm_clone.delete_message(&cid, &mid).await {
+                    Ok(()) => {
+                        log::info!("Mensagem {} deletada com sucesso no backend", mid);
+                        cm_clone.emit_event(TransportEvent::MessageDelete {
+                            channel_id: cid,
+                            message_id: mid,
+                        });
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        log::warn!("Falha ao deletar mensagem {} na API: {}", mid, err_msg);
+                        cm_clone.emit_event(TransportEvent::MessageDeleteFailed {
+                            channel_id: cid,
+                            message_id: mid,
+                            error: err_msg,
+                        });
+                    }
+                }
+            });
+        } else {
+            log::warn!("Não conectado ao Discord: client_manager ausente ao tentar deletar mensagem {}", mid);
         }
     }
 

@@ -25,6 +25,9 @@ use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
 use crate::protocol::media_cache::MediaCacheManager;
 use crate::tokens::colors::*;
+use crate::tokens::colors::white;
+use crate::tokens::spacing::{radius_md, radius_sm};
+use crate::tokens::typography::{font_size_sm, font_size_xs};
 
 /// Reactive Chat View managing real messages and input state for the active channel.
 pub struct ChatView {
@@ -46,6 +49,9 @@ pub struct ChatView {
     pub media_picker_selected_guild_id: Option<String>,
     pub media_picker_list_state: ListState,
     pub active_context_menu: Option<(String, Point<Pixels>)>,
+    pub pending_delete_message: Option<Message>,
+    pub is_deleting: bool,
+    pub delete_error: Option<String>,
     pub composer_state: Option<Entity<TextareaState>>,
     pub composer_sub: Option<Subscription>,
 }
@@ -84,6 +90,9 @@ impl ChatView {
             media_picker_selected_guild_id: None,
             media_picker_list_state,
             active_context_menu: None,
+            pending_delete_message: None,
+            is_deleting: false,
+            delete_error: None,
             composer_state: None,
             composer_sub: None,
         }
@@ -441,11 +450,22 @@ impl Render for ChatView {
                     let state = app_entity_list.read(cx);
                     let msgs = state.get_active_messages();
                     if let Some(msg) = msgs.get(*message_idx) {
+                        let author_role_color = state
+                            .members
+                            .iter()
+                            .find(|m| m.id == msg.author.id && m.role_color != 0)
+                            .map(|m| m.role_color)
+                            .or_else(|| {
+                                state.selected_guild_id.as_deref().and_then(|gid| {
+                                    crate::protocol::cache::lazy_guilds::get_cached_author_role_color(gid, &msg.author.id)
+                                })
+                            });
+
                         render_message_row(
                             msg,
                             MessageRowConfig {
                                 is_grouped: *is_grouped,
-                                role_color: None,
+                                role_color: author_role_color,
                                 on_react: on_react_item.clone(),
                                 on_reply: on_reply_item.clone(),
                                 on_more: on_more_item.clone(),
@@ -774,23 +794,10 @@ impl Render for ChatView {
         let context_menu_overlay = if let Some((ref target_id, click_pos)) = self.active_context_menu {
             let target_msg = all_messages.iter().find(|m| &m.id == target_id).cloned();
             if let Some(msg) = target_msg {
-                let vp = window.viewport_size();
-                let menu_width = px(222.0);
-                let menu_height = px(240.0);
-                let top_y = if click_pos.y + menu_height > vp.height {
-                    (click_pos.y - menu_height).max(px(8.0))
-                } else {
-                    click_pos.y.max(px(8.0))
-                };
-                let left_x = if click_pos.x + menu_width > vp.width {
-                    (vp.width - menu_width - px(16.0)).max(px(8.0))
-                } else {
-                    click_pos.x.max(px(8.0))
-                };
-
                 let msg_id = msg.id.clone();
                 let msg_content = msg.content.clone();
                 let is_pinned = msg.pinned;
+                let is_own = msg.author.id == app_state.current_user.id;
 
                 let self_close = self_entity.clone();
                 let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static> = Arc::new(move |_win, cx| {
@@ -830,64 +837,446 @@ impl Render for ChatView {
                     cx.write_to_clipboard(ClipboardItem::new_string(content_for_copy.clone()));
                 }));
 
+                let guild_part = app_state.selected_guild_id.as_deref().unwrap_or("@me");
+                let link_target = format!("https://discord.com/channels/{}/{}/{}", guild_part, channel_id, msg.id);
+                let on_cm_copy_link: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(link_target.clone()));
+                }));
+
                 let id_for_copy = msg_id.clone();
                 let on_cm_copy_id: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(id_for_copy.clone()));
                 }));
 
-                let app_cm_pin = app_entity.clone();
-                let cid_pin = channel_id.clone();
-                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
-                    let mid = m_id.to_string();
-                    let cid = cid_pin.clone();
-                    app_cm_pin.update(cx, |state, cx| {
-                        state.pin_message(&cid, &mid);
+                // Pin não possui implementação na API remota; omitido do menu de contexto
+                let on_cm_pin: Option<MessageActionCallback> = None;
+
+                // Normal click: abre o modal canônico de confirmação de exclusão
+                let self_cm_del = self_entity.clone();
+                let msg_for_del = msg.clone();
+                let on_cm_delete: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
+                    let m = msg_for_del.clone();
+                    self_cm_del.update(cx, |this, cx| {
+                        this.pending_delete_message = Some(m);
+                        this.is_deleting = false;
+                        this.delete_error = None;
+                        this.active_context_menu = None;
                         cx.notify();
                     });
                 }));
 
-                let app_cm_del = app_entity.clone();
-                let cid_del = channel_id.clone();
-                let on_cm_delete: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
+                // Shift+click: apaga direto chamando a API sem exibir confirmação
+                let app_cm_del_shift = app_entity.clone();
+                let cid_del_shift = channel_id.clone();
+                let self_cm_del_shift = self_entity.clone();
+                let on_cm_delete_shift: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
                     let mid = m_id.to_string();
-                    let cid = cid_del.clone();
-                    app_cm_del.update(cx, |state, cx| {
-                        state.delete_message(&cid, &mid);
-                        cx.notify();
-                    });
+                    let cid = cid_del_shift.clone();
+                    let cm = app_cm_del_shift.read(cx).client_manager.clone();
+                    if let Some(cm) = cm {
+                        self_cm_del_shift.update(cx, |this, cx| {
+                            this.delete_error = None;
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
+                        let self_async = self_cm_del_shift.clone();
+                        cx.spawn(|cx: &mut AsyncApp| {
+                            let cx = cx.clone();
+                            async move {
+                                match cm.delete_message(&cid, &mid).await {
+                                    Ok(()) => {
+                                        cm.emit_event(crate::protocol::TransportEvent::MessageDelete {
+                                            channel_id: cid,
+                                            message_id: mid,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let err_msg = e.to_string();
+                                        let _ = cx.update(|cx| {
+                                            let _ = self_async.update(cx, |chat, cx| {
+                                                chat.delete_error = Some(err_msg.clone());
+                                                cx.notify();
+                                            });
+                                        });
+                                        cm.emit_event(crate::protocol::TransportEvent::MessageDeleteFailed {
+                                            channel_id: cid,
+                                            message_id: mid,
+                                            error: err_msg,
+                                        });
+                                    }
+                                }
+                            }
+                        }).detach();
+                    } else {
+                        let err_msg = "Não conectado ao Discord: cliente não inicializado".to_string();
+                        self_cm_del_shift.update(cx, |this, cx| {
+                            this.delete_error = Some(err_msg);
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
+                    }
                 }));
 
                 let self_dismiss = self_entity.clone();
+                let self_dismiss_r = self_entity.clone();
+                let self_close_key = self_entity.clone();
+
                 Some(
                     div()
+                        .id("message-context-menu-layer")
+                        .key_context("MessageContextMenu")
                         .absolute()
                         .inset_0()
-                        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                            self_dismiss.update(cx, |this, cx| {
-                                this.active_context_menu = None;
-                                cx.notify();
-                            });
+                        .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                            if event.keystroke.key == "escape" {
+                                self_close_key.update(cx, |this, cx| {
+                                    this.active_context_menu = None;
+                                    cx.notify();
+                                });
+                            }
                         })
                         .child(
                             div()
+                                .id("message-context-menu-dismiss-backdrop")
                                 .absolute()
-                                .top(top_y)
-                                .left(left_x)
-                                .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
-                                    cx.stop_propagation();
+                                .inset_0()
+                                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                    self_dismiss.update(cx, |this, cx| {
+                                        this.active_context_menu = None;
+                                        cx.notify();
+                                    });
                                 })
-                                .child(render_message_context_menu(MessageContextMenuConfig {
-                                    message_id: msg_id,
-                                    message_content: msg_content,
-                                    is_pinned,
-                                    on_add_reaction: on_cm_add_rx,
-                                    on_reply: on_cm_reply,
-                                    on_copy_text: on_cm_copy_text,
-                                    on_copy_id: on_cm_copy_id,
-                                    on_pin: on_cm_pin,
-                                    on_delete: on_cm_delete,
-                                    on_close: Some(on_close),
-                                })),
+                                .on_mouse_down(MouseButton::Right, move |_ev, _win, cx| {
+                                    self_dismiss_r.update(cx, |this, cx| {
+                                        this.active_context_menu = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            deferred(
+                                anchored()
+                                    .position(click_pos)
+                                    .snap_to_window_with_margin(px(8.0))
+                                    .child(
+                                        div()
+                                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .child(render_message_context_menu(MessageContextMenuConfig {
+                                                message_id: msg_id,
+                                                message_content: msg_content,
+                                                is_pinned,
+                                                is_own,
+                                                on_add_reaction: on_cm_add_rx,
+                                                on_reply: on_cm_reply,
+                                                on_copy_text: on_cm_copy_text,
+                                                on_copy_link: on_cm_copy_link,
+                                                on_copy_id: on_cm_copy_id,
+                                                on_pin: on_cm_pin,
+                                                on_delete: on_cm_delete,
+                                                on_delete_shift: on_cm_delete_shift,
+                                                on_close: Some(on_close),
+                                            })),
+                                    ),
+                            ),
+                        ),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let delete_modal_overlay = if let Some(ref del_msg) = self.pending_delete_message {
+            let msg_to_delete = del_msg.clone();
+            let cid_confirm = channel_id.clone();
+            let app_confirm = app_entity.clone();
+            let self_cancel = self_entity.clone();
+            let self_confirm = self_entity.clone();
+            let self_esc = self_entity.clone();
+            let self_backdrop = self_entity.clone();
+
+            Some(
+                div()
+                    .id("delete-message-modal-layer")
+                    .key_context("DeleteMessageModal")
+                    .absolute()
+                    .inset_0()
+                    .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                        if event.keystroke.key == "escape" {
+                            self_esc.update(cx, |this, cx| {
+                                this.pending_delete_message = None;
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .id("delete-modal-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(modal_backdrop())
+                            .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                self_backdrop.update(cx, |this, cx| {
+                                    this.pending_delete_message = None;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(440.0))
+                                    .bg(bg_floating())
+                                    .border_1()
+                                    .border_color(bg_user_bar())
+                                    .rounded(radius_md())
+                                    .shadow_xl()
+                                    .overflow_hidden()
+                                    .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .child(
+                                        // Header
+                                        div()
+                                            .p(px(16.0))
+                                            .pb(px(8.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(18.0))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(white())
+                                                    .child("Excluir Mensagem"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .pt(px(8.0))
+                                                    .text_size(font_size_sm())
+                                                    .text_color(text_normal())
+                                                    .child("Tem certeza de que deseja excluir esta mensagem? Isto não pode ser desfeito."),
+                                            ),
+                                    )
+                                    .children(self.delete_error.as_ref().map(|err| {
+                                        div()
+                                            .mx(px(16.0))
+                                            .mt(px(8.0))
+                                            .p(px(8.0))
+                                            .rounded(radius_sm())
+                                            .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+                                            .border_1()
+                                            .border_color(status_danger())
+                                            .text_size(font_size_xs())
+                                            .text_color(status_danger())
+                                            .child(format!("Erro ao excluir mensagem: {}", err))
+                                    }))
+                                    .child(
+                                        // Message Preview Card
+                                        div()
+                                            .mx(px(16.0))
+                                            .my(px(8.0))
+                                            .p(px(10.0))
+                                            .bg(bg_chat())
+                                            .border_1()
+                                            .border_color(bg_user_bar())
+                                            .rounded(radius_md())
+                                            .flex()
+                                            .flex_row()
+                                            .gap(px(10.0))
+                                            .child(
+                                                crate::components::avatar::Avatar::new(msg_to_delete.author.display_name().to_string())
+                                                    .size(crate::components::avatar::AvatarSize::Px40)
+                                                    .opt_src(msg_to_delete.author.avatar_url())
+                                                    .opt_decoration(msg_to_delete.author.avatar_decoration_data.clone())
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_baseline()
+                                                            .gap(px(6.0))
+                                                            .child(
+                                                                div()
+                                                                    .font_weight(FontWeight::MEDIUM)
+                                                                    .text_size(font_size_sm())
+                                                                    .text_color(text_titles())
+                                                                    .child(msg_to_delete.author.display_name().to_string()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_size(font_size_xs())
+                                                                    .text_color(text_muted())
+                                                                    .child(crate::chat::message_list::format_message_timestamp(msg_to_delete.timestamp)),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .pt(px(4.0))
+                                                            .text_size(font_size_sm())
+                                                            .text_color(text_normal())
+                                                            .child(msg_to_delete.content.clone()),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        // Actions Footer
+                                        div()
+                                            .p(px(16.0))
+                                            .bg(bg_user_bar())
+                                            .flex()
+                                            .flex_row()
+                                            .justify_end()
+                                            .items_center()
+                                            .gap(px(12.0))
+                                            .child(
+                                                div()
+                                                    .px(px(16.0))
+                                                    .py(px(8.0))
+                                                    .rounded(radius_sm())
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.underline())
+                                                    .text_color(white())
+                                                    .text_size(font_size_sm())
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                                        self_cancel.update(cx, |this, cx| {
+                                                            this.pending_delete_message = None;
+                                                            this.is_deleting = false;
+                                                            this.delete_error = None;
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child("Cancelar"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(24.0))
+                                                    .py(px(8.0))
+                                                    .bg(status_danger())
+                                                    .hover(|s| s.bg(with_alpha(HEX_STATUS_DANGER, 0.85)))
+                                                    .rounded(radius_sm())
+                                                    .cursor_pointer()
+                                                    .text_color(white())
+                                                    .text_size(font_size_sm())
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                                        let mid = msg_to_delete.id.clone();
+                                                        let cid = cid_confirm.clone();
+                                                        let cm = app_confirm.read(cx).client_manager.clone();
+                                                        if let Some(cm) = cm {
+                                                            self_confirm.update(cx, |this, cx| {
+                                                                if this.is_deleting {
+                                                                    return;
+                                                                }
+                                                                this.is_deleting = true;
+                                                                this.delete_error = None;
+                                                                cx.notify();
+                                                            });
+                                                            let self_async = self_confirm.clone();
+                                                            cx.spawn(|cx: &mut AsyncApp| {
+                                                                let cx = cx.clone();
+                                                                async move {
+                                                                    match cm.delete_message(&cid, &mid).await {
+                                                                        Ok(()) => {
+                                                                            let _ = cx.update(|cx| {
+                                                                                let _ = self_async.update(cx, |chat, cx| {
+                                                                                    chat.pending_delete_message = None;
+                                                                                    chat.is_deleting = false;
+                                                                                    chat.delete_error = None;
+                                                                                    cx.notify();
+                                                                                });
+                                                                            });
+                                                                            cm.emit_event(crate::protocol::TransportEvent::MessageDelete {
+                                                                                channel_id: cid,
+                                                                                message_id: mid,
+                                                                            });
+                                                                        }
+                                                                        Err(e) => {
+                                                                            let err_msg = e.to_string();
+                                                                            let _ = cx.update(|cx| {
+                                                                                let _ = self_async.update(cx, |chat, cx| {
+                                                                                    chat.is_deleting = false;
+                                                                                    chat.delete_error = Some(err_msg.clone());
+                                                                                    cx.notify();
+                                                                                });
+                                                                            });
+                                                                            cm.emit_event(crate::protocol::TransportEvent::MessageDeleteFailed {
+                                                                                channel_id: cid,
+                                                                                message_id: mid,
+                                                                                error: err_msg,
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }).detach();
+                                                        } else {
+                                                            self_confirm.update(cx, |this, cx| {
+                                                                this.is_deleting = false;
+                                                                this.delete_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+                                                                cx.notify();
+                                                            });
+                                                        }
+                                                    })
+                                                    .child(if self.is_deleting { "Excluindo..." } else { "Excluir" }),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let delete_error_toast = if let Some(ref err) = self.delete_error {
+            if self.pending_delete_message.is_none() {
+                let self_dismiss_err = self_entity.clone();
+                Some(
+                    div()
+                        .mx(px(16.0))
+                        .mb(px(8.0))
+                        .p(px(8.0))
+                        .rounded(radius_sm())
+                        .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+                        .border_1()
+                        .border_color(status_danger())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(font_size_xs())
+                                .text_color(status_danger())
+                                .child(format!("Erro ao excluir mensagem: {}", err)),
+                        )
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .text_size(font_size_xs())
+                                .text_color(status_danger())
+                                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                    self_dismiss_err.update(cx, |this, cx| {
+                                        this.delete_error = None;
+                                        cx.notify();
+                                    });
+                                })
+                                .child("✕"),
                         ),
                 )
             } else {
@@ -920,6 +1309,7 @@ impl Render for ChatView {
                     .id("messages-scroll-area")
                     .child(virtual_list),
             )
+            .children(delete_error_toast)
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)
@@ -934,8 +1324,7 @@ impl Render for ChatView {
                     .on_cancel_reply(on_cancel_reply)
                     .on_send(on_send),
             )
-            .children(media_picker_overlay)
-            .children(context_menu_overlay);
+            .children(media_picker_overlay);
 
         let app_entity_shortcut = app_entity.clone();
 
@@ -958,5 +1347,7 @@ impl Render for ChatView {
             })
             .child(main_chat_col)
             .children(search_panel)
+            .children(context_menu_overlay)
+            .children(delete_modal_overlay)
     }
 }
