@@ -33,6 +33,9 @@ pub struct ClientManager {
     mode: Arc<RwLock<ConnectionMode>>,
     event_tx: broadcast::Sender<TransportEvent>,
     real_client: Arc<RwLock<Option<Arc<DiscordApiClient>>>>,
+    active_voice: Arc<RwLock<Option<Arc<crate::protocol::voice_session::VoiceSession>>>>,
+    voice_state_tx: broadcast::Sender<(crate::protocol::voice_session::VoiceSessionState, Option<u32>)>,
+    voice_gateway_factory: Arc<RwLock<Option<crate::protocol::voice_session::VoiceGatewayFactory>>>,
 }
 
 impl std::fmt::Debug for ClientManager {
@@ -49,12 +52,16 @@ impl ClientManager {
     pub fn new() -> (Self, broadcast::Receiver<TransportEvent>) {
         let idle = Arc::new(IdleTransport::new());
         let (event_tx, event_rx) = broadcast::channel(256);
+        let (voice_state_tx, _) = broadcast::channel(64);
 
         let manager = Self {
             transport: Arc::new(RwLock::new(idle)),
             mode: Arc::new(RwLock::new(ConnectionMode::Disconnected("Não conectado".to_string()))),
             event_tx,
             real_client: Arc::new(RwLock::new(None)),
+            active_voice: Arc::new(RwLock::new(None)),
+            voice_state_tx,
+            voice_gateway_factory: Arc::new(RwLock::new(None)),
         };
 
         (manager, event_rx)
@@ -65,12 +72,16 @@ impl ClientManager {
     pub fn new_mock() -> (Self, broadcast::Receiver<TransportEvent>) {
         let mock = Arc::new(MockDiscordProvider::new());
         let (event_tx, event_rx) = broadcast::channel(256);
+        let (voice_state_tx, _) = broadcast::channel(64);
 
         let manager = Self {
             transport: Arc::new(RwLock::new(mock)),
             mode: Arc::new(RwLock::new(ConnectionMode::Mock)),
             event_tx,
             real_client: Arc::new(RwLock::new(None)),
+            active_voice: Arc::new(RwLock::new(None)),
+            voice_state_tx,
+            voice_gateway_factory: Arc::new(RwLock::new(None)),
         };
 
         (manager, event_rx)
@@ -550,5 +561,168 @@ impl ClientManager {
             lock.clone()
         };
         transport.remove_relationship(user_id).await
+    }
+
+    /// Ring participants in a DM / private channel via POST /channels/{id}/call/ring
+    pub async fn ring_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.ring_call(channel_id, recipients).await
+    }
+
+    /// Sets an optional custom voice gateway factory (e.g. for deterministic unit / offline tests).
+    pub async fn set_voice_gateway_factory(
+        &self,
+        factory: Option<crate::protocol::voice_session::VoiceGatewayFactory>,
+    ) {
+        let mut gw = self.voice_gateway_factory.write().await;
+        *gw = factory;
+    }
+
+    /// Returns the active VoiceSession if one is currently running.
+    pub async fn active_voice_session(&self) -> Option<Arc<crate::protocol::voice_session::VoiceSession>> {
+        let active = self.active_voice.read().await;
+        active.clone()
+    }
+
+    /// Subscribes to real-time voice state transitions and measured latency.
+    pub fn subscribe_voice_state(
+        &self,
+    ) -> broadcast::Receiver<(crate::protocol::voice_session::VoiceSessionState, Option<u32>)> {
+        self.voice_state_tx.subscribe()
+    }
+
+    /// Disconnects the active voice session gracefully.
+    pub async fn disconnect_voice_session(&self) -> Result<()> {
+        let session_opt = {
+            let mut active = self.active_voice.write().await;
+            active.take()
+        };
+        if let Some(session) = session_opt {
+            session.disconnect().await?;
+        }
+        let _ = self.voice_state_tx.send((
+            crate::protocol::voice_session::VoiceSessionState::Disconnected {
+                reason: "Desconectado pelo usuário".into(),
+            },
+            None,
+        ));
+        Ok(())
+    }
+
+    /// Starts a real VoiceSession using client_manager transport or active live client.
+    pub async fn start_voice_session(
+        &self,
+        guild_id: Option<u64>,
+        channel_id: u64,
+        user_id: u64,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> Result<Arc<crate::protocol::voice_session::VoiceSession>> {
+        let device_manager = crate::media::devices::MediaDeviceManager::new();
+        let has_hardware_audio = device_manager
+            .list_input_devices()
+            .map(|d| !d.is_empty())
+            .unwrap_or(false)
+            && device_manager
+                .list_output_devices()
+                .map(|d| !d.is_empty())
+                .unwrap_or(false);
+
+        let audio_bridge = if has_hardware_audio {
+            crate::protocol::voice_session::AudioBridge::new_thread()
+        } else {
+            let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(64);
+            let (_audio_spk_tx, audio_spk_rx) = tokio::sync::mpsc::channel(16);
+            let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel(64);
+
+            tokio::spawn(async move {
+                while let Some(cmd) = audio_cmd_rx.recv().await {
+                    match cmd {
+                        crate::protocol::voice_session::AudioBridgeCommand::StartSession { responder } => {
+                            let _ = responder.send(Ok(()));
+                        }
+                        crate::protocol::voice_session::AudioBridgeCommand::ReceiveOpusPacket { .. } => {}
+                        crate::protocol::voice_session::AudioBridgeCommand::StopSession => {}
+                        crate::protocol::voice_session::AudioBridgeCommand::SetMuted(_) => {}
+                        crate::protocol::voice_session::AudioBridgeCommand::SetDeafened(_) => {}
+                        crate::protocol::voice_session::AudioBridgeCommand::Shutdown => break,
+                    }
+                }
+            });
+
+            crate::protocol::voice_session::AudioBridge::from_channels(
+                audio_out_rx,
+                audio_spk_rx,
+                audio_cmd_tx,
+            )
+        };
+
+        let session_config = crate::protocol::voice_session::VoiceSessionConfig {
+            guild_id,
+            channel_id,
+            user_id,
+            self_mute,
+            self_deaf,
+        };
+
+        let signaling: Arc<dyn crate::protocol::voice_session::MainSignalingChannel> = {
+            let rc = self.real_client.read().await;
+            if let Some(client) = rc.as_ref() {
+                client.clone()
+            } else {
+                let tr = self.transport.read().await;
+                Arc::new(tr.clone())
+            }
+        };
+
+        let mut session = crate::protocol::voice_session::VoiceSession::new(
+            session_config,
+            signaling,
+            audio_bridge,
+        );
+
+        let gw_factory = {
+            let lock = self.voice_gateway_factory.read().await;
+            lock.clone()
+        };
+        if let Some(factory) = gw_factory {
+            session = session.with_gateway_factory(move |cfg| factory(cfg));
+        }
+
+        let session = Arc::new(session);
+
+        {
+            let mut active = self.active_voice.write().await;
+            if let Some(prev) = active.take() {
+                let _ = prev.disconnect().await;
+            }
+            *active = Some(session.clone());
+        }
+
+        // Bridge session state changes to voice_state_tx
+        let mut state_rx = session.subscribe_state();
+        let voice_tx = self.voice_state_tx.clone();
+        tokio::spawn(async move {
+            let initial = state_rx.borrow().clone();
+            let _ = voice_tx.send((initial, None));
+
+            while state_rx.changed().await.is_ok() {
+                let current_st = state_rx.borrow().clone();
+                let is_term = matches!(
+                    current_st,
+                    crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }
+                );
+                let _ = voice_tx.send((current_st, None));
+                if is_term {
+                    break;
+                }
+            }
+        });
+
+        session.start().await?;
+        Ok(session)
     }
 }

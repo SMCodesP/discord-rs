@@ -304,6 +304,53 @@ struct ShotFixture {
     /// Selects the "Conta de Usuário" account type (login modal).
     #[serde(default)]
     is_user_token: bool,
+    /// Active voice call state for voice_stage captures.
+    #[serde(default)]
+    voice_call: Option<FixtureVoiceCall>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FixtureVoiceParticipant {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    avatar_text: String,
+    #[serde(default)]
+    is_speaking: bool,
+    #[serde(default)]
+    is_muted: bool,
+    #[serde(default)]
+    is_deafened: bool,
+    #[serde(default)]
+    is_camera_on: bool,
+    #[serde(default)]
+    is_screen_sharing: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FixtureVoiceCall {
+    #[serde(default)]
+    channel_id: String,
+    #[serde(default)]
+    channel_name: String,
+    #[serde(default)]
+    guild_name: String,
+    #[serde(default)]
+    ping_ms: Option<u32>,
+    #[serde(default)]
+    is_muted: bool,
+    #[serde(default)]
+    is_deafened: bool,
+    #[serde(default)]
+    is_camera_on: bool,
+    #[serde(default)]
+    is_screen_sharing: bool,
+    #[serde(default)]
+    connection_state: Option<String>,
+    #[serde(default)]
+    participants: Vec<FixtureVoiceParticipant>,
 }
 
 fn default_true() -> bool {
@@ -578,7 +625,57 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
     s.typing_tracker = HashMap::new();
     s.typing_users = Vec::new();
     s.voice_states_by_channel = HashMap::new();
-    s.active_voice_call = None;
+    s.active_voice_call = f.voice_call.as_ref().map(|vc| {
+        let conn_state = match vc.connection_state.as_deref() {
+            Some("Connecting") => discord_rs::protocol::voice_session::VoiceSessionState::Connecting,
+            Some("Reconnecting") => discord_rs::protocol::voice_session::VoiceSessionState::Reconnecting,
+            Some(reason) if reason.starts_with("Disconnected") => {
+                discord_rs::protocol::voice_session::VoiceSessionState::Disconnected {
+                    reason: reason.to_string(),
+                }
+            }
+            _ => discord_rs::protocol::voice_session::VoiceSessionState::Connected,
+        };
+        let participants = vc
+            .participants
+            .iter()
+            .map(|p| discord_rs::app::VoiceParticipantState {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                avatar_text: if p.avatar_text.is_empty() {
+                    p.name.chars().next().unwrap_or('?').to_string()
+                } else {
+                    p.avatar_text.clone()
+                },
+                avatar_url: None,
+                is_speaking: p.is_speaking,
+                is_muted: p.is_muted,
+                is_deafened: p.is_deafened,
+                is_camera_on: p.is_camera_on,
+                is_screen_sharing: p.is_screen_sharing,
+                avatar_decoration_data: None,
+            })
+            .collect();
+
+        discord_rs::app::ActiveVoiceCall {
+            channel_id: vc.channel_id.clone(),
+            channel_name: vc.channel_name.clone(),
+            guild_name: vc.guild_name.clone(),
+            ping_ms: vc.ping_ms,
+            is_muted: vc.is_muted,
+            is_deafened: vc.is_deafened,
+            is_screen_sharing: vc.is_screen_sharing,
+            participants,
+            connection_state: conn_state,
+            fatal_error: None,
+            is_camera_on: vc.is_camera_on,
+            focus_user_id: None,
+            selected_input_device: None,
+            selected_output_device: None,
+            selected_camera_device: None,
+            voice_session: None,
+        }
+    });
 
     // --- Navigation / overlays --------------------------------------------
     s.selected_guild_id = f.selected_guild_id.clone();

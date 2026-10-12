@@ -930,16 +930,36 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                         .flex_col()
                         .child(
                             div()
-                                .text_color(status_online())
+                                .text_color(match voice.connection_state {
+                                    crate::protocol::voice_session::VoiceSessionState::Connected => status_online(),
+                                    crate::protocol::voice_session::VoiceSessionState::Connecting
+                                    | crate::protocol::voice_session::VoiceSessionState::Reconnecting => status_idle(),
+                                    crate::protocol::voice_session::VoiceSessionState::Disconnected { .. } => status_dnd(),
+                                })
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
-                                .child("Voz Conectada"),
+                                .child(match voice.connection_state {
+                                    crate::protocol::voice_session::VoiceSessionState::Connected => "Voz Conectada".to_string(),
+                                    crate::protocol::voice_session::VoiceSessionState::Connecting => "Conectando ao RTC...".to_string(),
+                                    crate::protocol::voice_session::VoiceSessionState::Reconnecting => "Reconectando...".to_string(),
+                                    crate::protocol::voice_session::VoiceSessionState::Disconnected { ref reason } => {
+                                        if !reason.is_empty() && reason != "Sessão inicializada" {
+                                            format!("Desconectado ({})", reason)
+                                        } else {
+                                            "Desconectado".to_string()
+                                        }
+                                    }
+                                }),
                         )
                         .child(
                             div()
                                 .text_color(text_muted())
                                 .text_size(px(11.0))
-                                .child(format!("{} / {}ms", voice.channel_name, voice.ping_ms)),
+                                .child(if let Some(ms) = voice.ping_ms {
+                                    format!("{} / {}ms", voice.channel_name, ms)
+                                } else {
+                                    voice.channel_name.clone()
+                                }),
                         ),
                 ),
         )

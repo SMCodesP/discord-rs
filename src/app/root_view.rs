@@ -78,6 +78,8 @@ impl RootView {
         });
 
         let state_weak = state.downgrade();
+        let state_weak_voice = state.downgrade();
+        let mut voice_rx = client_manager.subscribe_voice_state();
         cx.spawn(|_view, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
@@ -85,6 +87,21 @@ impl RootView {
                     let _ = cx.update(|cx| {
                         let _ = state_weak.update(cx, |state, cx| {
                             state.handle_transport_event(evt);
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+
+        cx.spawn(|_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                while let Ok((v_st, ping)) = voice_rx.recv().await {
+                    let _ = cx.update(|cx| {
+                        let _ = state_weak_voice.update(cx, |state, cx| {
+                            state.update_voice_session_state(v_st, ping);
                             cx.notify();
                         });
                     });
@@ -577,6 +594,12 @@ impl Render for RootView {
             .as_ref()
             .map(|ch| ch.kind == ChannelKind::Voice)
             .unwrap_or(false);
+        let show_voice_stage = in_voice_channel
+            || state
+                .active_voice_call
+                .as_ref()
+                .map(|call| state.selected_channel_id.as_deref() == Some(&call.channel_id))
+                .unwrap_or(false);
         let app_entity = self.state.clone();
 
         div()
@@ -610,14 +633,14 @@ impl Render for RootView {
                     .overflow_hidden()
                     // Top Header Bar (48px) - shown for chat / voice channels; Friends Hub renders its own unified header bar
                     .children((!(state.selected_guild_id.is_none() && state.selected_channel_id.is_none())).then(|| self.header_bar.clone()))
-                    // Center Content (Voice Panel if in voice channel, Friends View if in Home with no channel selected, else Chat area)
+                    // Center Content (Voice Panel if in voice channel or active call, Friends View if in Home with no channel selected, else Chat area)
                     .child(
                         div()
                             .flex_1()
                             .w_full()
                             .min_h(px(0.0))
                             .overflow_hidden()
-                            .child(if in_voice_channel {
+                            .child(if show_voice_stage {
                                 self.voice_panel.clone().into_any_element()
                             } else if state.selected_guild_id.is_none() && state.selected_channel_id.is_none() {
                                 let search_state = self

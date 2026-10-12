@@ -219,16 +219,130 @@ fn render_toolbar(app_entity: Entity<AppState>, state: &AppState, cx: &App) -> A
         toolbar = toolbar.child(render_login_button(app_entity.clone(), cx));
     }
 
-    // 1. Notifications / Bell button
-    toolbar = toolbar.child(
-        IconButton::with_icon("header-btn-notifications", |sz, col| {
-            icon_bell(sz, col).into_any_element()
-        })
-        .size(px(28.0))
-        .icon_size(px(16.0))
-        .rounded(px(4.0))
-        .tooltip("Notification Settings"),
-    );
+    let is_dm_channel = state.selected_guild_id.is_none() && state.selected_channel_id.is_some();
+
+    // Voice and Video call buttons (Only in DM / Group DM)
+    if is_dm_channel {
+        let channel_id = state.selected_channel_id.clone().unwrap_or_default();
+        let channel_name = state
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| "DM".into());
+        let recipient_ids = state
+            .dm_channels
+            .iter()
+            .find(|d| d.id == channel_id)
+            .map(|d| d.recipient_ids.clone())
+            .unwrap_or_default();
+
+        let voice_entity = app_entity.clone();
+        let cid_v = channel_id.clone();
+        let cname_v = channel_name.clone();
+        let recips_v = recipient_ids.clone();
+        toolbar = toolbar.child(
+            IconButton::with_icon("header-btn-voice-call", |sz, col| {
+                icon_phone(sz, col).into_any_element()
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(px(4.0))
+            .tooltip("Iniciar chamada de voz")
+            .on_click(move |_event, _window, cx| {
+                let cm_opt = voice_entity.read(cx).client_manager.clone();
+                let cid = cid_v.clone();
+                let cname = cname_v.clone();
+                let recips = if recips_v.is_empty() {
+                    None
+                } else {
+                    Some(recips_v.clone())
+                };
+                let entity = voice_entity.clone();
+
+                cx.spawn(|cx: &mut AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                        if let Some(cm) = cm_opt {
+                            match cm.ring_call(&cid, recips).await {
+                                Ok(()) => {
+                                    let _ = cx.update(|cx| {
+                                        entity.update(cx, |state, cx| {
+                                            state.connect_voice(&cid, &cname, "DM");
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                                Err(e) => {
+                                    log::error!("[HeaderBar] Falha ao iniciar chamada (ring_call recusado): {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }),
+        );
+
+        let video_entity = app_entity.clone();
+        let cid_vid = channel_id.clone();
+        let cname_vid = channel_name.clone();
+        let recips_vid = recipient_ids;
+        toolbar = toolbar.child(
+            IconButton::with_icon("header-btn-video-call", |sz, col| {
+                render_video_camera_icon(sz, col)
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(px(4.0))
+            .tooltip("Iniciar chamada de vídeo")
+            .on_click(move |_event, _window, cx| {
+                let cm_opt = video_entity.read(cx).client_manager.clone();
+                let cid = cid_vid.clone();
+                let cname = cname_vid.clone();
+                let recips = if recips_vid.is_empty() {
+                    None
+                } else {
+                    Some(recips_vid.clone())
+                };
+                let entity = video_entity.clone();
+
+                cx.spawn(|cx: &mut AsyncApp| {
+                    let cx = cx.clone();
+                    async move {
+                        if let Some(cm) = cm_opt {
+                            match cm.ring_call(&cid, recips).await {
+                                Ok(()) => {
+                                    let _ = cx.update(|cx| {
+                                        entity.update(cx, |state, cx| {
+                                            state.connect_voice(&cid, &cname, "DM");
+                                            state.toggle_camera();
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                                Err(e) => {
+                                    log::error!("[HeaderBar] Falha ao iniciar chamada de vídeo (ring_call recusado): {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }),
+        );
+    } else {
+        // 1. Notifications / Bell button (Guild text/voice channels)
+        toolbar = toolbar.child(
+            IconButton::with_icon("header-btn-notifications", |sz, col| {
+                icon_bell(sz, col).into_any_element()
+            })
+            .size(px(28.0))
+            .icon_size(px(16.0))
+            .rounded(px(4.0))
+            .tooltip("Notification Settings"),
+        );
+    }
 
     // 2. Pinned messages button
     toolbar = toolbar.child(
@@ -383,3 +497,34 @@ fn render_search_box(
         ))
         .into_any_element()
 }
+
+fn render_video_camera_icon(size: Pixels, color: Rgba) -> AnyElement {
+    div()
+        .size(size)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .w(px(10.0))
+                        .h(px(8.0))
+                        .rounded(px(1.5))
+                        .bg(color),
+                )
+                .child(
+                    div()
+                        .w(px(3.0))
+                        .h(px(6.0))
+                        .rounded(px(1.0))
+                        .bg(color),
+                ),
+        )
+        .into_any_element()
+}
+
