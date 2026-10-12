@@ -88,7 +88,7 @@ impl Banner {
         }
     }
 
-    /// Creates an Info banner (e.g. "Modo Demonstração ativado")
+    /// Creates an Info banner (e.g. "Atualização disponível")
     pub fn info(id: impl Into<ElementId>, message: impl Into<SharedString>) -> Self {
         Self::new(id, message).variant(BannerVariant::Info)
     }

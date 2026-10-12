@@ -127,7 +127,6 @@ mod tests {
         assert_eq!(t("auth.connect"), "Conectar");
         assert_eq!(t("auth.connecting"), "Conectando...");
         assert_eq!(t("auth.connected"), "Conectado");
-        assert_eq!(t("auth.mock_mode"), "Modo Demonstração (Mock)");
         assert_eq!(t("auth.disconnect"), "Desconectar");
         assert_eq!(t("auth.failed"), "Falha ao autenticar");
         assert_eq!(

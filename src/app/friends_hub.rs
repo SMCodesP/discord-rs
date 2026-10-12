@@ -20,7 +20,6 @@
 use gpui::component::Disableable as _;
 use gpui::component::button::{Button as KitButton, ButtonVariants as _};
 use gpui::component::input::InputState;
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use crate::app::state::*;
 use crate::components::{Avatar, AvatarSize, Button, ButtonSize, TextInput};
@@ -1705,59 +1704,109 @@ fn render_active_now_details(item: &ActiveNowItem) -> AnyElement {
         .into_any_element()
 }
 
-/// Big 48px app icon, colored per activity kind.
+/// Big 48px app icon or album cover, rendered from real assets, with fallback to kind vector icon.
 fn render_active_now_app_icon(item: &ActiveNowItem) -> AnyElement {
-    div()
-        .size(px(48.0))
-        .rounded(px(8.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        // TOKEN FALTANDO: --platform-vscode (azul "VS" do rich presence, 0x007acc)
-        .when(item.kind == ActiveNowKind::RichPresence, |d| {
-            d.bg(rgb(0x007acc))
-                .text_color(white())
-                .text_size(px(20.0))
-        })
-        .when(item.kind == ActiveNowKind::Quest, |d| {
-            d.bg(bg_channels())
-                .text_color(white())
-                .text_size(px(22.0))
-        })
-        // TOKEN FALTANDO: --activity-card-background (fundo do ícone Spotify, 0x121212)
-        .when(item.kind == ActiveNowKind::Spotify, |d| {
-            d.bg(rgb(0x121212))
-                .text_color(status_online())
-                .text_size(px(24.0))
-        })
-        // TOKEN FALTANDO: --status-positive-background (verde do ícone de jogo, 0x248046)
-        .when(item.kind == ActiveNowKind::Game, |d| {
-            d.bg(rgb(0x248046))
-                .text_color(white())
-                .text_size(px(20.0))
-        })
-        .child(match item.kind {
-            ActiveNowKind::RichPresence => div().child("VS").into_any_element(),
-            ActiveNowKind::Quest => icon_gamepad(px(24.0), white()).into_any_element(),
-            ActiveNowKind::Spotify => {
-                icon_music(px(24.0), status_online()).into_any_element()
-            }
-            ActiveNowKind::Game => icon_gamepad(px(24.0), white()).into_any_element(),
-        })
-        .into_any_element()
+    if let Some(ref url) = item.large_image_url {
+        let mut base = div()
+            .relative()
+            .size(px(48.0))
+            .rounded(px(8.0))
+            .overflow_hidden()
+            .flex_shrink_0()
+            .child(
+                img(url.clone())
+                    .size_full()
+                    .rounded(px(8.0)),
+            );
+
+        if let Some(ref small_url) = item.small_image_url {
+            base = base.child(
+                div()
+                    .absolute()
+                    .bottom(px(-2.0))
+                    .right(px(-2.0))
+                    .size(px(20.0))
+                    .rounded_full()
+                    .border_2()
+                    .border_color(bg_input())
+                    .overflow_hidden()
+                    .child(
+                        img(small_url.clone())
+                            .size_full()
+                            .rounded_full(),
+                    ),
+            );
+        }
+
+        base.into_any_element()
+    } else {
+        // Sem imagem: exibe o ícone oficial da atividade sobre fundo neutro do Discord.
+        div()
+            .size(px(48.0))
+            .rounded(px(8.0))
+            .bg(bg_channels())
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(match item.kind {
+                ActiveNowKind::Quest | ActiveNowKind::Game => {
+                    icon_gamepad(px(24.0), text_muted()).into_any_element()
+                }
+                ActiveNowKind::Spotify => {
+                    icon_music(px(24.0), status_online()).into_any_element()
+                }
+                ActiveNowKind::RichPresence => {
+                    icon_screen_share(px(24.0), text_muted()).into_any_element()
+                }
+            })
+            .into_any_element()
+    }
 }
 
-/// Spotify progress row (times from state; 1:24/3:50 + 36% fallbacks as today).
+/// Helper to compute Spotify progress text and ratio from timestamps.
+fn compute_spotify_progress(
+    start_ms: i64,
+    end_ms: i64,
+    now_ms: i64,
+) -> Option<((String, String), f32)> {
+    if end_ms <= start_ms {
+        return None;
+    }
+    let total_ms = end_ms - start_ms;
+    let elapsed_ms = (now_ms - start_ms).clamp(0, total_ms);
+    let ratio = (elapsed_ms as f32 / total_ms as f32).clamp(0.0, 1.0);
+
+    let cur_secs = elapsed_ms / 1000;
+    let total_secs = total_ms / 1000;
+
+    let cur_text = format!("{}:{:02}", cur_secs / 60, cur_secs % 60);
+    let total_text = format!("{}:{:02}", total_secs / 60, total_secs % 60);
+
+    Some(((cur_text, total_text), ratio))
+}
+
+/// Spotify progress row dynamically computed from timestamps (start/end).
+/// Without real timestamps or progress data, no progress bar is shown (zero mocks).
 fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
     if item.kind != ActiveNowKind::Spotify {
         return None;
     }
-    let (cur, total) = item
-        .spotify_progress_text
-        .clone()
-        .unwrap_or_else(|| ("1:24".into(), "3:50".into()));
-    let progress_ratio = item.spotify_progress_pct.unwrap_or(0.36);
+
+    let (cur, total, progress_ratio) = if let (Some(start), Some(end)) = (item.timestamps_start, item.timestamps_end) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let start_ms = if start < 100_000_000_000 { start * 1000 } else { start };
+        let end_ms = if end < 100_000_000_000 { end * 1000 } else { end };
+        if let Some(((cur, total), ratio)) = compute_spotify_progress(start_ms, end_ms, now_ms) {
+            (cur, total, ratio)
+        } else {
+            return None;
+        }
+    } else if let (Some(progress_text), Some(ratio)) = (&item.spotify_progress_text, item.spotify_progress_pct) {
+        (progress_text.0.clone(), progress_text.1.clone(), ratio)
+    } else {
+        return None;
+    };
 
     Some(
         div()
@@ -1779,10 +1828,11 @@ fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
                     .bg(channel_active())
                     .rounded_full()
                     .relative()
+                    .overflow_hidden()
                     .child(
                         div()
                             .h_full()
-                            .w(px(progress_ratio * 120.0))
+                            .w(relative(progress_ratio))
                             .bg(status_online())
                             .rounded_full(),
                     ),
@@ -1795,4 +1845,67 @@ fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
             )
             .into_any_element(),
     )
+}
+
+/// Helper to check if any active Spotify item with timestamps is present in state.
+pub fn has_spotify_with_timestamps(state: &AppState) -> bool {
+    state.active_now_items.iter().any(|item| {
+        item.kind == ActiveNowKind::Spotify
+            && item.timestamps_start.is_some()
+            && item.timestamps_end.is_some()
+    })
+}
+
+/// Synchronizes a 1-second GPUI timer task for dynamic Spotify progress updates.
+///
+/// When `state.has_visible_spotify_progress()` is true:
+/// If `timer_slot` is empty, spawns an asynchronous periodic task via GPUI's executor
+/// that sleeps for 1 second (`cx.background_executor().timer(1s).await`), calls `tick_spotify_progress()`,
+/// and emits `cx.notify()`.
+///
+/// When `state.has_visible_spotify_progress()` is false (either no Spotify items with timestamps
+/// exist or the Friends Hub is not visible):
+/// Sets `*timer_slot = None`, which drops the `Task<()>`, cleanly cancelling the GPUI task
+/// without running an external thread.
+pub fn sync_spotify_progress_timer<V: 'static>(
+    timer_slot: &mut Option<Task<()>>,
+    state: &AppState,
+    app_entity: &Entity<AppState>,
+    cx: &Context<V>,
+) {
+    if state.has_visible_spotify_progress() {
+        if timer_slot.is_none() {
+            let app_weak = app_entity.downgrade();
+            let task = cx.spawn(|_view, cx: &mut AsyncApp| {
+                let cx = cx.clone();
+                async move {
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(1))
+                            .await;
+                        let keep_going = cx.update(|cx| {
+                            app_weak
+                                .update(cx, |state, cx| {
+                                    if state.has_visible_spotify_progress() {
+                                        state.tick_spotify_progress();
+                                        cx.notify();
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false)
+                        });
+
+                        if !keep_going {
+                            break;
+                        }
+                    }
+                }
+            });
+            *timer_slot = Some(task);
+        }
+    } else {
+        *timer_slot = None;
+    }
 }

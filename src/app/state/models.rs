@@ -296,6 +296,27 @@ pub struct ActiveNowItem {
     pub spotify_progress_text: Option<(String, String)>,
     pub spotify_progress_pct: Option<f32>,
     pub button_text: Option<String>,
+    /// Large asset image URL (application asset, Spotify cover, or media proxy).
+    #[serde(default)]
+    pub large_image_url: Option<String>,
+    /// Large asset hover text.
+    #[serde(default)]
+    pub large_image_text: Option<String>,
+    /// Small asset image URL (e.g. status or platform icon overlay).
+    #[serde(default)]
+    pub small_image_url: Option<String>,
+    /// Small asset hover text.
+    #[serde(default)]
+    pub small_image_text: Option<String>,
+    /// Application snowflake ID.
+    #[serde(default)]
+    pub application_id: Option<String>,
+    /// Activity start timestamp (milliseconds).
+    #[serde(default)]
+    pub timestamps_start: Option<i64>,
+    /// Activity end timestamp (milliseconds).
+    #[serde(default)]
+    pub timestamps_end: Option<i64>,
     /// Avatar decoration equipped by the user, copied from the friend entry.
     #[serde(default)]
     pub avatar_decoration_data: Option<AvatarDecorationData>,

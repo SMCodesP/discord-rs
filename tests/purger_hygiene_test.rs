@@ -203,3 +203,57 @@ async fn test_client_manager_new_starts_idle_and_disconnect_lifecycle() {
     assert!(cm.list_guilds().await.unwrap().is_empty());
     assert!(cm.send_message("chan-1", "hello").await.is_err());
 }
+
+#[test]
+fn test_hygiene_no_demo_mode_in_production() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src_dir = std::path::Path::new(manifest_dir).join("src");
+
+    let mut violations = Vec::new();
+    fn visit_rs_files(dir: &std::path::Path, cb: &mut dyn FnMut(&std::path::Path)) {
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit_rs_files(&path, cb);
+                } else if path.extension().map_or(false, |ext| ext == "rs") {
+                    cb(&path);
+                }
+            }
+        }
+    }
+
+    visit_rs_files(&src_dir, &mut |path| {
+        let content = std::fs::read_to_string(path).unwrap();
+        for (line_no, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                continue;
+            }
+            if trimmed.contains("Modo Demonstração")
+                || trimmed.contains("auth.mock_mode")
+                || trimmed.contains("auth.demo_mode")
+                || trimmed.contains("connection.mock")
+            {
+                violations.push(format!("{}:{}: {}", path.display(), line_no + 1, trimmed));
+            }
+        }
+    });
+
+    assert!(
+        violations.is_empty(),
+        "Found 'Modo Demonstração' or mock i18n keys in src/:\n{}",
+        violations.join("\n")
+    );
+
+    // Production AppState::new() must start as Connecting or Disconnected, never Mock
+    let state = AppState::new();
+    assert!(
+        matches!(
+            state.connection_mode,
+            discord_rs::protocol::ConnectionMode::Disconnected(_)
+                | discord_rs::protocol::ConnectionMode::Connecting
+        ),
+        "Production AppState::new() must never start in ConnectionMode::Mock"
+    );
+}
