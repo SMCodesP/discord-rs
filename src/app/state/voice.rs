@@ -6,12 +6,22 @@ impl AppState {
     /// Connects to a voice call in a guild channel
     pub fn connect_voice(&mut self, channel_id: &str, channel_name: &str, guild_name: &str) {
         let gid_opt = self.selected_guild_id.as_deref().and_then(|g| g.parse::<u64>().ok());
-        self.connect_voice_internal(channel_id, channel_name, guild_name, gid_opt);
+        self.connect_voice_internal(channel_id, channel_name, guild_name, gid_opt, None);
     }
 
     /// Connects to a voice call in a DM channel with explicit guild_id = None
     pub fn connect_voice_dm(&mut self, channel_id: &str, channel_name: &str) {
-        self.connect_voice_internal(channel_id, channel_name, "Mensagem Direta", None);
+        self.connect_voice_internal(channel_id, channel_name, "Mensagem Direta", None, None);
+    }
+
+    /// Connects to a voice call in a DM channel with explicit guild_id = None and optional ring_recipients
+    pub fn connect_voice_dm_with_ring(
+        &mut self,
+        channel_id: &str,
+        channel_name: &str,
+        ring_recipients: Option<Vec<String>>,
+    ) {
+        self.connect_voice_internal(channel_id, channel_name, "Mensagem Direta", None, ring_recipients);
     }
 
     fn connect_voice_internal(
@@ -20,6 +30,7 @@ impl AppState {
         channel_name: &str,
         guild_name: &str,
         explicit_guild_id: Option<u64>,
+        ring_recipients: Option<Vec<String>>,
     ) {
         let mut participants = Vec::new();
 
@@ -153,6 +164,7 @@ impl AppState {
             let cm = cm.clone();
             let self_mute = self.current_user.is_muted;
             let self_deaf = self.current_user.is_deafened;
+            let ring_recips = ring_recipients;
 
             tokio::spawn(async move {
                 if let Err(e) = cm
@@ -162,6 +174,7 @@ impl AppState {
                         user_id_u64,
                         self_mute,
                         self_deaf,
+                        ring_recips,
                     )
                     .await
                 {

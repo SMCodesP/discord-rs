@@ -685,6 +685,17 @@ impl DiscordApiClient {
         self.last_voice_server.read().await.clone()
     }
 
+    /// Clear the cached voice server information.
+    pub async fn clear_voice_server(&self) {
+        *self.last_voice_server.write().await = None;
+    }
+
+    /// Clear both cached voice session ID and voice server information.
+    pub async fn clear_voice_session(&self) {
+        *self.last_voice_session_id.write().await = None;
+        *self.last_voice_server.write().await = None;
+    }
+
     /// Deletes a message from a channel (/channels/{channel_id}/messages/{message_id})
     pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         let path = format!("/channels/{}/messages/{}", channel_id, message_id);
@@ -766,6 +777,8 @@ impl DiscordTransport for DiscordApiClient {
         }
         *self.outbound_gateway_tx.write().await = None;
         crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared().clear().await;
+        *self.last_voice_session_id.write().await = None;
+        *self.last_voice_server.write().await = None;
         let _ = self
             .event_sender
             .send(TransportEvent::Disconnected("Disconnected by client".to_string()));
@@ -1415,6 +1428,7 @@ async fn handle_dispatch(
             if let Some(r_url) = data.get("resume_gateway_url").and_then(|v| v.as_str()) {
                 *resume_gateway_url.write().await = Some(r_url.to_string());
             }
+            *last_voice_server.write().await = None;
 
             let user = data
                 .get("user")
@@ -1818,6 +1832,41 @@ async fn handle_dispatch(
                 channel_id,
                 endpoint,
             });
+        }
+        "CALL_CREATE" => {
+            if let Some(ch_id) = data.get("channel_id").and_then(|v| v.as_str()) {
+                let message_id = data.get("message_id").and_then(|v| v.as_str()).map(ToString::to_string);
+                let region = data.get("region").and_then(|v| v.as_str()).map(ToString::to_string);
+                let ringing = data.get("ringing").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str()).map(ToString::to_string).collect())
+                    .unwrap_or_default();
+                let _ = event_tx.send(TransportEvent::CallCreate {
+                    channel_id: ch_id.to_string(),
+                    message_id,
+                    region,
+                    ringing,
+                });
+            }
+        }
+        "CALL_UPDATE" => {
+            if let Some(ch_id) = data.get("channel_id").and_then(|v| v.as_str()) {
+                let region = data.get("region").and_then(|v| v.as_str()).map(ToString::to_string);
+                let ringing = data.get("ringing").and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|x| x.as_str()).map(ToString::to_string).collect())
+                    .unwrap_or_default();
+                let _ = event_tx.send(TransportEvent::CallUpdate {
+                    channel_id: ch_id.to_string(),
+                    region,
+                    ringing,
+                });
+            }
+        }
+        "CALL_DELETE" => {
+            if let Some(ch_id) = data.get("channel_id").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(TransportEvent::CallDelete {
+                    channel_id: ch_id.to_string(),
+                });
+            }
         }
         "TYPING_START" => {
             if let (Some(ch_id), Some(user_id)) = (

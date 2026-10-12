@@ -923,11 +923,17 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .child(icon_wifi(px(16.0), status_online()))
+                .min_w(px(0.0))
+                .flex_1()
+                .overflow_hidden()
+                .child(icon_wifi(px(16.0), status_online()).flex_shrink_0())
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .min_w(px(0.0))
+                        .flex_1()
+                        .overflow_hidden()
                         .child(
                             div()
                                 .text_color(match voice.connection_state {
@@ -938,6 +944,7 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                                 })
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
+                                .truncate()
                                 .child(match voice.connection_state {
                                     crate::protocol::voice_session::VoiceSessionState::Connected => "Voz Conectada".to_string(),
                                     crate::protocol::voice_session::VoiceSessionState::Connecting => "Conectando ao RTC...".to_string(),
@@ -955,6 +962,7 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                             div()
                                 .text_color(text_muted())
                                 .text_size(px(11.0))
+                                .truncate()
                                 .child(if let Some(ms) = voice.ping_ms {
                                     format!("{} / {}ms", voice.channel_name, ms)
                                 } else {
@@ -964,20 +972,24 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
                 ),
         )
         .child(
-            IconButton::with_icon("voice-disconnect-btn", |sz, col| {
-                icon_phone_hangup(sz, col).into_any_element()
-            })
-            .size(px(28.0))
-            .icon_size(px(16.0))
-            .rounded(radius_sm())
-            .danger(true)
-            .tooltip("Desconectar")
-            .on_click(move |_event, _window, cx| {
-                entity.update(cx, |state, cx| {
-                    state.disconnect_voice();
-                    cx.notify();
-                });
-            }),
+            div()
+                .flex_shrink_0()
+                .child(
+                    IconButton::with_icon("voice-disconnect-btn", |sz, col| {
+                        icon_phone_hangup(sz, col).into_any_element()
+                    })
+                    .size(px(28.0))
+                    .icon_size(px(16.0))
+                    .rounded(radius_sm())
+                    .danger(true)
+                    .tooltip("Desconectar")
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |state, cx| {
+                            state.disconnect_voice();
+                            cx.notify();
+                        });
+                    }),
+                ),
         )
         .into_any_element()
 }

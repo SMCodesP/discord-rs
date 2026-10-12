@@ -104,6 +104,23 @@ pub enum TransportEvent {
         channel_id: Option<String>,
         endpoint: Option<String>,
     },
+    /// Call initiated in a private channel / DM (CALL_CREATE)
+    CallCreate {
+        channel_id: String,
+        message_id: Option<String>,
+        region: Option<String>,
+        ringing: Vec<String>,
+    },
+    /// Call updated in a private channel / DM (CALL_UPDATE)
+    CallUpdate {
+        channel_id: String,
+        region: Option<String>,
+        ringing: Vec<String>,
+    },
+    /// Call ended / deleted in a private channel / DM (CALL_DELETE)
+    CallDelete {
+        channel_id: String,
+    },
     /// A user started typing in a channel.
     TypingStart {
         channel_id: String,

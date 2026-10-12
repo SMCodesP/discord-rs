@@ -215,6 +215,9 @@ pub trait MainSignalingChannel: Send + Sync {
     async fn current_voice_server(&self) -> Option<VoiceServerData> {
         None
     }
+
+    /// Limpa o cache de servidor de voz capturado (ao desconectar ou sair).
+    async fn clear_voice_server(&self) {}
 }
 
 #[async_trait]
@@ -240,6 +243,10 @@ impl MainSignalingChannel for DiscordApiClient {
 
     async fn current_voice_server(&self) -> Option<VoiceServerData> {
         self.current_voice_server().await
+    }
+
+    async fn clear_voice_server(&self) {
+        self.clear_voice_server().await;
     }
 }
 
@@ -598,6 +605,9 @@ pub struct VoiceSession {
     self_deaf: Arc<AtomicBool>,
     ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>>,
     ping_ms: Arc<AtomicU32>,
+    call_warning: Arc<std::sync::RwLock<Option<String>>>,
+    entry_confirmed_tx: watch::Sender<bool>,
+    entry_confirmed_rx: watch::Receiver<bool>,
 }
 
 impl VoiceSession {
@@ -611,6 +621,7 @@ impl VoiceSession {
             reason: "Sessão inicializada".into(),
         });
         let (events_tx, _) = broadcast::channel(64);
+        let (entry_confirmed_tx, entry_confirmed_rx) = watch::channel(false);
 
         let self_mute = Arc::new(AtomicBool::new(config.self_mute));
         let self_deaf = Arc::new(AtomicBool::new(config.self_deaf));
@@ -618,6 +629,7 @@ impl VoiceSession {
         let recv_packets = Arc::new(AtomicU64::new(0));
         let ssrc_to_user = Arc::new(RwLock::new(HashMap::new()));
         let ping_ms = Arc::new(AtomicU32::new(u32::MAX));
+        let call_warning = Arc::new(std::sync::RwLock::new(None));
 
         let dave_session = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(
             config.user_id,
@@ -643,6 +655,26 @@ impl VoiceSession {
             self_deaf,
             ssrc_to_user,
             ping_ms,
+            call_warning,
+            entry_confirmed_tx,
+            entry_confirmed_rx,
+        }
+    }
+
+    /// Subscreve ao sinal de entrada confirmada no canal de voz (próprio VOICE_STATE_UPDATE ou CALL_CREATE).
+    pub fn subscribe_entry_confirmed(&self) -> watch::Receiver<bool> {
+        self.entry_confirmed_rx.clone()
+    }
+
+    /// Retorna aviso de chamada atual se houver (aviso não-fatal)
+    pub fn call_warning(&self) -> Option<String> {
+        self.call_warning.read().ok()?.clone()
+    }
+
+    /// Define ou limpa o aviso não-fatal de chamada
+    pub fn set_call_warning(&self, warning: Option<String>) {
+        if let Ok(mut w) = self.call_warning.write() {
+            *w = warning;
         }
     }
 
@@ -818,6 +850,7 @@ impl VoiceSession {
         let self_deaf = self.self_deaf.clone();
         let ssrc_to_user = self.ssrc_to_user.clone();
         let ping_ms = self.ping_ms.clone();
+        let entry_confirmed_tx = self.entry_confirmed_tx.clone();
 
         let handle = tokio::spawn(async move {
             if let Err(err) = run_voice_session(
@@ -836,6 +869,7 @@ impl VoiceSession {
                 self_deaf,
                 ssrc_to_user,
                 ping_ms,
+                entry_confirmed_tx,
             )
             .await
             {
@@ -871,6 +905,7 @@ impl VoiceSession {
             .signaling
             .send_voice_state_update(guild_id_str.as_deref(), None, false, false)
             .await;
+        self.signaling.clear_voice_server().await;
 
         // 2. Desconecta gateway de voz ativo
         let mut gw_lock = self.active_gateway.lock().await;
@@ -926,6 +961,7 @@ async fn run_voice_session(
     self_deaf: Arc<AtomicBool>,
     ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>>,
     ping_ms: Arc<AtomicU32>,
+    entry_confirmed_tx: watch::Sender<bool>,
 ) -> Result<()> {
     // ------------------------------------------------------------------------
     // Passo 1: Subscrever eventos do transporte principal e disparar Opcode 4
@@ -942,19 +978,15 @@ async fn run_voice_session(
         .await
         .context("Falha ao enviar Opcode 4 (Voice State Update)")?;
 
+    log::info!("[VoiceDiag] Opcode 4 enviado: guild_presente={}", guild_str.is_some());
     let _ = events_tx.send(VoiceSessionEvent::VoiceStateSent);
 
     // ------------------------------------------------------------------------
-    // Passo 2: Aguardar session_id + token + endpoint
+    // Passo 2: Aguardar session_id + token + endpoint recebidos APÓS Opcode 4
     // ------------------------------------------------------------------------
-    let mut captured_session_id = signaling.current_voice_session_id().await;
+    let mut captured_session_id: Option<String> = None;
     let mut captured_token: Option<String> = None;
     let mut captured_endpoint: Option<String> = None;
-
-    if let Some(server) = signaling.current_voice_server().await {
-        captured_token = Some(server.token);
-        captured_endpoint = server.endpoint;
-    }
 
     let discovery_timeout = Duration::from_secs(15);
     tokio::time::timeout(discovery_timeout, async {
@@ -962,18 +994,44 @@ async fn run_voice_session(
             match transport_rx.recv().await {
                 Ok(TransportEvent::VoiceStateUpdate(VoiceState {
                     user_id,
+                    channel_id: ev_ch_id,
                     session_id,
                     ..
-                })) if user_id == config.user_id.to_string() && !session_id.is_empty() => {
+                })) if user_id == config.user_id.to_string()
+                    && ev_ch_id.as_deref() == Some(&channel_str)
+                    && !session_id.is_empty() => {
+                    log::info!("[VoiceDiag] VOICE_STATE_UPDATE próprio recebido");
                     captured_session_id = Some(session_id);
+                    let _ = entry_confirmed_tx.send(true);
+                }
+                Ok(TransportEvent::CallCreate { channel_id: ev_ch_id, .. })
+                    if ev_ch_id == channel_str => {
+                    let _ = entry_confirmed_tx.send(true);
                 }
                 Ok(TransportEvent::VoiceServerUpdate {
                     token,
+                    guild_id: ev_guild_id,
+                    channel_id: ev_channel_id,
                     endpoint,
-                    ..
                 }) => {
-                    captured_token = Some(token);
-                    captured_endpoint = endpoint;
+                    let matches_guild = match (&config.guild_id, &ev_guild_id) {
+                        (Some(g), Some(eg)) => g.to_string() == *eg,
+                        (None, None) => true,
+                        (None, Some(_)) => false,
+                        (Some(_), None) => false,
+                    };
+                    let matches_channel = match (&ev_channel_id, &channel_str) {
+                        (Some(ec), target) => ec == target,
+                        (None, _) => true,
+                    };
+
+                    if matches_guild && matches_channel {
+                        log::info!("[VoiceDiag] VOICE_SERVER_UPDATE recebido: endpoint_presente={}", endpoint.is_some());
+                        captured_token = Some(token);
+                        captured_endpoint = endpoint;
+                    } else {
+                        log::debug!("[VoiceSession] Descartando VoiceServerUpdate para outro guild/canal");
+                    }
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -998,9 +1056,7 @@ async fn run_voice_session(
         .unwrap_or(&raw_endpoint)
         .to_string();
 
-    log::info!(
-        "[VoiceSession] Handshake inicial concluído. Endpoint: {endpoint}, SessionID: {session_id}"
-    );
+    log::info!("[VoiceSession] Handshake inicial concluído com sucesso");
     let _ = events_tx.send(VoiceSessionEvent::VoiceServerReceived {
         endpoint: endpoint.clone(),
     });
@@ -1028,9 +1084,8 @@ async fn run_voice_session(
         .context("Falha ao aguardar Opcode 2 Ready do Voice Gateway")?;
 
     log::info!(
-        "[VoiceSession] Voice Gateway Ready recebido: SSRC={}, IP={}, Porta={}, Modos={:?}",
+        "[VoiceSession] Voice Gateway Ready recebido: SSRC={}, Porta={}, Modos={:?}",
         ready.ssrc,
-        ready.ip,
         ready.port,
         ready.modes
     );
@@ -1053,8 +1108,7 @@ async fn run_voice_session(
         .context("Falha durante IP Discovery sobre o socket UDP")?;
 
     log::info!(
-        "[VoiceSession] IP Discovery concluído com sucesso: {}:{}",
-        discovered_ip,
+        "[VoiceSession] IP Discovery concluído com sucesso: porta={}",
         discovered_port
     );
     let _ = events_tx.send(VoiceSessionEvent::IpDiscovered {

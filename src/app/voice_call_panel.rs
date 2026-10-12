@@ -67,6 +67,7 @@ impl Render for VoiceCallPanel {
 fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
     let discord = cx.discord();
     let has_fatal_error = call.fatal_error.is_some();
+    let call_warning = call.voice_session.as_ref().and_then(|s| s.call_warning());
 
     // Verificação de dispositivos de áudio reais de hardware (Zero mocks em produção)
     let device_manager = MediaDeviceManager::new();
@@ -105,7 +106,30 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
                 .child(render_rtc_badge(call, cx)),
         )
         .children(has_fatal_error.then(|| render_fatal_error_banner(call, discord.white)))
+        .children(call_warning.map(|msg| render_call_warning_banner(&msg, discord.bg_server)))
         .children(device_warning.map(|msg| render_audio_device_warning_banner(msg, discord.bg_server)))
+        .into_any_element()
+}
+
+fn render_call_warning_banner(msg: &str, text_col: Rgba) -> AnyElement {
+    div()
+        .w_full()
+        .px(px(12.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .bg(status_warning())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(icon_warning(px(16.0), text_col))
+        .child(
+            div()
+                .text_color(text_col)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(12.0))
+                .child(msg.to_string()),
+        )
         .into_any_element()
 }
 
@@ -200,16 +224,30 @@ fn render_rtc_badge(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
                 .text_color(icon_col)
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(12.0))
+                .truncate()
                 .child(label_text),
         )
         .into_any_element()
 }
 
+fn sanitize_user_error_message(raw: &str) -> String {
+    if raw.contains("Missing Permissions") || raw.contains("50013") {
+        "Permissões insuficientes no canal".to_string()
+    } else if raw.contains("Timed out waiting for VoiceReady") {
+        "Tempo limite ao aguardar resposta do servidor de voz".to_string()
+    } else if raw.contains('{') && raw.contains('}') {
+        "Erro na comunicação com o servidor de voz".to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
 fn render_fatal_error_banner(call: &ActiveVoiceCall, text_col: Rgba) -> AnyElement {
-    let err_desc = call
+    let raw_desc = call
         .fatal_error
         .clone()
         .unwrap_or_else(|| "Erro desconhecido na sessão de voz".into());
+    let err_desc = sanitize_user_error_message(&raw_desc);
 
     div()
         .w_full()
@@ -227,6 +265,7 @@ fn render_fatal_error_banner(call: &ActiveVoiceCall, text_col: Rgba) -> AnyEleme
                 .text_color(text_col)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(12.0))
+                .truncate()
                 .child(format!("Falha na chamada: {}", err_desc)),
         )
         .into_any_element()
