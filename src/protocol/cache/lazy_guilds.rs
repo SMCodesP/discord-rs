@@ -176,6 +176,9 @@ pub enum MemberListOp {
     Delete {
         index: usize,
     },
+    Invalidate {
+        range: [usize; 2],
+    },
 }
 
 /// Parsed `GUILD_MEMBER_LIST_UPDATE` Discord Gateway event
@@ -329,6 +332,22 @@ pub fn parse_guild_member_list_update(val: &serde_json::Value) -> Option<GuildMe
                     let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     ops.push(MemberListOp::Delete { index });
                 }
+                "INVALIDATE" => {
+                    let range_arr = op_val.get("range").and_then(|v| v.as_array());
+                    let range = if let Some(r) = range_arr {
+                        if r.len() >= 2 {
+                            [
+                                r[0].as_u64().unwrap_or(0) as usize,
+                                r[1].as_u64().unwrap_or(99) as usize,
+                            ]
+                        } else {
+                            [0, 99]
+                        }
+                    } else {
+                        [0, 99]
+                    };
+                    ops.push(MemberListOp::Invalidate { range });
+                }
                 _ => {}
             }
         }
@@ -430,46 +449,165 @@ pub fn convert_member_to_item_state(
     }
 }
 
+use std::sync::OnceLock;
+use std::sync::RwLock as StdRwLock;
+
+static AUTHOR_ROLES_CACHE: OnceLock<StdRwLock<HashMap<(String, String), Vec<String>>>> = OnceLock::new();
+static AUTHOR_ROLE_COLOR_CACHE: OnceLock<StdRwLock<HashMap<(String, String), u32>>> = OnceLock::new();
+static GUILD_ROLES_CACHE: OnceLock<StdRwLock<HashMap<String, Vec<Role>>>> = OnceLock::new();
+
+fn roles_cache() -> &'static StdRwLock<HashMap<(String, String), Vec<String>>> {
+    AUTHOR_ROLES_CACHE.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+fn role_color_cache() -> &'static StdRwLock<HashMap<(String, String), u32>> {
+    AUTHOR_ROLE_COLOR_CACHE.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+fn guild_roles_cache() -> &'static StdRwLock<HashMap<String, Vec<Role>>> {
+    GUILD_ROLES_CACHE.get_or_init(|| StdRwLock::new(HashMap::new()))
+}
+
+pub fn cache_guild_roles(guild_id: &str, roles: Vec<Role>) {
+    if let Ok(mut lock) = guild_roles_cache().write() {
+        lock.insert(guild_id.to_string(), roles);
+    }
+}
+
+pub fn get_cached_guild_roles(guild_id: &str) -> Vec<Role> {
+    let lock = guild_roles_cache().read().ok();
+    lock.and_then(|l| l.get(guild_id).cloned()).unwrap_or_default()
+}
+
+pub fn cache_author_roles(guild_id: &str, user_id: &str, roles: Vec<String>) {
+    if let Ok(mut lock) = roles_cache().write() {
+        lock.insert((guild_id.to_string(), user_id.to_string()), roles);
+    }
+}
+
+pub fn get_cached_author_roles(guild_id: &str, user_id: &str) -> Option<Vec<String>> {
+    let lock = roles_cache().read().ok()?;
+    lock.get(&(guild_id.to_string(), user_id.to_string())).cloned()
+}
+
+pub fn cache_author_role_color(guild_id: &str, user_id: &str, color: u32) {
+    if let Ok(mut lock) = role_color_cache().write() {
+        lock.insert((guild_id.to_string(), user_id.to_string()), color);
+    }
+}
+
+pub fn get_cached_author_role_color(guild_id: &str, user_id: &str) -> Option<u32> {
+    let lock = role_color_cache().read().ok()?;
+    lock.get(&(guild_id.to_string(), user_id.to_string())).copied()
+}
+
+/// Converts a `MemberListItem` (Group or Member) into a `MemberItemState`
+pub fn convert_list_item_to_state(
+    item: &MemberListItem,
+    guild_id: &str,
+    guild_roles: &[Role],
+) -> MemberItemState {
+    match item {
+        MemberListItem::Group(g) => {
+            let (title, role_color) = if g.id == "online" {
+                ("ONLINE".to_string(), 0)
+            } else if g.id == "offline" {
+                ("OFFLINE".to_string(), 0)
+            } else if let Some(role) = guild_roles.iter().find(|r| r.id == g.id) {
+                (role.name.clone(), role.color)
+            } else {
+                (g.id.clone(), 0)
+            };
+
+            MemberItemState {
+                id: format!("group:{}", g.id),
+                name: title,
+                avatar_text: String::new(),
+                presence: if g.id == "offline" {
+                    PresenceStatus::Offline
+                } else {
+                    PresenceStatus::Online
+                },
+                role_group: g.id.clone(),
+                role_color,
+                is_bot: false,
+                activity: Some(g.count.to_string()),
+                avatar_decoration_data: None,
+            }
+        }
+        MemberListItem::Member(m) => {
+            let state = convert_member_to_item_state(m, guild_roles);
+            if state.role_color != 0 {
+                cache_author_role_color(guild_id, &m.id, state.role_color);
+            }
+            cache_author_roles(guild_id, &m.id, m.roles.clone());
+            state
+        }
+    }
+}
+
 /// Applies parsed `GuildMemberListUpdate` operations into the active member list
 pub fn apply_member_list_update(
     existing_members: &mut Vec<MemberItemState>,
     update: &GuildMemberListUpdate,
     guild_roles: &[Role],
 ) {
+    if update.ops.is_empty() {
+        existing_members.clear();
+        return;
+    }
+
     for op in &update.ops {
         match op {
-            MemberListOp::Sync { items, .. } => {
-                for it in items {
-                    if let MemberListItem::Member(m) = it {
-                        let state = convert_member_to_item_state(m, guild_roles);
-                        if let Some(pos) = existing_members.iter().position(|em| em.id == state.id) {
-                            existing_members[pos] = state;
-                        } else {
-                            existing_members.push(state);
-                        }
-                    }
+            MemberListOp::Sync { range, items } => {
+                let converted: Vec<MemberItemState> = items
+                    .iter()
+                    .map(|it| convert_list_item_to_state(it, &update.guild_id, guild_roles))
+                    .collect();
+
+                let start = range[0];
+                if start == 0 {
+                    *existing_members = converted;
+                } else if start <= existing_members.len() {
+                    let end_idx = (start + converted.len()).min(existing_members.len());
+                    existing_members.splice(start..end_idx, converted);
+                } else {
+                    existing_members.extend(converted);
                 }
             }
-            MemberListOp::Insert { item, .. } => {
-                if let MemberListItem::Member(m) = item {
-                    let state = convert_member_to_item_state(m, guild_roles);
-                    if let Some(pos) = existing_members.iter().position(|em| em.id == state.id) {
-                        existing_members[pos] = state;
-                    } else {
-                        existing_members.push(state);
-                    }
+            MemberListOp::Insert { index, item } => {
+                let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
+                let idx = *index;
+                if idx <= existing_members.len() {
+                    existing_members.insert(idx, state);
+                } else {
+                    existing_members.push(state);
                 }
             }
-            MemberListOp::Update { item, .. } => {
-                if let MemberListItem::Member(m) = item {
-                    let state = convert_member_to_item_state(m, guild_roles);
-                    if let Some(pos) = existing_members.iter().position(|em| em.id == state.id) {
-                        existing_members[pos] = state;
-                    }
+            MemberListOp::Update { index, item } => {
+                let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
+                let idx = *index;
+                if idx < existing_members.len() {
+                    existing_members[idx] = state;
+                } else {
+                    existing_members.push(state);
                 }
             }
-            MemberListOp::Delete { .. } => {
-                // Positional deletion from ranged member list
+            MemberListOp::Delete { index } => {
+                let idx = *index;
+                if idx < existing_members.len() {
+                    existing_members.remove(idx);
+                }
+            }
+            MemberListOp::Invalidate { range } => {
+                let start = range[0];
+                let end = range[1];
+                if start == 0 && end >= existing_members.len() {
+                    existing_members.clear();
+                } else if start < existing_members.len() {
+                    let end_idx = (end + 1).min(existing_members.len());
+                    existing_members.drain(start..end_idx);
+                }
             }
         }
     }

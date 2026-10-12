@@ -830,6 +830,44 @@ impl DiscordTransport for MockDiscordProvider {
         anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
     }
 
+    async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        let mut removed = false;
+        if let Some(list) = state.messages.get_mut(channel_id) {
+            let initial_len = list.len();
+            list.retain(|m| m.id != message_id);
+            if list.len() < initial_len {
+                removed = true;
+            }
+        }
+        if channel_id == "chan-dm-ferris" {
+            if let Some(list) = state.messages.get_mut("dm-ferris") {
+                list.retain(|m| m.id != message_id);
+            }
+        } else if channel_id == "dm-ferris" {
+            if let Some(list) = state.messages.get_mut("chan-dm-ferris") {
+                list.retain(|m| m.id != message_id);
+            }
+        }
+        if removed {
+            let _ = self.event_sender.send(TransportEvent::MessageDelete {
+                channel_id: channel_id.to_string(),
+                message_id: message_id.to_string(),
+            });
+            Ok(())
+        } else {
+            anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
+        }
+    }
+
+    async fn subscribe_guild_members(
+        &self,
+        _guild_id: &str,
+        _channel_id: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn subscribe_events(&self) -> broadcast::Receiver<TransportEvent> {
         self.event_sender.subscribe()
     }

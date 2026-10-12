@@ -38,6 +38,29 @@ impl MemberSidebar {
         let state = self.state.read(cx);
         let members = state.members.clone();
 
+        let has_server_groups = members.iter().any(|m| m.id.starts_with("group:"));
+
+        if has_server_groups {
+            let mut items = Vec::new();
+            for m in members {
+                if m.id.starts_with("group:") {
+                    let count = m
+                        .activity
+                        .as_deref()
+                        .and_then(|c| c.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    items.push(MemberSidebarItem::Header {
+                        title: m.name.into(),
+                        count,
+                    });
+                } else {
+                    items.push(MemberSidebarItem::Member(m));
+                }
+            }
+            self.items = items;
+            return;
+        }
+
         let mut group_order: Vec<String> = Vec::new();
         let mut group_map: std::collections::HashMap<String, Vec<MemberItemState>> = std::collections::HashMap::new();
         let mut offline_list: Vec<MemberItemState> = Vec::new();

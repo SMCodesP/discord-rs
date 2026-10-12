@@ -50,6 +50,8 @@ pub struct ChatView {
     pub media_picker_list_state: ListState,
     pub active_context_menu: Option<(String, Point<Pixels>)>,
     pub pending_delete_message: Option<Message>,
+    pub is_deleting: bool,
+    pub delete_error: Option<String>,
     pub composer_state: Option<Entity<TextareaState>>,
     pub composer_sub: Option<Subscription>,
 }
@@ -89,6 +91,8 @@ impl ChatView {
             media_picker_list_state,
             active_context_menu: None,
             pending_delete_message: None,
+            is_deleting: false,
+            delete_error: None,
             composer_state: None,
             composer_sub: None,
         }
@@ -449,8 +453,13 @@ impl Render for ChatView {
                         let author_role_color = state
                             .members
                             .iter()
-                            .find(|m| m.id == msg.author.id)
-                            .and_then(|m| if m.role_color != 0 { Some(m.role_color) } else { None });
+                            .find(|m| m.id == msg.author.id && m.role_color != 0)
+                            .map(|m| m.role_color)
+                            .or_else(|| {
+                                state.selected_guild_id.as_deref().and_then(|gid| {
+                                    crate::protocol::cache::lazy_guilds::get_cached_author_role_color(gid, &msg.author.id)
+                                })
+                            });
 
                         render_message_row(
                             msg,
@@ -839,16 +848,8 @@ impl Render for ChatView {
                     cx.write_to_clipboard(ClipboardItem::new_string(id_for_copy.clone()));
                 }));
 
-                let app_cm_pin = app_entity.clone();
-                let cid_pin = channel_id.clone();
-                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
-                    let mid = m_id.to_string();
-                    let cid = cid_pin.clone();
-                    app_cm_pin.update(cx, |state, cx| {
-                        state.pin_message(&cid, &mid);
-                        cx.notify();
-                    });
-                }));
+                // Pin não possui implementação na API remota; omitido do menu de contexto
+                let on_cm_pin: Option<MessageActionCallback> = None;
 
                 // Normal click: abre o modal canônico de confirmação de exclusão
                 let self_cm_del = self_entity.clone();
@@ -857,6 +858,8 @@ impl Render for ChatView {
                     let m = msg_for_del.clone();
                     self_cm_del.update(cx, |this, cx| {
                         this.pending_delete_message = Some(m);
+                        this.is_deleting = false;
+                        this.delete_error = None;
                         this.active_context_menu = None;
                         cx.notify();
                     });
@@ -869,13 +872,49 @@ impl Render for ChatView {
                 let on_cm_delete_shift: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
                     let mid = m_id.to_string();
                     let cid = cid_del_shift.clone();
-                    app_cm_del_shift.update(cx, |state, _cx| {
-                        state.request_delete_message(&cid, &mid);
-                    });
-                    self_cm_del_shift.update(cx, |this, cx| {
-                        this.active_context_menu = None;
-                        cx.notify();
-                    });
+                    let cm = app_cm_del_shift.read(cx).client_manager.clone();
+                    if let Some(cm) = cm {
+                        self_cm_del_shift.update(cx, |this, cx| {
+                            this.delete_error = None;
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
+                        let self_async = self_cm_del_shift.clone();
+                        cx.spawn(|cx: &mut AsyncApp| {
+                            let cx = cx.clone();
+                            async move {
+                                match cm.delete_message(&cid, &mid).await {
+                                    Ok(()) => {
+                                        cm.emit_event(crate::protocol::TransportEvent::MessageDelete {
+                                            channel_id: cid,
+                                            message_id: mid,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let err_msg = e.to_string();
+                                        let _ = cx.update(|cx| {
+                                            let _ = self_async.update(cx, |chat, cx| {
+                                                chat.delete_error = Some(err_msg.clone());
+                                                cx.notify();
+                                            });
+                                        });
+                                        cm.emit_event(crate::protocol::TransportEvent::MessageDeleteFailed {
+                                            channel_id: cid,
+                                            message_id: mid,
+                                            error: err_msg,
+                                        });
+                                    }
+                                }
+                            }
+                        }).detach();
+                    } else {
+                        let err_msg = "Não conectado ao Discord: cliente não inicializado".to_string();
+                        self_cm_del_shift.update(cx, |this, cx| {
+                            this.delete_error = Some(err_msg);
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
+                    }
                 }));
 
                 let self_dismiss = self_entity.clone();
@@ -1028,6 +1067,19 @@ impl Render for ChatView {
                                                     .child("Tem certeza de que deseja excluir esta mensagem? Isto não pode ser desfeito."),
                                             ),
                                     )
+                                    .children(self.delete_error.as_ref().map(|err| {
+                                        div()
+                                            .mx(px(16.0))
+                                            .mt(px(8.0))
+                                            .p(px(8.0))
+                                            .rounded(radius_sm())
+                                            .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+                                            .border_1()
+                                            .border_color(status_danger())
+                                            .text_size(font_size_xs())
+                                            .text_color(status_danger())
+                                            .child(format!("Erro ao excluir mensagem: {}", err))
+                                    }))
                                     .child(
                                         // Message Preview Card
                                         div()
@@ -1105,6 +1157,8 @@ impl Render for ChatView {
                                                     .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
                                                         self_cancel.update(cx, |this, cx| {
                                                             this.pending_delete_message = None;
+                                                            this.is_deleting = false;
+                                                            this.delete_error = None;
                                                             cx.notify();
                                                         });
                                                     })
@@ -1124,20 +1178,110 @@ impl Render for ChatView {
                                                     .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
                                                         let mid = msg_to_delete.id.clone();
                                                         let cid = cid_confirm.clone();
-                                                        app_confirm.update(cx, |state, _cx| {
-                                                            state.request_delete_message(&cid, &mid);
-                                                        });
-                                                        self_confirm.update(cx, |this, cx| {
-                                                            this.pending_delete_message = None;
-                                                            cx.notify();
-                                                        });
+                                                        let cm = app_confirm.read(cx).client_manager.clone();
+                                                        if let Some(cm) = cm {
+                                                            self_confirm.update(cx, |this, cx| {
+                                                                if this.is_deleting {
+                                                                    return;
+                                                                }
+                                                                this.is_deleting = true;
+                                                                this.delete_error = None;
+                                                                cx.notify();
+                                                            });
+                                                            let self_async = self_confirm.clone();
+                                                            cx.spawn(|cx: &mut AsyncApp| {
+                                                                let cx = cx.clone();
+                                                                async move {
+                                                                    match cm.delete_message(&cid, &mid).await {
+                                                                        Ok(()) => {
+                                                                            let _ = cx.update(|cx| {
+                                                                                let _ = self_async.update(cx, |chat, cx| {
+                                                                                    chat.pending_delete_message = None;
+                                                                                    chat.is_deleting = false;
+                                                                                    chat.delete_error = None;
+                                                                                    cx.notify();
+                                                                                });
+                                                                            });
+                                                                            cm.emit_event(crate::protocol::TransportEvent::MessageDelete {
+                                                                                channel_id: cid,
+                                                                                message_id: mid,
+                                                                            });
+                                                                        }
+                                                                        Err(e) => {
+                                                                            let err_msg = e.to_string();
+                                                                            let _ = cx.update(|cx| {
+                                                                                let _ = self_async.update(cx, |chat, cx| {
+                                                                                    chat.is_deleting = false;
+                                                                                    chat.delete_error = Some(err_msg.clone());
+                                                                                    cx.notify();
+                                                                                });
+                                                                            });
+                                                                            cm.emit_event(crate::protocol::TransportEvent::MessageDeleteFailed {
+                                                                                channel_id: cid,
+                                                                                message_id: mid,
+                                                                                error: err_msg,
+                                                                            });
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }).detach();
+                                                        } else {
+                                                            self_confirm.update(cx, |this, cx| {
+                                                                this.is_deleting = false;
+                                                                this.delete_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+                                                                cx.notify();
+                                                            });
+                                                        }
                                                     })
-                                                    .child("Excluir"),
+                                                    .child(if self.is_deleting { "Excluindo..." } else { "Excluir" }),
                                             ),
                                     ),
                             ),
                     ),
             )
+        } else {
+            None
+        };
+
+        let delete_error_toast = if let Some(ref err) = self.delete_error {
+            if self.pending_delete_message.is_none() {
+                let self_dismiss_err = self_entity.clone();
+                Some(
+                    div()
+                        .mx(px(16.0))
+                        .mb(px(8.0))
+                        .p(px(8.0))
+                        .rounded(radius_sm())
+                        .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+                        .border_1()
+                        .border_color(status_danger())
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(font_size_xs())
+                                .text_color(status_danger())
+                                .child(format!("Erro ao excluir mensagem: {}", err)),
+                        )
+                        .child(
+                            div()
+                                .cursor_pointer()
+                                .text_size(font_size_xs())
+                                .text_color(status_danger())
+                                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                    self_dismiss_err.update(cx, |this, cx| {
+                                        this.delete_error = None;
+                                        cx.notify();
+                                    });
+                                })
+                                .child("✕"),
+                        ),
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1165,6 +1309,7 @@ impl Render for ChatView {
                     .id("messages-scroll-area")
                     .child(virtual_list),
             )
+            .children(delete_error_toast)
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)

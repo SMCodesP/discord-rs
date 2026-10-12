@@ -442,16 +442,18 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         ));
     }
 
-    // 5. Fixar Mensagem
-    menu = menu.child(render_menu_item(
-        pin_label,
-        "📌",
-        false,
-        config.on_pin,
-        None,
-        &config.message_id,
-        config.on_close.clone(),
-    ));
+    // 5. Fixar Mensagem (apenas se houver callback implementado)
+    if config.on_pin.is_some() {
+        menu = menu.child(render_menu_item(
+            pin_label,
+            "📌",
+            false,
+            config.on_pin,
+            None,
+            &config.message_id,
+            config.on_close.clone(),
+        ));
+    }
 
     // 6. Excluir Mensagem (apenas mensagem própria)
     if config.is_own {

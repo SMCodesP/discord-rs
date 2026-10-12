@@ -12,7 +12,9 @@ pub mod startup;
 
 pub use directory::{AssetCasStore, AssetMetadata, CacheDirectory, CacheManifest};
 pub use lazy_guilds::{
-    apply_member_list_update, convert_member_to_item_state, parse_guild_member_list_update,
+    apply_member_list_update, cache_author_role_color, cache_author_roles, cache_guild_roles,
+    convert_list_item_to_state, convert_member_to_item_state, get_cached_author_role_color,
+    get_cached_author_roles, get_cached_guild_roles, parse_guild_member_list_update,
     resolve_member_role_color, resolve_member_role_group, GuildMemberListUpdate,
     GuildSubscription, LazyGuildCoordinator, MemberListItem, MemberListOp, MemberRange,
 };

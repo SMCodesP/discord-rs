@@ -48,71 +48,37 @@ impl AppState {
         }
     }
 
-    /// Remotely deletes a message via Discord REST API.
-    /// Returns Ok(()) only when the remote API confirms deletion (HTTP 204 / 2xx).
-    /// Does not perform optimistic local deletion; errors keep the message.
-    pub async fn execute_delete_message(
-        auth_token: Option<&str>,
-        is_user_token: bool,
-        channel_id: &str,
-        message_id: &str,
-    ) -> anyhow::Result<()> {
-        if let Some(auth) = auth_token {
-            let auth_header = if is_user_token {
-                auth.to_string()
-            } else {
-                format!("Bot {}", auth)
-            };
-            let client = reqwest::Client::new();
-            let url = format!(
-                "https://discord.com/api/v9/channels/{}/messages/{}",
-                channel_id, message_id
-            );
-            let resp = client
-                .delete(&url)
-                .header("Authorization", auth_header)
-                .header("User-Agent", "discord-rs/0.1.0")
-                .send()
-                .await?;
-
-            if resp.status().is_success() {
-                Ok(())
-            } else {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                anyhow::bail!("Discord API error {}: {}", status, body);
-            }
-        } else {
-            // Test or deterministic mock environment without auth token
-            Ok(())
-        }
-    }
-
-    /// Dispatches message deletion request asynchronously to the Discord API.
+    /// Dispatches message deletion request asynchronously through the ClientManager / DiscordTransport.
+    /// Uses the official rate limiter, User-Agent, and headers of DiscordApiClient (or MockProvider).
     /// ONLY upon successful API response or Gateway event is the message removed from state.
     pub fn request_delete_message(&mut self, channel_id: &str, message_id: &str) {
         let cid = channel_id.to_string();
         let mid = message_id.to_string();
-        let token = self.auth_token.clone();
-        let is_user = self.is_user_token;
-        let cm = self.client_manager.clone();
-
-        tokio::spawn(async move {
-            match Self::execute_delete_message(token.as_deref(), is_user, &cid, &mid).await {
-                Ok(_) => {
-                    log::info!("Mensagem {} deletada com sucesso no backend", mid);
-                    if let Some(ref mgr) = cm {
-                        mgr.emit_event(TransportEvent::MessageDelete {
+        if let Some(ref cm) = self.client_manager {
+            let cm_clone = cm.clone();
+            tokio::spawn(async move {
+                match cm_clone.delete_message(&cid, &mid).await {
+                    Ok(()) => {
+                        log::info!("Mensagem {} deletada com sucesso no backend", mid);
+                        cm_clone.emit_event(TransportEvent::MessageDelete {
                             channel_id: cid,
                             message_id: mid,
                         });
                     }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        log::warn!("Falha ao deletar mensagem {} na API: {}", mid, err_msg);
+                        cm_clone.emit_event(TransportEvent::MessageDeleteFailed {
+                            channel_id: cid,
+                            message_id: mid,
+                            error: err_msg,
+                        });
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Falha ao deletar mensagem {} na API: {:?}", mid, e);
-                }
-            }
-        });
+            });
+        } else {
+            log::warn!("Não conectado ao Discord: client_manager ausente ao tentar deletar mensagem {}", mid);
+        }
     }
 
     /// Toggles the pinned status of a message by ID

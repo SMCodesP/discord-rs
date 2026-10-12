@@ -283,3 +283,208 @@ async fn test_lazy_guild_opcode_14_and_member_list_sync() {
     assert_eq!(members[0].role_color, 0x3498db);
     assert_eq!(members[0].role_group, "STAFF");
 }
+
+#[tokio::test]
+async fn test_transport_delete_message_lifecycle_mock_and_idle() {
+    use discord_rs::protocol::idle_transport::IdleTransport;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+    use discord_rs::protocol::transport::{DiscordTransport, TransportEvent};
+
+    // 1. IdleTransport deve retornar erro quando desconectado
+    let idle = IdleTransport::new();
+    let res = idle.delete_message("c-1", "m-1").await;
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err().to_string(), "Não conectado ao Discord");
+
+    // 2. MockDiscordProvider deve remover a mensagem do estado e emitir TransportEvent::MessageDelete
+    let mock = MockDiscordProvider::new();
+    let cid = "c-mock";
+
+    let mut event_rx = mock.subscribe_events();
+    let sent_msg = mock.send_message(cid, "Mensagem de teste no mock").await.unwrap();
+
+    let del_res = mock.delete_message(cid, &sent_msg.id).await;
+    assert!(del_res.is_ok());
+
+    // Consome eventos até encontrar MessageDelete
+    let mut found_delete = false;
+    while let Ok(evt) = event_rx.try_recv() {
+        if let TransportEvent::MessageDelete { channel_id, message_id } = evt {
+            assert_eq!(channel_id, cid);
+            assert_eq!(message_id, sent_msg.id);
+            found_delete = true;
+            break;
+        }
+    }
+    assert!(found_delete, "TransportEvent::MessageDelete deve ter sido emitido");
+}
+
+#[test]
+fn test_server_isolation_member_list_cleared_on_guild_switch() {
+    let mut state = AppState::default();
+    state.selected_guild_id = Some("guild-alpha".into());
+    state.members.push(discord_rs::app::state::MemberItemState {
+        id: "user-alpha-1".into(),
+        name: "Alpha User".into(),
+        avatar_text: "A".into(),
+        presence: PresenceStatus::Online,
+        role_group: "STAFF".into(),
+        role_color: 0x5865f2,
+        is_bot: false,
+        activity: None,
+        avatar_decoration_data: None,
+    });
+    assert_eq!(state.members.len(), 1);
+
+    // Trocar de servidor deve limpar a lista de membros para não vazar dados
+    state.select_guild(Some("guild-beta".into()));
+    assert_eq!(state.selected_guild_id, Some("guild-beta".into()));
+    assert_eq!(state.members.len(), 0, "A lista de membros deve ser limpa ao trocar de servidor");
+}
+
+#[test]
+fn test_end_to_end_gateway_member_list_update_dispatch_to_app_state() {
+    use discord_rs::protocol::cache::lazy_guilds::{cache_guild_roles, parse_guild_member_list_update};
+    use discord_rs::protocol::transport::TransportEvent;
+
+    let mut state = AppState::default();
+    let gid = "guild-e2e-test";
+    state.selected_guild_id = Some(gid.into());
+
+    // Carga prévia de cargos da guild no cache canônico
+    let roles = vec![
+        Role::new("role-staff-hoist", "STAFF").with_color(0xe74c3c).with_hoist(true).with_position(10),
+    ];
+    cache_guild_roles(gid, roles);
+
+    // Evento sintético com grupos do servidor e contagens exatas
+    let event_json = json!({
+        "op": 0,
+        "t": "GUILD_MEMBER_LIST_UPDATE",
+        "d": {
+            "guild_id": gid,
+            "id": "everyone",
+            "member_count": 2,
+            "online_count": 1,
+            "groups": [
+                { "id": "role-staff-hoist", "count": 1 },
+                { "id": "online", "count": 1 }
+            ],
+            "ops": [
+                {
+                    "op": "SYNC",
+                    "range": [0, 99],
+                    "items": [
+                        {
+                            "group": { "id": "role-staff-hoist", "count": 1 }
+                        },
+                        {
+                            "member": {
+                                "user": {
+                                    "id": "u-admin",
+                                    "username": "admin_real",
+                                    "global_name": "Admin Real",
+                                    "avatar": null,
+                                    "bot": false
+                                },
+                                "roles": ["role-staff-hoist"],
+                                "presence": { "status": "online" }
+                            }
+                        },
+                        {
+                            "group": { "id": "online", "count": 1 }
+                        },
+                        {
+                            "member": {
+                                "user": {
+                                    "id": "u-member",
+                                    "username": "regular_member",
+                                    "global_name": "Membro",
+                                    "avatar": null,
+                                    "bot": false
+                                },
+                                "roles": [],
+                                "presence": { "status": "online" }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    });
+
+    let update = parse_guild_member_list_update(&event_json).expect("Parse do evento do gateway");
+    state.handle_transport_event(TransportEvent::GuildMemberListUpdate(update));
+
+    // A lista deve manter a ordem estrita do servidor com 4 itens: grupo, membro, grupo, membro
+    assert_eq!(state.members.len(), 4);
+    assert_eq!(state.members[0].id, "group:role-staff-hoist");
+    assert_eq!(state.members[0].name, "STAFF");
+    assert_eq!(state.members[0].activity.as_deref(), Some("1")); // Contagem do evento
+    assert_eq!(state.members[0].role_color, 0xe74c3c);
+
+    assert_eq!(state.members[1].id, "u-admin");
+    assert_eq!(state.members[1].name, "Admin Real");
+    assert_eq!(state.members[1].role_color, 0xe74c3c); // Cor herdada do cargo mais alto
+
+    assert_eq!(state.members[2].id, "group:online");
+    assert_eq!(state.members[2].name, "ONLINE");
+    assert_eq!(state.members[2].activity.as_deref(), Some("1"));
+
+    assert_eq!(state.members[3].id, "u-member");
+    assert_eq!(state.members[3].name, "Membro");
+    assert_eq!(state.members[3].role_color, 0); // Sem cargo -> cor 0
+
+    // Testa operação de INVALIDATE
+    let invalidate_json = json!({
+        "op": 0,
+        "t": "GUILD_MEMBER_LIST_UPDATE",
+        "d": {
+            "guild_id": gid,
+            "id": "everyone",
+            "ops": [
+                {
+                    "op": "INVALIDATE",
+                    "range": [0, 99]
+                }
+            ]
+        }
+    });
+    let inv_update = parse_guild_member_list_update(&invalidate_json).unwrap();
+    state.handle_transport_event(TransportEvent::GuildMemberListUpdate(inv_update));
+    assert_eq!(state.members.len(), 0, "INVALIDATE deve limpar a lista sincronizada");
+}
+
+#[test]
+fn test_message_create_author_role_color_cached_when_outside_member_list() {
+    use discord_rs::protocol::cache::lazy_guilds::{
+        cache_author_role_color, cache_guild_roles, get_cached_author_role_color,
+        resolve_member_role_color,
+    };
+
+    let gid = "guild-outside-color";
+    let author_id = "user-not-in-members-slice";
+
+    let roles = vec![
+        Role::new("r-vip", "VIP").with_color(0x9b59b6).with_position(7),
+        Role::new("r-default", "Membro").with_color(0).with_position(1),
+    ];
+    cache_guild_roles(gid, roles.clone());
+
+    // Autor vem no payload REST ou MESSAGE_CREATE com cargos, mas não está em state.members
+    let member_roles = vec!["r-default".to_string(), "r-vip".to_string()];
+    let resolved_color = resolve_member_role_color(&member_roles, &roles);
+    assert_eq!(resolved_color, 0x9b59b6);
+
+    cache_author_role_color(gid, author_id, resolved_color);
+
+    // O chat recupera a cor legítima mesmo para autores fora da fatia da lista de membros
+    let cached = get_cached_author_role_color(gid, author_id);
+    assert_eq!(cached, Some(0x9b59b6));
+
+    // Autor sem nenhum cargo com cor recebe 0 (padrão)
+    let no_color_roles = vec!["r-default".to_string()];
+    let color_zero = resolve_member_role_color(&no_color_roles, &roles);
+    assert_eq!(color_zero, 0);
+}
+
