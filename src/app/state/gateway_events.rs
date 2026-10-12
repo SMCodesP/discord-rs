@@ -685,16 +685,9 @@ impl AppState {
                 client_theme_settings,
             } => {
                 self.account_theme = Some(theme);
-                self.account_client_theme_settings = client_theme_settings;
-                self.theme_choice = match theme {
-                    crate::protocol::user_settings_proto::Theme::Light => {
-                        crate::domain::settings::ThemeChoice::Light
-                    }
-                    crate::protocol::user_settings_proto::Theme::Midnight => {
-                        crate::domain::settings::ThemeChoice::Midnight
-                    }
-                    _ => crate::domain::settings::ThemeChoice::Dark,
-                };
+                if client_theme_settings.is_some() {
+                    self.account_client_theme_settings = client_theme_settings;
+                }
             }
             TransportEvent::UserProfileLoaded { user_id, profile } => {
                 self.set_profile_popout_data(&user_id, *profile);

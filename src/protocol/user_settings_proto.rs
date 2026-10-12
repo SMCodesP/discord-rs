@@ -1,47 +1,47 @@
-//! Read-only Protobuf decoder for Discord `PreloadedUserSettings`.
+//! Read-only Protobuf decoder for Discord `PreloadedUserSettings` (Appearance & Theme).
 //!
-//! Discord modern clients persist user preferences (including pinned/favorite DMs,
-//! appearance theme, and client theme settings) in a binary protobuf message
-//! (`PreloadedUserSettings`) sent base64-encoded via Gateway `READY` (`user_settings_proto`),
-//! `USER_SETTINGS_PROTO_UPDATE` (`settings`), and REST `/api/v9/users/@me/settings-proto/1`.
+//! Discord modern clients persist user appearance preferences (theme, client theme settings,
+//! gradient presets, and custom colors) in a binary protobuf message (`PreloadedUserSettings`)
+//! sent base64-encoded via Gateway `READY` (`user_settings_proto`), Gateway
+//! `USER_SETTINGS_PROTO_UPDATE` (`settings`), and REST `GET /api/v9/users/@me/settings-proto/1`.
 //!
-//! # Field Numbers and Official Schema Citations
+//! # Official Schema Source and Line Citations
 //!
-//! All field numbers below are verified against official Discord protobuf schemas:
-//! - Primary Source: `discord-protos` (`PreloadedUserSettings.proto`, `PreloadedUserSettings.ts`)
-//!   by `discord-userdoccers` (extracted from Discord web client builds).
-//! - Documentation Source: `https://docs.discord.food/resources/user-settings-proto`
+//! Verified against official protobuf definition at:
+//! `/home/smcodes/.cache/discord-rs-parity/orch/PreloadedUserSettings.proto`
+//! (package `discord_protos.discord_users.v1`):
 //!
-//! Verified Field Numbers:
-//! - `PreloadedUserSettings`:
-//!   - Field 13: `appearance` (`AppearanceSettings`)
-//!   - Field 15: `favorites` (`Favorites`)
-//! - `AppearanceSettings`:
-//!   - Field 1: `theme` (`Theme`: 0=UNSET, 1=DARK, 2=LIGHT, 3=DARKER, 4=MIDNIGHT)
-//!   - Field 3: `client_theme_settings` (`ClientThemeSettings`)
-//! - `ClientThemeSettings`:
-//!   - Field 2: `background_gradient_preset_id` (`google.protobuf.UInt32Value`, wrapper with field 1 = uint32)
-//!   - Field 4: `custom_user_theme_settings` (`CustomUserThemeSettings`)
-//! - `CustomUserThemeSettings`:
-//!   - Field 1: `colors` (`repeated string`, hex colors like "#1e1f22")
-//!   - Field 2: `gradient_color_stops` (`repeated float`)
-//!   - Field 3: `gradient_angle` (`int32`)
-//!   - Field 4: `base_mix` (`int32`)
-//! - `Favorites`:
-//!   - Field 1: `favorite_channels` (`map<fixed64, FavoriteChannel>`)
-//!   - Field 2: `muted` (`bool`)
-//! - `FavoriteChannel`:
-//!   - Field 1: `nickname` (`string`)
-//!   - Field 2: `parent_id` (`fixed64`)
-//!   - Field 3: `position` (`uint32`)
-//!   - Field 4: `channel_id` (`fixed64`)
-//!   - Field 5: `channel_type` (`google.protobuf.UInt32Value`, wrapper with field 1 = uint32: 1=DM, 3=GROUP_DM)
+//! | Mensagem / Campo | Nº Campo | Tipo de Fio (Wire Type) | Linha no `.proto` |
+//! |---|---|---|---|
+//! | `PreloadedUserSettings.appearance` | 13 | 2 (Length-delimited) | Linha 607 |
+//! | `AppearanceSettings.theme` | 1 | 0 (Varint, enum `Theme`) | Linha 438 |
+//! | `AppearanceSettings.client_theme_settings` | 3 | 2 (Length-delimited) | Linha 440 |
+//! | `ClientThemeSettings.background_gradient_preset_id` | 2 | 2 (Length-delimited `UInt32Value`) | Linha 406 |
+//! | `ClientThemeSettings.custom_user_theme_settings` | 4 | 2 (Length-delimited `CustomUserThemeSettings`) | Linha 407 |
+//! | `CustomUserThemeSettings.colors` | 1 | 2 (Repeated length-delimited `string`) | Linha 399 |
+//! | `CustomUserThemeSettings.gradient_color_stops` | 2 | 5 (Fixed32) ou 2 (Packed Fixed32 `float`) | Linha 400 |
+//! | `CustomUserThemeSettings.gradient_angle` | 3 | 0 (Varint `int32`) | Linha 401 |
+//! | `CustomUserThemeSettings.base_mix` | 4 | 0 (Varint `int32`) | Linha 402 |
+//! | Enum `Theme` (`THEME_UNSET = 0`) | - | 0 (Varint) | Linha 391 |
+//! | Enum `Theme` (`THEME_DARK = 1`) | - | 0 (Varint) | Linha 392 |
+//! | Enum `Theme` (`THEME_LIGHT = 2`) | - | 0 (Varint) | Linha 393 |
+//! | Enum `Theme` (`THEME_DARKER = 3`) | - | 0 (Varint) | Linha 394 |
+//! | Enum `Theme` (`THEME_MIDNIGHT = 4`) | - | 0 (Varint) | Linha 395 |
 //!
-//! Note: This implementation is strictly READ-ONLY. No write or PATCH endpoints are implemented.
+//! # Pinned DMs
+//!
+//! Conforme verificação no `.proto` (linhas 1-623), **não existe campo de DMs fixadas** em
+//! `PreloadedUserSettings`. O campo `Favorites` (linha 609, mensagem nas linhas 481-486) refere-se
+//! ao recurso de servidor "Favoritos" (`guild_visible`, `auto_add_joined_threads`), não a DMs.
+//! Portanto, DMs fixadas continuam sendo gerenciadas exclusivamente de forma local no `discord-rs`.
+//!
+//! # Fronteira de Somente Leitura
+//!
+//! O cliente opera estritamente em modo de leitura. Nenhuma chamada de escrita (`PATCH`) é enviada.
 
 use serde::{Deserialize, Serialize};
 
-/// Appearance theme preference stored in Discord user settings.
+/// Appearance theme preference stored in Discord user settings (`PreloadedUserSettings.proto:390-396`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Theme {
     #[default]
@@ -78,7 +78,7 @@ impl Theme {
     }
 }
 
-/// Custom user theme gradient and color settings.
+/// Custom user theme gradient and color settings (`PreloadedUserSettings.proto:398-403`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CustomUserThemeSettings {
     pub colors: Vec<String>,
@@ -87,85 +87,27 @@ pub struct CustomUserThemeSettings {
     pub base_mix: Option<i32>,
 }
 
-/// Client theme settings, including background gradient preset or custom colors.
+/// Client theme settings, including background gradient preset or custom colors (`PreloadedUserSettings.proto:405-408`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ClientThemeSettings {
     pub background_gradient_preset_id: Option<u32>,
     pub custom_user_theme_settings: Option<CustomUserThemeSettings>,
 }
 
-/// Appearance settings container.
+/// Appearance settings container (`PreloadedUserSettings.proto:437-452`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AppearanceSettings {
     pub theme: Option<Theme>,
     pub client_theme_settings: Option<ClientThemeSettings>,
 }
 
-/// Individual favorite channel metadata in `Favorites.favorite_channels`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct FavoriteChannel {
-    pub nickname: Option<String>,
-    pub parent_id: Option<u64>,
-    pub position: u32,
-    pub channel_id: Option<u64>,
-    pub channel_type: Option<u32>,
-}
-
-/// Favorites container holding favorited channels and categories.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct FavoritesSettings {
-    pub favorite_channels: Vec<(String, FavoriteChannel)>,
-    pub muted: bool,
-}
-
-/// Decoded representation of `PreloadedUserSettings`.
+/// Decoded representation of `PreloadedUserSettings` (somente leitura).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct PreloadedUserSettings {
     pub appearance: Option<AppearanceSettings>,
-    pub favorites: Option<FavoritesSettings>,
 }
 
 impl PreloadedUserSettings {
-    /// Extracts the list of pinned/favorite Direct Message (DM) channel IDs,
-    /// ordered strictly by `position` ascending.
-    ///
-    /// Excludes guild/server channels (e.g. channel_type 0, 2, 4).
-    /// Includes channels with channel_type 1 (DM), 3 (GROUP_DM), or unspecified.
-    pub fn pinned_dms(&self) -> Vec<String> {
-        let Some(favs) = &self.favorites else {
-            return Vec::new();
-        };
-
-        let mut dm_entries: Vec<(&str, u32)> = Vec::new();
-
-        for (key, channel) in &favs.favorite_channels {
-            // Channel types in Discord:
-            // 0: GUILD_TEXT, 1: DM, 2: GUILD_VOICE, 3: GROUP_DM, 4: GUILD_CATEGORY, ...
-            let is_dm = match channel.channel_type {
-                Some(1) | Some(3) => true,
-                Some(_) => false, // Guild text, voice, category, etc.
-                None => true,     // Unspecified, treat as candidate (filtered downstream against known DMs)
-            };
-
-            if is_dm && !key.is_empty() {
-                dm_entries.push((key.as_str(), channel.position));
-            }
-        }
-
-        // Sort stably by position ascending
-        dm_entries.sort_by_key(|&(_, pos)| pos);
-
-        // Deduplicate while preserving order
-        let mut result = Vec::new();
-        for (id, _) in dm_entries {
-            if !result.iter().any(|existing: &String| existing == id) {
-                result.push(id.to_string());
-            }
-        }
-
-        result
-    }
-
     /// Returns the account appearance theme if present.
     pub fn theme(&self) -> Option<Theme> {
         self.appearance.as_ref().and_then(|a| a.theme)
@@ -264,15 +206,6 @@ fn read_varint(buf: &[u8], pos: &mut usize) -> anyhow::Result<u64> {
         }
     }
     anyhow::bail!("Unexpected EOF reading varint");
-}
-
-fn read_fixed64(buf: &[u8], pos: &mut usize) -> anyhow::Result<u64> {
-    if *pos + 8 > buf.len() {
-        anyhow::bail!("Unexpected EOF reading fixed64");
-    }
-    let bytes: [u8; 8] = buf[*pos..*pos + 8].try_into().unwrap();
-    *pos += 8;
-    Ok(u64::from_le_bytes(bytes))
 }
 
 fn read_fixed32(buf: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
@@ -431,7 +364,7 @@ fn decode_appearance_settings(buf: &[u8]) -> anyhow::Result<AppearanceSettings> 
         let wire_type = (tag & 0x07) as u8;
 
         match (field_num, wire_type) {
-            // Field 1: theme (enum Theme)
+            // Field 1: theme (enum Theme: THEME_UNSET=0, THEME_DARK=1, THEME_LIGHT=2, THEME_DARKER=3, THEME_MIDNIGHT=4)
             (1, 0) => {
                 appearance.theme = Some(Theme::from_u32(read_varint(buf, &mut pos)? as u32));
             }
@@ -449,126 +382,6 @@ fn decode_appearance_settings(buf: &[u8]) -> anyhow::Result<AppearanceSettings> 
     Ok(appearance)
 }
 
-fn decode_favorite_channel(buf: &[u8]) -> anyhow::Result<FavoriteChannel> {
-    let mut channel = FavoriteChannel::default();
-    let mut pos = 0;
-
-    while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
-
-        match (field_num, wire_type) {
-            // Field 1: nickname (string)
-            (1, 2) => {
-                channel.nickname = Some(read_string(buf, &mut pos)?);
-            }
-            // Field 2: parent_id (fixed64 or varint)
-            (2, 1) => {
-                channel.parent_id = Some(read_fixed64(buf, &mut pos)?);
-            }
-            (2, 0) => {
-                channel.parent_id = Some(read_varint(buf, &mut pos)?);
-            }
-            // Field 3: position (uint32)
-            (3, 0) => {
-                channel.position = read_varint(buf, &mut pos)? as u32;
-            }
-            // Field 4: channel_id (fixed64, varint, or string)
-            (4, 1) => {
-                channel.channel_id = Some(read_fixed64(buf, &mut pos)?);
-            }
-            (4, 0) => {
-                channel.channel_id = Some(read_varint(buf, &mut pos)?);
-            }
-            // Field 5: channel_type (google.protobuf.UInt32Value wrapper or raw varint)
-            (5, 2) => {
-                let wrapper = read_bytes(buf, &mut pos)?;
-                channel.channel_type = Some(decode_uint32_value(wrapper)?);
-            }
-            (5, 0) => {
-                channel.channel_type = Some(read_varint(buf, &mut pos)? as u32);
-            }
-            _ => {
-                skip_field(buf, &mut pos, wire_type)?;
-            }
-        }
-    }
-
-    Ok(channel)
-}
-
-fn decode_favorite_map_entry(buf: &[u8]) -> anyhow::Result<(String, FavoriteChannel)> {
-    let mut key = String::new();
-    let mut channel = FavoriteChannel::default();
-    let mut pos = 0;
-
-    while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
-
-        match (field_num, wire_type) {
-            // Field 1: key (fixed64, varint, or string)
-            (1, 1) => {
-                key = read_fixed64(buf, &mut pos)?.to_string();
-            }
-            (1, 0) => {
-                key = read_varint(buf, &mut pos)?.to_string();
-            }
-            (1, 2) => {
-                key = read_string(buf, &mut pos)?;
-            }
-            // Field 2: value (FavoriteChannel)
-            (2, 2) => {
-                let inner = read_bytes(buf, &mut pos)?;
-                channel = decode_favorite_channel(inner)?;
-            }
-            _ => {
-                skip_field(buf, &mut pos, wire_type)?;
-            }
-        }
-    }
-
-    if key.is_empty() {
-        if let Some(id) = channel.channel_id {
-            key = id.to_string();
-        }
-    }
-
-    Ok((key, channel))
-}
-
-fn decode_favorites_settings(buf: &[u8]) -> anyhow::Result<FavoritesSettings> {
-    let mut favorites = FavoritesSettings::default();
-    let mut pos = 0;
-
-    while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
-
-        match (field_num, wire_type) {
-            // Field 1: favorite_channels (repeated MapEntry)
-            (1, 2) => {
-                let entry_bytes = read_bytes(buf, &mut pos)?;
-                if let Ok(entry) = decode_favorite_map_entry(entry_bytes) {
-                    favorites.favorite_channels.push(entry);
-                }
-            }
-            // Field 2: muted (bool)
-            (2, 0) => {
-                favorites.muted = read_varint(buf, &mut pos)? != 0;
-            }
-            _ => {
-                skip_field(buf, &mut pos, wire_type)?;
-            }
-        }
-    }
-
-    Ok(favorites)
-}
-
 /// Decodes binary protobuf buffer into `PreloadedUserSettings`.
 pub fn decode_preloaded_user_settings_bytes(buf: &[u8]) -> anyhow::Result<PreloadedUserSettings> {
     let mut settings = PreloadedUserSettings::default();
@@ -580,15 +393,10 @@ pub fn decode_preloaded_user_settings_bytes(buf: &[u8]) -> anyhow::Result<Preloa
         let wire_type = (tag & 0x07) as u8;
 
         match (field_num, wire_type) {
-            // Field 13: appearance (AppearanceSettings)
+            // Field 13: appearance (AppearanceSettings, PreloadedUserSettings.proto:607)
             (13, 2) => {
                 let inner = read_bytes(buf, &mut pos)?;
                 settings.appearance = Some(decode_appearance_settings(inner)?);
-            }
-            // Field 15: favorites (Favorites)
-            (15, 2) => {
-                let inner = read_bytes(buf, &mut pos)?;
-                settings.favorites = Some(decode_favorites_settings(inner)?);
             }
             _ => {
                 skip_field(buf, &mut pos, wire_type)?;
@@ -642,31 +450,14 @@ pub mod synthetic {
         buf
     }
 
-    pub fn build_favorite_channel(position: u32, channel_type: Option<u32>) -> Vec<u8> {
-        let mut buf = Vec::new();
-        // Field 3: position
-        write_tag(&mut buf, 3, 0);
-        write_varint(&mut buf, position as u64);
-        // Field 5: channel_type
-        if let Some(ct) = channel_type {
-            let wrapper = write_uint32_value(ct);
-            write_length_delimited(&mut buf, 5, &wrapper);
-        }
-        buf
-    }
-
-    pub fn build_favorite_entry_fixed64(key_channel_id: u64, position: u32, channel_type: Option<u32>) -> Vec<u8> {
-        let mut entry = Vec::new();
-        // Field 1: key (fixed64)
-        write_tag(&mut entry, 1, 1);
-        entry.extend_from_slice(&key_channel_id.to_le_bytes());
-        // Field 2: value
-        let val_bytes = build_favorite_channel(position, channel_type);
-        write_length_delimited(&mut entry, 2, &val_bytes);
-        entry
-    }
-
-    pub fn build_appearance(theme: u32, preset_id: Option<u32>, colors: &[&str]) -> Vec<u8> {
+    pub fn build_appearance(
+        theme: u32,
+        preset_id: Option<u32>,
+        colors: &[&str],
+        stops: &[f32],
+        angle: Option<i32>,
+        base_mix: Option<i32>,
+    ) -> Vec<u8> {
         let mut app_buf = Vec::new();
         // Field 1: theme
         write_tag(&mut app_buf, 1, 0);
@@ -677,11 +468,25 @@ pub mod synthetic {
             let pid_wrapper = write_uint32_value(pid);
             write_length_delimited(&mut client_theme_buf, 2, &pid_wrapper);
         }
-        if !colors.is_empty() {
-            let mut custom_buf = Vec::new();
-            for c in colors {
-                write_length_delimited(&mut custom_buf, 1, c.as_bytes());
-            }
+
+        let mut custom_buf = Vec::new();
+        for c in colors {
+            write_length_delimited(&mut custom_buf, 1, c.as_bytes());
+        }
+        for s in stops {
+            write_tag(&mut custom_buf, 2, 5);
+            custom_buf.extend_from_slice(&s.to_bits().to_le_bytes());
+        }
+        if let Some(ang) = angle {
+            write_tag(&mut custom_buf, 3, 0);
+            write_varint(&mut custom_buf, ang as u64);
+        }
+        if let Some(bm) = base_mix {
+            write_tag(&mut custom_buf, 4, 0);
+            write_varint(&mut custom_buf, bm as u64);
+        }
+
+        if !custom_buf.is_empty() {
             write_length_delimited(&mut client_theme_buf, 4, &custom_buf);
         }
 
@@ -718,23 +523,9 @@ mod tests {
 
         let mut top_level = Vec::new();
 
-        // Build Appearance (Field 13): Theme::Darker (3), preset 42, custom color "#1e1f22"
-        let appearance_bytes = build_appearance(3, Some(42), &["#1e1f22"]);
+        // Build Appearance (Field 13): Theme::Darker (3), preset 42, custom color "#1e1f22", stops [0.0, 1.0], angle 90, base_mix 20
+        let appearance_bytes = build_appearance(3, Some(42), &["#1e1f22"], &[0.0, 1.0], Some(90), Some(20));
         write_length_delimited(&mut top_level, 13, &appearance_bytes);
-
-        // Build Favorites (Field 15) with 2 DMs in reversed position order
-        let mut favs_buf = Vec::new();
-        // DM 1: id 10001, pos 2, channel_type 1 (DM)
-        let entry1 = build_favorite_entry_fixed64(10001, 2, Some(1));
-        write_length_delimited(&mut favs_buf, 1, &entry1);
-        // DM 2: id 10002, pos 0, channel_type 1 (DM)
-        let entry2 = build_favorite_entry_fixed64(10002, 0, Some(1));
-        write_length_delimited(&mut favs_buf, 1, &entry2);
-        // Server channel: id 99999, pos 1, channel_type 0 (GUILD_TEXT - should be ignored)
-        let entry_server = build_favorite_entry_fixed64(99999, 1, Some(0));
-        write_length_delimited(&mut favs_buf, 1, &entry_server);
-
-        write_length_delimited(&mut top_level, 15, &favs_buf);
 
         let b64 = encode_base64(&top_level);
         let settings = decode_preloaded_user_settings(&b64).expect("decode user settings");
@@ -742,17 +533,10 @@ mod tests {
         assert_eq!(settings.theme(), Some(Theme::Darker));
         let client_theme = settings.client_theme_settings().expect("client theme");
         assert_eq!(client_theme.background_gradient_preset_id, Some(42));
-        assert_eq!(
-            client_theme
-                .custom_user_theme_settings
-                .as_ref()
-                .unwrap()
-                .colors,
-            vec!["#1e1f22".to_string()]
-        );
-
-        // Pinned DMs should be ordered by position ascending: [10002 (pos 0), 10001 (pos 2)]
-        let pinned = settings.pinned_dms();
-        assert_eq!(pinned, vec!["10002".to_string(), "10001".to_string()]);
+        let custom = client_theme.custom_user_theme_settings.as_ref().unwrap();
+        assert_eq!(custom.colors, vec!["#1e1f22".to_string()]);
+        assert_eq!(custom.gradient_color_stops, vec![0.0, 1.0]);
+        assert_eq!(custom.gradient_angle, Some(90));
+        assert_eq!(custom.base_mix, Some(20));
     }
 }

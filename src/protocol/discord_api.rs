@@ -1394,36 +1394,31 @@ async fn handle_dispatch(
             cache_engine.save_current_user(&user);
             cache_engine.save_guilds(&guilds);
 
-            // Discord stores user settings (pinned DMs, appearance theme, client theme settings)
-            // in binary Protobuf (PreloadedUserSettings), transmitted as base64 in `user_settings_proto`.
-            let mut pinned_dms = Vec::new();
-            let mut account_theme = None;
-            let mut client_theme = None;
+            // Discord web stores user settings / DM pins in binary Protobuf (PreloadedUserSettings); Gateway READY / REST doesn't expose them in JSON, so pinned DMs are managed locally in discord-rs AppState.
+            let raw_pinned = data
+                .get("user_settings")
+                .and_then(|us| us.get("pinned_dms"))
+                .or_else(|| data.get("pinned_dms"))
+                .and_then(|v| v.as_array());
 
-            if let Some(proto_b64) = data.get("user_settings_proto").and_then(|v| v.as_str()) {
-                if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(proto_b64) {
-                    pinned_dms = settings.pinned_dms();
-                    account_theme = settings.theme();
-                    client_theme = settings.appearance.as_ref().and_then(|a| a.client_theme_settings.clone());
+            let mut pinned_dms = Vec::new();
+            if let Some(arr) = raw_pinned {
+                for item in arr {
+                    if let Some(id) = item.as_str() {
+                        pinned_dms.push(id.to_string());
+                    } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        pinned_dms.push(id.to_string());
+                    }
                 }
             }
 
-            // Fallback for legacy JSON user_settings or mock gateways if proto is absent/empty
-            if pinned_dms.is_empty() {
-                let raw_pinned = data
-                    .get("user_settings")
-                    .and_then(|us| us.get("pinned_dms"))
-                    .or_else(|| data.get("pinned_dms"))
-                    .and_then(|v| v.as_array());
-
-                if let Some(arr) = raw_pinned {
-                    for item in arr {
-                        if let Some(id) = item.as_str() {
-                            pinned_dms.push(id.to_string());
-                        } else if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                            pinned_dms.push(id.to_string());
-                        }
-                    }
+            // Extract appearance settings from user_settings_proto if present in READY
+            let mut account_theme = None;
+            let mut client_theme = None;
+            if let Some(proto_b64) = data.get("user_settings_proto").and_then(|v| v.as_str()) {
+                if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(proto_b64) {
+                    account_theme = settings.theme();
+                    client_theme = settings.appearance.as_ref().and_then(|a| a.client_theme_settings.clone());
                 }
             }
 
@@ -1761,13 +1756,9 @@ async fn handle_dispatch(
         }
         "USER_SETTINGS_PROTO_UPDATE" => {
             // Live protobuf user settings update from Discord Gateway:
-            // payload contains { "settings": "<base64_string>", "partial": false }
+            // payload contains { "settings": "<base64_string>", "partial": bool }
             if let Some(settings_b64) = data.get("settings").and_then(|v| v.as_str()) {
                 if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(settings_b64) {
-                    let pinned_dms = settings.pinned_dms();
-                    if !pinned_dms.is_empty() {
-                        let _ = event_tx.send(TransportEvent::PinnedDmsUpdated(pinned_dms));
-                    }
                     if let Some(theme) = settings.theme() {
                         let _ = event_tx.send(TransportEvent::AccountThemeUpdated {
                             theme,

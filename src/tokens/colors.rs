@@ -715,15 +715,6 @@ impl Default for DiscordPalette {
 }
 
 impl DiscordPalette {
-    /// Selects the palette corresponding to the given account appearance theme.
-    ///
-    /// Currently only `DiscordPalette::dark()` is implemented in discord-rs.
-    /// Unsupported themes (such as Light, Midnight, or custom gradients) fallback to Dark,
-    /// as specified in `docs/THEME_PER_ACCOUNT.md`.
-    pub fn for_theme(_theme: crate::protocol::user_settings_proto::Theme) -> Self {
-        Self::dark()
-    }
-
     /// Returns the exact Discord Dark Theme reference palette.
     pub fn dark() -> Self {
         Self {
