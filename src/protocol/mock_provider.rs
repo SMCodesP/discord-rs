@@ -510,6 +510,22 @@ impl MockDiscordProvider {
         let _ = self.event_sender.send(TransportEvent::MessageCreate(msg.clone()));
         Ok(msg)
     }
+
+    pub async fn get_recorded_viewport_updates(&self) -> Vec<(String, String, Vec<[usize; 2]>)> {
+        self.state.read().await.recorded_viewport_updates.clone()
+    }
+
+    pub async fn get_recorded_member_requests(&self) -> Vec<(String, Vec<String>)> {
+        self.state.read().await.recorded_member_requests.clone()
+    }
+
+    pub async fn get_recorded_message_edits(&self) -> Vec<(String, String, String)> {
+        self.state.read().await.recorded_message_edits.clone()
+    }
+
+    pub async fn get_recorded_pins(&self) -> Vec<(String, String)> {
+        self.state.read().await.recorded_pins.clone()
+    }
 }
 
 impl Default for MockDiscordProvider {
@@ -912,7 +928,7 @@ impl DiscordTransport for MockDiscordProvider {
         state.recorded_pins.push((channel_id.to_string(), message_id.to_string()));
         if let Some(list) = state.messages.get_mut(channel_id) {
             if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
-                msg.is_pinned = true;
+                msg.pinned = true;
                 return Ok(());
             }
         }
@@ -923,7 +939,7 @@ impl DiscordTransport for MockDiscordProvider {
         let mut state = self.state.write().await;
         if let Some(list) = state.messages.get_mut(channel_id) {
             if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
-                msg.is_pinned = false;
+                msg.pinned = false;
                 return Ok(());
             }
         }

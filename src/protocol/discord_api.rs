@@ -698,7 +698,7 @@ impl DiscordApiClient {
     /// Bot account uses standard guild members chunk / request members.
     pub async fn subscribe_guild_members(&self, guild_id: &str, channel_id: &str) -> Result<()> {
         if self.token.token_type == TokenType::User {
-            let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::new();
+            let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
             let payload = coordinator.focus_guild_and_channel(guild_id, channel_id).await;
             self.send_gateway_payload(&payload).await
         } else {
@@ -765,6 +765,7 @@ impl DiscordTransport for DiscordApiClient {
             task.abort();
         }
         *self.outbound_gateway_tx.write().await = None;
+        crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared().clear().await;
         let _ = self
             .event_sender
             .send(TransportEvent::Disconnected("Disconnected by client".to_string()));
@@ -1076,6 +1077,40 @@ impl DiscordTransport for DiscordApiClient {
 
     async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
         self.delete_message(channel_id, message_id).await
+    }
+
+    async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> anyhow::Result<Message> {
+        self.edit_message(channel_id, message_id, content).await
+    }
+
+    async fn pin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        self.pin_message(channel_id, message_id).await
+    }
+
+    async fn unpin_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
+        self.unpin_message(channel_id, message_id).await
+    }
+
+    async fn request_guild_members(
+        &self,
+        guild_id: &str,
+        user_ids: Vec<String>,
+    ) -> anyhow::Result<()> {
+        self.request_guild_members(guild_id, user_ids).await
+    }
+
+    async fn update_guild_member_viewport(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+    ) -> anyhow::Result<()> {
+        self.update_guild_member_viewport(guild_id, channel_id, ranges).await
     }
 
     async fn subscribe_guild_members(
@@ -1654,6 +1689,9 @@ async fn handle_dispatch(
             if let Some(update) = crate::protocol::cache::lazy_guilds::parse_guild_member_list_update(&data) {
                 let _ = event_tx.send(TransportEvent::GuildMemberListUpdate(update));
             }
+        }
+        "GUILD_MEMBERS_CHUNK" => {
+            handle_guild_members_chunk_dispatch(&data, event_tx);
         }
         "MESSAGE_CREATE" => {
             if let Some(author_id) = data.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()) {
@@ -2919,4 +2957,143 @@ impl DiscordApiClient {
             Ok(crate::chat::search::SearchApiResponse::Ready(payload))
         }
     }
+
+    /// Edits an existing message (PATCH /channels/{channel_id}/messages/{message_id})
+    pub async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<Message> {
+        let path = format!("/channels/{}/messages/{}", channel_id, message_id);
+        let body = json!({ "content": content });
+        let req = self.auth_request(reqwest::Method::PATCH, &path).json(&body);
+        let resp = self.send_request(&path, req).await?;
+        let val: serde_json::Value = resp.json().await?;
+
+        let msg = parse_message_from_json(&val)
+            .context("Failed to deserialize edited message response from Discord API")?;
+
+        self.cache_engine.apply_gateway_message_update(channel_id, message_id, content).await;
+
+        Ok(msg)
+    }
+
+    /// Pins a message in a channel (PUT /channels/{channel_id}/pins/{message_id})
+    pub async fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let path = format!("/channels/{}/pins/{}", channel_id, message_id);
+        let req = self.auth_request(reqwest::Method::PUT, &path);
+        self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Unpins a message in a channel (DELETE /channels/{channel_id}/pins/{message_id})
+    pub async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let path = format!("/channels/{}/pins/{}", channel_id, message_id);
+        let req = self.auth_request(reqwest::Method::DELETE, &path);
+        self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Requests guild members for message authors via Gateway Opcode 8
+    pub async fn request_guild_members(
+        &self,
+        guild_id: &str,
+        user_ids: Vec<String>,
+    ) -> Result<()> {
+        let payload = json!({
+            "op": 8,
+            "d": {
+                "guild_id": guild_id,
+                "user_ids": user_ids
+            }
+        });
+        self.send_gateway_payload(&payload).await
+    }
+
+    /// Updates active viewport member list ranges via Gateway Opcode 14
+    pub async fn update_guild_member_viewport(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+    ) -> Result<()> {
+        if self.token.token_type == TokenType::User {
+            let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
+            let payload = coordinator.update_viewport_ranges(guild_id, channel_id, ranges).await;
+            self.send_gateway_payload(&payload).await
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn handle_guild_members_chunk_dispatch(
+    data: &serde_json::Value,
+    event_tx: &broadcast::Sender<TransportEvent>,
+) {
+    let guild_id = match data.get("guild_id").and_then(|v| v.as_str()) {
+        Some(gid) => gid,
+        None => return,
+    };
+    let members_arr = match data.get("members").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => return,
+    };
+
+    let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(guild_id);
+    let mut parsed_members = Vec::new();
+
+    for m in members_arr {
+        let user = match m.get("user") {
+            Some(u) => u,
+            None => continue,
+        };
+        let user_id = match user.get("id").and_then(|v| v.as_str()) {
+            Some(id) => id,
+            None => continue,
+        };
+        let username = user.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let global_name = user.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
+        let avatar = user.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
+        let is_bot = user.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
+        let avatar_decoration_data = user.get("avatar_decoration_data").and_then(|v| {
+            serde_json::from_value(v.clone()).ok()
+        });
+
+        let roles: Vec<String> = m
+            .get("roles")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        crate::protocol::cache::lazy_guilds::cache_author_roles(guild_id, user_id, roles.clone());
+        if !guild_roles.is_empty() {
+            let color = crate::protocol::cache::lazy_guilds::resolve_member_role_color(&roles, &guild_roles);
+            if color != 0 {
+                crate::protocol::cache::lazy_guilds::cache_author_role_color(guild_id, user_id, color);
+            }
+        }
+
+        parsed_members.push(crate::protocol::cache::lazy_guilds::MemberListMember {
+            id: user_id.to_string(),
+            username,
+            global_name,
+            avatar,
+            avatar_decoration_data,
+            roles,
+            presence: crate::app::state::PresenceStatus::Offline,
+            activity: None,
+            is_bot,
+        });
+    }
+
+    let _ = event_tx.send(TransportEvent::GuildMembersChunk {
+        guild_id: guild_id.to_string(),
+        members: parsed_members,
+    });
 }

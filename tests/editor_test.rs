@@ -319,3 +319,10 @@ fn test_composer_placeholder_dm_and_channel() {
     assert_eq!(format_placeholder("#avisos"), "Conversar em #avisos");
 }
 
+#[test]
+fn test_render_active_edit_banner() {
+    use discord_rs::chat::editor::render_active_edit_banner;
+    let banner = render_active_edit_banner(None);
+    let _ = banner;
+}
+

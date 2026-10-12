@@ -92,6 +92,27 @@ impl ClientManager {
         (manager, event_rx)
     }
 
+    /// Somente testes: cria um ClientManager com o provedor de transporte fornecido.
+    #[doc(hidden)]
+    pub fn new_with_transport(transport: Arc<dyn DiscordTransport>) -> (Self, broadcast::Receiver<TransportEvent>) {
+        let (event_tx, event_rx) = broadcast::channel(256);
+        let (voice_state_tx, _) = broadcast::channel(64);
+        let (voice_event_tx, _) = broadcast::channel(64);
+
+        let manager = Self {
+            transport: Arc::new(RwLock::new(transport)),
+            mode: Arc::new(RwLock::new(ConnectionMode::Mock)),
+            event_tx,
+            real_client: Arc::new(RwLock::new(None)),
+            active_voice: Arc::new(RwLock::new(None)),
+            voice_state_tx,
+            voice_event_tx,
+            voice_gateway_factory: Arc::new(RwLock::new(None)),
+        };
+
+        (manager, event_rx)
+    }
+
     /// Connects to real Discord API using an AuthToken (Bot or User token)
     pub async fn connect_with_token(&self, token: AuthToken) -> Result<()> {
         info!("Iniciando conexão com Discord API v10 e WebSocket Gateway...");

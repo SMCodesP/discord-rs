@@ -342,11 +342,15 @@ impl AppState {
         if let (Some(gid), Some(cid)) = (&self.selected_guild_id, &self.selected_channel_id) {
             let gid = gid.clone();
             let cid = cid.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
-                handle.spawn(async move {
-                    let _payload = coordinator.update_viewport_ranges(&gid, &cid, ranges).await;
-                });
+            if let Some(ref cm) = self.client_manager {
+                let cm = cm.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Err(e) = cm.update_guild_member_viewport(&gid, &cid, ranges).await {
+                            log::warn!("Falha ao enviar faixas do viewport para guild {} canal {}: {:?}", gid, cid, e);
+                        }
+                    });
+                }
             }
         }
     }

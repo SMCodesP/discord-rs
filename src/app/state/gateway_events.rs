@@ -251,6 +251,17 @@ impl AppState {
                     );
                 }
             }
+            TransportEvent::GuildMembersChunk { guild_id, members } => {
+                if self.selected_guild_id.as_deref() == Some(&guild_id) {
+                    let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(&guild_id);
+                    for m in &members {
+                        let item_state = crate::protocol::cache::lazy_guilds::convert_member_to_item_state(m, &guild_roles);
+                        if let Some(pos) = self.members.iter().position(|em| em.id == item_state.id) {
+                            self.members[pos] = item_state;
+                        }
+                    }
+                }
+            }
             TransportEvent::ReactionAdd { channel_id, message_id, emoji, .. } => {
                 self.add_reaction_to_message(&channel_id, &message_id, &emoji);
             }

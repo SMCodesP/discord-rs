@@ -664,11 +664,11 @@ pub fn apply_member_list_update(
             MemberListOp::Invalidate { range } => {
                 let start = range[0];
                 let end = range[1];
-                let max = end.min(existing_members.len().saturating_sub(1));
-                if start <= max {
-                    for idx in start..=max {
-                        existing_members[idx] = MemberItemState::unloaded(idx);
-                    }
+                if start == 0 && (end + 1) >= existing_members.len() {
+                    existing_members.clear();
+                } else if start < existing_members.len() {
+                    let end_idx = (end + 1).min(existing_members.len());
+                    existing_members.drain(start..end_idx);
                 }
             }
         }

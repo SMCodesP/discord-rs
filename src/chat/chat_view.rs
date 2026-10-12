@@ -52,6 +52,9 @@ pub struct ChatView {
     pub pending_delete_message: Option<Message>,
     pub is_deleting: bool,
     pub delete_error: Option<String>,
+    pub editing_message: Option<Message>,
+    pub edit_error: Option<String>,
+    pub pin_error: Option<String>,
     pub composer_state: Option<Entity<TextareaState>>,
     pub composer_sub: Option<Subscription>,
 }
@@ -93,6 +96,9 @@ impl ChatView {
             pending_delete_message: None,
             is_deleting: false,
             delete_error: None,
+            editing_message: None,
+            edit_error: None,
+            pin_error: None,
             composer_state: None,
             composer_sub: None,
         }
@@ -108,6 +114,37 @@ impl ChatView {
 
     pub fn set_typing_users(&mut self, users: Vec<String>) {
         self.typing_users = users;
+    }
+
+    pub fn start_editing_message(
+        &mut self,
+        message: Message,
+        window: Option<&mut Window>,
+        cx: &mut Context<Self>,
+    ) {
+        let content = message.content.clone();
+        self.editing_message = Some(message);
+        self.edit_error = None;
+        self.replying_to = None;
+        self.typed_text = content.clone();
+        if let (Some(w), Some(st)) = (window, &self.composer_state) {
+            st.update(cx, |s, cx| {
+                s.set_value(content, w, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_editing(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.editing_message = None;
+        self.edit_error = None;
+        self.typed_text.clear();
+        if let (Some(w), Some(st)) = (window, &self.composer_state) {
+            st.update(cx, |s, cx| {
+                s.set_value("", w, cx);
+            });
+        }
+        cx.notify();
     }
 
     pub fn ensure_composer_state(
@@ -142,6 +179,52 @@ impl ChatView {
                     let trimmed = content.trim();
                     if !trimmed.is_empty() {
                         let text = trimmed.to_string();
+                        if let Some(editing_msg) = this.editing_message.clone() {
+                            let cid = if let Some((_, ch)) = this.state.read(cx).get_selected_channel() {
+                                ch.id.clone()
+                            } else if let Some(ref cid) = this.state.read(cx).selected_channel_id {
+                                cid.clone()
+                            } else {
+                                editing_msg.channel_id.clone()
+                            };
+                            let mid = editing_msg.id.clone();
+                            let cm = this.state.read(cx).client_manager.clone();
+                            if let Some(cm) = cm {
+                                this.edit_error = None;
+                                cx.notify();
+                                let this_entity = cx.entity().clone();
+                                let text_clone = text.clone();
+                                cx.spawn(|_view, cx: &mut AsyncApp| {
+                                    let cx = cx.clone();
+                                    async move {
+                                        match cm.edit_message(&cid, &mid, &text_clone).await {
+                                            Ok(updated_msg) => {
+                                                let _ = cx.update(|cx| {
+                                                    let _ = this_entity.update(cx, |chat, cx| {
+                                                        chat.cancel_editing(None, cx);
+                                                    });
+                                                });
+                                                cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(updated_msg));
+                                            }
+                                            Err(e) => {
+                                                let err_msg = e.to_string();
+                                                let _ = cx.update(|cx| {
+                                                    let _ = this_entity.update(cx, |chat, cx| {
+                                                        chat.edit_error = Some(err_msg.clone());
+                                                        cx.notify();
+                                                    });
+                                                });
+                                            }
+                                        }
+                                    }
+                                }).detach();
+                            } else {
+                                this.edit_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+                                cx.notify();
+                            }
+                            return;
+                        }
+
                         let app_state = this.state.read(cx);
                         let cid = if let Some((_, ch)) = app_state.get_selected_channel() {
                             ch.id.clone()
@@ -187,7 +270,7 @@ impl ChatView {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let composer_state = self.ensure_composer_state(window, cx);
-        if !self.typed_text.is_empty() && composer_state.read(cx).value() != self.typed_text.as_str() {
+        if composer_state.read(cx).value() != self.typed_text.as_str() {
             let t = self.typed_text.clone();
             composer_state.update(cx, |s, cx| {
                 s.set_value(t, window, cx);
@@ -383,6 +466,51 @@ impl Render for ChatView {
             }
 
             let text = trimmed.to_string();
+            let editing_msg_opt = self_for_send.read(cx).editing_message.clone();
+            if let Some(editing_msg) = editing_msg_opt {
+                let cid = cid_for_send.clone();
+                let mid = editing_msg.id.clone();
+                let cm = app_for_send.read(cx).client_manager.clone();
+                if let Some(cm) = cm {
+                    self_for_send.update(cx, |this, cx| {
+                        this.edit_error = None;
+                        cx.notify();
+                    });
+                    let self_async = self_for_send.clone();
+                    let text_clone = text.clone();
+                    cx.spawn(|cx: &mut AsyncApp| {
+                        let cx = cx.clone();
+                        async move {
+                            match cm.edit_message(&cid, &mid, &text_clone).await {
+                                Ok(updated_msg) => {
+                                    let _ = cx.update(|cx| {
+                                        let _ = self_async.update(cx, |chat, cx| {
+                                            chat.cancel_editing(None, cx);
+                                        });
+                                    });
+                                    cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(updated_msg));
+                                }
+                                Err(e) => {
+                                    let err_msg = e.to_string();
+                                    let _ = cx.update(|cx| {
+                                        let _ = self_async.update(cx, |chat, cx| {
+                                            chat.edit_error = Some(err_msg.clone());
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                            }
+                        }
+                    }).detach();
+                } else {
+                    self_for_send.update(cx, |this, cx| {
+                        this.edit_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+
             let cid = cid_for_send.clone();
             app_for_send.update(cx, |state, cx| {
                 state.send_message(&cid, &text);
@@ -848,8 +976,66 @@ impl Render for ChatView {
                     cx.write_to_clipboard(ClipboardItem::new_string(id_for_copy.clone()));
                 }));
 
-                // Pin não possui implementação na API remota; omitido do menu de contexto
-                let on_cm_pin: Option<MessageActionCallback> = None;
+                let self_cm_edit = self_entity.clone();
+                let msg_for_edit = msg.clone();
+                let on_cm_edit: Option<MessageActionCallback> = if is_own {
+                    Some(Arc::new(move |_m_id: &str, window: &mut Window, cx: &mut App| {
+                        let m = msg_for_edit.clone();
+                        self_cm_edit.update(cx, |this, cx| {
+                            this.start_editing_message(m, Some(window), cx);
+                            this.active_context_menu = None;
+                        });
+                    }))
+                } else {
+                    None
+                };
+
+                let self_cm_pin = self_entity.clone();
+                let app_cm_pin = app_entity.clone();
+                let cid_pin = channel_id.clone();
+                let msg_pin = msg.clone();
+                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
+                    let mid = m_id.to_string();
+                    let cid = cid_pin.clone();
+                    let is_currently_pinned = msg_pin.pinned;
+                    let cm = app_cm_pin.read(cx).client_manager.clone();
+                    self_cm_pin.update(cx, |this, cx| {
+                        this.pin_error = None;
+                        this.active_context_menu = None;
+                        cx.notify();
+                    });
+                    if let Some(cm) = cm {
+                        let self_async = self_cm_pin.clone();
+                        cx.spawn(move |cx: &mut AsyncApp| {
+                            let cx = cx.clone();
+                            async move {
+                                let res = if is_currently_pinned {
+                                    cm.unpin_message(&cid, &mid).await
+                                } else {
+                                    cm.pin_message(&cid, &mid).await
+                                };
+                                match res {
+                                    Ok(()) => {}
+                                    Err(e) => {
+                                        let err_msg = e.to_string();
+                                        let _ = cx.update(|cx| {
+                                            let _ = self_async.update(cx, |chat, cx| {
+                                                chat.pin_error = Some(err_msg.clone());
+                                                cx.notify();
+                                            });
+                                        });
+                                    }
+                                }
+                            }
+                        }).detach();
+                    } else {
+                        let err_msg = "Não conectado ao Discord: cliente não inicializado".to_string();
+                        self_cm_pin.update(cx, |this, cx| {
+                            this.pin_error = Some(err_msg);
+                            cx.notify();
+                        });
+                    }
+                }));
 
                 // Normal click: abre o modal canônico de confirmação de exclusão
                 let self_cm_del = self_entity.clone();
@@ -972,7 +1158,7 @@ impl Render for ChatView {
                                                 is_pinned,
                                                 is_own,
                                                 on_add_reaction: on_cm_add_rx,
-                                                on_edit: None,
+                                                on_edit: on_cm_edit,
                                                 on_reply: on_cm_reply,
                                                 on_copy_text: on_cm_copy_text,
                                                 on_copy_link: on_cm_copy_link,
@@ -1288,6 +1474,91 @@ impl Render for ChatView {
             None
         };
 
+        let edit_error_toast = if let Some(ref err) = self.edit_error {
+            let self_dismiss_err = self_entity.clone();
+            Some(
+                div()
+                    .mx(px(16.0))
+                    .mb(px(8.0))
+                    .p(px(8.0))
+                    .rounded(radius_sm())
+                    .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+                    .border_1()
+                    .border_color(status_danger())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(font_size_xs())
+                            .text_color(status_danger())
+                            .child(format!("Erro ao editar mensagem: {}", err)),
+                    )
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .text_size(font_size_xs())
+                            .text_color(status_danger())
+                            .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                self_dismiss_err.update(cx, |this, cx| {
+                                    this.edit_error = None;
+                                    cx.notify();
+                                });
+                            })
+                            .child("✕"),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let pin_error_toast = if let Some(ref err) = self.pin_error {
+            let self_dismiss_err = self_entity.clone();
+            Some(
+                div()
+                    .mx(px(16.0))
+                    .mb(px(8.0))
+                    .p(px(8.0))
+                    .rounded(radius_sm())
+                    .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+                    .border_1()
+                    .border_color(status_danger())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(font_size_xs())
+                            .text_color(status_danger())
+                            .child(format!("Erro ao fixar/desafixar mensagem: {}", err)),
+                    )
+                    .child(
+                        div()
+                            .cursor_pointer()
+                            .text_size(font_size_xs())
+                            .text_color(status_danger())
+                            .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                self_dismiss_err.update(cx, |this, cx| {
+                                    this.pin_error = None;
+                                    cx.notify();
+                                });
+                            })
+                            .child("✕"),
+                    ),
+            )
+        } else {
+            None
+        };
+
+        let self_for_cancel_edit = self_entity.clone();
+        let on_cancel_edit: Option<EditorActionCallback> = Some(Arc::new(move |window: &mut Window, cx: &mut App| {
+            self_for_cancel_edit.update(cx, |this, cx| {
+                this.cancel_editing(Some(window), cx);
+            });
+        }));
+
         let composer_channel_name = if is_dm {
             if channel_name.starts_with('@') {
                 channel_name.clone()
@@ -1322,11 +1593,15 @@ impl Render for ChatView {
                     .child(virtual_list),
             )
             .children(delete_error_toast)
+            .children(edit_error_toast)
+            .children(pin_error_toast)
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)
                     .channel_name(composer_channel_name)
                     .replying_to(self.replying_to.clone())
+                    .editing_message(self.editing_message.clone())
+                    .on_cancel_edit(on_cancel_edit)
                     .mention_author(true)
                     .typing_users(typing_users)
                     .active_media_tab(if self.media_picker_open { Some(self.media_picker_tab) } else { None })
@@ -1339,6 +1614,8 @@ impl Render for ChatView {
             .children(media_picker_overlay);
 
         let app_entity_shortcut = app_entity.clone();
+        let self_keys = self_entity.clone();
+        let app_keys = app_entity.clone();
 
         div()
             .size_full()
@@ -1348,13 +1625,43 @@ impl Render for ChatView {
             .flex_row()
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .on_key_down(move |ev: &KeyDownEvent, _window, cx| {
+            .on_key_down(move |ev: &KeyDownEvent, window, cx| {
+                let key = ev.keystroke.key.as_str();
                 let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
                 if is_ctrl && ev.keystroke.key.to_lowercase() == "f" {
                     app_entity_shortcut.update(cx, |state, cx| {
                         state.toggle_search();
                         cx.notify();
                     });
+                    return;
+                }
+
+                if key == "escape" || key == "Escape" {
+                    self_keys.update(cx, |this, cx| {
+                        if this.editing_message.is_some() {
+                            this.cancel_editing(Some(window), cx);
+                        } else if this.replying_to.is_some() {
+                            this.replying_to = None;
+                            cx.notify();
+                        } else if this.active_context_menu.is_some() {
+                            this.active_context_menu = None;
+                            cx.notify();
+                        }
+                    });
+                    return;
+                }
+
+                if key == "up" || key == "arrowup" || key == "ArrowUp" {
+                    self_keys.update(cx, |this, cx| {
+                        if this.editing_message.is_none() && this.typed_text.trim().is_empty() {
+                            let state = app_keys.read(cx);
+                            let msgs = state.get_active_messages();
+                            if let Some(last_own) = msgs.iter().rev().find(|m| m.author.id == state.current_user.id).cloned() {
+                                this.start_editing_message(last_own, Some(window), cx);
+                            }
+                        }
+                    });
+                    return;
                 }
             })
             .child(main_chat_col)

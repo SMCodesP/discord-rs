@@ -112,7 +112,39 @@ impl AppState {
                 }
             }
         }
+        if let Some(ref gid) = self.selected_guild_id {
+            self.request_missing_author_colors(gid, &messages);
+        }
         self.messages_by_channel.insert(channel_id.to_string(), messages);
+    }
+
+    /// Requests missing author roles and colors for historical messages via Gateway Opcode 8
+    pub fn request_missing_author_colors(&self, guild_id: &str, messages: &[Message]) {
+        let mut missing_uids = Vec::new();
+        for msg in messages {
+            let uid = &msg.author.id;
+            if uid.is_empty() || uid == "user-me" || uid.starts_with("temp-") {
+                continue;
+            }
+            let has_color = self.members.iter().any(|m| &m.id == uid && m.role_color != 0)
+                || crate::protocol::cache::lazy_guilds::get_cached_author_role_color(guild_id, uid).is_some()
+                || crate::protocol::cache::lazy_guilds::get_cached_author_roles(guild_id, uid).is_some();
+            if !has_color && !missing_uids.contains(uid) {
+                missing_uids.push(uid.clone());
+            }
+        }
+
+        if !missing_uids.is_empty() {
+            if let Some(ref cm) = self.client_manager {
+                let cm = cm.clone();
+                let gid = guild_id.to_string();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = cm.request_guild_members(&gid, missing_uids).await;
+                    });
+                }
+            }
+        }
     }
 }
 

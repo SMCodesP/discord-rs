@@ -167,24 +167,19 @@ impl Render for MemberSidebar {
                     entity,
                     "member-sidebar-virtual-list",
                     item_sizes,
-                    move |this, range, _window, _cx| {
+                    move |this, range, _window, cx| {
                         let app = app_entity.clone();
 
-                        if let (Some(gid), Some(cid)) = (&active_gid, &active_cid) {
+                        if let (Some(_gid), Some(_cid)) = (&active_gid, &active_cid) {
                             let ranges = crate::protocol::cache::lazy_guilds::calculate_ranges_for_viewport(
                                 range.start,
                                 range.end,
                             );
                             if this.last_requested_ranges.as_ref() != Some(&ranges) {
                                 this.last_requested_ranges = Some(ranges.clone());
-                                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                                    let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
-                                    let gid_c = gid.clone();
-                                    let cid_c = cid.clone();
-                                    handle.spawn(async move {
-                                        coordinator.update_viewport_ranges(&gid_c, &cid_c, ranges).await;
-                                    });
-                                }
+                                app.update(cx, |state, _cx| {
+                                    state.update_member_viewport(ranges);
+                                });
                             }
                         }
 

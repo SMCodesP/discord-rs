@@ -650,4 +650,194 @@ async fn test_lazy_guild_coordinator_singleton_and_viewport_ranges() {
     assert_eq!(reset_ranges, vec![[0, 99]]);
 }
 
+#[tokio::test]
+async fn test_viewport_scrolling_delivers_op14_payload_to_transport() {
+    use discord_rs::app::state::AppState;
+    use discord_rs::protocol::client_manager::ClientManager;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+
+    let mock = Arc::new(MockDiscordProvider::new());
+    let (cm, _rx) = ClientManager::new_with_transport(mock.clone());
+
+    let mut state = AppState::default();
+    state.client_manager = Some(cm);
+    state.selected_guild_id = Some("guild-scroll".to_string());
+    state.selected_channel_id = Some("chan-scroll".to_string());
+
+    // Chamar update_member_viewport
+    state.update_member_viewport(vec![[0, 99], [100, 199]]);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let recorded = mock.get_recorded_viewport_updates().await;
+    assert_eq!(recorded.len(), 1, "Opcode 14 deve ser entregue ao transporte");
+    assert_eq!(recorded[0].0, "guild-scroll");
+    assert_eq!(recorded[0].1, "chan-scroll");
+    assert_eq!(recorded[0].2, vec![[0, 99], [100, 199]]);
+}
+
+#[test]
+fn test_sparse_member_list_with_gaps_does_not_invent_fake_members() {
+    use discord_rs::app::state::MemberItemState;
+    use discord_rs::protocol::cache::lazy_guilds::{
+        apply_member_list_update, GuildMemberListUpdate, MemberListItem, MemberListMember,
+        MemberListOp,
+    };
+
+    let mut members: Vec<MemberItemState> = Vec::new();
+
+    // Receber chunk [100, 199] sem ter os primeiros 0..99
+    let mut items = Vec::new();
+    for i in 100..200 {
+        items.push(MemberListItem::Member(Box::new(MemberListMember {
+            id: format!("user-{}", i),
+            username: format!("User {}", i),
+            global_name: None,
+            avatar: None,
+            avatar_decoration_data: None,
+            roles: Vec::new(),
+            presence: PresenceStatus::Online,
+            activity: None,
+            is_bot: false,
+        })));
+    }
+
+    let update = GuildMemberListUpdate {
+        guild_id: "guild-sparse".into(),
+        id: "everyone".into(),
+        member_count: Some(200),
+        online_count: Some(200),
+        groups: Vec::new(),
+        ops: vec![MemberListOp::Sync {
+            range: [100, 199],
+            items,
+        }],
+    };
+
+    apply_member_list_update(&mut members, &update, &[]);
+
+    // A lista tem tamanho 200 para preservar o índice absoluto
+    assert_eq!(members.len(), 200);
+
+    // Os membros de 0..100 são posições esparsas 'unloaded' (não inventam dados fictícios)
+    for i in 0..100 {
+        assert!(members[i].is_unloaded(), "Slot {} deve estar descarregado (unloaded)", i);
+        assert_eq!(members[i].id, format!("unloaded:{}", i));
+    }
+
+    // Os membros de 100..200 são os dados reais carregados
+    for i in 100..200 {
+        assert!(!members[i].is_unloaded(), "Slot {} deve ser membro real", i);
+        assert_eq!(members[i].id, format!("user-{}", i));
+    }
+}
+
+#[tokio::test]
+async fn test_message_edit_via_client_manager_and_mock_no_optimistic_update() {
+    use discord_rs::app::state::AppState;
+    use discord_rs::protocol::client_manager::ClientManager;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+    use discord_rs::protocol::transport::{DiscordTransport, TransportEvent};
+
+    let mock = Arc::new(MockDiscordProvider::new());
+    mock.connect().await.unwrap();
+
+    let (cm, _rx) = ClientManager::new_with_transport(mock.clone());
+    let mut state = AppState::default();
+    state.client_manager = Some(cm.clone());
+    state.selected_channel_id = Some("chan-br-general".to_string());
+
+    // Buscar mensagens do canal pelo mock
+    let msgs = mock.get_messages("chan-br-general", 50).await.unwrap();
+    state.set_channel_messages("chan-br-general", msgs);
+
+    let initial = state.get_active_messages().first().unwrap().content.clone();
+
+    // Editar mensagem via ClientManager
+    let edited = cm.edit_message("chan-br-general", "msg-br-101", "Texto editado com sucesso").await.unwrap();
+    assert_eq!(edited.content, "Texto editado com sucesso");
+
+    // Verificar que o mock registrou a edição
+    let edits = mock.get_recorded_message_edits().await;
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0], ("chan-br-general".to_string(), "msg-br-101".to_string(), "Texto editado com sucesso".to_string()));
+
+    // Zero Mocks: a tela só atualiza quando TransportEvent::MessageUpdate for processado
+    state.handle_transport_event(TransportEvent::MessageUpdate(edited));
+    let current = state.get_active_messages().first().unwrap().content.clone();
+    assert_eq!(current, "Texto editado com sucesso");
+    assert_ne!(initial, current);
+}
+
+#[tokio::test]
+async fn test_pin_and_unpin_message_via_client_manager() {
+    use discord_rs::protocol::client_manager::ClientManager;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+    use discord_rs::protocol::transport::DiscordTransport;
+
+    let mock = Arc::new(MockDiscordProvider::new());
+    mock.connect().await.unwrap();
+    let (cm, _rx) = ClientManager::new_with_transport(mock.clone());
+
+    // Fixar mensagem
+    cm.pin_message("chan-br-general", "msg-br-101").await.unwrap();
+    let pins = mock.get_recorded_pins().await;
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0], ("chan-br-general".to_string(), "msg-br-101".to_string()));
+
+    // Desafixar mensagem
+    cm.unpin_message("chan-br-general", "msg-br-101").await.unwrap();
+    let msgs = mock.get_messages("chan-br-general", 50).await.unwrap();
+    let msg = msgs.iter().find(|m| m.id == "msg-br-101").unwrap();
+    assert!(!msg.pinned, "Mensagem deve estar desafixada após unpin");
+}
+
+#[tokio::test]
+async fn test_request_missing_author_colors_opcode_8_deduplication() {
+    use discord_rs::app::state::AppState;
+    use discord_rs::domain::message::{Author, Message};
+    use discord_rs::protocol::client_manager::ClientManager;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+
+    let mock = Arc::new(MockDiscordProvider::new());
+    let (cm, _rx) = ClientManager::new_with_transport(mock.clone());
+
+    let mut state = AppState::default();
+    state.client_manager = Some(cm);
+    state.selected_guild_id = Some("guild-roles".to_string());
+    state.selected_channel_id = Some("chan-1".to_string());
+
+    let author1 = Author {
+        id: "user-unknown-1".to_string(),
+        username: "unknown1".to_string(),
+        global_name: None,
+        avatar: None,
+        bot: false,
+        avatar_decoration_data: None,
+    };
+    let author2 = Author {
+        id: "user-unknown-2".to_string(),
+        username: "unknown2".to_string(),
+        global_name: None,
+        avatar: None,
+        bot: false,
+        avatar_decoration_data: None,
+    };
+
+    let msg1 = Message::new("m1", "chan-1", author1.clone(), "hello 1");
+    let msg2 = Message::new("m2", "chan-1", author1.clone(), "hello 1 duplicate");
+    let msg3 = Message::new("m3", "chan-1", author2.clone(), "hello 2");
+
+    // Injetar mensagens de histórico com autores não cacheados
+    state.set_channel_messages("chan-1", vec![msg1, msg2, msg3]);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let reqs = mock.get_recorded_member_requests().await;
+    assert_eq!(reqs.len(), 1, "Deve enviar exatamente 1 requisição em lote");
+    assert_eq!(reqs[0].0, "guild-roles");
+    assert_eq!(reqs[0].1.len(), 2, "Usuários devem estar deduplicados");
+    assert!(reqs[0].1.contains(&"user-unknown-1".to_string()));
+    assert!(reqs[0].1.contains(&"user-unknown-2".to_string()));
+}
+
+
 
