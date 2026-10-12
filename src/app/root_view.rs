@@ -279,10 +279,26 @@ fn ensure_quick_input(
                 });
             }
             InputEvent::PressEnter { .. } => {
-                app.update(cx, |s, cx| {
-                    s.send_profile_popout_quick_message();
+                if let Some(req) = app.update(cx, |s, cx| {
+                    let r = s.begin_profile_popout_quick_message();
                     cx.notify();
-                });
+                    r
+                }) {
+                    let app_weak = app.downgrade();
+                    cx.spawn(|_view, cx: &mut AsyncApp| {
+                        let cx = cx.clone();
+                        async move {
+                            let res = req.execute().await;
+                            let _ = cx.update(|cx| {
+                                let _ = app_weak.update(cx, |s, cx| {
+                                    s.finish_profile_popout_quick_message(&req, res);
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    })
+                    .detach();
+                }
             }
             _ => {}
         },

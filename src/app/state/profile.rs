@@ -1,5 +1,40 @@
+use std::collections::HashSet;
+use std::sync::Mutex;
 use gpui_kit::{Pixels, Point};
 use super::*;
+
+static QUICK_SEND_IN_FLIGHT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+fn is_quick_send_in_flight(user_id: &str) -> bool {
+    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
+        let set = lock.get_or_insert_with(HashSet::new);
+        if set.contains(user_id) {
+            true
+        } else {
+            set.insert(user_id.to_string());
+            false
+        }
+    } else {
+        false
+    }
+}
+
+pub fn clear_quick_send_in_flight(user_id: &str) {
+    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
+        if let Some(ref mut set) = *lock {
+            set.remove(user_id);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn clear_all_quick_send_in_flight() {
+    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
+        if let Some(ref mut set) = *lock {
+            set.clear();
+        }
+    }
+}
 
 impl AppState {
     /// Opens a modal dialog
@@ -97,6 +132,9 @@ impl AppState {
 
     /// Closes the active user profile popout and resets anchor/modal state
     pub fn close_profile_popout(&mut self) {
+        if let Some(ref popout) = self.profile_popout {
+            clear_quick_send_in_flight(&popout.user_id);
+        }
         self.profile_popout = None;
         self.profile_anchor = None;
         self.profile_modal_open = false;
@@ -163,16 +201,55 @@ impl AppState {
             }
         }
     }
+}
 
-    /// Sends a quick message from the user profile popout input and closes the popout
-    pub fn send_profile_popout_quick_message(&mut self) {
+/// Request bundle produced by `begin_profile_popout_quick_message`.
+/// Encapsulates the target channel, content and client manager needed to execute the send
+/// asynchronously outside `AppState` (e.g. via `cx.spawn`).
+#[derive(Debug, Clone)]
+pub struct ProfileQuickSend {
+    pub client_manager: crate::protocol::ClientManager,
+    pub channel_id: String,
+    pub content: String,
+    pub user_id: String,
+}
+
+impl ProfileQuickSend {
+    /// Executes the message dispatch asynchronously via ClientManager
+    pub async fn execute(&self) -> Result<crate::domain::message::Message, String> {
+        self.client_manager
+            .send_message(&self.channel_id, &self.content)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl AppState {
+
+    /// Returns whether a quick message send is currently in-flight for the open popout
+    pub fn is_profile_popout_quick_message_sending(&self) -> bool {
+        if let Some(ref popout) = self.profile_popout {
+            if let Ok(lock) = QUICK_SEND_IN_FLIGHT.lock() {
+                if let Some(ref set) = *lock {
+                    return set.contains(&popout.user_id);
+                }
+            }
+        }
+        false
+    }
+
+    /// First phase of popout quick direct message send.
+    /// - Returns None if popout is absent, input is empty/whitespace, or already sending (blocks duplicate Enter).
+    /// - If ClientManager is absent: records "Não conectado ao Discord." on popout.error, preserves field and returns None (ZERO MOCKS).
+    /// - If ClientManager is present: registers in-flight send, resolves DM channel, and returns ProfileQuickSend.
+    pub fn begin_profile_popout_quick_message(&mut self) -> Option<ProfileQuickSend> {
         let (user_id, username, content) = {
-            let Some(ref popout) = self.profile_popout else {
-                return;
+            let Some(ref mut popout) = self.profile_popout else {
+                return None;
             };
             let content = popout.quick_message.trim().to_string();
             if content.is_empty() {
-                return;
+                return None;
             }
             let user_id = popout.user_id.clone();
             let username = popout
@@ -180,13 +257,86 @@ impl AppState {
                 .as_ref()
                 .map(|d| d.user.username.clone())
                 .unwrap_or_else(|| user_id.clone());
+
+            if self.client_manager.is_none() {
+                // ZERO MOCKS: Sem client_manager não inventa sucesso nem mensagem offline
+                popout.error = Some("Não conectado ao Discord.".to_string());
+                return None;
+            }
+
+            if is_quick_send_in_flight(&user_id) {
+                // Blocks duplicate sends while an existing request for this user is in-flight
+                return None;
+            }
+
+            popout.error = None;
             (user_id, username, content)
         };
 
         let channel_id = self.open_dm_with_user(&user_id, &username);
-        self.send_message(&channel_id, &content);
-        self.close_profile_popout();
+        let cm = match self.client_manager.as_ref().cloned() {
+            Some(cm) => cm,
+            None => {
+                clear_quick_send_in_flight(&user_id);
+                return None;
+            }
+        };
+
+        Some(ProfileQuickSend {
+            client_manager: cm,
+            channel_id,
+            content,
+            user_id,
+        })
     }
+
+    /// Second phase of popout quick direct message send.
+    /// - Consumes result from ProfileQuickSend::execute.
+    /// - On success: injects confirmed message into chat, clears quick_message, resets error and closes popout.
+    /// - On error: records error in popout.error, preserves quick_message, popout remains open.
+    /// - Resets in-flight sending state in all cases.
+    pub fn finish_profile_popout_quick_message(
+        &mut self,
+        request: &ProfileQuickSend,
+        result: Result<crate::domain::message::Message, String>,
+    ) {
+        clear_quick_send_in_flight(&request.user_id);
+
+        match result {
+            Ok(msg) => {
+                let target_cid = if !msg.channel_id.is_empty() {
+                    &msg.channel_id
+                } else {
+                    &request.channel_id
+                };
+                self.inject_message(target_cid, msg.clone());
+                if let Some(dm) = self
+                    .dm_channels
+                    .iter_mut()
+                    .find(|c| c.id == request.channel_id || c.id == *target_cid)
+                {
+                    dm.last_message_id =
+                        Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+                    self.sort_dm_channels();
+                }
+                if let Some(ref mut popout) = self.profile_popout {
+                    if popout.user_id == request.user_id {
+                        popout.quick_message.clear();
+                        popout.error = None;
+                    }
+                }
+                self.close_profile_popout();
+            }
+            Err(err_msg) => {
+                if let Some(ref mut popout) = self.profile_popout {
+                    if popout.user_id == request.user_id {
+                        popout.error = Some(err_msg);
+                    }
+                }
+            }
+        }
+    }
+
 
     /// Builds fallback profile data from local friends, members, or current_user
     pub fn build_fallback_profile_data(&self, user_id: &str, _guild_id: Option<&str>) -> Option<crate::domain::profile::UserProfileData> {
