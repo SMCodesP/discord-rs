@@ -9,7 +9,7 @@
 //! - Attachments & rich embed rendering
 //! - Embedded reactions bar
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Local, NaiveDate, Utc};
 use gpui::component::menu::{PopupMenu, PopupMenuItem};
 use gpui::component::tooltip::Tooltip;
 use gpui::prelude::*;
@@ -57,9 +57,8 @@ fn pt_month_name(month: u32) -> &'static str {
     }
 }
 
-/// Formats a date for the central date divider.
-pub fn format_date_separator(date: NaiveDate) -> String {
-    let today = Utc::now().date_naive();
+/// Formats a date for the central date divider with an explicit 'today' reference date.
+pub fn format_date_separator_with_today(date: NaiveDate, today: NaiveDate) -> String {
     let diff = today.signed_duration_since(date).num_days();
 
     if diff == 0 {
@@ -71,20 +70,39 @@ pub fn format_date_separator(date: NaiveDate) -> String {
     }
 }
 
-/// Formats message timestamp: "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 14:32".
-pub fn format_message_timestamp(dt: DateTime<Utc>) -> String {
-    let today = Utc::now().date_naive();
-    let msg_date = dt.date_naive();
+/// Formats a date for the central date divider using local machine timezone.
+pub fn format_date_separator(date: NaiveDate) -> String {
+    let today = Local::now().date_naive();
+    format_date_separator_with_today(date, today)
+}
+
+/// Formats message timestamp with explicit FixedOffset and reference local now time.
+/// E.g. "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 às 14:32".
+pub fn format_message_timestamp_with_offset(
+    dt: DateTime<Utc>,
+    offset: FixedOffset,
+    now: DateTime<FixedOffset>,
+) -> String {
+    let local_dt = dt.with_timezone(&offset);
+    let today = now.date_naive();
+    let msg_date = local_dt.date_naive();
     let diff = today.signed_duration_since(msg_date).num_days();
-    let time_str = dt.format("%H:%M").to_string();
+    let time_str = local_dt.format("%H:%M").to_string();
 
     if diff == 0 {
         format!("Hoje às {}", time_str)
     } else if diff == 1 {
         format!("Ontem às {}", time_str)
     } else {
-        format!("{} às {}", dt.format("%d/%m/%Y"), time_str)
+        format!("{} às {}", local_dt.format("%d/%m/%Y"), time_str)
     }
+}
+
+/// Formats message timestamp: "Hoje às 14:32" or "Ontem às 14:32" or "22/09/2026 às 14:32" in local timezone.
+pub fn format_message_timestamp(dt: DateTime<Utc>) -> String {
+    let local_now = Local::now();
+    let offset = *local_now.offset();
+    format_message_timestamp_with_offset(dt, offset, local_now.with_timezone(&offset))
 }
 
 /// Returns weekday name in Portuguese.
@@ -100,12 +118,33 @@ fn pt_weekday_name(wd: chrono::Weekday) -> &'static str {
     }
 }
 
-/// Formats full message timestamp for hover tooltip (canonical Discord format: "domingo, 11 de outubro de 2026 às 15:30").
+/// Formats full message timestamp for hover tooltip with explicit FixedOffset (canonical Discord format: "domingo, 11 de outubro de 2026 às 15:30").
+pub fn format_message_full_timestamp_with_offset(
+    dt: DateTime<Utc>,
+    offset: FixedOffset,
+) -> String {
+    let local_dt = dt.with_timezone(&offset);
+    let weekday = pt_weekday_name(local_dt.weekday());
+    let month = pt_month_name(local_dt.month()).to_lowercase();
+    let time_str = local_dt.format("%H:%M").to_string();
+    format!("{}, {} de {} de {} às {}", weekday, local_dt.day(), month, local_dt.year(), time_str)
+}
+
+/// Formats full message timestamp for hover tooltip in local timezone (canonical Discord format: "domingo, 11 de outubro de 2026 às 15:30").
 pub fn format_message_full_timestamp(dt: DateTime<Utc>) -> String {
-    let weekday = pt_weekday_name(dt.weekday());
-    let month = pt_month_name(dt.month()).to_lowercase();
-    let time_str = dt.format("%H:%M").to_string();
-    format!("{}, {} de {} de {} às {}", weekday, dt.day(), month, dt.year(), time_str)
+    let local_now = Local::now();
+    let offset = *local_now.offset();
+    format_message_full_timestamp_with_offset(dt, offset)
+}
+
+/// Formats compact gutter time with explicit FixedOffset ("HH:MM").
+pub fn format_compact_gutter_time_with_offset(dt: DateTime<Utc>, offset: FixedOffset) -> String {
+    dt.with_timezone(&offset).format("%H:%M").to_string()
+}
+
+/// Formats compact gutter time in local timezone ("HH:MM").
+pub fn format_compact_gutter_time(dt: DateTime<Utc>) -> String {
+    dt.with_timezone(&Local).format("%H:%M").to_string()
 }
 
 /// Formats a file size in bytes to a human-readable string.
@@ -869,7 +908,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
     // 1. Left Gutter (Avatar via crate::components::Avatar or hover timestamp - Cozy 48px spacing)
     let left_gutter = if config.is_grouped {
         // Grouped mode: gutter displays timestamp only on hover
-        let time_hh_mm = message.timestamp.format("%H:%M").to_string();
+        let time_hh_mm = format_compact_gutter_time(message.timestamp);
         let full_timestamp = format_message_full_timestamp(message.timestamp);
         div()
             .w(px(48.0))

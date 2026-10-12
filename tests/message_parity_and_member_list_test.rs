@@ -494,15 +494,21 @@ fn test_message_create_author_role_color_cached_when_outside_member_list() {
 
 #[test]
 fn test_format_message_full_timestamp_pt_br() {
-    use chrono::DateTime;
-    use discord_rs::chat::message_list::format_message_full_timestamp;
+    use chrono::{DateTime, FixedOffset};
+    use discord_rs::chat::message_list::{format_message_full_timestamp, format_message_full_timestamp_with_offset};
 
-    // 2026-10-11T15:30:00Z -> domingo, 11 de outubro de 2026 às 15:30
+    // 2026-10-11T15:30:00Z com offset UTC explícito -> domingo, 11 de outubro de 2026 às 15:30
     let ts = DateTime::from_timestamp(1791732600, 0).unwrap();
-    let formatted = format_message_full_timestamp(ts);
+    let formatted = format_message_full_timestamp_with_offset(ts, FixedOffset::east_opt(0).unwrap());
     assert!(formatted.contains("11 de outubro de 2026"), "Deve conter dia, mês e ano em pt-BR: {}", formatted);
     assert!(formatted.contains("15:30"), "Deve conter horário formatado: {}", formatted);
     assert!(formatted.contains("às"), "Deve conter 'às' no padrão canônico LLLL: {}", formatted);
+
+    // A função principal converte para o fuso local da máquina (chrono::Local)
+    let local_formatted = format_message_full_timestamp(ts);
+    let local_dt = ts.with_timezone(&chrono::Local);
+    let local_time = local_dt.format("%H:%M").to_string();
+    assert!(local_formatted.contains(&local_time), "Deve conter horário formatado no fuso local: {}", local_formatted);
 }
 
 #[test]
@@ -837,6 +843,191 @@ async fn test_request_missing_author_colors_opcode_8_deduplication() {
     assert_eq!(reqs[0].1.len(), 2, "Usuários devem estar deduplicados");
     assert!(reqs[0].1.contains(&"user-unknown-1".to_string()));
     assert!(reqs[0].1.contains(&"user-unknown-2".to_string()));
+}
+
+#[tokio::test]
+async fn test_guild_members_chunk_preserves_presence_and_activity() {
+    use discord_rs::app::state::{AppState, MemberItemState, PresenceStatus};
+    use discord_rs::protocol::cache::lazy_guilds::GuildMemberChunkItem;
+    use discord_rs::protocol::TransportEvent;
+
+    let mut state = AppState::default();
+    state.selected_guild_id = Some("guild-chunk-test".to_string());
+
+    // Membro Online com atividade na lista ativa
+    let online_member = MemberItemState {
+        id: "user-online-1".to_string(),
+        name: "Gamer Pro".to_string(),
+        avatar_text: "GP".to_string(),
+        presence: PresenceStatus::Online,
+        role_group: "ONLINE".to_string(),
+        role_color: 0,
+        is_bot: false,
+        activity: Some("Playing Elden Ring".to_string()),
+        avatar_decoration_data: None,
+    };
+    state.members.push(online_member);
+
+    // Receber chunk de Opcode 8 para o mesmo usuário com cor resolvida
+    let chunk_item = GuildMemberChunkItem {
+        id: "user-online-1".to_string(),
+        roles: vec!["role-vip".to_string()],
+        role_color: 0x9b59b6,
+        username: Some("gamer_pro".to_string()),
+        global_name: Some("Gamer Pro".to_string()),
+        avatar: None,
+        avatar_decoration_data: None,
+        is_bot: false,
+    };
+
+    let event = TransportEvent::GuildMembersChunk {
+        guild_id: "guild-chunk-test".to_string(),
+        members: vec![chunk_item],
+        not_found: vec![],
+    };
+
+    state.handle_transport_event(event);
+
+    let updated = &state.members[0];
+    assert_eq!(updated.id, "user-online-1");
+    // BUG FIX 1: Presença DEVE permanecer Online, atividade DEVE ser preservada, grupo inalterado
+    assert_eq!(updated.presence, PresenceStatus::Online, "Presença Online não pode virar Offline");
+    assert_eq!(updated.activity, Some("Playing Elden Ring".to_string()), "Atividade não pode ser apagada");
+    assert_eq!(updated.role_group, "ONLINE", "Grupo do membro não pode mudar");
+    // Role color atualizado
+    assert_eq!(updated.role_color, 0x9b59b6, "Cor do cargo deve ser atualizada");
+}
+
+#[tokio::test]
+async fn test_request_missing_author_colors_does_not_repeat_in_session_including_not_found() {
+    use discord_rs::app::state::AppState;
+    use discord_rs::domain::message::{Author, Message};
+    use discord_rs::protocol::client_manager::ClientManager;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+    use discord_rs::protocol::TransportEvent;
+
+    discord_rs::protocol::cache::lazy_guilds::clear_op8_requested();
+
+    let mock = Arc::new(MockDiscordProvider::new());
+    let (cm, _rx) = ClientManager::new_with_transport(mock.clone());
+
+    let mut state = AppState::default();
+    state.client_manager = Some(cm);
+    state.selected_guild_id = Some("guild-repeat-test".to_string());
+    state.selected_channel_id = Some("chan-1".to_string());
+
+    let author1 = Author {
+        id: "user-repeat-1".to_string(),
+        username: "repeat1".to_string(),
+        global_name: None,
+        avatar: None,
+        bot: false,
+        avatar_decoration_data: None,
+    };
+    let msg1 = Message::new("m1", "chan-1", author1.clone(), "first time");
+
+    // 1. Primeira carga de histórico -> dispara 1 pedido
+    state.set_channel_messages("chan-1", vec![msg1.clone()]);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let reqs = mock.get_recorded_member_requests().await;
+    assert_eq!(reqs.len(), 1, "Primeira carga deve gerar 1 pedido");
+
+    // 2. Resposta de gateway com user-repeat-1 marcado em not_found
+    state.handle_transport_event(TransportEvent::GuildMembersChunk {
+        guild_id: "guild-repeat-test".to_string(),
+        members: vec![],
+        not_found: vec!["user-repeat-1".to_string()],
+    });
+
+    // 3. Segunda carga com o mesmo histórico -> NÃO pode disparar novo pedido
+    state.set_channel_messages("chan-1", vec![msg1]);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let reqs_after = mock.get_recorded_member_requests().await;
+    assert_eq!(reqs_after.len(), 1, "Segunda carga com mesmo autor não deve gerar novo pedido!");
+}
+
+#[tokio::test]
+async fn test_request_guild_members_chunks_at_most_100_user_ids() {
+    use discord_rs::app::state::AppState;
+    use discord_rs::domain::message::{Author, Message};
+    use discord_rs::protocol::client_manager::ClientManager;
+    use discord_rs::protocol::mock_provider::MockDiscordProvider;
+
+    discord_rs::protocol::cache::lazy_guilds::clear_op8_requested();
+
+    let mock = Arc::new(MockDiscordProvider::new());
+    let (cm, _rx) = ClientManager::new_with_transport(mock.clone());
+
+    let mut state = AppState::default();
+    state.client_manager = Some(cm);
+    state.selected_guild_id = Some("guild-large".to_string());
+    state.selected_channel_id = Some("chan-large".to_string());
+
+    // Gerar 150 autores únicos
+    let mut messages = Vec::new();
+    for i in 0..150 {
+        let author = Author {
+            id: format!("user-chunk-test-{}", i),
+            username: format!("user_{}", i),
+            global_name: None,
+            avatar: None,
+            bot: false,
+            avatar_decoration_data: None,
+        };
+        messages.push(Message::new(format!("m-{}", i), "chan-large", author, "test"));
+    }
+
+    state.set_channel_messages("chan-large", messages);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let reqs = mock.get_recorded_member_requests().await;
+    assert_eq!(reqs.len(), 2, "150 autores devem ser divididos em exatamente 2 requisições");
+    assert_eq!(reqs[0].1.len(), 100, "Primeiro chunk deve conter exatamente 100 IDs");
+    assert_eq!(reqs[1].1.len(), 50, "Segundo chunk deve conter exatamente 50 IDs");
+}
+
+#[test]
+fn test_format_message_timestamp_with_offset_crossing_midnight() {
+    use chrono::{FixedOffset, NaiveDate, TimeZone, Utc};
+    use discord_rs::chat::message_list::{
+        format_date_separator_with_today,
+        format_message_full_timestamp_with_offset,
+        format_message_timestamp_with_offset,
+    };
+
+    // Fuso de Brasília (-03:00)
+    let offset_br = FixedOffset::east_opt(-3 * 3600).unwrap();
+
+    // Mensagem enviada em 2026-10-12 01:30:00 UTC
+    // No fuso -03:00, este horário corresponde a: 2026-10-11 22:30:00 -03:00
+    let dt_utc = Utc.with_ymd_and_hms(2026, 10, 12, 1, 30, 0).unwrap();
+
+    // Data/hora "atual" no fuso -03:00: 2026-10-12 10:00:00 -03:00
+    let now_local = offset_br.with_ymd_and_hms(2026, 10, 12, 10, 0, 0).unwrap();
+
+    // Como no fuso local o dia da mensagem é 2026-10-11 e "hoje" é 2026-10-12, deve formatar "Ontem às 22:30"!
+    let formatted = format_message_timestamp_with_offset(dt_utc, offset_br, now_local);
+    assert_eq!(formatted, "Ontem às 22:30", "No fuso local cruzando meia-noite, deve ser Ontem às 22:30");
+
+    // Tooltip completo no fuso local: 11 de outubro de 2026 (domingo) às 22:30
+    let full = format_message_full_timestamp_with_offset(dt_utc, offset_br);
+    assert_eq!(
+        full,
+        "domingo, 11 de outubro de 2026 às 22:30",
+        "Tooltip completo no fuso local deve refletir data e hora locais"
+    );
+
+    // Separadores de data com referência 'today'
+    let today = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+    let msg_date_yesterday = NaiveDate::from_ymd_opt(2026, 10, 11).unwrap();
+    let msg_date_today = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+    let msg_date_older = NaiveDate::from_ymd_opt(2026, 9, 20).unwrap();
+
+    assert_eq!(format_date_separator_with_today(msg_date_today, today), "Hoje");
+    assert_eq!(format_date_separator_with_today(msg_date_yesterday, today), "Ontem");
+    assert_eq!(format_date_separator_with_today(msg_date_older, today), "20 de Setembro de 2026");
 }
 
 

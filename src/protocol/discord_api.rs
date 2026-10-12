@@ -2995,20 +2995,23 @@ impl DiscordApiClient {
         Ok(())
     }
 
-    /// Requests guild members for message authors via Gateway Opcode 8
+    /// Requests guild members for message authors via Gateway Opcode 8 (chunks of <= 100)
     pub async fn request_guild_members(
         &self,
         guild_id: &str,
         user_ids: Vec<String>,
     ) -> Result<()> {
-        let payload = json!({
-            "op": 8,
-            "d": {
-                "guild_id": guild_id,
-                "user_ids": user_ids
-            }
-        });
-        self.send_gateway_payload(&payload).await
+        for chunk in user_ids.chunks(100) {
+            let payload = json!({
+                "op": 8,
+                "d": {
+                    "guild_id": guild_id,
+                    "user_ids": chunk
+                }
+            });
+            self.send_gateway_payload(&payload).await?;
+        }
+        Ok(())
     }
 
     /// Updates active viewport member list ranges via Gateway Opcode 14
@@ -3036,9 +3039,30 @@ fn handle_guild_members_chunk_dispatch(
         Some(gid) => gid,
         None => return,
     };
+    let not_found: Vec<String> = data
+        .get("not_found")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for uid in &not_found {
+        crate::protocol::cache::lazy_guilds::mark_op8_requested(guild_id, uid);
+    }
+
     let members_arr = match data.get("members").and_then(|v| v.as_array()) {
         Some(arr) => arr,
-        None => return,
+        None => {
+            let _ = event_tx.send(TransportEvent::GuildMembersChunk {
+                guild_id: guild_id.to_string(),
+                members: Vec::new(),
+                not_found,
+            });
+            return;
+        }
     };
 
     let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(guild_id);
@@ -3053,7 +3077,7 @@ fn handle_guild_members_chunk_dispatch(
             Some(id) => id,
             None => continue,
         };
-        let username = user.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let username = user.get("username").and_then(|v| v.as_str()).map(ToString::to_string);
         let global_name = user.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
         let avatar = user.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
         let is_bot = user.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -3072,22 +3096,24 @@ fn handle_guild_members_chunk_dispatch(
             .unwrap_or_default();
 
         crate::protocol::cache::lazy_guilds::cache_author_roles(guild_id, user_id, roles.clone());
+        crate::protocol::cache::lazy_guilds::mark_op8_requested(guild_id, user_id);
+
+        let mut role_color = 0;
         if !guild_roles.is_empty() {
-            let color = crate::protocol::cache::lazy_guilds::resolve_member_role_color(&roles, &guild_roles);
-            if color != 0 {
-                crate::protocol::cache::lazy_guilds::cache_author_role_color(guild_id, user_id, color);
+            role_color = crate::protocol::cache::lazy_guilds::resolve_member_role_color(&roles, &guild_roles);
+            if role_color != 0 {
+                crate::protocol::cache::lazy_guilds::cache_author_role_color(guild_id, user_id, role_color);
             }
         }
 
-        parsed_members.push(crate::protocol::cache::lazy_guilds::MemberListMember {
+        parsed_members.push(crate::protocol::cache::lazy_guilds::GuildMemberChunkItem {
             id: user_id.to_string(),
             username,
             global_name,
             avatar,
             avatar_decoration_data,
             roles,
-            presence: crate::app::state::PresenceStatus::Offline,
-            activity: None,
+            role_color,
             is_bot,
         });
     }
@@ -3095,5 +3121,6 @@ fn handle_guild_members_chunk_dispatch(
     let _ = event_tx.send(TransportEvent::GuildMembersChunk {
         guild_id: guild_id.to_string(),
         members: parsed_members,
+        not_found,
     });
 }

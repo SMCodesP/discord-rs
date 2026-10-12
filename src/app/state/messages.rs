@@ -126,6 +126,9 @@ impl AppState {
             if uid.is_empty() || uid == "user-me" || uid.starts_with("temp-") {
                 continue;
             }
+            if crate::protocol::cache::lazy_guilds::is_op8_requested(guild_id, uid) {
+                continue;
+            }
             let has_color = self.members.iter().any(|m| &m.id == uid && m.role_color != 0)
                 || crate::protocol::cache::lazy_guilds::get_cached_author_role_color(guild_id, uid).is_some()
                 || crate::protocol::cache::lazy_guilds::get_cached_author_roles(guild_id, uid).is_some();
@@ -135,12 +138,15 @@ impl AppState {
         }
 
         if !missing_uids.is_empty() {
+            crate::protocol::cache::lazy_guilds::mark_op8_batch_requested(guild_id, &missing_uids);
             if let Some(ref cm) = self.client_manager {
                 let cm = cm.clone();
                 let gid = guild_id.to_string();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
-                        let _ = cm.request_guild_members(&gid, missing_uids).await;
+                        for chunk in missing_uids.chunks(100) {
+                            let _ = cm.request_guild_members(&gid, chunk.to_vec()).await;
+                        }
                     });
                 }
             }

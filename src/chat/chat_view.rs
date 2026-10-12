@@ -29,6 +29,12 @@ use crate::tokens::colors::white;
 use crate::tokens::spacing::{radius_md, radius_sm};
 use crate::tokens::typography::{font_size_sm, font_size_xs};
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingPinAction {
+    pub message: Message,
+    pub is_unpin: bool,
+}
+
 /// Reactive Chat View managing real messages and input state for the active channel.
 pub struct ChatView {
     pub state: Entity<AppState>,
@@ -52,6 +58,7 @@ pub struct ChatView {
     pub pending_delete_message: Option<Message>,
     pub is_deleting: bool,
     pub delete_error: Option<String>,
+    pub pending_pin_action: Option<PendingPinAction>,
     pub editing_message: Option<Message>,
     pub edit_error: Option<String>,
     pub pin_error: Option<String>,
@@ -96,6 +103,7 @@ impl ChatView {
             pending_delete_message: None,
             is_deleting: false,
             delete_error: None,
+            pending_pin_action: None,
             editing_message: None,
             edit_error: None,
             pin_error: None,
@@ -147,6 +155,50 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Envia a edição de uma mensagem via ClientManager sem mutação otimista
+    pub fn submit_edit_message(
+        &mut self,
+        channel_id: String,
+        message_id: String,
+        text: String,
+        cm: Option<crate::protocol::ClientManager>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(cm) = cm {
+            self.edit_error = None;
+            cx.notify();
+            let this_entity = cx.entity().clone();
+            cx.spawn(move |_view, cx: &mut AsyncApp| {
+                let cx = cx.clone();
+                async move {
+                    match cm.edit_message(&channel_id, &message_id, &text).await {
+                        Ok(updated_msg) => {
+                            let _ = cx.update(|cx| {
+                                let _ = this_entity.update(cx, |chat, cx| {
+                                    chat.cancel_editing(None, cx);
+                                });
+                            });
+                            cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(updated_msg));
+                        }
+                        Err(e) => {
+                            let err_msg = e.to_string();
+                            let _ = cx.update(|cx| {
+                                let _ = this_entity.update(cx, |chat, cx| {
+                                    chat.edit_error = Some(err_msg.clone());
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    }
+                }
+            })
+            .detach();
+        } else {
+            self.edit_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+            cx.notify();
+        }
+    }
+
     pub fn ensure_composer_state(
         &mut self,
         window: &mut Window,
@@ -189,39 +241,7 @@ impl ChatView {
                             };
                             let mid = editing_msg.id.clone();
                             let cm = this.state.read(cx).client_manager.clone();
-                            if let Some(cm) = cm {
-                                this.edit_error = None;
-                                cx.notify();
-                                let this_entity = cx.entity().clone();
-                                let text_clone = text.clone();
-                                cx.spawn(|_view, cx: &mut AsyncApp| {
-                                    let cx = cx.clone();
-                                    async move {
-                                        match cm.edit_message(&cid, &mid, &text_clone).await {
-                                            Ok(updated_msg) => {
-                                                let _ = cx.update(|cx| {
-                                                    let _ = this_entity.update(cx, |chat, cx| {
-                                                        chat.cancel_editing(None, cx);
-                                                    });
-                                                });
-                                                cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(updated_msg));
-                                            }
-                                            Err(e) => {
-                                                let err_msg = e.to_string();
-                                                let _ = cx.update(|cx| {
-                                                    let _ = this_entity.update(cx, |chat, cx| {
-                                                        chat.edit_error = Some(err_msg.clone());
-                                                        cx.notify();
-                                                    });
-                                                });
-                                            }
-                                        }
-                                    }
-                                }).detach();
-                            } else {
-                                this.edit_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
-                                cx.notify();
-                            }
+                            this.submit_edit_message(cid, mid, text, cm, cx);
                             return;
                         }
 
@@ -471,43 +491,9 @@ impl Render for ChatView {
                 let cid = cid_for_send.clone();
                 let mid = editing_msg.id.clone();
                 let cm = app_for_send.read(cx).client_manager.clone();
-                if let Some(cm) = cm {
-                    self_for_send.update(cx, |this, cx| {
-                        this.edit_error = None;
-                        cx.notify();
-                    });
-                    let self_async = self_for_send.clone();
-                    let text_clone = text.clone();
-                    cx.spawn(|cx: &mut AsyncApp| {
-                        let cx = cx.clone();
-                        async move {
-                            match cm.edit_message(&cid, &mid, &text_clone).await {
-                                Ok(updated_msg) => {
-                                    let _ = cx.update(|cx| {
-                                        let _ = self_async.update(cx, |chat, cx| {
-                                            chat.cancel_editing(None, cx);
-                                        });
-                                    });
-                                    cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(updated_msg));
-                                }
-                                Err(e) => {
-                                    let err_msg = e.to_string();
-                                    let _ = cx.update(|cx| {
-                                        let _ = self_async.update(cx, |chat, cx| {
-                                            chat.edit_error = Some(err_msg.clone());
-                                            cx.notify();
-                                        });
-                                    });
-                                }
-                            }
-                        }
-                    }).detach();
-                } else {
-                    self_for_send.update(cx, |this, cx| {
-                        this.edit_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
-                        cx.notify();
-                    });
-                }
+                self_for_send.update(cx, |this, cx| {
+                    this.submit_edit_message(cid, mid, text, cm, cx);
+                });
                 return;
             }
 
@@ -991,50 +977,19 @@ impl Render for ChatView {
                 };
 
                 let self_cm_pin = self_entity.clone();
-                let app_cm_pin = app_entity.clone();
-                let cid_pin = channel_id.clone();
                 let msg_pin = msg.clone();
-                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
-                    let mid = m_id.to_string();
-                    let cid = cid_pin.clone();
-                    let is_currently_pinned = msg_pin.pinned;
-                    let cm = app_cm_pin.read(cx).client_manager.clone();
+                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
+                    let m = msg_pin.clone();
+                    let is_currently_pinned = m.pinned;
                     self_cm_pin.update(cx, |this, cx| {
+                        this.pending_pin_action = Some(PendingPinAction {
+                            message: m,
+                            is_unpin: is_currently_pinned,
+                        });
                         this.pin_error = None;
                         this.active_context_menu = None;
                         cx.notify();
                     });
-                    if let Some(cm) = cm {
-                        let self_async = self_cm_pin.clone();
-                        cx.spawn(move |cx: &mut AsyncApp| {
-                            let cx = cx.clone();
-                            async move {
-                                let res = if is_currently_pinned {
-                                    cm.unpin_message(&cid, &mid).await
-                                } else {
-                                    cm.pin_message(&cid, &mid).await
-                                };
-                                match res {
-                                    Ok(()) => {}
-                                    Err(e) => {
-                                        let err_msg = e.to_string();
-                                        let _ = cx.update(|cx| {
-                                            let _ = self_async.update(cx, |chat, cx| {
-                                                chat.pin_error = Some(err_msg.clone());
-                                                cx.notify();
-                                            });
-                                        });
-                                    }
-                                }
-                            }
-                        }).detach();
-                    } else {
-                        let err_msg = "Não conectado ao Discord: cliente não inicializado".to_string();
-                        self_cm_pin.update(cx, |this, cx| {
-                            this.pin_error = Some(err_msg);
-                            cx.notify();
-                        });
-                    }
                 }));
 
                 // Normal click: abre o modal canônico de confirmação de exclusão
@@ -1431,6 +1386,247 @@ impl Render for ChatView {
             None
         };
 
+        let pin_modal_overlay = if let Some(ref pin_act) = self.pending_pin_action {
+            let msg_to_pin = pin_act.message.clone();
+            let is_unpin = pin_act.is_unpin;
+            let cid_confirm = channel_id.clone();
+            let app_confirm = app_entity.clone();
+            let self_cancel = self_entity.clone();
+            let self_confirm = self_entity.clone();
+            let self_esc = self_entity.clone();
+            let self_backdrop = self_entity.clone();
+
+            let title = if is_unpin {
+                "Desafixar Mensagem"
+            } else {
+                "Fixar Mensagem"
+            };
+
+            let subtitle = if is_unpin {
+                "Tem certeza de que deseja remover esta mensagem fixada?".to_string()
+            } else if is_dm {
+                "Você tem certeza de que deseja fixar esta mensagem para a posteridade?".to_string()
+            } else {
+                format!("Você tem certeza de que deseja fixar esta mensagem em #{} para a posteridade?", channel_name)
+            };
+
+            let confirm_label = if is_unpin {
+                "Sim, desafixar"
+            } else {
+                "Sim, fixar"
+            };
+
+            let confirm_color = if is_unpin {
+                status_danger()
+            } else {
+                blurple()
+            };
+
+            Some(
+                div()
+                    .id("pin-message-modal-layer")
+                    .key_context("PinMessageModal")
+                    .absolute()
+                    .inset_0()
+                    .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                        if event.keystroke.key == "escape" {
+                            self_esc.update(cx, |this, cx| {
+                                this.pending_pin_action = None;
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .id("pin-modal-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(modal_backdrop())
+                            .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                self_backdrop.update(cx, |this, cx| {
+                                    this.pending_pin_action = None;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .w(px(440.0))
+                                    .bg(bg_floating())
+                                    .border_1()
+                                    .border_color(bg_user_bar())
+                                    .rounded(radius_md())
+                                    .shadow_xl()
+                                    .overflow_hidden()
+                                    .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .child(
+                                        // Header
+                                        div()
+                                            .p(px(16.0))
+                                            .pb(px(8.0))
+                                            .child(
+                                                div()
+                                                    .text_size(px(18.0))
+                                                    .font_weight(FontWeight::BOLD)
+                                                    .text_color(white())
+                                                    .child(title),
+                                            )
+                                            .child(
+                                                div()
+                                                    .pt(px(8.0))
+                                                    .text_size(font_size_sm())
+                                                    .text_color(text_normal())
+                                                    .child(subtitle),
+                                            ),
+                                    )
+                                    .child(
+                                        // Message Preview Card
+                                        div()
+                                            .mx(px(16.0))
+                                            .my(px(8.0))
+                                            .p(px(10.0))
+                                            .bg(bg_chat())
+                                            .border_1()
+                                            .border_color(bg_user_bar())
+                                            .rounded(radius_md())
+                                            .flex()
+                                            .flex_row()
+                                            .gap(px(10.0))
+                                            .child(
+                                                crate::components::avatar::Avatar::new(msg_to_pin.author.display_name().to_string())
+                                                    .size(crate::components::avatar::AvatarSize::Px40)
+                                                    .opt_src(msg_to_pin.author.avatar_url())
+                                                    .opt_decoration(msg_to_pin.author.avatar_decoration_data.clone())
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .flex_1()
+                                                    .min_w(px(0.0))
+                                                    .child(
+                                                        div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_baseline()
+                                                            .gap(px(6.0))
+                                                            .child(
+                                                                div()
+                                                                    .font_weight(FontWeight::MEDIUM)
+                                                                    .text_size(font_size_sm())
+                                                                    .text_color(text_titles())
+                                                                    .child(msg_to_pin.author.display_name().to_string()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_size(font_size_xs())
+                                                                    .text_color(text_muted())
+                                                                    .child(crate::chat::message_list::format_message_timestamp(msg_to_pin.timestamp)),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .pt(px(4.0))
+                                                            .text_size(font_size_sm())
+                                                            .text_color(text_normal())
+                                                            .child(if msg_to_pin.content.is_empty() {
+                                                                "[Anexo ou mensagem sem texto]".to_string()
+                                                            } else {
+                                                                msg_to_pin.content.clone()
+                                                            }),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        // Actions Footer
+                                        div()
+                                            .p(px(16.0))
+                                            .bg(bg_user_bar())
+                                            .flex()
+                                            .flex_row()
+                                            .justify_end()
+                                            .items_center()
+                                            .gap(px(12.0))
+                                            .child(
+                                                div()
+                                                    .px(px(16.0))
+                                                    .py(px(8.0))
+                                                    .rounded(radius_sm())
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.underline())
+                                                    .text_color(white())
+                                                    .text_size(font_size_sm())
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                                        self_cancel.update(cx, |this, cx| {
+                                                            this.pending_pin_action = None;
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                    .child("Cancelar"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px(px(24.0))
+                                                    .py(px(8.0))
+                                                    .bg(confirm_color)
+                                                    .hover(move |s| s.opacity(0.85))
+                                                    .rounded(radius_sm())
+                                                    .cursor_pointer()
+                                                    .text_color(white())
+                                                    .text_size(font_size_sm())
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                                                        let mid = msg_to_pin.id.clone();
+                                                        let cid = cid_confirm.clone();
+                                                        let cm = app_confirm.read(cx).client_manager.clone();
+                                                        self_confirm.update(cx, |this, cx| {
+                                                            this.pending_pin_action = None;
+                                                            this.pin_error = None;
+                                                            cx.notify();
+                                                        });
+                                                        if let Some(cm) = cm {
+                                                            let self_async = self_confirm.clone();
+                                                            cx.spawn(move |cx: &mut AsyncApp| {
+                                                                let cx = cx.clone();
+                                                                async move {
+                                                                    let res = if is_unpin {
+                                                                        cm.unpin_message(&cid, &mid).await
+                                                                    } else {
+                                                                        cm.pin_message(&cid, &mid).await
+                                                                    };
+                                                                    if let Err(e) = res {
+                                                                        let err_msg = e.to_string();
+                                                                        let _ = cx.update(|cx| {
+                                                                            let _ = self_async.update(cx, |chat, cx| {
+                                                                                chat.pin_error = Some(err_msg.clone());
+                                                                                cx.notify();
+                                                                            });
+                                                                        });
+                                                                    }
+                                                                }
+                                                            }).detach();
+                                                        }
+                                                    })
+                                                    .child(confirm_label),
+                                            ),
+                                    ),
+                            ),
+                    )
+            )
+        } else {
+            None
+        };
+
         let delete_error_toast = if let Some(ref err) = self.delete_error {
             if self.pending_delete_message.is_none() {
                 let self_dismiss_err = self_entity.clone();
@@ -1638,7 +1834,13 @@ impl Render for ChatView {
 
                 if key == "escape" || key == "Escape" {
                     self_keys.update(cx, |this, cx| {
-                        if this.editing_message.is_some() {
+                        if this.pending_pin_action.is_some() {
+                            this.pending_pin_action = None;
+                            cx.notify();
+                        } else if this.pending_delete_message.is_some() {
+                            this.pending_delete_message = None;
+                            cx.notify();
+                        } else if this.editing_message.is_some() {
                             this.cancel_editing(Some(window), cx);
                         } else if this.replying_to.is_some() {
                             this.replying_to = None;
@@ -1668,5 +1870,6 @@ impl Render for ChatView {
             .children(search_panel)
             .children(context_menu_overlay)
             .children(delete_modal_overlay)
+            .children(pin_modal_overlay)
     }
 }

@@ -71,6 +71,7 @@ impl LazyGuildCoordinator {
         *self.active_guild_id.write().await = None;
         *self.active_channel_id.write().await = None;
         self.channel_ranges.write().await.clear();
+        clear_op8_requested();
     }
 
     /// Retorna o ID da guilda atualmente ativa
@@ -174,6 +175,20 @@ pub struct MemberListMember {
     pub roles: Vec<String>,
     pub presence: PresenceStatus,
     pub activity: Option<String>,
+    pub is_bot: bool,
+}
+
+/// Represents an item received in a GUILD_MEMBERS_CHUNK event (Opcode 8)
+/// It carries ONLY what was returned by the gateway (no fake presence or activity).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuildMemberChunkItem {
+    pub id: String,
+    pub roles: Vec<String>,
+    pub role_color: u32,
+    pub username: Option<String>,
+    pub global_name: Option<String>,
+    pub avatar: Option<String>,
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
     pub is_bot: bool,
 }
 
@@ -525,6 +540,37 @@ pub fn cache_author_role_color(guild_id: &str, user_id: &str, color: u32) {
 pub fn get_cached_author_role_color(guild_id: &str, user_id: &str) -> Option<u32> {
     let lock = role_color_cache().read().ok()?;
     lock.get(&(guild_id.to_string(), user_id.to_string())).copied()
+}
+
+static REQUESTED_OP8_MEMBERS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<(String, String)>>> = std::sync::OnceLock::new();
+
+fn requested_op8_cache() -> &'static std::sync::RwLock<std::collections::HashSet<(String, String)>> {
+    REQUESTED_OP8_MEMBERS.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()))
+}
+
+pub fn is_op8_requested(guild_id: &str, user_id: &str) -> bool {
+    let lock = requested_op8_cache().read().ok();
+    lock.map(|l| l.contains(&(guild_id.to_string(), user_id.to_string()))).unwrap_or(false)
+}
+
+pub fn mark_op8_requested(guild_id: &str, user_id: &str) {
+    if let Ok(mut lock) = requested_op8_cache().write() {
+        lock.insert((guild_id.to_string(), user_id.to_string()));
+    }
+}
+
+pub fn mark_op8_batch_requested(guild_id: &str, user_ids: &[String]) {
+    if let Ok(mut lock) = requested_op8_cache().write() {
+        for uid in user_ids {
+            lock.insert((guild_id.to_string(), uid.clone()));
+        }
+    }
+}
+
+pub fn clear_op8_requested() {
+    if let Ok(mut lock) = requested_op8_cache().write() {
+        lock.clear();
+    }
 }
 
 /// Converts a `MemberListItem` (Group or Member) into a `MemberItemState`

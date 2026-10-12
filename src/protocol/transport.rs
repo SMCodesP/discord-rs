@@ -197,7 +197,8 @@ pub enum TransportEvent {
     /// Member chunk returned by Gateway Opcode 8 (REQUEST_GUILD_MEMBERS)
     GuildMembersChunk {
         guild_id: String,
-        members: Vec<crate::protocol::cache::lazy_guilds::MemberListMember>,
+        members: Vec<crate::protocol::cache::lazy_guilds::GuildMemberChunkItem>,
+        not_found: Vec<String>,
     },
 }
 
