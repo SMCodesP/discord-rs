@@ -19,18 +19,6 @@ impl AppState {
         self.is_user_token = is_user;
         self.auth_error = None;
 
-        // Quick development / offline testing bypass
-        if trimmed.starts_with("mock_") || trimmed == "test" || trimmed == "demo" {
-            self.is_connected_to_gateway = true;
-            self.is_connecting = false;
-            self.connection_mode = ConnectionMode::LiveDiscord("rustacean".to_string());
-            self.connection_status = "Conectado (Ambiente de Testes)".to_string();
-            self.current_user.username = "rustacean".into();
-            self.current_user.display_name = "Rustacean".into();
-            self.close_modal();
-            return;
-        }
-
         self.is_connecting = true;
         self.is_connected_to_gateway = false;
         self.connection_status = "Conectando ao Gateway v10...".to_string();
@@ -58,18 +46,9 @@ impl AppState {
                 }
             });
         } else {
-            self.is_connected_to_gateway = true;
             self.is_connecting = false;
-            self.connection_mode = ConnectionMode::Live;
-            self.connection_status = if is_user {
-                "Conectado via Conta de Usuário (Gateway v10)".to_string()
-            } else {
-                "Conectado via Bot Discord (Gateway v10)".to_string()
-            };
-            self.close_modal();
-            self.current_user.username = if is_user { "usuario_discord".into() } else { "bot_discord".into() };
-            self.current_user.display_name = if is_user { "Usuário Conectado".into() } else { "Bot Discord".into() };
-            self.current_user.custom_status = Some("Conectado ao Discord Oficial".into());
+            self.auth_error = Some("Gerenciador de conexão não inicializado.".to_string());
+            self.connection_status = "Desconectado".to_string();
         }
     }
 
