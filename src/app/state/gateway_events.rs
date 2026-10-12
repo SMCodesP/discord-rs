@@ -680,6 +680,15 @@ impl AppState {
                     crate::protocol::pinned_dms::save_pinned_dms_to_path(path, &self.pinned_dms);
                 }
             }
+            TransportEvent::AccountThemeUpdated {
+                theme,
+                client_theme_settings,
+            } => {
+                self.account_theme = Some(theme);
+                if client_theme_settings.is_some() {
+                    self.account_client_theme_settings = client_theme_settings;
+                }
+            }
             TransportEvent::UserProfileLoaded { user_id, profile } => {
                 self.set_profile_popout_data(&user_id, *profile);
             }
