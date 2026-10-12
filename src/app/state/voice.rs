@@ -37,29 +37,25 @@ impl AppState {
         // 1. Participantes reais vindos de voice_states_by_channel
         if let Some(states) = self.voice_states_by_channel.get(channel_id) {
             for vs in states {
-                let name = vs.user_name.clone().unwrap_or_else(|| {
-                    if vs.user_id == self.current_user.id {
-                        self.current_user.display_name.clone()
-                    } else if let Some(m) = self.members.iter().find(|m| m.id == vs.user_id) {
-                        m.name.clone()
-                    } else if let Some(f) = self.friends.iter().find(|f| f.id == vs.user_id) {
-                        f.display_name.clone()
-                    } else {
-                        "Usuário".into()
-                    }
-                });
-                let avatar_text = name.chars().next().unwrap_or('?').to_string();
+                let (name, avatar_url, avatar_decoration_data) = self.resolve_participant_info(
+                    &vs.user_id,
+                    vs.user_name.as_deref(),
+                    vs.avatar_url.as_deref(),
+                    vs.avatar_decoration_data.as_ref(),
+                    channel_id,
+                );
+                let avatar_text = name.chars().next().map(|c| c.to_string()).unwrap_or_default();
                 participants.push(VoiceParticipantState {
                     id: vs.user_id.clone(),
                     name,
                     avatar_text,
-                    avatar_url: vs.avatar_url.clone(),
+                    avatar_url,
                     is_speaking: false,
                     is_muted: vs.self_mute || vs.mute,
                     is_deafened: vs.self_deaf || vs.deaf,
                     is_camera_on: vs.self_video,
                     is_screen_sharing: false,
-                    avatar_decoration_data: vs.avatar_decoration_data.clone(),
+                    avatar_decoration_data,
                 });
             }
         }
@@ -250,38 +246,55 @@ impl AppState {
         }
 
         // Sincroniza participantes da chamada de voz ativa se corresponder ao canal
-        if let Some(ref mut call) = self.active_voice_call {
-            if let Some(ref cid) = state.channel_id {
-                if cid == &call.channel_id {
+        if let Some(ref call) = self.active_voice_call {
+            let is_same_channel = state.channel_id.as_deref() == Some(&call.channel_id);
+            let is_user_left = state.channel_id.is_none() && user_id != self.current_user.id;
+            let active_channel_id = call.channel_id.clone();
+
+            if is_same_channel {
+                let (name, avatar_url, avatar_dec) = self.resolve_participant_info(
+                    &user_id,
+                    state.user_name.as_deref(),
+                    state.avatar_url.as_deref(),
+                    state.avatar_decoration_data.as_ref(),
+                    &active_channel_id,
+                );
+
+                if let Some(ref mut call) = self.active_voice_call {
                     if let Some(p) = call.participants.iter_mut().find(|p| p.id == user_id) {
-                        if let Some(ref un) = state.user_name {
-                            p.name = un.clone();
+                        if !name.is_empty() {
+                            p.name = name;
+                            p.avatar_text = p.name.chars().next().map(|c| c.to_string()).unwrap_or_default();
                         }
-                        if let Some(ref au) = state.avatar_url {
-                            p.avatar_url = Some(au.clone());
+                        if avatar_url.is_some() {
+                            p.avatar_url = avatar_url;
+                        }
+                        if avatar_dec.is_some() {
+                            p.avatar_decoration_data = avatar_dec;
                         }
                         p.is_muted = state.self_mute || state.mute;
                         p.is_deafened = state.self_deaf || state.deaf;
                         p.is_camera_on = state.self_video;
                     } else {
-                        let name = state.user_name.clone().unwrap_or_else(|| "Usuário".into());
-                        let avatar_text = name.chars().next().unwrap_or('?').to_string();
+                        let avatar_text = name.chars().next().map(|c| c.to_string()).unwrap_or_default();
                         call.participants.push(VoiceParticipantState {
                             id: user_id.clone(),
                             name,
                             avatar_text,
-                            avatar_url: state.avatar_url.clone(),
+                            avatar_url,
                             is_speaking: false,
                             is_muted: state.self_mute || state.mute,
                             is_deafened: state.self_deaf || state.deaf,
                             is_camera_on: state.self_video,
                             is_screen_sharing: false,
-                            avatar_decoration_data: state.avatar_decoration_data.clone(),
+                            avatar_decoration_data: avatar_dec,
                         });
                     }
                 }
-            } else if user_id != self.current_user.id {
-                call.participants.retain(|p| p.id != user_id);
+            } else if is_user_left {
+                if let Some(ref mut call) = self.active_voice_call {
+                    call.participants.retain(|p| p.id != user_id);
+                }
             }
         }
     }
@@ -457,4 +470,180 @@ impl AppState {
             });
         }
     }
+
+    /// Resolve o nome, avatar_url e decoração de um participante de chamada.
+    /// Em DMs, consulta `dm_channels`, `friends`, `members`, etc.
+    /// Se não houver nenhum dado real, retorna nome vazio "" (Zero mocks: sem palavra inventada "Usuário").
+    pub fn resolve_participant_info(
+        &self,
+        user_id: &str,
+        fallback_name: Option<&str>,
+        fallback_avatar: Option<&str>,
+        fallback_decoration: Option<&crate::domain::user::AvatarDecorationData>,
+        channel_id: &str,
+    ) -> (String, Option<String>, Option<crate::domain::user::AvatarDecorationData>) {
+        // 1. Se for o usuário atual
+        if user_id == self.current_user.id {
+            return (
+                self.current_user.display_name.clone(),
+                self.current_user.avatar_url.clone(),
+                None,
+            );
+        }
+
+        // 2. Se o fallback de nome fornecido for válido e diferente de "Usuário"
+        let mut resolved_name = fallback_name
+            .filter(|n| !n.trim().is_empty() && *n != "Usuário")
+            .map(|s| s.to_string());
+        let mut resolved_avatar = fallback_avatar
+            .filter(|a| !a.trim().is_empty())
+            .map(|s| s.to_string());
+        let mut resolved_dec = fallback_decoration.cloned();
+
+        // 3. Procura no canal de DM específico (se for DM)
+        if let Some(dm) = self.dm_channels.iter().find(|d| d.id == channel_id) {
+            if let Some(idx) = dm.recipient_ids.iter().position(|r| r == user_id) {
+                if resolved_name.is_none() {
+                    if let Some(name) = dm.recipient_names.get(idx) {
+                        resolved_name = Some(name.clone());
+                    } else if !dm.name.is_empty() && !dm.is_group_dm {
+                        resolved_name = Some(dm.name.clone());
+                    }
+                }
+                if resolved_avatar.is_none() {
+                    resolved_avatar = dm.icon_url.clone();
+                }
+                if resolved_dec.is_none() {
+                    resolved_dec = dm.avatar_decoration_data.clone();
+                }
+            } else if !dm.is_group_dm && resolved_name.is_none() && !dm.name.is_empty() {
+                // Em DM individual direta, o nome e ícone do canal correspondem ao outro participante
+                resolved_name = Some(dm.name.clone());
+                if resolved_avatar.is_none() {
+                    resolved_avatar = dm.icon_url.clone();
+                }
+                if resolved_dec.is_none() {
+                    resolved_dec = dm.avatar_decoration_data.clone();
+                }
+            }
+        }
+
+        // 4. Procura em qualquer outro canal de DM
+        if resolved_name.is_none() || resolved_avatar.is_none() {
+            if let Some(dm) = self.dm_channels.iter().find(|d| d.recipient_ids.contains(&user_id.to_string())) {
+                if resolved_name.is_none() {
+                    if let Some(idx) = dm.recipient_ids.iter().position(|r| r == user_id) {
+                        if let Some(name) = dm.recipient_names.get(idx) {
+                            resolved_name = Some(name.clone());
+                        } else if !dm.name.is_empty() && !dm.is_group_dm {
+                            resolved_name = Some(dm.name.clone());
+                        }
+                    }
+                }
+                if resolved_avatar.is_none() {
+                    resolved_avatar = dm.icon_url.clone();
+                }
+                if resolved_dec.is_none() {
+                    resolved_dec = dm.avatar_decoration_data.clone();
+                }
+            }
+        }
+
+        // 5. Procura na lista de amigos (`friends`)
+        if let Some(friend) = self.friends.iter().find(|f| f.id == user_id) {
+            if resolved_name.is_none() {
+                let name = if !friend.display_name.is_empty() {
+                    friend.display_name.clone()
+                } else {
+                    friend.username.clone()
+                };
+                resolved_name = Some(name);
+            }
+            if resolved_avatar.is_none() {
+                resolved_avatar = friend.avatar_url.clone();
+            }
+            if resolved_dec.is_none() {
+                resolved_dec = friend.avatar_decoration_data.clone();
+            }
+        }
+
+        // 6. Procura nos membros (`members`)
+        if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
+            if resolved_name.is_none() {
+                resolved_name = Some(m.name.clone());
+            }
+            if resolved_dec.is_none() {
+                resolved_dec = m.avatar_decoration_data.clone();
+            }
+        }
+
+        let name = resolved_name.unwrap_or_default();
+        (name, resolved_avatar, resolved_dec)
+    }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::models::{ChannelItemState, ChannelKind, FriendItemState, PresenceStatus};
+
+    #[test]
+    fn test_resolve_participant_info_from_dm_channel() {
+        let mut state = AppState::default();
+        let dm = ChannelItemState {
+            id: "dm_123".into(),
+            name: "amigo_legal".into(),
+            kind: ChannelKind::Text,
+            topic: None,
+            unread: false,
+            mention_count: 0,
+            icon_url: Some("https://cdn.discordapp.com/avatars/u1/hash.png".into()),
+            is_pinned: false,
+            last_message_id: None,
+            is_group_dm: false,
+            recipient_ids: vec!["u1".into()],
+            recipient_names: vec!["Amigo Legal".into()],
+            user_limit: None,
+            avatar_decoration_data: None,
+        };
+        state.dm_channels.push(dm);
+
+        let (name, avatar, dec) = state.resolve_participant_info("u1", None, None, None, "dm_123");
+        assert_eq!(name, "Amigo Legal");
+        assert_eq!(avatar, Some("https://cdn.discordapp.com/avatars/u1/hash.png".into()));
+        assert!(dec.is_none());
+    }
+
+    #[test]
+    fn test_resolve_participant_info_from_friends() {
+        let mut state = AppState::default();
+        let friend = FriendItemState {
+            id: "u2".into(),
+            username: "friend_user".into(),
+            display_name: "Melhor Amigo".into(),
+            avatar_url: Some("https://cdn.discordapp.com/avatars/u2/avatar.png".into()),
+            avatar_text: "M".into(),
+            presence: PresenceStatus::Online,
+            custom_status: None,
+            relationship_type: 1,
+            avatar_decoration_data: None,
+        };
+        state.friends.push(friend);
+
+        let (name, avatar, _) = state.resolve_participant_info("u2", None, None, None, "other_channel");
+        assert_eq!(name, "Melhor Amigo");
+        assert_eq!(avatar, Some("https://cdn.discordapp.com/avatars/u2/avatar.png".into()));
+    }
+
+    #[test]
+    fn test_resolve_participant_info_empty_when_no_data_never_mock_usuario() {
+        let state = AppState::default();
+        let (name, avatar, dec) = state.resolve_participant_info("unknown_u999", None, None, None, "unknown_channel");
+        // Zero mocks: sem dado real, retorna string vazia, NUNCA "Usuário"
+        assert_eq!(name, "");
+        assert_ne!(name, "Usuário");
+        assert!(avatar.is_none());
+        assert!(dec.is_none());
+    }
+}
+

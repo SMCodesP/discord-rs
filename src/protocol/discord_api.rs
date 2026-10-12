@@ -411,9 +411,7 @@ impl DiscordApiClient {
     /// Fetches all custom stickers for a guild (/guilds/{guild_id}/stickers) with local disk cache
     pub async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<DiscordSticker>> {
         if let Some(cached) = self.media_cache.load_guild_stickers_from_disk(guild_id) {
-            if !cached.is_empty() {
-                return Ok(cached);
-            }
+            return Ok(cached);
         }
         let path = format!("/guilds/{}/stickers", guild_id);
         let req = self.auth_request(reqwest::Method::GET, &path);
@@ -658,8 +656,21 @@ impl DiscordApiClient {
             json!({})
         };
         let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
-        let _ = self.send_request(&path, req).await?;
-        Ok(())
+        match self.send_request(&path, req).await {
+            Ok(resp) => {
+                log::info!("[VoiceDiag] Status HTTP do toque: status={}", resp.status().as_u16());
+                Ok(())
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if let Some(code) = err_str.split("HTTP ").nth(1).and_then(|s| s.split_whitespace().next()).and_then(|c| c.parse::<u16>().ok()) {
+                    log::info!("[VoiceDiag] Status HTTP do toque: status={}", code);
+                } else {
+                    log::info!("[VoiceDiag] Status HTTP do toque: status=falha");
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Stop ringing participants in a DM / private channel via POST /channels/{id}/call/stop-ringing
@@ -1420,6 +1431,7 @@ async fn handle_dispatch(
     last_voice_session_id: &Arc<RwLock<Option<String>>>,
     last_voice_server: &Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
 ) {
+    let media_cache = MediaCacheManager::default_path();
     match event_name {
         "READY" => {
             if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
@@ -1455,7 +1467,9 @@ async fn handle_dispatch(
                         guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
                     }
                     if let Some(raw_stickers) = g.get("stickers").and_then(|v| v.as_array()) {
-                        guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                        let parsed = parse_stickers_from_value_array(raw_stickers, id);
+                        let _ = media_cache.save_guild_stickers_to_disk(id, &parsed);
+                        guild.stickers = parsed;
                     }
                     guilds.push(guild);
                 }
@@ -1623,7 +1637,9 @@ async fn handle_dispatch(
                     guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
                 }
                 if let Some(raw_stickers) = data.get("stickers").and_then(|v| v.as_array()) {
-                    guild.stickers = parse_stickers_from_value_array(raw_stickers, id);
+                    let parsed = parse_stickers_from_value_array(raw_stickers, id);
+                    let _ = media_cache.save_guild_stickers_to_disk(id, &parsed);
+                    guild.stickers = parsed;
                 }
 
                 // Popula voice_states a partir do snapshot inicial de GUILD_CREATE

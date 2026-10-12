@@ -319,13 +319,14 @@ impl AppState {
     /// e busca da API em segundo plano caso algum servidor ainda não os possua.
     pub fn sync_guild_media(&mut self) {
         let mut missing_emojis = Vec::new();
-        let mut missing_stickers = Vec::new();
 
         // 1. Fast-path: carrega do cache particionado em disco
         for guild in &mut self.guilds {
             if guild.emojis.is_empty() {
                 if let Some(cached) = self.media_cache.load_guild_emojis_from_disk(&guild.id) {
                     guild.emojis = cached;
+                } else {
+                    missing_emojis.push(guild.id.clone());
                 }
             }
             if guild.stickers.is_empty() {
@@ -333,19 +334,31 @@ impl AppState {
                     guild.stickers = cached;
                 }
             }
-
-            if guild.emojis.is_empty() {
-                missing_emojis.push(guild.id.clone());
-            }
-            if guild.stickers.is_empty() {
-                missing_stickers.push(guild.id.clone());
-            }
         }
 
-        // 2. Background-path: busca da API se houver ClientManager
+        // 2. Background-path sob demanda: busca figurinhas APENAS da guilda selecionada se ainda não estiver em cache
         if let Some(ref cm) = self.client_manager {
-            if !missing_emojis.is_empty() || !missing_stickers.is_empty() {
-                let cm = cm.clone();
+            let cm = cm.clone();
+            if let Some(ref gid) = self.selected_guild_id {
+                let target_gid = gid.clone();
+                let needs_stickers = self.guilds.iter().any(|g| g.id == target_gid && g.stickers.is_empty())
+                    && self.media_cache.load_guild_stickers_from_disk(&target_gid).is_none();
+                if needs_stickers {
+                    let cm_stickers = cm.clone();
+                    tokio::spawn(async move {
+                        if let Ok(stickers) = cm_stickers.get_guild_stickers(&target_gid).await {
+                            if !stickers.is_empty() {
+                                cm_stickers.emit_event(TransportEvent::GuildStickersUpdated {
+                                    guild_id: target_gid,
+                                    stickers,
+                                });
+                            }
+                        }
+                    });
+                }
+            }
+
+            if !missing_emojis.is_empty() {
                 tokio::spawn(async move {
                     for gid in missing_emojis {
                         if let Ok(emojis) = cm.get_guild_emojis(&gid).await {
@@ -353,16 +366,6 @@ impl AppState {
                                 cm.emit_event(TransportEvent::GuildEmojisUpdated {
                                     guild_id: gid,
                                     emojis,
-                                });
-                            }
-                        }
-                    }
-                    for gid in missing_stickers {
-                        if let Ok(stickers) = cm.get_guild_stickers(&gid).await {
-                            if !stickers.is_empty() {
-                                cm.emit_event(TransportEvent::GuildStickersUpdated {
-                                    guild_id: gid,
-                                    stickers,
                                 });
                             }
                         }
