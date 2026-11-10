@@ -1,7 +1,7 @@
 # Discord RS — Relatório Oficial de Auditoria e Paridade em Rust
 
 > **Documento Gerado Automaticamente pelo Serviço Nativo de Telemetria e Observabilidade**  
-> **Data e Hora:** 2026-10-10 18:39:23 UTC  
+> **Data e Hora:** 2026-10-13 02:56:47 UTC  
 > **Versão do Cliente:** v0.1.0 | **Ambiente:** Linux x86_64 (COSMIC)
 
 ---
@@ -83,10 +83,10 @@ Monitoramento de latência e taxas de throughput capturados via atomics lock-fre
 | **Montagem de Tela (p50)** | 0.00 ms | < 8.33 ms | < 16.66 ms | ✅ Ótimo |
 | **Montagem de Tela (p95)** | 0.00 ms | < 8.33 ms | < 16.66 ms | ✅ Conforme |
 | **Montagem de Tela (p99)** | 0.00 ms | < 12.00 ms | < 25.00 ms | ✅ Conforme |
-| **Resposta a Interações (Média)** | 1.76 ms | < 8.33 ms | < 16.66 ms | ✅ Excelente |
-| **Transições Totais Registradas** | 2 transições | — | — | ℹ️ Ativo |
+| **Resposta a Interações (Média)** | 0.00 ms | < 8.33 ms | < 16.66 ms | ✅ Excelente |
+| **Transições Totais Registradas** | 7 transições | — | — | ℹ️ Ativo |
 | **Violações de SLA de Montagem** | 0 eventos | 0 eventos | < 5% do total | ✅ Zero Violações |
-| **Interações de Usuário Monitoradas** | 5 eventos | — | — | ℹ️ Ativo |
+| **Interações de Usuário Monitoradas** | 12 eventos | — | — | ℹ️ Ativo |
 | **Eventos de Telemetria Descartados (Drops)** | 0 eventos | 0 drops | 0 drops | ✅ Zero Drops (Perfeito) |
 
 ---
