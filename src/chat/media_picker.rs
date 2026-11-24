@@ -15,8 +15,12 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::protocol::gifs_client::{
+    parse_gifs_response, GifItem, GifQuery, GifsClient, GifsClientConfig, DEFAULT_GIFS_LOCALE,
+    DEFAULT_SEARCH_MEDIA_FORMAT, DEFAULT_TRENDING_MEDIA_FORMAT,
+};
 use crate::protocol::media_cache::{
-    DiscordEmoji, DiscordSticker, MediaCacheManager, RecentEmojiItem, SoundboardSound, TenorGif,
+    DiscordEmoji, DiscordSticker, MediaCacheManager, RecentEmojiItem, SoundboardSound,
 };
 use crate::tokens::colors::white;
 use crate::tokens::colors::*;
@@ -179,6 +183,41 @@ impl MediaPickerModal {
     }
 }
 
+/// Constrói um `GifQuery` a partir do estado atual do picker.
+/// Sem busca, usa trending; com busca, usa `/gifs/search`.
+pub fn gif_query_from_picker(search_query: &str) -> GifQuery {
+    let q = search_query.trim();
+    if q.is_empty() {
+        GifQuery::trending()
+    } else {
+        let mut query = GifQuery::search(q);
+        query.locale = DEFAULT_GIFS_LOCALE.to_string();
+        query.media_format = DEFAULT_SEARCH_MEDIA_FORMAT.to_string();
+        query
+    }
+}
+
+/// Converte resposta JSON real do endpoint de GIFs em itens tipados para o picker.
+pub fn gif_items_from_response(value: &serde_json::Value) -> Vec<GifItem> {
+    parse_gifs_response(value)
+}
+
+/// Cria um cliente de GIFs usando os tipos e configuração reais do protocolo.
+pub fn new_gifs_client(http: reqwest::Client) -> GifsClient {
+    GifsClient::with_config(http, GifsClientConfig::default())
+}
+
+/// Cria um cliente de GIFs com base URL configurada (útil para testes/injeção).
+pub fn new_gifs_client_with_base_url(http: reqwest::Client, base_url: impl Into<String>) -> GifsClient {
+    GifsClient::with_config(
+        http,
+        GifsClientConfig {
+            base_url: base_url.into(),
+            ..GifsClientConfig::default()
+        },
+    )
+}
+
 /// Seção de guilda / servidor no seletor de mídia com emojis e stickers correspondentes
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MediaPickerGuildSection {
@@ -196,7 +235,7 @@ pub struct MediaPickerConfig {
     pub recent_emojis: Vec<RecentEmojiItem>,
     pub custom_emojis: Vec<DiscordEmoji>,
     pub stickers: Vec<DiscordSticker>,
-    pub gifs: Vec<TenorGif>,
+    pub gifs: Vec<GifItem>,
     pub sounds: Vec<SoundboardSound>,
     pub hovered_info: Option<String>,
     pub guild_sections: Vec<MediaPickerGuildSection>,
@@ -2069,22 +2108,9 @@ fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
     container.into_any_element()
 }
 
-fn collect_gif_categories(gifs: &[TenorGif]) -> Vec<String> {
-    let mut categories = Vec::new();
-    let mut seen = HashSet::new();
-    for gif in gifs {
-        if let Some(category) = gif
-            .category
-            .as_deref()
-            .map(str::trim)
-            .filter(|category| !category.is_empty())
-        {
-            if seen.insert(category.to_string()) {
-                categories.push(category.to_string());
-            }
-        }
-    }
-    categories
+fn collect_gif_categories(_gifs: &[GifItem]) -> Vec<String> {
+    // GifItem does not carry local navigation category metadata; categories come from real API/category responses.
+    Vec::new()
 }
 
 fn render_gif_category_chips(
@@ -2141,8 +2167,12 @@ fn render_gif_category_chips(
     cat_row.into_any_element()
 }
 
-fn render_gif_card(gif: &TenorGif, on_select_gif: Option<&OnSelectGifCallback>) -> AnyElement {
-    let send_url = gif.send_url().map(ToString::to_string);
+fn render_gif_card(gif: &GifItem, on_select_gif: Option<&OnSelectGifCallback>) -> AnyElement {
+    let send_url = if gif.url.is_empty() {
+        None
+    } else {
+        Some(gif.url.clone())
+    };
     let title = gif.title.clone();
     let preview = if gif.preview_url.is_empty() {
         icon_gif(px(28.0), text_muted()).into_any_element()
@@ -2745,24 +2775,27 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_gif_categories_come_only_from_api_results() {
         let gifs = vec![
-            TenorGif::new(
-                "1",
-                "First",
-                "https://media.example/1.webp",
-                "https://media.example/1.webp",
-                (320, 240),
-                Some("API Category".into()),
-            ),
-            TenorGif::new(
-                "2",
-                "Second",
-                "https://media.example/2.webp",
-                "https://media.example/2.webp",
-                (320, 240),
-                Some("API Category".into()),
-            ),
+            GifItem {
+                id: "1".into(),
+                title: "First".into(),
+                url: "https://media.example/1.mp4".into(),
+                preview_url: "https://media.example/1.webp".into(),
+                width: 320,
+                height: 240,
+                tenor_url: None,
+            },
+            GifItem {
+                id: "2".into(),
+                title: "Second".into(),
+                url: "https://media.example/2.mp4".into(),
+                preview_url: "https://media.example/2.webp".into(),
+                width: 320,
+                height: 240,
+                tenor_url: None,
+            },
         ];
-        assert_eq!(collect_gif_categories(&gifs), vec!["API Category"]);
+        // GifItem has no category field; categories must come from API category responses, not fabricated locally.
+        assert!(collect_gif_categories(&gifs).is_empty());
         assert!(collect_gif_categories(&[]).is_empty());
     }
 
