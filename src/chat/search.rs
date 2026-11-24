@@ -15,7 +15,7 @@
 //! `GET /api/v10/channels/{channel_id}/messages/search`
 //! `GET /api/v10/guilds/{guild_id}/messages/search`
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use gpui::*;
 use serde::{Deserialize, Serialize};
 
@@ -167,6 +167,18 @@ fn parse_search_date(val: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(val, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(val, "%Y/%m/%d"))
         .ok()
+}
+
+/// Discord's epoch in Unix milliseconds (2015-01-01T00:00:00Z).
+const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+
+/// Converts the start of a UTC date to the Discord Snowflake used by the search
+/// API's `min_id` / `max_id` bounds.
+fn snowflake_at_date_start(date: NaiveDate) -> Option<String> {
+    let midnight = date.and_hms_opt(0, 0, 0)?;
+    let unix_ms = Utc.from_utc_datetime(&midnight).timestamp_millis();
+    let discord_ms = unix_ms.checked_sub(DISCORD_EPOCH_MS)?;
+    discord_ms.checked_shl(22).map(|snowflake| snowflake.to_string())
 }
 
 impl SearchQuery {
@@ -321,6 +333,25 @@ impl SearchQuery {
                 HasFilter::Sticker => "sticker",
             };
             params.push(("has", s.to_string()));
+        }
+
+        // Date facets are inclusive/exclusive in the local matcher. Express the
+        // same intersection to the REST API as a half-open Snowflake interval.
+        let min_date = self.after.max(self.during);
+        let max_date_exclusive = self.before.min(self.during.and_then(|date| date.succ_opt()));
+        if let Some(date) = min_date {
+            if let Some(min_id) = snowflake_at_date_start(date) {
+                params.push(("min_id", min_id));
+            }
+        }
+        if let Some(date) = max_date_exclusive {
+            if let Some(start_id) = snowflake_at_date_start(date) {
+                if let Ok(start) = start_id.parse::<i64>() {
+                    if let Some(max_id) = start.checked_sub(1) {
+                        params.push(("max_id", max_id.to_string()));
+                    }
+                }
+            }
         }
         if let Some(pinned) = self.pinned {
             params.push(("pinned", pinned.to_string()));
@@ -602,53 +633,76 @@ pub const DISCORD_SEARCH_CHIPS: &[(&str, &str)] = &[
     ("pinned:", "true/false"),
 ];
 
-/// Renders message text highlighting search query matches with Discord yellow (#fee75c) and dark text (#1e1f22)
-pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
-    let terms: Vec<String> = query
-        .text_terms
-        .iter()
-        .map(|t| t.to_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
+/// Lowercases text while retaining a map from each lowercase byte boundary
+/// back to a UTF-8 boundary in the original string. Unicode case conversion can
+/// expand a character (for example `İ`), so raw lowercase byte offsets cannot be
+/// used to slice the original message safely.
+fn lowercase_with_original_boundaries(content: &str) -> (String, Vec<usize>) {
+    let mut lowercase = String::with_capacity(content.len());
+    let mut boundaries = Vec::with_capacity(content.len() + 1);
+    for (offset, ch) in content.char_indices() {
+        let lowered: String = ch.to_lowercase().collect();
+        for _ in 0..lowered.len() {
+            boundaries.push(offset);
+        }
+        lowercase.push_str(&lowered);
+    }
+    boundaries.push(content.len());
+    (lowercase, boundaries)
+}
 
+/// Returns merged, non-overlapping highlight ranges in original UTF-8 offsets.
+fn highlight_ranges(content: &str, terms: &[String]) -> Vec<(usize, usize)> {
+    let terms: Vec<String> = terms
+        .iter()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
     if terms.is_empty() || content.is_empty() {
-        return div()
-            .text_color(text_primary())
-            .text_size(px(14.0))
-            .child(content.to_string());
+        return Vec::new();
     }
 
-    let content_lower = content.to_lowercase();
+    let (content_lower, boundaries) = lowercase_with_original_boundaries(content);
     let mut matches = Vec::new();
     for term in &terms {
         let mut start = 0;
         while let Some(pos) = content_lower[start..].find(term.as_str()) {
-            let s = start + pos;
-            let e = s + term.len();
-            matches.push((s, e));
-            start = e;
+            let lower_start = start + pos;
+            let lower_end = lower_start + term.len();
+            if let (Some(s), Some(e)) = (
+                boundaries.get(lower_start).copied(),
+                boundaries.get(lower_end).copied(),
+            ) {
+                if s < e {
+                    matches.push((s, e));
+                }
+            }
+            start = lower_end;
         }
     }
 
-    if matches.is_empty() {
+    matches.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in matches {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+/// Renders message text highlighting search query matches with Discord yellow (#fee75c) and dark text (#1e1f22)
+pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
+    let ranges = highlight_ranges(content, &query.text_terms);
+    if ranges.is_empty() || content.is_empty() {
         return div()
             .text_color(text_primary())
             .text_size(px(14.0))
             .child(content.to_string());
-    }
-
-    matches.sort_by_key(|&(s, _)| s);
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in matches {
-        if let Some(last) = merged.last_mut() {
-            if s <= last.1 {
-                last.1 = last.1.max(e);
-            } else {
-                merged.push((s, e));
-            }
-        } else {
-            merged.push((s, e));
-        }
     }
 
     let mut container = div()
@@ -660,9 +714,9 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
         .text_size(px(14.0));
 
     let mut last_idx = 0;
-    for (s, e) in merged {
-        if s > last_idx && s <= content.len() {
-            if let Some(sub) = content.get(last_idx..s) {
+    for (start, end) in ranges {
+        if start > last_idx {
+            if let Some(sub) = content.get(last_idx..start) {
                 container = container.child(
                     div()
                         .text_color(text_primary())
@@ -670,7 +724,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
                 );
             }
         }
-        if let Some(sub) = content.get(s..e) {
+        if let Some(sub) = content.get(start..end) {
             container = container.child(
                 div()
                     // COR ANTIGA SEM ORIGEM: legacy_fee75c (0xfee75c)
@@ -682,7 +736,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
                     .child(sub.to_string()),
             );
         }
-        last_idx = e;
+        last_idx = end;
     }
     if last_idx < content.len() {
         if let Some(sub) = content.get(last_idx..) {
@@ -1813,6 +1867,43 @@ mod tests {
         assert_eq!(groups[0].context_before[0].id, "m1");
         assert_eq!(groups[0].context_after.len(), 1);
         assert_eq!(groups[0].context_after[0].id, "m3");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_date_filters_serialize_to_discord_snowflake_bounds() {
+        assert_eq!(
+            snowflake_at_date_start(NaiveDate::from_ymd_opt(2015, 1, 1).unwrap()),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            snowflake_at_date_start(NaiveDate::from_ymd_opt(2015, 1, 2).unwrap()),
+            Some("362387865600000".to_string())
+        );
+
+        let before = SearchQuery::parse("before:2015-01-02").to_api_query_params();
+        assert!(before.contains(&("max_id", "362387865599999".to_string())));
+
+        let during = SearchQuery::parse("during:2015-01-01").to_api_query_params();
+        assert!(during.contains(&("min_id", "0".to_string())));
+        assert!(during.contains(&("max_id", "362387865599999".to_string())));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_highlight_ranges_are_utf8_safe_and_merge_overlaps() {
+        let dotted_i = "i\u{307}".to_string();
+        assert_eq!(highlight_ranges("İ X", &[dotted_i]), vec![(0, 2)]);
+        assert_eq!(highlight_ranges("İ X", &["x".to_string()]), vec![(3, 4)]);
+        assert_eq!(
+            highlight_ranges(
+                "alpha",
+                &["al".to_string(), "alp".to_string(), "ha".to_string()],
+            ),
+            vec![(0, 5)]
+        );
+        drop(render_highlighted_text(
+            "İ X",
+            &SearchQuery::parse("i\u{307} x"),
+        ));
     }
 
     #[::core::prelude::v1::test]

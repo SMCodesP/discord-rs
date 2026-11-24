@@ -164,6 +164,9 @@ fn format_file_size(bytes: u64) -> String {
 // ============================================================================
 
 /// Renders a horizontal divider with a centered date pill.
+///
+/// Geometry follows Discord's current `.divider_4TfzT5` / `.content_4TfzT5`:
+/// a zero-height flex rule with a 12px semibold label on the chat background.
 pub fn render_date_separator_element(date: NaiveDate) -> Div {
     let date_text = format_date_separator(date);
 
@@ -173,31 +176,27 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
         .items_center()
         .justify_center()
         .w_full()
-        .my(space_4())
+        .h_px()
+        .border_t_1()
+        .border_color(border_subtle())
         .child(
-            // Horizontal line
-            div()
-                .absolute()
-                .w_full()
-                .h_px()
-                .bg(border_subtle()),
-        )
-        .child(
-            // Centered date pill
             div()
                 .relative()
                 .bg(bg_chat())
-                .px(space_3())
+                .px(space_2())
                 .py(space_1())
-                .rounded(radius_pill())
+                .pl(space_4())
+                .rounded(radius_md())
                 .text_size(font_size_xs())
-                .font_weight(WEIGHT_BOLD)
-                .text_color(text_muted())
+                .font_weight(WEIGHT_SEMIBOLD)
+                .line_height(px(13.0))
+                .text_color(channels_default())
                 .child(date_text),
         )
 }
 
-/// Renders Discord's unread divider: a red rule with the centered `NOVAS` label.
+/// Renders Discord's unread divider: a red rule with the `NOVAS` end cap
+/// aligned to the inline-end edge (`.isUnread_4TfzT5` / `.endCap_4TfzT5`).
 ///
 /// The caller owns the unread boundary because the current `Message` model does
 /// not carry a read-state marker. No divider is invented when that boundary is
@@ -207,25 +206,29 @@ pub fn render_new_messages_divider() -> Div {
         .relative()
         .flex()
         .items_center()
-        .justify_center()
+        .justify_end()
         .w_full()
-        .my(space_2())
+        .h_px()
+        .border_t_1()
+        .border_color(status_danger())
         .child(
             div()
                 .absolute()
-                .w_full()
-                .h_px()
-                .bg(status_danger()),
-        )
-        .child(
-            div()
-                .relative()
-                .bg(bg_chat())
-                .px(space_2())
-                .py(space_1())
+                .top(px(-7.0))
+                .right(px(0.0))
+                .h(px(13.0))
+                .px(px(4.0))
+                .pr(px(1.0))
+                .bg(status_danger())
+                .rounded_tl(radius_sm())
+                .rounded_bl(radius_sm())
+                .flex()
+                .items_center()
+                .justify_center()
                 .text_size(font_size_xxs())
                 .font_weight(WEIGHT_BOLD)
-                .text_color(status_danger())
+                .line_height(px(9.0))
+                .text_color(white())
                 .child("NOVAS"),
         )
 }
@@ -266,9 +269,9 @@ pub fn render_hover_action_bar_with_edit(
         format!("hover-react-{}", message_id),
         |sz, col| icon_smile(sz, col).into_any_element(),
     )
-    .size(px(28.0))
+    .size(px(32.0))
     .icon_size(px(20.0))
-    .rounded(px(6.0))
+    .rounded(radius_sm())
     .tooltip("Adicionar reação");
 
     if let Some(handler) = on_react {
@@ -281,9 +284,9 @@ pub fn render_hover_action_bar_with_edit(
         format!("hover-reply-{}", message_id),
         |sz, col| svg().path("icons/undo-2.svg").size(sz).text_color(col).into_any_element(),
     )
-    .size(px(28.0))
+    .size(px(32.0))
     .icon_size(px(20.0))
-    .rounded(px(6.0))
+    .rounded(radius_sm())
     .tooltip("Responder");
 
     if let Some(handler) = on_reply {
@@ -295,16 +298,15 @@ pub fn render_hover_action_bar_with_edit(
     let mut action_bar = div()
         .absolute()
         .top(px(-16.0))
-        .right(px(14.0))
-        .bg(bg_chat())
+        .right(px(16.0))
+        .bg(bg_channels())
         .border_1()
-        .border_color(bg_user_bar())
+        .border_color(border_subtle())
         .rounded(radius_md())
         .shadow_md()
         .p(px(2.0))
         .flex()
         .flex_row()
-        .gap(px(2.0))
         .items_center()
         .invisible()
         .group_hover("message-row", |s| s.visible())
@@ -316,9 +318,9 @@ pub fn render_hover_action_bar_with_edit(
             format!("hover-edit-{}", message_id),
             |sz, col| svg().path("icons/pencil.svg").size(sz).text_color(col).into_any_element(),
         )
-        .size(px(28.0))
+        .size(px(32.0))
         .icon_size(px(20.0))
-        .rounded(px(6.0))
+        .rounded(radius_sm())
         .tooltip("Editar")
         .on_click(move |_ev, window, cx| {
             handler(&msg_id_edit, window, cx);
@@ -330,9 +332,9 @@ pub fn render_hover_action_bar_with_edit(
         format!("hover-more-{}", message_id),
         |sz, col| svg().path("icons/ellipsis.svg").size(sz).text_color(col).into_any_element(),
     )
-    .size(px(28.0))
+    .size(px(32.0))
     .icon_size(px(20.0))
-    .rounded(px(6.0))
+    .rounded(radius_sm())
     .tooltip("Mais");
 
     if let Some(handler) = on_more {
@@ -953,6 +955,77 @@ fn reply_preview_text(message: &Message) -> Option<String> {
         .find_map(|embed| embed.title.clone())
 }
 
+/// Reply references use a 16px avatar in the current Discord Cozy layout. The
+/// shared Avatar component starts at 24px, so this small renderer keeps the
+/// real CDN avatar/decoration without scaling or inventing an identity.
+fn render_reply_avatar(reply: &Message) -> AnyElement {
+    let inner = if let Some(url) = reply.author.avatar_url() {
+        div()
+            .size_full()
+            .rounded_full()
+            .overflow_hidden()
+            .child(img(url).size_full().rounded_full())
+    } else {
+        let initial = reply
+            .author
+            .display_name()
+            .chars()
+            .next()
+            .map(|ch| ch.to_uppercase().to_string())
+            .unwrap_or_else(|| "?".to_string());
+        div()
+            .size_full()
+            .rounded_full()
+            .bg(bg_channels())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(text_muted())
+            .text_size(px(9.0))
+            .font_weight(WEIGHT_BOLD)
+            .child(initial)
+    };
+
+    let mut avatar = div()
+        .relative()
+        .w(px(16.0))
+        .h(px(16.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .child(inner);
+
+    if let Some(decoration) = &reply.author.avatar_decoration_data {
+        avatar = avatar.child(
+            div()
+                .absolute()
+                .top(px(-1.6))
+                .left(px(-1.6))
+                .w(px(19.2))
+                .h(px(19.2))
+                .child(img(decoration.url()).size_full()),
+        );
+    }
+
+    avatar.into_any_element()
+}
+
+/// Draws the Cozy reply spine from the parent avatar center to the 16px reply
+/// avatar. The 36px offset is `40px avatar / 2 + 16px gutter`, matching the
+/// current Discord `--custom-message-margin-left-content-cozy` geometry.
+fn render_reply_spine() -> AnyElement {
+    div()
+        .absolute()
+        .left(px(-36.0))
+        .top(px(8.0))
+        .w(px(38.0))
+        .h(px(10.0))
+        .border_l_2()
+        .border_t_2()
+        .border_color(borders())
+        .rounded_tl(px(6.0))
+        .into_any_element()
+}
+
 /// Renders the compact reply reference shown above a message, including the
 /// curved connector used by Discord's Cozy layout.
 pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
@@ -977,6 +1050,7 @@ pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
                 .font_weight(WEIGHT_SEMIBOLD)
                 .text_size(font_size_sm())
                 .line_height(line_height_sm())
+                .opacity(0.64)
                 .truncate()
                 .child(author_name),
         );
@@ -993,38 +1067,16 @@ pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
     }
 
     div()
+        .relative()
         .flex()
         .flex_row()
-        .items_start()
+        .items_center()
         .gap(space_2())
         .w_full()
         .min_w(px(0.0))
-        .mb(space_1())
-        .child(
-            div()
-                .w(space_12())
-                .h(space_10())
-                .flex_shrink_0()
-                .relative()
-                .child(
-                    div()
-                        .absolute()
-                        .left(space_1())
-                        .top(space_2())
-                        .w(font_size_sm())
-                        .h(font_size_xs())
-                        .border_l_2()
-                        .border_b_2()
-                        .border_color(borders())
-                        .rounded_bl(radius_sm()),
-                ),
-        )
-        .child(
-            Avatar::new(reply.author.display_name().to_string())
-                .size(AvatarSize::Px24)
-                .opt_src(reply.author.avatar_url())
-                .opt_decoration(reply.author.avatar_decoration_data.clone()),
-        )
+        .mb(space_2())
+        .child(render_reply_spine())
+        .child(render_reply_avatar(reply))
         .child(summary)
 }
 
@@ -1077,10 +1129,9 @@ pub fn render_message_row_with_reply_and_edit(
         .w_full()
         .min_w(px(0.0))
         .min_h(if config.is_grouped { px(22.0) } else { px(44.0) })
-        .mt(if config.is_grouped { px(0.0) } else { px(17.0) })
         .max_w_full()
         .pl(space_8())
-        .pr(space_12())
+        .pr(space_8())
         .py(px(2.0))
         .hover(|s| s.bg(bg_chat_hover()))
         .rounded_tr(radius_sm())
@@ -1090,13 +1141,13 @@ pub fn render_message_row_with_reply_and_edit(
         row = row.opacity(0.5).text_color(text_muted());
     }
 
-    // 1. Left Gutter (Avatar via crate::components::Avatar or hover timestamp - Cozy 48px spacing)
+    // 1. Left Gutter (avatar or hover timestamp; content starts at Cozy 72px)
     let left_gutter = if config.is_grouped {
         // Grouped mode: gutter displays timestamp only on hover
         let time_hh_mm = format_compact_gutter_time(message.timestamp);
         let full_timestamp = format_message_full_timestamp(message.timestamp);
         div()
-            .w(px(48.0))
+            .w(px(56.0))
             .flex()
             .justify_end()
             .items_baseline()
@@ -1105,7 +1156,8 @@ pub fn render_message_row_with_reply_and_edit(
             .child(
                 div()
                     .id(ElementId::Name(format!("compact-time-{}", message.id).into()))
-                    .text_size(px(10.0))
+                    .text_size(px(11.0))
+                    .line_height(line_height_base())
                     .text_color(text_muted())
                     .invisible()
                     .cursor_default()
@@ -1122,7 +1174,7 @@ pub fn render_message_row_with_reply_and_edit(
             .opt_decoration(message.author.avatar_decoration_data.clone());
 
         div()
-            .w(px(48.0))
+            .w(px(56.0))
             .flex_shrink_0()
             .pt(px(2.0))
             .cursor_pointer()
@@ -1145,16 +1197,14 @@ pub fn render_message_row_with_reply_and_edit(
         .flex()
         .flex_col()
         .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .pl(space_4());
+        .min_w(px(0.0));
 
     if message.is_pending {
         content_area = content_area.text_color(text_muted());
     }
 
     if let Some(reply) = reply {
-        content_area = content_area.child(render_reply_preview(reply, None));
+        content_area = content_area.child(render_reply_preview(reply, config.role_color));
     }
 
     if !config.is_grouped {
@@ -1193,8 +1243,10 @@ pub fn render_message_row_with_reply_and_edit(
                     .bg(blurple())
                     .rounded(radius_xs())
                     .px(px(4.0))
-                    .py(px(1.0))
-                    .text_size(px(10.0))
+                    .h(px(16.0))
+                    .flex()
+                    .items_center()
+                    .text_size(font_size_xxs())
                     .font_weight(WEIGHT_BOLD)
                     .text_color(white())
                     .child("BOT"),
