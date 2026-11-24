@@ -55,7 +55,7 @@ pub struct RootView {
 
 impl RootView {
     pub fn new(telemetry: crate::telemetry::TelemetryHandle, cx: &mut Context<Self>) -> Self {
-        let (client_manager, mut event_rx) = crate::protocol::ClientManager::new();
+        let (client_manager, _event_rx) = crate::protocol::ClientManager::new();
         let cm_auto_login = client_manager.clone();
         let tel_init = telemetry.clone();
         let state = cx.new(|_cx| {
@@ -79,35 +79,27 @@ impl RootView {
         });
 
         let state_weak = state.downgrade();
-        let state_weak_voice = state.downgrade();
-        let mut voice_rx = client_manager.subscribe_voice_state();
+        let mut event_rx = client_manager.subscribe();
         cx.spawn(|_view, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
                 while let Ok(evt) = event_rx.recv().await {
                     let _ = cx.update(|cx| {
                         let _ = state_weak.update(cx, |state, cx| {
+                            let deleted_call_channel = match &evt {
+                                crate::protocol::TransportEvent::CallDelete { channel_id } => {
+                                    Some(channel_id.clone())
+                                }
+                                _ => None,
+                            };
                             state.handle_transport_event(evt);
-                            cx.notify();
-                        });
-                    });
-                }
-            }
-        })
-        .detach();
-
-        let cm_voice = client_manager.clone();
-        cx.spawn(|_view, cx: &mut AsyncApp| {
-            let cx = cx.clone();
-            async move {
-                while let Ok((v_st, ping)) = voice_rx.recv().await {
-                    let maybe_session = cm_voice.active_voice_session().await;
-                    let _ = cx.update(|cx| {
-                        let _ = state_weak_voice.update(cx, |state, cx| {
-                            if let Some(session) = maybe_session {
-                                state.set_voice_session(session);
+                            if let Some(channel_id) = deleted_call_channel {
+                                if state.active_voice_call.as_ref().map(|call| call.channel_id.as_str())
+                                    == Some(channel_id.as_str())
+                                {
+                                    state.disconnect_voice();
+                                }
                             }
-                            state.update_voice_session_state(v_st, ping);
                             cx.notify();
                         });
                     });
@@ -116,30 +108,7 @@ impl RootView {
         })
         .detach();
 
-        let state_weak_voice_evt = state.downgrade();
-        let mut voice_evt_rx = client_manager.subscribe_voice_events();
-        cx.spawn(|_view, cx: &mut AsyncApp| {
-            let cx = cx.clone();
-            async move {
-                while let Ok(evt) = voice_evt_rx.recv().await {
-                    if let crate::protocol::voice_session::VoiceSessionEvent::Speaking {
-                        user_id: Some(uid),
-                        is_speaking,
-                        ..
-                    } = evt
-                    {
-                        let uid_str = uid.to_string();
-                        let _ = cx.update(|cx| {
-                            let _ = state_weak_voice_evt.update(cx, |state, cx| {
-                                state.set_participant_speaking(&uid_str, is_speaking);
-                                cx.notify();
-                            });
-                        });
-                    }
-                }
-            }
-        })
-        .detach();
+        Self::spawn_voice_subscriptions(state.clone(), client_manager.clone(), cx);
 
         cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 
@@ -183,8 +152,72 @@ impl RootView {
         }
     }
 
+    fn spawn_voice_subscriptions(
+        state: Entity<AppState>,
+        client_manager: crate::protocol::ClientManager,
+        cx: &mut Context<Self>,
+    ) {
+        let state_weak = state.downgrade();
+        let cm_voice = client_manager.clone();
+        let mut voice_rx = client_manager.subscribe_voice_state();
+        cx.spawn(|_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                while let Ok((reported_state, reported_ping)) = voice_rx.recv().await {
+                    let maybe_session = cm_voice.active_voice_session().await;
+                    let _ = cx.update(|cx| {
+                        let _ = state_weak.update(cx, |state, cx| {
+                            if let Some(session) = maybe_session {
+                                // Lê a sessão ativa, não um evento atrasado de uma
+                                // sessão anterior, para evitar estado cruzado.
+                                state.set_voice_session(session.clone());
+                                state.update_voice_session_state(
+                                    session.state(),
+                                    session.ping_ms(),
+                                );
+                            } else {
+                                state.update_voice_session_state(reported_state, reported_ping);
+                            }
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+
+        let state_weak_events = state.downgrade();
+        let mut voice_evt_rx = client_manager.subscribe_voice_events();
+        cx.spawn(|_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                while let Ok(event) = voice_evt_rx.recv().await {
+                    let speaking = match &event {
+                        crate::protocol::voice_session::VoiceSessionEvent::Speaking {
+                            user_id: Some(user_id),
+                            is_speaking,
+                            ..
+                        } => Some((user_id.to_string(), *is_speaking)),
+                        _ => None,
+                    };
+                    let _ = cx.update(|cx| {
+                        let _ = state_weak_events.update(cx, |state, cx| {
+                            if let Some((user_id, is_speaking)) = speaking {
+                                state.set_participant_speaking(&user_id, is_speaking);
+                            }
+                            // Também atualiza avisos não fatais da sessão.
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub fn with_state(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let telemetry = state.read(cx).telemetry.clone().unwrap_or_else(|| crate::telemetry::global().clone());
+        let voice_client_manager = state.read(cx).client_manager.clone();
         let guild_rail = cx.new(|cx| GuildRail::new(state.clone(), cx));
         let channel_sidebar = cx.new(|cx| ChannelSidebar::new(state.clone(), cx));
         let header_bar = cx.new(|cx| HeaderBar::new(state.clone(), cx));
@@ -197,6 +230,10 @@ impl RootView {
             cx.notify();
         })
         .detach();
+
+        if let Some(client_manager) = voice_client_manager {
+            Self::spawn_voice_subscriptions(state.clone(), client_manager, cx);
+        }
 
         cx.set_global(crate::app::state::AppStateGlobal(state.clone()));
 

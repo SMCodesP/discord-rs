@@ -32,31 +32,23 @@ impl AppState {
         explicit_guild_id: Option<u64>,
         ring_recipients: Option<Vec<String>>,
     ) {
+        // Evita reiniciar a sessão em clique duplo ou ao reselecionar o canal.
+        if self.active_voice_call.as_ref().is_some_and(|call| {
+            call.channel_id == channel_id
+                && !matches!(
+                    call.connection_state,
+                    VoiceSessionState::Disconnected { .. }
+                )
+        }) {
+            return;
+        }
+
         let mut participants = Vec::new();
 
         // 1. Participantes reais vindos de voice_states_by_channel
         if let Some(states) = self.voice_states_by_channel.get(channel_id) {
             for vs in states {
-                let (name, avatar_url, avatar_decoration_data) = self.resolve_participant_info(
-                    &vs.user_id,
-                    vs.user_name.as_deref(),
-                    vs.avatar_url.as_deref(),
-                    vs.avatar_decoration_data.as_ref(),
-                    channel_id,
-                );
-                let avatar_text = name.chars().next().map(|c| c.to_string()).unwrap_or_default();
-                participants.push(VoiceParticipantState {
-                    id: vs.user_id.clone(),
-                    name,
-                    avatar_text,
-                    avatar_url,
-                    is_speaking: false,
-                    is_muted: vs.self_mute || vs.mute,
-                    is_deafened: vs.self_deaf || vs.deaf,
-                    is_camera_on: vs.self_video,
-                    is_screen_sharing: false,
-                    avatar_decoration_data,
-                });
+                participants.push(self.participant_from_voice_state(vs, channel_id));
             }
         }
 
@@ -180,16 +172,57 @@ impl AppState {
         }
     }
 
+    /// Constrói um participante somente a partir de estado de voz real.
+    fn participant_from_voice_state(
+        &self,
+        state: &VoiceState,
+        channel_id: &str,
+    ) -> VoiceParticipantState {
+        let (name, avatar_url, avatar_decoration_data) = self.resolve_participant_info(
+            &state.user_id,
+            state.user_name.as_deref(),
+            state.avatar_url.as_deref(),
+            state.avatar_decoration_data.as_ref(),
+            channel_id,
+        );
+        let avatar_text = name.chars().next().map(|c| c.to_string()).unwrap_or_default();
+
+        VoiceParticipantState {
+            id: state.user_id.clone(),
+            name,
+            avatar_text,
+            avatar_url,
+            is_speaking: state.is_speaking,
+            is_muted: state.is_muted(),
+            is_deafened: state.is_deafened(),
+            is_camera_on: state.self_video,
+            is_screen_sharing: state.self_stream,
+            avatar_decoration_data,
+        }
+    }
+
     /// Disconnects from current voice call
     pub fn disconnect_voice(&mut self) {
         if let Some(ref tel) = self.telemetry {
             tel.track_button_click("disconnect_voice", "Desconectar Voz", 0);
         }
+        let direct_session = self
+            .active_voice_call
+            .as_ref()
+            .and_then(|call| call.voice_session.clone());
         self.active_voice_call = None;
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
             tokio::spawn(async move {
-                let _ = cm.disconnect_voice_session().await;
+                if let Err(e) = cm.disconnect_voice_session().await {
+                    log::error!("[AppState] Falha ao desconectar VoiceSession: {:?}", e);
+                }
+            });
+        } else if let Some(session) = direct_session {
+            tokio::spawn(async move {
+                if let Err(e) = session.disconnect().await {
+                    log::error!("[AppState] Falha ao desconectar VoiceSession local: {:?}", e);
+                }
             });
         }
     }
@@ -201,67 +234,146 @@ impl AppState {
         ping_ms: Option<u32>,
     ) {
         if let Some(ref mut call) = self.active_voice_call {
-            if let VoiceSessionState::Disconnected { ref reason } = session_state {
-                if reason != "Sessão inicializada" && reason != "Desconectado pelo usuário" {
+            let previous_state = call.connection_state.clone();
+            match &session_state {
+                VoiceSessionState::Disconnected { reason }
+                    if reason != "Sessão inicializada"
+                        && reason != "Desconectado pelo usuário" =>
+                {
                     call.fatal_error = Some(reason.clone());
                 }
+                VoiceSessionState::Disconnected { .. } => {
+                    call.fatal_error = None;
+                }
+                VoiceSessionState::Connecting
+                | VoiceSessionState::Connected
+                | VoiceSessionState::Reconnecting => {
+                    call.fatal_error = None;
+                }
             }
+
+            // Uma reconexão só volta a exibir RTT depois de um novo ACK real.
+            // O primeiro Connected ainda pode carregar uma medida já recebida.
+            call.ping_ms = match (&previous_state, &session_state) {
+                (VoiceSessionState::Reconnecting, VoiceSessionState::Connected) => None,
+                (_, VoiceSessionState::Connected) => ping_ms,
+                _ => None,
+            };
             call.connection_state = session_state;
-            call.ping_ms = ping_ms;
         }
     }
 
     /// Updates or removes a voice state across all channels
     pub fn update_voice_state(&mut self, mut state: VoiceState) {
         let user_id = state.user_id.clone();
-        // Resolução de nome de exibição e avatar a partir dos caches locais se não vierem no voice state
+
+        // Resolução de nome de exibição e avatar a partir dos caches locais.
         if state.user_name.is_none() {
             if user_id == self.current_user.id {
                 state.user_name = Some(self.current_user.display_name.clone());
-                if state.avatar_url.is_none() {
-                    state.avatar_url = self.current_user.avatar_url.clone();
-                }
             } else if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
                 state.user_name = Some(m.name.clone());
             } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
-                state.user_name = Some(f.display_name.clone());
-                if state.avatar_url.is_none() {
-                    state.avatar_url = f.avatar_url.clone();
-                }
+                state.user_name = Some(if f.display_name.is_empty() {
+                    f.username.clone()
+                } else {
+                    f.display_name.clone()
+                });
+            }
+        }
+        if state.avatar_url.is_none() {
+            if user_id == self.current_user.id {
+                state.avatar_url = self.current_user.avatar_url.clone();
+            } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
+                state.avatar_url = f.avatar_url.clone();
+            }
+        }
+        if state.avatar_decoration_data.is_none() {
+            if user_id == self.current_user.id {
+                state.avatar_decoration_data = self.current_user.avatar_decoration_data.clone();
+            } else if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
+                state.avatar_decoration_data = m.avatar_decoration_data.clone();
+            } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
+                state.avatar_decoration_data = f.avatar_decoration_data.clone();
             }
         }
 
-        // Remove the user from any channel they were previously in
-        for states in self.voice_states_by_channel.values_mut() {
-            states.retain(|s| s.user_id != user_id);
+        // VOICE_STATE_UPDATE não carrega Opcode 5. Preserva o indicador real
+        // já recebido pelo Voice Gateway ao atualizar mute/câmera/stream.
+        let previous_speaking = self
+            .voice_states_by_channel
+            .values()
+            .flatten()
+            .find(|existing| {
+                existing.user_id == user_id
+                    && existing.channel_id.as_deref() == state.channel_id.as_deref()
+            })
+            .map(|existing| existing.is_speaking)
+            .unwrap_or(false);
+        let participant_speaking = self
+            .active_voice_call
+            .as_ref()
+            .filter(|call| state.channel_id.as_deref() == Some(call.channel_id.as_str()))
+            .and_then(|call| call.participants.iter().find(|participant| participant.id == user_id))
+            .map(|participant| participant.is_speaking)
+            .unwrap_or(false);
+        if !state.is_speaking {
+            state.is_speaking = previous_speaking || participant_speaking;
         }
-        // If channel_id == Some(cid), add or update in cid
+
+        // Remove o usuário de qualquer canal anterior antes de inseri-lo.
+        for states in self.voice_states_by_channel.values_mut() {
+            states.retain(|existing| existing.user_id != user_id);
+        }
         if let Some(ref cid) = state.channel_id {
             let entry = self.voice_states_by_channel.entry(cid.clone()).or_default();
-            if let Some(existing) = entry.iter_mut().find(|s| s.user_id == user_id) {
+            if let Some(existing) = entry.iter_mut().find(|existing| existing.user_id == user_id) {
                 *existing = state.clone();
             } else {
                 entry.push(state.clone());
             }
         }
 
-        // Sincroniza participantes da chamada de voz ativa se corresponder ao canal
-        if let Some(ref call) = self.active_voice_call {
-            let is_same_channel = state.channel_id.as_deref() == Some(&call.channel_id);
-            let is_user_left = state.channel_id.is_none() && user_id != self.current_user.id;
-            let active_channel_id = call.channel_id.clone();
-
-            if is_same_channel {
-                let (name, avatar_url, avatar_dec) = self.resolve_participant_info(
+        let active_channel_id = self
+            .active_voice_call
+            .as_ref()
+            .map(|call| call.channel_id.clone());
+        let is_active_channel = state.channel_id.is_some()
+            && active_channel_id.as_deref() == state.channel_id.as_deref();
+        let resolved_participant = is_active_channel
+            .then(|| {
+                self.resolve_participant_info(
                     &user_id,
                     state.user_name.as_deref(),
                     state.avatar_url.as_deref(),
                     state.avatar_decoration_data.as_ref(),
-                    &active_channel_id,
-                );
+                    state.channel_id.as_deref().unwrap_or_default(),
+                )
+            });
 
-                if let Some(ref mut call) = self.active_voice_call {
-                    if let Some(p) = call.participants.iter_mut().find(|p| p.id == user_id) {
+        // O eco do Gateway é a fonte da verdade para mute/deafen locais.
+        if is_active_channel && user_id == self.current_user.id {
+            self.current_user.is_muted = state.is_muted();
+            self.current_user.is_deafened = state.is_deafened();
+        }
+
+        if let Some(ref mut call) = self.active_voice_call {
+            if is_active_channel {
+                if user_id == self.current_user.id {
+                    call.is_muted = state.is_muted();
+                    call.is_deafened = state.is_deafened();
+                }
+
+                if state.self_stream && call.focus_user_id.is_none() {
+                    call.focus_user_id = Some(user_id.clone());
+                } else if !state.self_stream
+                    && call.focus_user_id.as_deref() == Some(user_id.as_str())
+                {
+                    call.focus_user_id = None;
+                }
+
+                if let Some(p) = call.participants.iter_mut().find(|p| p.id == user_id) {
+                    if let Some((name, avatar_url, avatar_dec)) = resolved_participant {
                         if !name.is_empty() {
                             p.name = name;
                             p.avatar_text = p.name.chars().next().map(|c| c.to_string()).unwrap_or_default();
@@ -272,28 +384,32 @@ impl AppState {
                         if avatar_dec.is_some() {
                             p.avatar_decoration_data = avatar_dec;
                         }
-                        p.is_muted = state.self_mute || state.mute;
-                        p.is_deafened = state.self_deaf || state.deaf;
-                        p.is_camera_on = state.self_video;
-                    } else {
-                        let avatar_text = name.chars().next().map(|c| c.to_string()).unwrap_or_default();
-                        call.participants.push(VoiceParticipantState {
-                            id: user_id.clone(),
-                            name,
-                            avatar_text,
-                            avatar_url,
-                            is_speaking: false,
-                            is_muted: state.self_mute || state.mute,
-                            is_deafened: state.self_deaf || state.deaf,
-                            is_camera_on: state.self_video,
-                            is_screen_sharing: false,
-                            avatar_decoration_data: avatar_dec,
-                        });
                     }
+                    p.is_speaking = state.is_speaking;
+                    p.is_muted = state.is_muted();
+                    p.is_deafened = state.is_deafened();
+                    p.is_camera_on = state.self_video;
+                    p.is_screen_sharing = state.self_stream;
+                } else if let Some((name, avatar_url, avatar_decoration_data)) = resolved_participant {
+                    let avatar_text = name.chars().next().map(|c| c.to_string()).unwrap_or_default();
+                    call.participants.push(VoiceParticipantState {
+                        id: user_id.clone(),
+                        name,
+                        avatar_text,
+                        avatar_url,
+                        is_speaking: state.is_speaking,
+                        is_muted: state.is_muted(),
+                        is_deafened: state.is_deafened(),
+                        is_camera_on: state.self_video,
+                        is_screen_sharing: state.self_stream,
+                        avatar_decoration_data,
+                    });
                 }
-            } else if is_user_left {
-                if let Some(ref mut call) = self.active_voice_call {
-                    call.participants.retain(|p| p.id != user_id);
+            } else if user_id != self.current_user.id {
+                // Também remove quem mudou para outro canal, não só quem saiu.
+                call.participants.retain(|p| p.id != user_id);
+                if call.focus_user_id.as_deref() == Some(user_id.as_str()) {
+                    call.focus_user_id = None;
                 }
             }
         }
@@ -301,9 +417,35 @@ impl AppState {
 
     /// Sets speaking state for a participant in the active voice call
     pub fn set_participant_speaking(&mut self, user_id: &str, is_speaking: bool) {
+        let channel_id = self
+            .active_voice_call
+            .as_ref()
+            .map(|call| call.channel_id.clone());
+        if let Some(channel_id) = channel_id {
+            if let Some(states) = self.voice_states_by_channel.get_mut(&channel_id) {
+                if let Some(state) = states.iter_mut().find(|state| state.user_id == user_id) {
+                    state.is_speaking = is_speaking;
+                }
+            }
+        }
         if let Some(ref mut call) = self.active_voice_call {
             if let Some(p) = call.participants.iter_mut().find(|p| p.id == user_id) {
                 p.is_speaking = is_speaking;
+            } else if is_speaking {
+                // Opcode 5 pode chegar antes do VOICE_STATE_UPDATE. Guarda o
+                // participante real pelo ID até nome/avatar chegarem.
+                call.participants.push(VoiceParticipantState {
+                    id: user_id.to_string(),
+                    name: String::new(),
+                    avatar_text: String::new(),
+                    avatar_url: None,
+                    is_speaking: true,
+                    is_muted: false,
+                    is_deafened: false,
+                    is_camera_on: false,
+                    is_screen_sharing: false,
+                    avatar_decoration_data: None,
+                });
             }
         }
     }
@@ -330,26 +472,27 @@ impl AppState {
         }
     }
 
+    /// Uma única sessão deve receber cada comando de controle. O `RootView`
+    /// anexa a sessão ativa antes de o painel aceitar interação do usuário.
+    fn voice_session_for_control(
+        &self,
+    ) -> Option<std::sync::Arc<crate::protocol::voice_session::VoiceSession>> {
+        self.active_voice_call
+            .as_ref()
+            .and_then(|call| call.voice_session.clone())
+    }
+
     /// Sets selected audio input device (microfone) and dynamically switches hardware stream
     pub fn set_input_device(&mut self, device_id: Option<String>) {
         if let Some(ref mut call) = self.active_voice_call {
             call.selected_input_device = device_id.clone();
-            if let Some(ref session) = call.voice_session {
-                let session = session.clone();
-                let dev_id = device_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = session.switch_input_device(dev_id).await {
-                        log::error!("[AppState] Falha ao trocar dispositivo de entrada: {:?}", e);
-                    }
-                });
-            }
         }
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
-            let dev_id = device_id.clone();
+        if let Some(session) = self.voice_session_for_control() {
             tokio::spawn(async move {
-                if let Some(session) = cm.active_voice_session().await {
-                    let _ = session.switch_input_device(dev_id).await;
+                if let Err(e) = session.switch_input_device(device_id).await {
+                    let warning = format!("Falha ao trocar microfone: {e:#}");
+                    log::error!("[AppState] {}", warning);
+                    session.set_call_warning(Some(warning));
                 }
             });
         }
@@ -359,24 +502,22 @@ impl AppState {
     pub fn set_output_device(&mut self, device_id: Option<String>) {
         if let Some(ref mut call) = self.active_voice_call {
             call.selected_output_device = device_id.clone();
-            if let Some(ref session) = call.voice_session {
-                let session = session.clone();
-                let dev_id = device_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = session.switch_output_device(dev_id).await {
-                        log::error!("[AppState] Falha ao trocar dispositivo de saída: {:?}", e);
-                    }
-                });
-            }
         }
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
-            let dev_id = device_id.clone();
+        if let Some(session) = self.voice_session_for_control() {
             tokio::spawn(async move {
-                if let Some(session) = cm.active_voice_session().await {
-                    let _ = session.switch_output_device(dev_id).await;
+                if let Err(e) = session.switch_output_device(device_id).await {
+                    let warning = format!("Falha ao trocar saída de áudio: {e:#}");
+                    log::error!("[AppState] {}", warning);
+                    session.set_call_warning(Some(warning));
                 }
             });
+        }
+    }
+
+    /// Guarda a câmera escolhida sem afirmar que há transmissão de vídeo.
+    pub fn set_camera_device(&mut self, device_id: Option<String>) {
+        if let Some(ref mut call) = self.active_voice_call {
+            call.selected_camera_device = device_id;
         }
     }
 
@@ -419,18 +560,13 @@ impl AppState {
             if let Some(p) = call.participants.iter_mut().find(|p| p.id == self.current_user.id) {
                 p.is_muted = is_muted;
             }
-            if let Some(ref session) = call.voice_session {
-                let session = session.clone();
-                tokio::spawn(async move {
-                    let _ = session.set_muted(is_muted).await;
-                });
-            }
         }
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
+        if let Some(session) = self.voice_session_for_control() {
             tokio::spawn(async move {
-                if let Some(session) = cm.active_voice_session().await {
-                    let _ = session.set_muted(is_muted).await;
+                if let Err(e) = session.set_muted(is_muted).await {
+                    let warning = format!("Falha ao sincronizar microfone com o Discord: {e:#}");
+                    log::error!("[AppState] {}", warning);
+                    session.set_call_warning(Some(warning));
                 }
             });
         }
@@ -454,18 +590,23 @@ impl AppState {
                 p.is_deafened = is_deafened;
                 p.is_muted = is_muted;
             }
-            if let Some(ref session) = call.voice_session {
-                let session = session.clone();
-                tokio::spawn(async move {
-                    let _ = session.set_deafened(is_deafened).await;
-                });
-            }
         }
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
+        if let Some(session) = self.voice_session_for_control() {
             tokio::spawn(async move {
-                if let Some(session) = cm.active_voice_session().await {
-                    let _ = session.set_deafened(is_deafened).await;
+                // VoiceSession::set_deafened usa o self_mute interno para o
+                // Opcode 4. Sincronize o mute antes de ativar o deafen.
+                let result = if is_deafened {
+                    match session.set_muted(true).await {
+                        Ok(()) => session.set_deafened(true).await,
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    session.set_deafened(false).await
+                };
+                if let Err(e) = result {
+                    let warning = format!("Falha ao sincronizar ensurdecimento com o Discord: {e:#}");
+                    log::error!("[AppState] {}", warning);
+                    session.set_call_warning(Some(warning));
                 }
             });
         }
@@ -487,7 +628,7 @@ impl AppState {
             return (
                 self.current_user.display_name.clone(),
                 self.current_user.avatar_url.clone(),
-                None,
+                self.current_user.avatar_decoration_data.clone(),
             );
         }
 
@@ -510,13 +651,17 @@ impl AppState {
                         resolved_name = Some(dm.name.clone());
                     }
                 }
-                if resolved_avatar.is_none() {
+                if resolved_avatar.is_none() && !dm.is_group_dm {
                     resolved_avatar = dm.icon_url.clone();
                 }
-                if resolved_dec.is_none() {
+                if resolved_dec.is_none() && idx == 0 {
                     resolved_dec = dm.avatar_decoration_data.clone();
                 }
-            } else if !dm.is_group_dm && resolved_name.is_none() && !dm.name.is_empty() {
+            } else if !dm.is_group_dm
+                && dm.recipient_ids.is_empty()
+                && resolved_name.is_none()
+                && !dm.name.is_empty()
+            {
                 // Em DM individual direta, o nome e ícone do canal correspondem ao outro participante
                 resolved_name = Some(dm.name.clone());
                 if resolved_avatar.is_none() {
@@ -531,8 +676,9 @@ impl AppState {
         // 4. Procura em qualquer outro canal de DM
         if resolved_name.is_none() || resolved_avatar.is_none() {
             if let Some(dm) = self.dm_channels.iter().find(|d| d.recipient_ids.contains(&user_id.to_string())) {
+                let recipient_idx = dm.recipient_ids.iter().position(|r| r == user_id);
                 if resolved_name.is_none() {
-                    if let Some(idx) = dm.recipient_ids.iter().position(|r| r == user_id) {
+                    if let Some(idx) = recipient_idx {
                         if let Some(name) = dm.recipient_names.get(idx) {
                             resolved_name = Some(name.clone());
                         } else if !dm.name.is_empty() && !dm.is_group_dm {
@@ -540,10 +686,10 @@ impl AppState {
                         }
                     }
                 }
-                if resolved_avatar.is_none() {
+                if resolved_avatar.is_none() && !dm.is_group_dm {
                     resolved_avatar = dm.icon_url.clone();
                 }
-                if resolved_dec.is_none() {
+                if resolved_dec.is_none() && recipient_idx == Some(0) {
                     resolved_dec = dm.avatar_decoration_data.clone();
                 }
             }
@@ -644,6 +790,151 @@ mod tests {
         assert_ne!(name, "Usuário");
         assert!(avatar.is_none());
         assert!(dec.is_none());
+    }
+
+    #[test]
+    fn test_voice_state_move_to_another_channel_removes_participant() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.connect_voice("200000000000000001", "Voz", "Guild");
+
+        state.update_voice_state(
+            VoiceState::new("100000000000000002", "session-2")
+                .with_channel_id("200000000000000001")
+                .with_user_name("Participante sintético"),
+        );
+        assert!(state.active_voice_call.as_ref().unwrap().participants.iter().any(|p| {
+            p.id == "100000000000000002"
+        }));
+
+        state.update_voice_state(
+            VoiceState::new("100000000000000002", "session-2")
+                .with_channel_id("200000000000000002")
+                .with_user_name("Participante sintético"),
+        );
+        assert!(!state.active_voice_call.as_ref().unwrap().participants.iter().any(|p| {
+            p.id == "100000000000000002"
+        }));
+    }
+
+    #[test]
+    fn test_speaking_before_voice_state_is_not_lost() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.connect_voice("200000000000000001", "Voz", "Guild");
+
+        state.set_participant_speaking("100000000000000002", true);
+        state.update_voice_state(
+            VoiceState::new("100000000000000002", "session-2")
+                .with_channel_id("200000000000000001")
+                .with_user_name("Participante sintético"),
+        );
+
+        let call = state.active_voice_call.as_ref().unwrap();
+        let participant = call.participants.iter().find(|p| p.id == "100000000000000002").unwrap();
+        assert!(participant.is_speaking);
+    }
+
+    #[test]
+    fn test_voice_state_stream_and_mute_are_reflected() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.connect_voice("200000000000000001", "Voz", "Guild");
+
+        let mut remote = VoiceState::new("100000000000000002", "session-2")
+            .with_channel_id("200000000000000001")
+            .with_user_name("Participante sintético")
+            .with_self_stream(true)
+            .with_mute(true);
+        remote.self_video = true;
+        state.update_voice_state(remote);
+
+        let call = state.active_voice_call.as_ref().unwrap();
+        let participant = call.participants.iter().find(|p| p.id == "100000000000000002").unwrap();
+        assert!(participant.is_screen_sharing);
+        assert!(participant.is_camera_on);
+        assert!(participant.is_muted);
+        assert_eq!(call.focus_user_id.as_deref(), Some("100000000000000002"));
+    }
+
+    #[test]
+    fn test_reconnect_requires_new_heartbeat_ack_and_clears_fatal_error() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.connect_voice("200000000000000001", "Voz", "Guild");
+
+        state.update_voice_session_state(VoiceSessionState::Connected, Some(35));
+        assert_eq!(state.active_voice_call.as_ref().unwrap().ping_ms, Some(35));
+        state.update_voice_session_state(VoiceSessionState::Reconnecting, Some(35));
+        assert_eq!(state.active_voice_call.as_ref().unwrap().ping_ms, None);
+        state.update_voice_session_state(VoiceSessionState::Connected, Some(35));
+        assert_eq!(state.active_voice_call.as_ref().unwrap().ping_ms, None);
+        state.update_voice_session_state(VoiceSessionState::Connected, Some(42));
+        assert_eq!(state.active_voice_call.as_ref().unwrap().ping_ms, Some(42));
+
+        state.set_call_fatal_error("erro sintético".into());
+        state.update_voice_session_state(VoiceSessionState::Connected, Some(42));
+        assert_eq!(state.active_voice_call.as_ref().unwrap().fatal_error, None);
+    }
+
+    #[test]
+    fn test_current_user_avatar_decoration_is_resolved() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.current_user.avatar_decoration_data =
+            Some(crate::domain::user::AvatarDecorationData::new("synthetic_decoration"));
+
+        let (_, _, decoration) = state.resolve_participant_info(
+            &state.current_user.id,
+            None,
+            None,
+            None,
+            "200000000000000001",
+        );
+        assert_eq!(decoration, state.current_user.avatar_decoration_data);
+    }
+
+    #[test]
+    fn test_gateway_echo_syncs_current_user_mute_and_deafen() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.connect_voice("200000000000000001", "Voz", "Guild");
+
+        let mut own_state = VoiceState::new("100000000000000001", "session-local")
+            .with_channel_id("200000000000000001")
+            .with_user_name("Usuário sintético");
+        own_state.self_mute = true;
+        own_state.self_deaf = true;
+        state.update_voice_state(own_state);
+
+        assert!(state.current_user.is_muted);
+        assert!(state.current_user.is_deafened);
+        let call = state.active_voice_call.as_ref().unwrap();
+        assert!(call.is_muted);
+        assert!(call.is_deafened);
+        let participant = call
+            .participants
+            .iter()
+            .find(|participant| participant.id == state.current_user.id)
+            .unwrap();
+        assert!(participant.is_muted);
+        assert!(participant.is_deafened);
+    }
+
+    #[test]
+    fn test_camera_selection_does_not_fake_broadcast_state() {
+        let mut state = AppState::default();
+        state.current_user.id = "100000000000000001".into();
+        state.connect_voice("200000000000000001", "Voz", "Guild");
+
+        state.set_camera_device(Some("/dev/video-synthetic".into()));
+        assert_eq!(
+            state.active_voice_call.as_ref().unwrap().selected_camera_device.as_deref(),
+            Some("/dev/video-synthetic")
+        );
+        assert!(!state.active_voice_call.as_ref().unwrap().is_camera_on);
+        state.toggle_camera();
+        assert!(!state.active_voice_call.as_ref().unwrap().is_camera_on);
     }
 }
 
