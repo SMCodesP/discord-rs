@@ -44,7 +44,7 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Setup OpenCode Auth (if secret provided)
@@ -88,9 +88,10 @@ jobs:
             (
               cd "$WT"
               export XDG_CONFIG_HOME="/tmp/swarm-xdg-${i}"
-              mkdir -p "$XDG_CONFIG_HOME"
+              mkdir -p "$XDG_CONFIG_HOME/opencode"
+              printf '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.json"
               echo "=== [$TID] Starting opencode ($MODEL) in $WT ==="
-              opencode run -m "$MODEL" "$PROMPT"
+              opencode run -m "$MODEL" "Voce esta em uma VM Linux headless do GitHub Actions SEM navegador/Chrome. NAO tente ler ~/.config ou abrir Chrome; use apenas os arquivos do repositorio atual. $PROMPT"
             ) > "/tmp/swarm-logs/${i}.log" 2>&1 &
             PIDS+=($!)
           done
