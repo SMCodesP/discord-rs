@@ -24,12 +24,20 @@ pub struct GuildSubscription {
     pub channels: HashMap<String, Vec<[usize; 2]>>,
 }
 
-/// Coordenador de Lazy Guilds gerenciando o estado de subscrições ativas
+#[derive(Debug, Default)]
+struct CoordinatorState {
+    active_guild_id: Option<String>,
+    active_channel_id: Option<String>,
+    channel_ranges: HashMap<String, Vec<[usize; 2]>>,
+    generation: u64,
+}
+
+/// Coordenador de Lazy Guilds gerenciando o estado de subscrições ativas.
+/// Todas as transições usam um único lock para evitar guilda/canal de gerações
+/// diferentes aparecerem combinados.
 #[derive(Debug, Clone)]
 pub struct LazyGuildCoordinator {
-    active_guild_id: Arc<RwLock<Option<String>>>,
-    active_channel_id: Arc<RwLock<Option<String>>>,
-    channel_ranges: Arc<RwLock<HashMap<String, Vec<[usize; 2]>>>>,
+    state: Arc<RwLock<CoordinatorState>>,
 }
 
 impl Default for LazyGuildCoordinator {
@@ -48,86 +56,149 @@ impl LazyGuildCoordinator {
 
     pub fn new() -> Self {
         Self {
-            active_guild_id: Arc::new(RwLock::new(None)),
-            active_channel_id: Arc::new(RwLock::new(None)),
-            channel_ranges: Arc::new(RwLock::new(HashMap::new())),
+            state: Arc::new(RwLock::new(CoordinatorState::default())),
         }
     }
 
-    /// Retorna as faixas ativas para um canal específico
+    /// Retorna as faixas ativas para um canal específico.
     pub async fn active_ranges_for_channel(&self, channel_id: &str) -> Vec<[usize; 2]> {
-        let map = self.channel_ranges.read().await;
-        map.get(channel_id).cloned().unwrap_or_else(|| vec![[0, 99]])
+        let state = self.state.read().await;
+        state
+            .channel_ranges
+            .get(channel_id)
+            .cloned()
+            .unwrap_or_else(|| vec![[0, 99]])
     }
 
-    /// Reinicia as faixas para um canal (ex.: troca de canal)
+    /// Reinicia as faixas para um canal (ex.: troca de canal).
     pub async fn reset_channel_ranges(&self, channel_id: &str) {
-        let mut map = self.channel_ranges.write().await;
-        map.insert(channel_id.to_string(), vec![[0, 99]]);
+        let mut state = self.state.write().await;
+        if state.active_channel_id.as_deref() == Some(channel_id)
+            || state.channel_ranges.contains_key(channel_id)
+        {
+            state
+                .channel_ranges
+                .insert(channel_id.to_string(), vec![[0, 99]]);
+            state.generation = state.generation.wrapping_add(1);
+        }
     }
 
-    /// Limpa o estado do coordenador (ex.: desconexão ou logout)
+    /// Limpa o estado do coordenador (ex.: desconexão ou logout).
     pub async fn clear(&self) {
-        *self.active_guild_id.write().await = None;
-        *self.active_channel_id.write().await = None;
-        self.channel_ranges.write().await.clear();
+        let previous_generation = {
+            let mut state = self.state.write().await;
+            let generation = state.generation.wrapping_add(1);
+            *state = CoordinatorState {
+                generation,
+                ..CoordinatorState::default()
+            };
+            generation
+        };
+        // Evita que a geração volte a zero após wrap e confunda resultados antigos.
+        if previous_generation == 0 {
+            let mut state = self.state.write().await;
+            state.generation = 1;
+        }
+        clear_role_caches();
         clear_op8_requested();
     }
 
-    /// Retorna o ID da guilda atualmente ativa
+    /// Retorna o ID da guilda atualmente ativa.
     pub async fn active_guild_id(&self) -> Option<String> {
-        self.active_guild_id.read().await.clone()
+        self.state.read().await.active_guild_id.clone()
     }
 
-    /// Retorna o ID do canal atualmente ativo
+    /// Retorna o ID do canal atualmente ativo.
     pub async fn active_channel_id(&self) -> Option<String> {
-        self.active_channel_id.read().await.clone()
+        self.state.read().await.active_channel_id.clone()
     }
 
-    /// Alterna o foco para um novo servidor e canal inicial, gerando o payload Op 14
+    /// Alterna o foco para um novo servidor e canal inicial, gerando o payload Op 14.
     pub async fn focus_guild_and_channel(
         &self,
         guild_id: &str,
         channel_id: &str,
     ) -> serde_json::Value {
-        {
-            let mut g = self.active_guild_id.write().await;
-            *g = Some(guild_id.to_string());
-        }
-        {
-            let mut c = self.active_channel_id.write().await;
-            *c = Some(channel_id.to_string());
-        }
-
-        // Padrão oficial: primeiros 100 membros no topo do viewport `[[0, 99]]`
         let default_range = vec![[0, 99]];
-        {
-            let mut ranges = self.channel_ranges.write().await;
-            ranges.clear();
-            ranges.insert(channel_id.to_string(), default_range.clone());
-        }
+        let mut state = self.state.write().await;
+        state.active_guild_id = Some(guild_id.to_string());
+        state.active_channel_id = Some(channel_id.to_string());
+        state.channel_ranges.clear();
+        state
+            .channel_ranges
+            .insert(channel_id.to_string(), default_range.clone());
+        state.generation = state.generation.wrapping_add(1);
 
-        self.generate_opcode_14_payload(guild_id, channel_id, default_range)
+        Self::generate_opcode_14_payload(guild_id, channel_id, default_range)
     }
 
-    /// Atualiza as faixas de membros visíveis (por exemplo durante scroll na sidebar)
+    /// Atualiza as faixas somente se guilda/canal ainda forem os ativos.
+    /// `None` significa que o resultado está obsoleto e não deve ser enviado.
+    pub async fn try_update_viewport_ranges(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+    ) -> Option<serde_json::Value> {
+        let mut state = self.state.write().await;
+        if state.active_guild_id.as_deref() != Some(guild_id)
+            || state.active_channel_id.as_deref() != Some(channel_id)
+        {
+            return None;
+        }
+        state
+            .channel_ranges
+            .insert(channel_id.to_string(), ranges.clone());
+        state.generation = state.generation.wrapping_add(1);
+        Some(Self::generate_opcode_14_payload(
+            guild_id, channel_id, ranges,
+        ))
+    }
+
+    /// Atualiza e envia sob o mesmo lock, garantindo que um foco novo não seja
+    /// seguido por um Opcode 14 antigo já agendado.
+    pub async fn try_update_viewport_ranges_and_send<F, Fut>(
+        &self,
+        guild_id: &str,
+        channel_id: &str,
+        ranges: Vec<[usize; 2]>,
+        send: F,
+    ) -> Option<anyhow::Result<()>>
+    where
+        F: FnOnce(Arc<serde_json::Value>) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + 'static,
+    {
+        let mut state = self.state.write().await;
+        if state.active_guild_id.as_deref() != Some(guild_id)
+            || state.active_channel_id.as_deref() != Some(channel_id)
+        {
+            return None;
+        }
+        state
+            .channel_ranges
+            .insert(channel_id.to_string(), ranges.clone());
+        state.generation = state.generation.wrapping_add(1);
+        let payload = Arc::new(Self::generate_opcode_14_payload(
+            guild_id, channel_id, ranges,
+        ));
+        Some(send(payload).await)
+    }
+
+    /// Compatibilidade com testes/callers legados. Novos envios devem usar
+    /// `try_update_viewport_ranges` para descartar gerações obsoletas.
     pub async fn update_viewport_ranges(
         &self,
         guild_id: &str,
         channel_id: &str,
         ranges: Vec<[usize; 2]>,
     ) -> serde_json::Value {
-        {
-            let mut map = self.channel_ranges.write().await;
-            map.insert(channel_id.to_string(), ranges.clone());
-        }
-
-        self.generate_opcode_14_payload(guild_id, channel_id, ranges)
+        self.try_update_viewport_ranges(guild_id, channel_id, ranges)
+            .await
+            .unwrap_or_else(|| json!({}))
     }
 
-    /// Constrói a mensagem WebSocket JSON Op 14 formatada exatamente conforme o protocolo Discord
+    /// Constrói a mensagem WebSocket JSON Op 14 formatada conforme o protocolo Discord.
     fn generate_opcode_14_payload(
-        &self,
         guild_id: &str,
         channel_id: &str,
         ranges: Vec<[usize; 2]>,
@@ -265,132 +336,91 @@ pub fn resolve_member_role_group(member_roles: &[String], guild_roles: &[Role]) 
     matched.first().map(|r| r.name.clone())
 }
 
-/// Parses a `GUILD_MEMBER_LIST_UPDATE` Gateway event from raw JSON
+/// Parses a `GUILD_MEMBER_LIST_UPDATE` Gateway event from raw JSON.
+/// Eventos com índice/range inválido são rejeitados como um todo.
 pub fn parse_guild_member_list_update(val: &serde_json::Value) -> Option<GuildMemberListUpdate> {
-    let d = val.get("d").unwrap_or(val);
-    let guild_id = d.get("guild_id")?.as_str()?.to_string();
-    let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("everyone").to_string();
-    let member_count = d.get("member_count").and_then(|v| v.as_u64()).map(|v| v as usize);
-    let online_count = d.get("online_count").and_then(|v| v.as_u64()).map(|v| v as usize);
+    fn parse_range(value: Option<&serde_json::Value>) -> Option<[usize; 2]> {
+        let values = value?.as_array()?;
+        if values.len() < 2 {
+            return None;
+        }
+        let start = usize::try_from(values[0].as_u64()?).ok()?;
+        let end = usize::try_from(values[1].as_u64()?).ok()?;
+        (start <= end).then_some([start, end])
+    }
+
+    fn parse_index(value: Option<&serde_json::Value>) -> Option<usize> {
+        usize::try_from(value?.as_u64()?).ok()
+    }
+
+    fn parse_item(value: &serde_json::Value) -> Option<MemberListItem> {
+        if let Some(group) = value.get("group") {
+            let id = group.get("id")?.as_str()?.to_string();
+            let count = usize::try_from(group.get("count")?.as_u64()?).ok()?;
+            return Some(MemberListItem::Group(MemberListGroup { id, count }));
+        }
+        let member = parse_member_obj(value.get("member")?)?;
+        Some(MemberListItem::Member(Box::new(member)))
+    }
+
+    let data = val.get("d").unwrap_or(val);
+    let guild_id = data.get("guild_id")?.as_str()?.to_string();
+    let id = data
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("everyone")
+        .to_string();
+    let member_count = data
+        .get("member_count")
+        .and_then(|value| value.as_u64())
+        .and_then(|count| usize::try_from(count).ok());
+    let online_count = data
+        .get("online_count")
+        .and_then(|value| value.as_u64())
+        .and_then(|count| usize::try_from(count).ok());
 
     let mut groups = Vec::new();
-    if let Some(groups_arr) = d.get("groups").and_then(|v| v.as_array()) {
-        for g in groups_arr {
-            if let (Some(gid), Some(cnt)) = (
-                g.get("id").and_then(|v| v.as_str()),
-                g.get("count").and_then(|v| v.as_u64()),
-            ) {
-                groups.push(MemberListGroup {
-                    id: gid.to_string(),
-                    count: cnt as usize,
-                });
-            }
+    if let Some(raw_groups) = data.get("groups").and_then(|value| value.as_array()) {
+        for group in raw_groups {
+            let id = group.get("id")?.as_str()?.to_string();
+            let count = usize::try_from(group.get("count")?.as_u64()?).ok()?;
+            groups.push(MemberListGroup { id, count });
         }
     }
 
-    let mut ops = Vec::new();
-    if let Some(ops_arr) = d.get("ops").and_then(|v| v.as_array()) {
-        for op_val in ops_arr {
-            let op_type = op_val.get("op").and_then(|v| v.as_str()).unwrap_or("");
-            match op_type {
-                "SYNC" => {
-                    let range_arr = op_val.get("range").and_then(|v| v.as_array());
-                    let range = if let Some(r) = range_arr {
-                        if r.len() >= 2 {
-                            [
-                                r[0].as_u64().unwrap_or(0) as usize,
-                                r[1].as_u64().unwrap_or(99) as usize,
-                            ]
-                        } else {
-                            [0, 99]
-                        }
-                    } else {
-                        [0, 99]
-                    };
-
-                    let mut items = Vec::new();
-                    if let Some(items_arr) = op_val.get("items").and_then(|v| v.as_array()) {
-                        for it in items_arr {
-                            if let Some(group_obj) = it.get("group") {
-                                if let (Some(gid), Some(cnt)) = (
-                                    group_obj.get("id").and_then(|v| v.as_str()),
-                                    group_obj.get("count").and_then(|v| v.as_u64()),
-                                ) {
-                                    items.push(MemberListItem::Group(MemberListGroup {
-                                        id: gid.to_string(),
-                                        count: cnt as usize,
-                                    }));
-                                }
-                            } else if let Some(member_obj) = it.get("member") {
-                                if let Some(parsed_m) = parse_member_obj(member_obj) {
-                                    items.push(MemberListItem::Member(Box::new(parsed_m)));
-                                }
-                            }
-                        }
-                    }
-                    ops.push(MemberListOp::Sync { range, items });
+    let raw_ops = data.get("ops")?.as_array()?;
+    let mut ops = Vec::with_capacity(raw_ops.len());
+    for operation in raw_ops {
+        let op_type = operation.get("op")?.as_str()?;
+        match op_type {
+            "SYNC" => {
+                let range = parse_range(operation.get("range"))?;
+                let raw_items = operation.get("items")?.as_array()?;
+                let mut items = Vec::with_capacity(raw_items.len());
+                for item in raw_items {
+                    items.push(parse_item(item)?);
                 }
-                "INSERT" => {
-                    let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    if let Some(item_val) = op_val.get("item") {
-                        if let Some(group_obj) = item_val.get("group") {
-                            if let (Some(gid), Some(cnt)) = (
-                                group_obj.get("id").and_then(|v| v.as_str()),
-                                group_obj.get("count").and_then(|v| v.as_u64()),
-                            ) {
-                                ops.push(MemberListOp::Insert {
-                                    index,
-                                    item: MemberListItem::Group(MemberListGroup {
-                                        id: gid.to_string(),
-                                        count: cnt as usize,
-                                    }),
-                                });
-                            }
-                        } else if let Some(member_obj) = item_val.get("member") {
-                            if let Some(parsed_m) = parse_member_obj(member_obj) {
-                                ops.push(MemberListOp::Insert {
-                                    index,
-                                    item: MemberListItem::Member(Box::new(parsed_m)),
-                                });
-                            }
-                        }
-                    }
-                }
-                "UPDATE" => {
-                    let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    if let Some(item_val) = op_val.get("item") {
-                        if let Some(member_obj) = item_val.get("member") {
-                            if let Some(parsed_m) = parse_member_obj(member_obj) {
-                                ops.push(MemberListOp::Update {
-                                    index,
-                                    item: MemberListItem::Member(Box::new(parsed_m)),
-                                });
-                            }
-                        }
-                    }
-                }
-                "DELETE" => {
-                    let index = op_val.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    ops.push(MemberListOp::Delete { index });
-                }
-                "INVALIDATE" => {
-                    let range_arr = op_val.get("range").and_then(|v| v.as_array());
-                    let range = if let Some(r) = range_arr {
-                        if r.len() >= 2 {
-                            [
-                                r[0].as_u64().unwrap_or(0) as usize,
-                                r[1].as_u64().unwrap_or(99) as usize,
-                            ]
-                        } else {
-                            [0, 99]
-                        }
-                    } else {
-                        [0, 99]
-                    };
-                    ops.push(MemberListOp::Invalidate { range });
-                }
-                _ => {}
+                ops.push(MemberListOp::Sync { range, items });
             }
+            "INSERT" => {
+                let index = parse_index(operation.get("index"))?;
+                let item = parse_item(operation.get("item")?)?;
+                ops.push(MemberListOp::Insert { index, item });
+            }
+            "UPDATE" => {
+                let index = parse_index(operation.get("index"))?;
+                let item = parse_item(operation.get("item")?)?;
+                ops.push(MemberListOp::Update { index, item });
+            }
+            "DELETE" => {
+                let index = parse_index(operation.get("index"))?;
+                ops.push(MemberListOp::Delete { index });
+            }
+            "INVALIDATE" => {
+                let range = parse_range(operation.get("range"))?;
+                ops.push(MemberListOp::Invalidate { range });
+            }
+            _ => return None,
         }
     }
 
@@ -408,13 +438,19 @@ fn parse_member_obj(val: &serde_json::Value) -> Option<MemberListMember> {
     let user = val.get("user")?;
     let id = user.get("id")?.as_str()?.to_string();
     let username = user.get("username")?.as_str()?.to_string();
-    let global_name = user.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
-    let avatar = user.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
+    let global_name = user
+        .get("global_name")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    let avatar = user
+        .get("avatar")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
     let is_bot = user.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let avatar_decoration_data = user.get("avatar_decoration_data").and_then(|v| {
-        serde_json::from_value(v.clone()).ok()
-    });
+    let avatar_decoration_data = user
+        .get("avatar_decoration_data")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let roles: Vec<String> = val
         .get("roles")
@@ -427,7 +463,11 @@ fn parse_member_obj(val: &serde_json::Value) -> Option<MemberListMember> {
         .unwrap_or_default();
 
     let presence = if let Some(p) = val.get("presence") {
-        match p.get("status").and_then(|v| v.as_str()).unwrap_or("offline") {
+        match p
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("offline")
+        {
             "online" => PresenceStatus::Online,
             "idle" => PresenceStatus::Idle,
             "dnd" => PresenceStatus::DoNotDisturb,
@@ -464,18 +504,21 @@ pub fn convert_member_to_item_state(
     guild_roles: &[Role],
 ) -> MemberItemState {
     let display = member.global_name.as_deref().unwrap_or(&member.username);
-    let avatar_text = display.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".to_string());
+    let avatar_text = display
+        .chars()
+        .next()
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string());
     let role_color = resolve_member_role_color(&member.roles, guild_roles);
-    let role_group = resolve_member_role_group(&member.roles, guild_roles)
-        .unwrap_or_else(|| {
-            if member.presence == PresenceStatus::Offline {
-                "OFFLINE".to_string()
-            } else if member.is_bot {
-                "BOTS".to_string()
-            } else {
-                "DISPONÍVEL".to_string()
-            }
-        });
+    let role_group = resolve_member_role_group(&member.roles, guild_roles).unwrap_or_else(|| {
+        if member.presence == PresenceStatus::Offline {
+            "OFFLINE".to_string()
+        } else if member.is_bot {
+            "BOTS".to_string()
+        } else {
+            "DISPONÍVEL".to_string()
+        }
+    });
 
     MemberItemState {
         id: member.id.clone(),
@@ -493,8 +536,10 @@ pub fn convert_member_to_item_state(
 use std::sync::OnceLock;
 use std::sync::RwLock as StdRwLock;
 
-static AUTHOR_ROLES_CACHE: OnceLock<StdRwLock<HashMap<(String, String), Vec<String>>>> = OnceLock::new();
-static AUTHOR_ROLE_COLOR_CACHE: OnceLock<StdRwLock<HashMap<(String, String), u32>>> = OnceLock::new();
+static AUTHOR_ROLES_CACHE: OnceLock<StdRwLock<HashMap<(String, String), Vec<String>>>> =
+    OnceLock::new();
+static AUTHOR_ROLE_COLOR_CACHE: OnceLock<StdRwLock<HashMap<(String, String), u32>>> =
+    OnceLock::new();
 static GUILD_ROLES_CACHE: OnceLock<StdRwLock<HashMap<String, Vec<Role>>>> = OnceLock::new();
 
 fn roles_cache() -> &'static StdRwLock<HashMap<(String, String), Vec<String>>> {
@@ -515,9 +560,23 @@ pub fn cache_guild_roles(guild_id: &str, roles: Vec<Role>) {
     }
 }
 
+/// Limpa todos os caches globais de roles ao trocar de conta/sessão.
+pub fn clear_role_caches() {
+    if let Ok(mut lock) = roles_cache().write() {
+        lock.clear();
+    }
+    if let Ok(mut lock) = role_color_cache().write() {
+        lock.clear();
+    }
+    if let Ok(mut lock) = guild_roles_cache().write() {
+        lock.clear();
+    }
+}
+
 pub fn get_cached_guild_roles(guild_id: &str) -> Vec<Role> {
     let lock = guild_roles_cache().read().ok();
-    lock.and_then(|l| l.get(guild_id).cloned()).unwrap_or_default()
+    lock.and_then(|l| l.get(guild_id).cloned())
+        .unwrap_or_default()
 }
 
 pub fn cache_author_roles(guild_id: &str, user_id: &str, roles: Vec<String>) {
@@ -528,7 +587,8 @@ pub fn cache_author_roles(guild_id: &str, user_id: &str, roles: Vec<String>) {
 
 pub fn get_cached_author_roles(guild_id: &str, user_id: &str) -> Option<Vec<String>> {
     let lock = roles_cache().read().ok()?;
-    lock.get(&(guild_id.to_string(), user_id.to_string())).cloned()
+    lock.get(&(guild_id.to_string(), user_id.to_string()))
+        .cloned()
 }
 
 pub fn cache_author_role_color(guild_id: &str, user_id: &str, color: u32) {
@@ -539,18 +599,23 @@ pub fn cache_author_role_color(guild_id: &str, user_id: &str, color: u32) {
 
 pub fn get_cached_author_role_color(guild_id: &str, user_id: &str) -> Option<u32> {
     let lock = role_color_cache().read().ok()?;
-    lock.get(&(guild_id.to_string(), user_id.to_string())).copied()
+    lock.get(&(guild_id.to_string(), user_id.to_string()))
+        .copied()
 }
 
-static REQUESTED_OP8_MEMBERS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<(String, String)>>> = std::sync::OnceLock::new();
+static REQUESTED_OP8_MEMBERS: std::sync::OnceLock<
+    std::sync::RwLock<std::collections::HashSet<(String, String)>>,
+> = std::sync::OnceLock::new();
 
-fn requested_op8_cache() -> &'static std::sync::RwLock<std::collections::HashSet<(String, String)>> {
+fn requested_op8_cache() -> &'static std::sync::RwLock<std::collections::HashSet<(String, String)>>
+{
     REQUESTED_OP8_MEMBERS.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()))
 }
 
 pub fn is_op8_requested(guild_id: &str, user_id: &str) -> bool {
     let lock = requested_op8_cache().read().ok();
-    lock.map(|l| l.contains(&(guild_id.to_string(), user_id.to_string()))).unwrap_or(false)
+    lock.map(|l| l.contains(&(guild_id.to_string(), user_id.to_string())))
+        .unwrap_or(false)
 }
 
 pub fn mark_op8_requested(guild_id: &str, user_id: &str) {
@@ -563,6 +628,27 @@ pub fn mark_op8_batch_requested(guild_id: &str, user_ids: &[String]) {
     if let Ok(mut lock) = requested_op8_cache().write() {
         for uid in user_ids {
             lock.insert((guild_id.to_string(), uid.clone()));
+        }
+    }
+}
+
+/// Reserva atomicamente apenas usuários ainda não pedidos/recebidos.
+/// Em caso de falha de envio, chame `release_op8_claim` para permitir retry.
+pub fn claim_missing_op8_users(guild_id: &str, user_ids: &[String]) -> Vec<String> {
+    let Ok(mut lock) = requested_op8_cache().write() else {
+        return Vec::new();
+    };
+    user_ids
+        .iter()
+        .filter(|user_id| lock.insert((guild_id.to_string(), (*user_id).clone())))
+        .cloned()
+        .collect()
+}
+
+pub fn release_op8_claim(guild_id: &str, user_ids: &[String]) {
+    if let Ok(mut lock) = requested_op8_cache().write() {
+        for user_id in user_ids {
+            lock.remove(&(guild_id.to_string(), user_id.clone()));
         }
     }
 }
@@ -639,83 +725,84 @@ pub fn calculate_ranges_for_viewport(visible_start: usize, visible_end: usize) -
     ranges
 }
 
-/// Applies parsed `GuildMemberListUpdate` operations into the active member list
+/// Applies parsed `GuildMemberListUpdate` operations into the active member list.
+/// Nunca fabrica slots "unloaded": um índice/range inválido invalida a lista
+/// para que o Gateway envie um novo SYNC.
 pub fn apply_member_list_update(
     existing_members: &mut Vec<MemberItemState>,
     update: &GuildMemberListUpdate,
     guild_roles: &[Role],
 ) {
     if update.ops.is_empty() {
-        existing_members.clear();
         return;
     }
 
-    for op in &update.ops {
-        match op {
+    for operation in &update.ops {
+        match operation {
             MemberListOp::Sync { range, items } => {
+                let [start, end] = *range;
+                let Some(end_exclusive) = end.checked_add(1) else {
+                    existing_members.clear();
+                    continue;
+                };
+                if start > end {
+                    existing_members.clear();
+                    continue;
+                }
+                let range_len = end_exclusive - start;
+                if items.len() > range_len {
+                    existing_members.clear();
+                    continue;
+                }
+                // Slots `unloaded` preservam o índice absoluto sem inventar
+                // usuários; eles são marcadores explícitos de dados ausentes.
+                if start > existing_members.len() {
+                    existing_members
+                        .extend((existing_members.len()..start).map(MemberItemState::unloaded));
+                }
+
                 let converted: Vec<MemberItemState> = items
                     .iter()
-                    .map(|it| convert_list_item_to_state(it, &update.guild_id, guild_roles))
+                    .map(|item| convert_list_item_to_state(item, &update.guild_id, guild_roles))
                     .collect();
-
-                let start = range[0];
-                // Pad any gap between current length and start with unloaded slots
-                if existing_members.len() < start {
-                    for i in existing_members.len()..start {
-                        existing_members.push(MemberItemState::unloaded(i));
-                    }
-                }
-
-                for (offset, item) in converted.into_iter().enumerate() {
-                    let idx = start + offset;
-                    if idx < existing_members.len() {
-                        existing_members[idx] = item;
-                    } else {
-                        existing_members.push(item);
-                    }
-                }
+                // Substitui integralmente o intervalo coberto, inclusive a
+                // cauda antiga quando o novo SYNC traz menos itens.
+                let replace_end = end_exclusive.min(existing_members.len()).max(start);
+                existing_members.splice(start..replace_end, converted);
             }
             MemberListOp::Insert { index, item } => {
-                let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
-                let idx = *index;
-                if idx < existing_members.len() {
-                    existing_members.insert(idx, state);
-                } else if idx == existing_members.len() {
-                    existing_members.push(state);
-                } else {
-                    for i in existing_members.len()..idx {
-                        existing_members.push(MemberItemState::unloaded(i));
-                    }
-                    existing_members.push(state);
+                if *index > existing_members.len() {
+                    existing_members.clear();
+                    continue;
                 }
+                let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
+                existing_members.insert(*index, state);
             }
             MemberListOp::Update { index, item } => {
-                let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
-                let idx = *index;
-                if idx < existing_members.len() {
-                    existing_members[idx] = state;
-                } else {
-                    for i in existing_members.len()..idx {
-                        existing_members.push(MemberItemState::unloaded(i));
-                    }
-                    existing_members.push(state);
+                if *index >= existing_members.len() {
+                    existing_members.clear();
+                    continue;
                 }
+                let state = convert_list_item_to_state(item, &update.guild_id, guild_roles);
+                existing_members[*index] = state;
             }
             MemberListOp::Delete { index } => {
-                let idx = *index;
-                if idx < existing_members.len() {
-                    existing_members.remove(idx);
+                if *index < existing_members.len() {
+                    existing_members.remove(*index);
                 }
             }
             MemberListOp::Invalidate { range } => {
-                let start = range[0];
-                let end = range[1];
-                if start == 0 && (end + 1) >= existing_members.len() {
+                let [start, end] = *range;
+                let Some(end_exclusive) = end.checked_add(1) else {
                     existing_members.clear();
-                } else if start < existing_members.len() {
-                    let end_idx = (end + 1).min(existing_members.len());
-                    existing_members.drain(start..end_idx);
+                    continue;
+                };
+                if start > end || start >= existing_members.len() {
+                    existing_members.clear();
+                    continue;
                 }
+                let end = end_exclusive.min(existing_members.len());
+                existing_members.drain(start..end);
             }
         }
     }
@@ -752,7 +839,9 @@ mod tests {
     #[test]
     fn test_resolve_member_role_color_hierarchy() {
         let roles = vec![
-            Role::new("r1", "Admin").with_color(0xe91e63).with_position(10),
+            Role::new("r1", "Admin")
+                .with_color(0xe91e63)
+                .with_position(10),
             Role::new("r2", "Mod").with_color(0x2ecc71).with_position(5),
             Role::new("r3", "Vip").with_color(0x3498db).with_position(3),
             Role::new("r0", "NoColor").with_color(0).with_position(20),
@@ -830,5 +919,126 @@ mod tests {
         } else {
             panic!("Expected Sync op");
         }
+    }
+
+    fn synthetic_member(id: &str) -> MemberListItem {
+        MemberListItem::Member(Box::new(MemberListMember {
+            id: id.to_string(),
+            username: format!("user_{id}"),
+            global_name: None,
+            avatar: None,
+            avatar_decoration_data: None,
+            roles: Vec::new(),
+            presence: PresenceStatus::Online,
+            activity: None,
+            is_bot: false,
+        }))
+    }
+
+    #[test]
+    fn test_member_list_parser_rejects_missing_or_inverted_ranges() {
+        for operation in [
+            json!({"op": "SYNC", "range": [10, 5], "items": []}),
+            json!({"op": "SYNC", "items": []}),
+            json!({"op": "DELETE"}),
+            json!({"op": "INVALIDATE", "range": [5, 4]}),
+        ] {
+            let raw = json!({"guild_id": "guild_1", "ops": [operation]});
+            assert!(parse_guild_member_list_update(&raw).is_none());
+        }
+    }
+
+    #[test]
+    fn test_sync_replaces_covered_tail_and_invalid_ranges_never_panic() {
+        let mut members: Vec<MemberItemState> = (0..10)
+            .map(|index| {
+                convert_list_item_to_state(&synthetic_member(&index.to_string()), "guild_1", &[])
+            })
+            .collect();
+        let update = GuildMemberListUpdate {
+            guild_id: "guild_1".into(),
+            id: "everyone".into(),
+            member_count: None,
+            online_count: None,
+            groups: Vec::new(),
+            ops: vec![MemberListOp::Sync {
+                range: [0, 2],
+                items: vec![synthetic_member("new")],
+            }],
+        };
+        apply_member_list_update(&mut members, &update, &[]);
+        assert_eq!(members.len(), 8);
+        assert_eq!(members[0].id, "new");
+        assert_eq!(members[1].id, "3");
+
+        let invalid = GuildMemberListUpdate {
+            guild_id: "guild_1".into(),
+            id: "everyone".into(),
+            member_count: None,
+            online_count: None,
+            groups: Vec::new(),
+            ops: vec![MemberListOp::Invalidate {
+                range: [0, usize::MAX],
+            }],
+        };
+        apply_member_list_update(&mut members, &invalid, &[]);
+        assert!(members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_transitions_are_atomic_and_stale_viewport_is_dropped() {
+        let coordinator = LazyGuildCoordinator::new();
+        let first = coordinator.clone();
+        let second = coordinator.clone();
+        tokio::join!(
+            first.focus_guild_and_channel("guild_a", "chan_a"),
+            second.focus_guild_and_channel("guild_b", "chan_b")
+        );
+
+        let guild = coordinator.active_guild_id().await.unwrap();
+        let channel = coordinator.active_channel_id().await.unwrap();
+        assert!(
+            (guild == "guild_a" && channel == "chan_a")
+                || (guild == "guild_b" && channel == "chan_b")
+        );
+        assert_eq!(
+            coordinator.active_ranges_for_channel(&channel).await,
+            vec![[0, 99]]
+        );
+        assert!(
+            coordinator
+                .try_update_viewport_ranges("guild_old", "chan_old", vec![[0, 9]])
+                .await
+                .is_none()
+        );
+
+        let mut called = false;
+        let result = coordinator
+            .try_update_viewport_ranges_and_send("guild_old", "chan_old", vec![[0, 9]], |_| {
+                called = true;
+                std::future::ready::<anyhow::Result<()>>(Ok(()))
+            })
+            .await;
+        assert!(result.is_none());
+        assert!(!called);
+    }
+
+    #[test]
+    fn test_op8_claim_is_atomic_and_release_allows_retry() {
+        clear_op8_requested();
+        let users = vec!["user_1".to_string(), "user_2".to_string()];
+        assert_eq!(claim_missing_op8_users("guild_1", &users), users);
+        assert!(claim_missing_op8_users("guild_1", &users).is_empty());
+        release_op8_claim("guild_1", &users);
+        assert_eq!(claim_missing_op8_users("guild_1", &users), users);
+        clear_op8_requested();
+    }
+
+    #[test]
+    fn test_clear_removes_role_caches_from_previous_account() {
+        cache_guild_roles("guild_1", vec![Role::new("role_1", "Role")]);
+        assert!(!get_cached_guild_roles("guild_1").is_empty());
+        clear_role_caches();
+        assert!(get_cached_guild_roles("guild_1").is_empty());
     }
 }

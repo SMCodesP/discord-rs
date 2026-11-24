@@ -12,14 +12,13 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use discord_rs::domain::{Channel, Guild, Message, User, VoiceState};
+use discord_rs::protocol::client_manager::{ClientManager, ConnectionMode};
+use discord_rs::protocol::voice_gateway::VoiceGateway;
 use discord_rs::protocol::{
     AudioBridge, AudioBridgeCommand, DiscordTransport, IdleTransport, MainSignalingChannel,
-    Relationship, TransportEvent, VoiceGatewayConfig, VoiceGatewayEvent,
-    VoiceGatewayTransport, VoiceReady, VoiceServerData, VoiceSession,
-    VoiceSessionConfig, VoiceSessionState,
+    Relationship, TransportEvent, VoiceGatewayConfig, VoiceGatewayEvent, VoiceGatewayTransport,
+    VoiceReady, VoiceServerData, VoiceSession, VoiceSessionConfig, VoiceSessionState,
 };
-use discord_rs::protocol::client_manager::ClientManager;
-use discord_rs::protocol::voice_gateway::VoiceGateway;
 
 // ============================================================================
 // Global Log Capturer for Secret Leak Assertion
@@ -112,11 +111,17 @@ impl DiscordTransport for MockTransport {
         self.idle.get_guild(guild_id).await
     }
 
-    async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<discord_rs::protocol::media_cache::DiscordEmoji>> {
+    async fn get_guild_emojis(
+        &self,
+        guild_id: &str,
+    ) -> Result<Vec<discord_rs::protocol::media_cache::DiscordEmoji>> {
         self.idle.get_guild_emojis(guild_id).await
     }
 
-    async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<discord_rs::protocol::media_cache::DiscordSticker>> {
+    async fn get_guild_stickers(
+        &self,
+        guild_id: &str,
+    ) -> Result<Vec<discord_rs::protocol::media_cache::DiscordSticker>> {
         self.idle.get_guild_stickers(guild_id).await
     }
 
@@ -149,7 +154,9 @@ impl DiscordTransport for MockTransport {
     }
 
     async fn remove_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
-        self.idle.remove_reaction(channel_id, message_id, emoji).await
+        self.idle
+            .remove_reaction(channel_id, message_id, emoji)
+            .await
     }
 
     async fn list_relationships(&self) -> Result<Vec<Relationship>> {
@@ -173,16 +180,14 @@ impl DiscordTransport for MockTransport {
         Ok(())
     }
 
-    async fn ring_call(
-        &self,
-        channel_id: &str,
-        recipients: Option<Vec<String>>,
-    ) -> Result<()> {
+    async fn ring_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
         let mut calls = self.ring_calls.lock().await;
         calls.push((channel_id.to_string(), recipients));
 
         if self.ring_should_fail.load(Ordering::SeqCst) {
-            anyhow::bail!("Discord API returned HTTP 403 Forbidden: {{\"message\": \"Missing Permissions\", \"code\": 50013}}");
+            anyhow::bail!(
+                "Discord API returned HTTP 403 Forbidden: {{\"message\": \"Missing Permissions\", \"code\": 50013}}"
+            );
         }
         Ok(())
     }
@@ -201,7 +206,10 @@ impl MainSignalingChannel for MockTransport {
         self_mute: bool,
         self_deaf: bool,
     ) -> Result<()> {
-        <Self as DiscordTransport>::send_voice_state_update(self, guild_id, channel_id, self_mute, self_deaf).await
+        <Self as DiscordTransport>::send_voice_state_update(
+            self, guild_id, channel_id, self_mute, self_deaf,
+        )
+        .await
     }
 
     fn subscribe_events(&self) -> broadcast::Receiver<TransportEvent> {
@@ -240,6 +248,56 @@ fn dummy_audio_bridge() -> AudioBridge {
 }
 
 // ============================================================================
+// TEST: Live sem hardware de áudio nunca publica Connected nem sinaliza chamada.
+// ============================================================================
+
+#[tokio::test]
+async fn test_live_without_audio_fails_before_signaling_and_ring() {
+    init_test_logger();
+    let transport = Arc::new(MockTransport::new());
+    let (manager, _events) = ClientManager::new_with_transport_with_audio_probe(
+        transport.clone(),
+        ConnectionMode::LiveDiscord("offline-test".into()),
+        Some(false),
+    );
+    let mut voice_states = manager.subscribe_voice_state();
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        manager.start_voice_session(
+            Some(900000000000000001),
+            900000000000000002,
+            900000000000000003,
+            false,
+            false,
+            Some(vec!["900000000000000004".into()]),
+        ),
+    )
+    .await
+    .expect("a checagem de hardware não deve bloquear");
+
+    assert!(result.is_err(), "Live sem áudio deve falhar");
+    let state = tokio::time::timeout(Duration::from_millis(500), voice_states.recv())
+        .await
+        .expect("estado de voz deve ser publicado")
+        .expect("receiver de estado deve permanecer aberto");
+    assert!(matches!(
+        state,
+        (
+            VoiceSessionState::Disconnected { ref reason },
+            None
+        ) if reason == "Áudio indisponível: é necessário um dispositivo de entrada e um de saída."
+    ));
+    assert!(
+        voice_states.try_recv().is_err(),
+        "nenhum Connected deve ser publicado"
+    );
+    assert!(manager.active_voice_session().await.is_none());
+    assert!(transport.voice_state_sent.lock().await.is_empty());
+    assert!(transport.ring_calls.lock().await.is_empty());
+}
+
+// ============================================================================
 // TEST 1: Toque só é chamado DEPOIS da confirmação de entrada (VoiceStateConfirmed)
 //         Se a confirmação não vier, o toque NÃO é chamado.
 // ============================================================================
@@ -260,22 +318,36 @@ async fn test_ring_called_only_after_voice_state_confirmed() {
         }
         #[async_trait]
         impl VoiceGatewayTransport for HangingGateway {
-            async fn connect(&self) -> Result<()> { Ok(()) }
+            async fn connect(&self) -> Result<()> {
+                Ok(())
+            }
             async fn wait_for_ready(&self, _timeout: Duration) -> Result<VoiceReady> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 anyhow::bail!("Timeout")
             }
-            async fn select_protocol(&self, _: &str, _: u16, _: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                _: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 anyhow::bail!("not reached")
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 self.event_tx.subscribe()
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
-        Arc::new(HangingGateway { event_tx: gw_tx.clone() })
-    }))).await;
+        Arc::new(HangingGateway {
+            event_tx: gw_tx.clone(),
+        })
+    })))
+    .await;
 
     let target_channel_id = 987654321u64;
     let target_user_id = 123456789u64;
@@ -412,23 +484,35 @@ async fn test_ring_error_does_not_fail_session() {
         struct HangingGateway;
         #[async_trait]
         impl VoiceGatewayTransport for HangingGateway {
-            async fn connect(&self) -> Result<()> { Ok(()) }
+            async fn connect(&self) -> Result<()> {
+                Ok(())
+            }
             async fn wait_for_ready(&self, _timeout: Duration) -> Result<VoiceReady> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 anyhow::bail!("Timeout")
             }
-            async fn select_protocol(&self, _: &str, _: u16, _: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                _: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 anyhow::bail!("not reached")
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 let (_, rx) = broadcast::channel(1);
                 rx
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
         Arc::new(HangingGateway)
-    }))).await;
+    })))
+    .await;
 
     let target_channel_id = 777888999u64;
     let target_user_id = 111222333u64;
@@ -520,20 +604,31 @@ async fn test_second_session_does_not_use_first_session_voice_server() {
         struct DummyGw;
         #[async_trait]
         impl VoiceGatewayTransport for DummyGw {
-            async fn connect(&self) -> Result<()> { Ok(()) }
+            async fn connect(&self) -> Result<()> {
+                Ok(())
+            }
             async fn wait_for_ready(&self, _: Duration) -> Result<VoiceReady> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 anyhow::bail!("timeout")
             }
-            async fn select_protocol(&self, _: &str, _: u16, _: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                _: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 anyhow::bail!("timeout")
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 let (_, rx) = broadcast::channel(1);
                 rx
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
         Arc::new(DummyGw)
     });
@@ -551,7 +646,9 @@ async fn test_second_session_does_not_use_first_session_voice_server() {
     // Agora despacha os dados reais para a sessão 1
     let mut vs1 = VoiceState::new("999999", "session-id-1");
     vs1.channel_id = Some("111111".to_string());
-    let _ = transport.event_tx.send(TransportEvent::VoiceStateUpdate(vs1));
+    let _ = transport
+        .event_tx
+        .send(TransportEvent::VoiceStateUpdate(vs1));
 
     let _ = transport.event_tx.send(TransportEvent::VoiceServerUpdate {
         token: "fresh-token-session1".to_string(),
@@ -593,20 +690,31 @@ async fn test_second_session_does_not_use_first_session_voice_server() {
         struct DummyGw;
         #[async_trait]
         impl VoiceGatewayTransport for DummyGw {
-            async fn connect(&self) -> Result<()> { Ok(()) }
+            async fn connect(&self) -> Result<()> {
+                Ok(())
+            }
             async fn wait_for_ready(&self, _: Duration) -> Result<VoiceReady> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 anyhow::bail!("timeout")
             }
-            async fn select_protocol(&self, _: &str, _: u16, _: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                _: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 anyhow::bail!("timeout")
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 let (_, rx) = broadcast::channel(1);
                 rx
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
         Arc::new(DummyGw)
     });
@@ -636,7 +744,9 @@ async fn test_second_session_does_not_use_first_session_voice_server() {
     // Agora despacha os dados exclusivos da Sessão 2
     let mut vs2 = VoiceState::new("999999", "session-id-2");
     vs2.channel_id = Some("222222".to_string());
-    let _ = transport.event_tx.send(TransportEvent::VoiceStateUpdate(vs2));
+    let _ = transport
+        .event_tx
+        .send(TransportEvent::VoiceStateUpdate(vs2));
 
     let _ = transport.event_tx.send(TransportEvent::VoiceServerUpdate {
         token: "fresh-token-session2".to_string(),
@@ -693,7 +803,10 @@ async fn test_voice_gateway_close_code_before_ready_returns_under_1_second() {
     );
 
     // O erro deve conter o código 4004 e a descrição
-    assert!(result.is_err(), "wait_for_ready deve retornar erro ao fechar");
+    assert!(
+        result.is_err(),
+        "wait_for_ready deve retornar erro ao fechar"
+    );
     let err_str = result.err().unwrap().to_string();
     assert!(
         err_str.contains("4004"),
@@ -728,7 +841,10 @@ async fn test_voice_gateway_already_closed_returns_immediately() {
     let result = gw.wait_for_ready(Duration::from_secs(10)).await;
     let elapsed = start.elapsed();
 
-    assert!(elapsed < Duration::from_millis(100), "Deve retornar instantaneamente");
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "Deve retornar instantaneamente"
+    );
     assert!(result.is_err());
     let err_str = result.err().unwrap().to_string();
     assert!(err_str.contains("4014"));
@@ -782,18 +898,27 @@ async fn test_voice_logs_do_not_contain_secrets() {
                     modes: vec!["aead_aes256_gcm_rtpsize".to_string()],
                 })
             }
-            async fn select_protocol(&self, _: &str, _: u16, mode: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                mode: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 Ok(discord_rs::protocol::SessionDescription {
                     mode: mode.to_string(),
                     secret_key: vec![0u8; 32],
                     dave_protocol_version: None,
                 })
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 self.event_tx.subscribe()
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
         let (tx, _) = broadcast::channel(16);
         Arc::new(MockDiagGateway { event_tx: tx })
@@ -804,7 +929,9 @@ async fn test_voice_logs_do_not_contain_secrets() {
     // Despacha eventos com dados sintéticos secretos
     let mut vs = VoiceState::new(&secret_user_str, secret_session_id);
     vs.channel_id = Some(secret_channel_str.clone());
-    let _ = transport.event_tx.send(TransportEvent::VoiceStateUpdate(vs));
+    let _ = transport
+        .event_tx
+        .send(TransportEvent::VoiceStateUpdate(vs));
 
     let _ = transport.event_tx.send(TransportEvent::VoiceServerUpdate {
         token: secret_token.to_string(),
@@ -826,24 +953,33 @@ async fn test_voice_logs_do_not_contain_secrets() {
         ringing: vec![],
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let session_cm = cm_secret.start_voice_session(
-        None,
-        secret_channel_id,
-        secret_user_id,
-        false,
-        false,
-        Some(vec!["recip1".to_string()]),
-    ).await.expect("start_voice_session with secrets");
+    let session_cm = cm_secret
+        .start_voice_session(
+            None,
+            secret_channel_id,
+            secret_user_id,
+            false,
+            false,
+            Some(vec!["recip1".to_string()]),
+        )
+        .await
+        .expect("start_voice_session with secrets");
     tokio::time::sleep(Duration::from_millis(50)).await;
     let _ = session_cm.disconnect().await;
 
     // Coleta todos os logs capturados durante o fluxo
     let logs = get_captured_logs();
-    assert!(!logs.is_empty(), "Logs devem ter sido capturados durante o fluxo de voz");
+    assert!(
+        !logs.is_empty(),
+        "Logs devem ter sido capturados durante o fluxo de voz"
+    );
 
     // Verifica que logs de diagnóstico estruturados [VoiceDiag] foram emitidos
     let has_voice_diag = logs.iter().any(|l| l.contains("[VoiceDiag]"));
-    assert!(has_voice_diag, "Logs devem conter entradas estruturadas [VoiceDiag]");
+    assert!(
+        has_voice_diag,
+        "Logs devem conter entradas estruturadas [VoiceDiag]"
+    );
 
     // REGRA 26: Nenhum segredo pode aparecer em nenhuma linha de log!
     for line in &logs {
@@ -895,22 +1031,36 @@ async fn test_voice_server_update_port_preserved_and_voice_diag_emitted() {
         }
         #[async_trait]
         impl VoiceGatewayTransport for MockGw {
-            async fn connect(&self) -> Result<()> { Ok(()) }
+            async fn connect(&self) -> Result<()> {
+                Ok(())
+            }
             async fn wait_for_ready(&self, _: Duration) -> Result<VoiceReady> {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 anyhow::bail!("Timeout")
             }
-            async fn select_protocol(&self, _: &str, _: u16, _: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                _: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 anyhow::bail!("not reached")
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 self.event_tx.subscribe()
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
-        Arc::new(MockGw { event_tx: gw_tx.clone() })
-    }))).await;
+        Arc::new(MockGw {
+            event_tx: gw_tx.clone(),
+        })
+    })))
+    .await;
 
     let target_channel_id = 9911223344u64;
     let target_user_id = 1122334455u64;
@@ -1010,9 +1160,9 @@ async fn test_dm_call_no_ring_if_already_existed() {
     );
 
     let logs = get_captured_logs();
-    let has_diag_already_existed = logs.iter().any(|l| {
-        l.contains("[VoiceDiag]") && l.contains("chamada_ja_existia=true")
-    });
+    let has_diag_already_existed = logs
+        .iter()
+        .any(|l| l.contains("[VoiceDiag]") && l.contains("chamada_ja_existia=true"));
     assert!(
         has_diag_already_existed,
         "Log deve indicar que a chamada já existia previamente e o toque foi omitido. Logs: {:?}",
@@ -1035,7 +1185,9 @@ async fn test_dm_call_no_ring_if_already_existed() {
 // Servidor UDP de Teste em Loopback 127.0.0.1 para IP Discovery (74 bytes)
 // ============================================================================
 
-async fn spawn_test_udp_server(expected_ssrc: u32) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+async fn spawn_test_udp_server(
+    expected_ssrc: u32,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = socket.local_addr().unwrap();
 
@@ -1101,22 +1253,35 @@ async fn test_call_create_after_voice_server_update_and_ready_rings() {
                     modes: vec!["aead_aes256_gcm_rtpsize".to_string()],
                 })
             }
-            async fn select_protocol(&self, _: &str, _: u16, mode: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                mode: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 Ok(discord_rs::protocol::SessionDescription {
                     mode: mode.to_string(),
                     secret_key: vec![0u8; 32],
                     dave_protocol_version: None,
                 })
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 self.event_tx.subscribe()
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
         let (tx, _) = broadcast::channel(16);
-        Arc::new(FastGateway { event_tx: tx, udp_port })
-    }))).await;
+        Arc::new(FastGateway {
+            event_tx: tx,
+            udp_port,
+        })
+    })))
+    .await;
 
     let target_channel_id = 9988112233u64;
     let target_user_id = 4455667788u64;
@@ -1162,12 +1327,20 @@ async fn test_call_create_after_voice_server_update_and_ready_rings() {
         .wait_until_connected(Duration::from_secs(3))
         .await
         .expect("conectar sessão de voz");
-    assert_eq!(session.state(), VoiceSessionState::Connected, "Sessão deve estar Connected");
+    assert_eq!(
+        session.state(),
+        VoiceSessionState::Connected,
+        "Sessão deve estar Connected"
+    );
 
     // Até este momento, CALL_CREATE não chegou, logo toque NÃO deve ter saído
     {
         let calls = transport.ring_calls.lock().await;
-        assert_eq!(calls.len(), 0, "ring_call NÃO deve ser chamado antes de CALL_CREATE chegar");
+        assert_eq!(
+            calls.len(),
+            0,
+            "ring_call NÃO deve ser chamado antes de CALL_CREATE chegar"
+        );
     }
 
     // 3. Agora chega CALL_CREATE (depois de VOICE_SERVER_UPDATE e depois do Ready!)
@@ -1187,7 +1360,11 @@ async fn test_call_create_after_voice_server_update_and_ready_rings() {
     // 4. Confirma que ring_call foi disparado com sucesso!
     {
         let calls = transport.ring_calls.lock().await;
-        assert_eq!(calls.len(), 1, "ring_call DEVE ser chamado após CALL_CREATE tardio");
+        assert_eq!(
+            calls.len(),
+            1,
+            "ring_call DEVE ser chamado após CALL_CREATE tardio"
+        );
         assert_eq!(calls[0].0, target_channel_id.to_string());
         assert_eq!(calls[0].1, Some(recips));
     }
@@ -1229,22 +1406,35 @@ async fn test_no_call_create_within_10s_times_out_and_shows_warning_without_ring
                     modes: vec!["aead_aes256_gcm_rtpsize".to_string()],
                 })
             }
-            async fn select_protocol(&self, _: &str, _: u16, mode: &str) -> Result<discord_rs::protocol::SessionDescription> {
+            async fn select_protocol(
+                &self,
+                _: &str,
+                _: u16,
+                mode: &str,
+            ) -> Result<discord_rs::protocol::SessionDescription> {
                 Ok(discord_rs::protocol::SessionDescription {
                     mode: mode.to_string(),
                     secret_key: vec![0u8; 32],
                     dave_protocol_version: None,
                 })
             }
-            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> { Ok(()) }
+            async fn set_speaking(&self, _: bool, _: u32, _: u32) -> Result<()> {
+                Ok(())
+            }
             fn subscribe_events(&self) -> broadcast::Receiver<VoiceGatewayEvent> {
                 self.event_tx.subscribe()
             }
-            async fn disconnect(&self) -> Result<()> { Ok(()) }
+            async fn disconnect(&self) -> Result<()> {
+                Ok(())
+            }
         }
         let (tx, _) = broadcast::channel(16);
-        Arc::new(FastGateway { event_tx: tx, udp_port })
-    }))).await;
+        Arc::new(FastGateway {
+            event_tx: tx,
+            udp_port,
+        })
+    })))
+    .await;
 
     let target_channel_id = 8877665544u64;
     let target_user_id = 2233445566u64;
@@ -1319,9 +1509,9 @@ async fn test_no_call_create_within_10s_times_out_and_shows_warning_without_ring
 
     // Confirma que o log [VoiceDiag] correspondente foi emitido
     let logs = get_captured_logs();
-    let has_diag_timeout = logs.iter().any(|l| {
-        l.contains("[VoiceDiag] CALL_CREATE não chegou em 10s; toque não enviado")
-    });
+    let has_diag_timeout = logs
+        .iter()
+        .any(|l| l.contains("[VoiceDiag] CALL_CREATE não chegou em 10s; toque não enviado"));
     assert!(
         has_diag_timeout,
         "Log deve conter [VoiceDiag] CALL_CREATE não chegou em 10s; toque não enviado. Logs: {:?}",
@@ -1367,19 +1557,29 @@ async fn test_voice_gateway_stops_completely_and_no_further_reconnections() {
 
 #[tokio::test]
 async fn test_guild_stickers_cached_empty_is_valid() {
-    let tmp_dir = std::env::temp_dir().join(format!("discord_rs_test_stickers_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "discord_rs_test_stickers_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::create_dir_all(&tmp_dir);
     let cache = discord_rs::protocol::media_cache::MediaCacheManager::with_root(&tmp_dir);
     let guild_id = "guild_998877";
 
     // Salva stickers vazios (servidor sem figurinhas customizadas)
-    cache.save_guild_stickers_to_disk(guild_id, &[]).expect("save empty stickers");
+    cache
+        .save_guild_stickers_to_disk(guild_id, &[])
+        .expect("save empty stickers");
 
     // Verifica que o cache carrega com sucesso como Some([]) e não None
     let loaded = cache.load_guild_stickers_from_disk(guild_id);
-    assert_eq!(loaded, Some(vec![]), "Cache em disco com [] deve ser reconhecido como válido");
+    assert_eq!(
+        loaded,
+        Some(vec![]),
+        "Cache em disco com [] deve ser reconhecido como válido"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
-
-

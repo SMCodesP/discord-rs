@@ -33,12 +33,15 @@ async fn test_protocol_bridge_token_storage_lifecycle() -> anyhow::Result<()> {
     assert!(!bridge.is_connected());
 
     // Save a token
-    let sample_token = AuthToken::bot("MTAwMDAwMDAwMDAwMDAwMDAw.GxYxYz.abcdefghijklmnopqrstuvwxyz123456");
+    let sample_token =
+        AuthToken::bot("MTAwMDAwMDAwMDAwMDAwMDAw.GxYxYz.abcdefghijklmnopqrstuvwxyz123456");
     bridge.save_token(&sample_token)?;
     assert!(auth_path.exists());
 
     // Load saved token
-    let loaded = bridge.load_saved_token()?.expect("Expected token to be loaded");
+    let loaded = bridge
+        .load_saved_token()?
+        .expect("Expected token to be loaded");
     assert_eq!(loaded.secret(), sample_token.secret());
     assert_eq!(loaded.token_type, TokenType::Bot);
 
@@ -84,7 +87,7 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
     // Verify secondary unbounded received
     let event3 = tokio::time::timeout(Duration::from_secs(1), secondary_unbounded_rx.recv())
         .await?
-        .expect("Secondary unbounded event expected");
+        .expect("Unbounded event expected");
     matches!(event3, TransportEvent::Connected);
 
     // Emit MessageCreate event
@@ -96,7 +99,12 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
         bot: false,
         avatar_decoration_data: None,
     };
-    let msg = Message::new("msg-101", "chan-test", author, "Hello GPUI from ProtocolBridge!");
+    let msg = Message::new(
+        "msg-101",
+        "chan-test",
+        author,
+        "Hello GPUI from ProtocolBridge!",
+    );
     bridge.emit_event(TransportEvent::MessageCreate(msg.clone()));
 
     let event_msg = tokio::time::timeout(Duration::from_secs(1), broadcast_rx.recv()).await??;
@@ -117,7 +125,11 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
 
     let event_typing = tokio::time::timeout(Duration::from_secs(1), broadcast_rx.recv()).await??;
     match event_typing {
-        TransportEvent::TypingStart { channel_id, user_id, timestamp } => {
+        TransportEvent::TypingStart {
+            channel_id,
+            user_id,
+            timestamp,
+        } => {
             assert_eq!(channel_id, "chan-test");
             assert_eq!(user_id, "user-123");
             assert_eq!(timestamp, 123456789);
@@ -161,6 +173,31 @@ async fn test_protocol_bridge_connect_raw_validation() {
     assert!(!auth_path.exists(), "token inválido não deve ser gravado");
     assert!(!bridge.is_connected());
     assert!(bridge.active_token().await.is_none());
+}
+
+#[tokio::test]
+async fn test_connect_with_invalid_token_emits_disconnected_without_network() {
+    let (cm, mut rx) = discord_rs::protocol::ClientManager::new_mock();
+
+    // Formato inválido é rejeitado antes de qualquer REST/WS. O teste nunca
+    // depende de token, conta ou conectividade real.
+    let _ = cm.connect_with_token(AuthToken::user("short")).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(1), async {
+        while let Ok(evt) = rx.recv().await {
+            if let TransportEvent::Disconnected(reason) = evt {
+                return Some(reason);
+            }
+        }
+        None
+    })
+    .await;
+
+    assert!(event.is_ok(), "Expected Disconnected event before timeout");
+    let reason = event
+        .unwrap()
+        .expect("Should have received Disconnected reason");
+    assert!(reason.contains("token inválido"));
 }
 
 #[tokio::test]

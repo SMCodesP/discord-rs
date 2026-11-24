@@ -39,6 +39,7 @@
 //!
 //! O cliente opera estritamente em modo de leitura. Nenhuma chamada de escrita (`PATCH`) é enviada.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 /// Appearance theme preference stored in Discord user settings (`PreloadedUserSettings.proto:390-396`).
@@ -126,35 +127,62 @@ impl PreloadedUserSettings {
 // ============================================================================
 
 /// Decodes standard or URL-safe Base64 string (with or without padding).
+///
+/// Whitespace is accepted, but padding must appear only at the end and unused
+/// bits must be zero. Malformed input is rejected instead of silently producing
+/// a truncated protobuf payload.
 pub fn decode_base64(input: &str) -> anyhow::Result<Vec<u8>> {
     let mut table = [255u8; 256];
-    for (i, &b) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+    for (i, &b) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        .iter()
+        .enumerate()
+    {
         table[b as usize] = i as u8;
     }
     table[b'-' as usize] = 62;
     table[b'_' as usize] = 63;
 
-    let mut buf = Vec::with_capacity((input.len() * 3) / 4);
-    let mut val = 0u32;
-    let mut val_bits = 0;
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    for &byte in input.as_bytes() {
-        if byte.is_ascii_whitespace() {
-            continue;
+    let first_padding = bytes.iter().position(|byte| *byte == b'=');
+    let data_end = first_padding.unwrap_or(bytes.len());
+    let padding = bytes.len() - data_end;
+    if padding > 2 || bytes[data_end..].iter().any(|byte| *byte != b'=') {
+        anyhow::bail!("Invalid base64 padding");
+    }
+    if data_end % 4 == 1 {
+        anyhow::bail!("Invalid base64 length");
+    }
+    if padding > 0 && bytes.len() % 4 != 0 {
+        anyhow::bail!("Invalid padded base64 length");
+    }
+
+    let mut buf = Vec::with_capacity((data_end * 3) / 4);
+    let mut value = 0u32;
+    let mut value_bits = 0u32;
+
+    for &byte in &bytes[..data_end] {
+        let digit = table[byte as usize];
+        if digit == 255 {
+            anyhow::bail!("Invalid base64 character");
         }
-        if byte == b'=' {
-            break;
+        value = (value << 6) | u32::from(digit);
+        value_bits += 6;
+        if value_bits >= 8 {
+            value_bits -= 8;
+            buf.push((value >> value_bits) as u8);
+            value &= (1u32 << value_bits) - 1;
         }
-        let d = table[byte as usize];
-        if d == 255 {
-            anyhow::bail!("Invalid base64 character: {}", byte as char);
-        }
-        val = (val << 6) | (d as u32);
-        val_bits += 6;
-        if val_bits >= 8 {
-            val_bits -= 8;
-            buf.push((val >> val_bits) as u8);
-        }
+    }
+
+    if value_bits > 0 && value != 0 {
+        anyhow::bail!("Non-zero unused bits in base64 input");
     }
 
     Ok(buf)
@@ -196,6 +224,9 @@ fn read_varint(buf: &[u8], pos: &mut usize) -> anyhow::Result<u64> {
     while *pos < buf.len() {
         let byte = buf[*pos];
         *pos += 1;
+        if shift == 63 && byte > 1 {
+            anyhow::bail!("Protobuf varint overflow");
+        }
         result |= ((byte & 0x7F) as u64) << shift;
         if (byte & 0x80) == 0 {
             return Ok(result);
@@ -208,6 +239,16 @@ fn read_varint(buf: &[u8], pos: &mut usize) -> anyhow::Result<u64> {
     anyhow::bail!("Unexpected EOF reading varint");
 }
 
+fn read_tag(buf: &[u8], pos: &mut usize) -> anyhow::Result<(u32, u8)> {
+    let tag = read_varint(buf, pos)?;
+    let field_num = tag >> 3;
+    let wire_type = (tag & 0x07) as u8;
+    if field_num == 0 || field_num > u64::from(u32::MAX) {
+        anyhow::bail!("Invalid protobuf field number");
+    }
+    Ok((field_num as u32, wire_type))
+}
+
 fn read_fixed32(buf: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
     if *pos + 4 > buf.len() {
         anyhow::bail!("Unexpected EOF reading fixed32");
@@ -218,18 +259,19 @@ fn read_fixed32(buf: &[u8], pos: &mut usize) -> anyhow::Result<u32> {
 }
 
 fn read_bytes<'a>(buf: &'a [u8], pos: &mut usize) -> anyhow::Result<&'a [u8]> {
-    let len = read_varint(buf, pos)? as usize;
-    if *pos + len > buf.len() {
-        anyhow::bail!("Unexpected EOF reading length-delimited bytes (len: {})", len);
-    }
-    let slice = &buf[*pos..*pos + len];
-    *pos += len;
+    let len = usize::try_from(read_varint(buf, pos)?)?;
+    let end = pos
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("Unexpected EOF reading length-delimited bytes"))?;
+    let slice = &buf[*pos..end];
+    *pos = end;
     Ok(slice)
 }
 
 fn read_string(buf: &[u8], pos: &mut usize) -> anyhow::Result<String> {
     let bytes = read_bytes(buf, pos)?;
-    Ok(String::from_utf8_lossy(bytes).into_owned())
+    String::from_utf8(bytes.to_vec()).context("Invalid UTF-8 in protobuf string")
 }
 
 fn skip_field(buf: &[u8], pos: &mut usize, wire_type: u8) -> anyhow::Result<()> {
@@ -238,23 +280,22 @@ fn skip_field(buf: &[u8], pos: &mut usize, wire_type: u8) -> anyhow::Result<()> 
             read_varint(buf, pos)?;
         }
         1 => {
-            if *pos + 8 > buf.len() {
-                anyhow::bail!("Unexpected EOF skipping fixed64");
-            }
-            *pos += 8;
+            let end = pos
+                .checked_add(8)
+                .filter(|end| *end <= buf.len())
+                .ok_or_else(|| anyhow::anyhow!("Unexpected EOF skipping fixed64"))?;
+            *pos = end;
         }
         2 => {
-            let len = read_varint(buf, pos)? as usize;
-            if *pos + len > buf.len() {
-                anyhow::bail!("Unexpected EOF skipping length-delimited");
-            }
-            *pos += len;
+            // Reutiliza a validação de comprimento/overflow de read_bytes.
+            let _ = read_bytes(buf, pos)?;
         }
         5 => {
-            if *pos + 4 > buf.len() {
-                anyhow::bail!("Unexpected EOF skipping fixed32");
-            }
-            *pos += 4;
+            let end = pos
+                .checked_add(4)
+                .filter(|end| *end <= buf.len())
+                .ok_or_else(|| anyhow::anyhow!("Unexpected EOF skipping fixed32"))?;
+            *pos = end;
         }
         _ => anyhow::bail!("Unsupported wire type {}", wire_type),
     }
@@ -265,11 +306,16 @@ fn decode_uint32_value(buf: &[u8]) -> anyhow::Result<u32> {
     let mut pos = 0;
     let mut val = 0;
     while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
-        if field_num == 1 && wire_type == 0 {
-            val = read_varint(buf, &mut pos)? as u32;
+        let (field_num, wire_type) = read_tag(buf, &mut pos)?;
+        if field_num == 1 {
+            if wire_type != 0 {
+                anyhow::bail!("UInt32Value field 1 has invalid wire type");
+            }
+            let value = read_varint(buf, &mut pos)?;
+            if value > u64::from(u32::MAX) {
+                anyhow::bail!("UInt32Value exceeds u32 range");
+            }
+            val = value as u32;
         } else {
             skip_field(buf, &mut pos, wire_type)?;
         }
@@ -282,9 +328,7 @@ fn decode_custom_user_theme_settings(buf: &[u8]) -> anyhow::Result<CustomUserThe
     let mut pos = 0;
 
     while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
+        let (field_num, wire_type) = read_tag(buf, &mut pos)?;
 
         match (field_num, wire_type) {
             // Field 1: colors (repeated string)
@@ -298,10 +342,15 @@ fn decode_custom_user_theme_settings(buf: &[u8]) -> anyhow::Result<CustomUserThe
             }
             (2, 2) => {
                 let slice = read_bytes(buf, &mut pos)?;
+                if slice.len() % 4 != 0 {
+                    anyhow::bail!("Packed fixed32 length is not a multiple of four");
+                }
                 let mut i = 0;
                 while i + 4 <= slice.len() {
                     let b: [u8; 4] = slice[i..i + 4].try_into().unwrap();
-                    settings.gradient_color_stops.push(f32::from_bits(u32::from_le_bytes(b)));
+                    settings
+                        .gradient_color_stops
+                        .push(f32::from_bits(u32::from_le_bytes(b)));
                     i += 4;
                 }
             }
@@ -312,6 +361,9 @@ fn decode_custom_user_theme_settings(buf: &[u8]) -> anyhow::Result<CustomUserThe
             // Field 4: base_mix (int32)
             (4, 0) => {
                 settings.base_mix = Some(read_varint(buf, &mut pos)? as i32);
+            }
+            (1 | 2 | 3 | 4, _) => {
+                anyhow::bail!("Campo conhecido de CustomUserThemeSettings com wire type inválido");
             }
             _ => {
                 skip_field(buf, &mut pos, wire_type)?;
@@ -327,9 +379,7 @@ fn decode_client_theme_settings(buf: &[u8]) -> anyhow::Result<ClientThemeSetting
     let mut pos = 0;
 
     while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
+        let (field_num, wire_type) = read_tag(buf, &mut pos)?;
 
         match (field_num, wire_type) {
             // Field 2: background_gradient_preset_id (google.protobuf.UInt32Value wrapper or raw varint)
@@ -338,12 +388,20 @@ fn decode_client_theme_settings(buf: &[u8]) -> anyhow::Result<ClientThemeSetting
                 settings.background_gradient_preset_id = Some(decode_uint32_value(wrapper)?);
             }
             (2, 0) => {
-                settings.background_gradient_preset_id = Some(read_varint(buf, &mut pos)? as u32);
+                let value = read_varint(buf, &mut pos)?;
+                if value > u64::from(u32::MAX) {
+                    anyhow::bail!("background_gradient_preset_id exceeds u32 range");
+                }
+                settings.background_gradient_preset_id = Some(value as u32);
             }
             // Field 4: custom_user_theme_settings
             (4, 2) => {
                 let inner = read_bytes(buf, &mut pos)?;
-                settings.custom_user_theme_settings = Some(decode_custom_user_theme_settings(inner)?);
+                settings.custom_user_theme_settings =
+                    Some(decode_custom_user_theme_settings(inner)?);
+            }
+            (2 | 4, _) => {
+                anyhow::bail!("Campo conhecido de ClientThemeSettings com wire type inválido");
             }
             _ => {
                 skip_field(buf, &mut pos, wire_type)?;
@@ -359,9 +417,7 @@ fn decode_appearance_settings(buf: &[u8]) -> anyhow::Result<AppearanceSettings> 
     let mut pos = 0;
 
     while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
+        let (field_num, wire_type) = read_tag(buf, &mut pos)?;
 
         match (field_num, wire_type) {
             // Field 1: theme (enum Theme: THEME_UNSET=0, THEME_DARK=1, THEME_LIGHT=2, THEME_DARKER=3, THEME_MIDNIGHT=4)
@@ -372,6 +428,9 @@ fn decode_appearance_settings(buf: &[u8]) -> anyhow::Result<AppearanceSettings> 
             (3, 2) => {
                 let inner = read_bytes(buf, &mut pos)?;
                 appearance.client_theme_settings = Some(decode_client_theme_settings(inner)?);
+            }
+            (1 | 3, _) => {
+                anyhow::bail!("Campo conhecido de AppearanceSettings com wire type inválido");
             }
             _ => {
                 skip_field(buf, &mut pos, wire_type)?;
@@ -388,15 +447,16 @@ pub fn decode_preloaded_user_settings_bytes(buf: &[u8]) -> anyhow::Result<Preloa
     let mut pos = 0;
 
     while pos < buf.len() {
-        let tag = read_varint(buf, &mut pos)?;
-        let field_num = (tag >> 3) as u32;
-        let wire_type = (tag & 0x07) as u8;
+        let (field_num, wire_type) = read_tag(buf, &mut pos)?;
 
         match (field_num, wire_type) {
             // Field 13: appearance (AppearanceSettings, PreloadedUserSettings.proto:607)
             (13, 2) => {
                 let inner = read_bytes(buf, &mut pos)?;
                 settings.appearance = Some(decode_appearance_settings(inner)?);
+            }
+            (13, _) => {
+                anyhow::bail!("Campo appearance com wire type inválido");
             }
             _ => {
                 skip_field(buf, &mut pos, wire_type)?;
@@ -512,9 +572,19 @@ mod tests {
 
     #[test]
     fn test_base64_url_safe_and_whitespace() {
-        let encoded = "  SGVsbG8-\n\rVGhlcmU_  ";
+        let encoded = "  SGVsbG8g\n\rVGhlcmU  ";
         let decoded = decode_base64(encoded).expect("url safe base64 decode");
-        assert_eq!(decoded.len(), 12);
+        assert_eq!(decoded, b"Hello There");
+    }
+
+    #[test]
+    fn test_base64_rejects_malformed_padding_and_unused_bits() {
+        for malformed in ["A", "AA=A", "AA====", "SGVsbG8=extra", "AB"] {
+            assert!(
+                decode_base64(malformed).is_err(),
+                "malformed base64 must be rejected: {malformed}"
+            );
+        }
     }
 
     #[test]
@@ -524,7 +594,8 @@ mod tests {
         let mut top_level = Vec::new();
 
         // Build Appearance (Field 13): Theme::Darker (3), preset 42, custom color "#1e1f22", stops [0.0, 1.0], angle 90, base_mix 20
-        let appearance_bytes = build_appearance(3, Some(42), &["#1e1f22"], &[0.0, 1.0], Some(90), Some(20));
+        let appearance_bytes =
+            build_appearance(3, Some(42), &["#1e1f22"], &[0.0, 1.0], Some(90), Some(20));
         write_length_delimited(&mut top_level, 13, &appearance_bytes);
 
         let b64 = encode_base64(&top_level);
@@ -538,5 +609,73 @@ mod tests {
         assert_eq!(custom.gradient_color_stops, vec![0.0, 1.0]);
         assert_eq!(custom.gradient_angle, Some(90));
         assert_eq!(custom.base_mix, Some(20));
+    }
+
+    #[test]
+    fn test_protobuf_rejects_invalid_tags_varints_and_packed_floats() {
+        assert!(decode_preloaded_user_settings_bytes(&[0]).is_err());
+
+        let mut overflow = vec![0xFF; 9];
+        overflow.push(0x02);
+        assert!(decode_preloaded_user_settings_bytes(&overflow).is_err());
+
+        let mut packed = Vec::new();
+        synthetic::write_tag(&mut packed, 2, 2);
+        synthetic::write_varint(&mut packed, 3);
+        packed.extend_from_slice(&[0, 0, 0]);
+        assert!(decode_custom_user_theme_settings(&packed).is_err());
+
+        let mut uint32_overflow = Vec::new();
+        synthetic::write_tag(&mut uint32_overflow, 1, 0);
+        synthetic::write_varint(&mut uint32_overflow, u64::from(u32::MAX) + 1);
+        assert!(decode_uint32_value(&uint32_overflow).is_err());
+    }
+
+    #[test]
+    fn test_protobuf_rejects_invalid_utf8_strings() {
+        let mut colors = Vec::new();
+        synthetic::write_tag(&mut colors, 1, 2);
+        synthetic::write_varint(&mut colors, 1);
+        colors.push(0xFF);
+        assert!(decode_custom_user_theme_settings(&colors).is_err());
+    }
+
+    #[test]
+    fn test_protobuf_decoder_never_panics_on_malformed_bytes() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for length in 0..64 {
+            let mut bytes = Vec::with_capacity(length);
+            for _ in 0..length {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                bytes.push((state >> 32) as u8);
+            }
+            let result = std::panic::catch_unwind(|| decode_preloaded_user_settings_bytes(&bytes));
+            assert!(result.is_ok(), "decoder não deve entrar em panic");
+        }
+    }
+
+    #[test]
+    fn test_protobuf_rejects_unknown_overflowing_length_and_known_wrong_wire_types() {
+        let mut overflowing = Vec::new();
+        synthetic::write_tag(&mut overflowing, 99, 2);
+        synthetic::write_varint(&mut overflowing, u64::MAX);
+        assert!(decode_preloaded_user_settings_bytes(&overflowing).is_err());
+
+        let mut wrong_top_level = Vec::new();
+        synthetic::write_tag(&mut wrong_top_level, 13, 0);
+        synthetic::write_varint(&mut wrong_top_level, 1);
+        assert!(decode_preloaded_user_settings_bytes(&wrong_top_level).is_err());
+
+        let mut wrong_appearance = Vec::new();
+        synthetic::write_tag(&mut wrong_appearance, 1, 2);
+        synthetic::write_length_delimited(&mut wrong_appearance, 1, b"dark");
+        assert!(decode_appearance_settings(&wrong_appearance).is_err());
+
+        let mut raw_u32_overflow = Vec::new();
+        synthetic::write_tag(&mut raw_u32_overflow, 2, 0);
+        synthetic::write_varint(&mut raw_u32_overflow, u64::from(u32::MAX) + 1);
+        assert!(decode_client_theme_settings(&raw_u32_overflow).is_err());
     }
 }

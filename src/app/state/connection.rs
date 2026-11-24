@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use super::*;
 use crate::protocol::AuthToken;
 use crate::protocol::ConnectionMode;
-use crate::protocol::TokenStorage;
+use std::collections::HashMap;
 
 impl AppState {
     /// Authenticates with a Discord token and updates connection status
@@ -23,16 +22,8 @@ impl AppState {
         self.is_connected_to_gateway = false;
         self.connection_status = "Conectando ao Gateway v10...".to_string();
 
-        if self.save_token_to_disk {
-            let auth = if is_user {
-                AuthToken::user(trimmed.clone())
-            } else {
-                AuthToken::bot(trimmed.clone())
-            };
-            let storage = TokenStorage::default();
-            let _ = storage.save(&auth);
-        }
-
+        // O token só é persistido depois de READY, em gateway_events. Assim,
+        // credenciais inválidas/expiradas/2FA nunca substituem a conta salva.
         if let Some(ref cm) = self.client_manager {
             let cm = cm.clone();
             let auth = if is_user {
@@ -42,7 +33,7 @@ impl AppState {
             };
             tokio::spawn(async move {
                 if let Err(e) = cm.connect_with_token(auth).await {
-                    log::error!("Falha ao conectar via ClientManager: {:?}", e);
+                    log::error!("Falha ao conectar via ClientManager: {:#}", e);
                 }
             });
         } else {
