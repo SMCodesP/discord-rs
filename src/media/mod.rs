@@ -1,3 +1,4 @@
+pub mod anim_scheduler;
 pub mod audio;
 pub mod capture;
 pub mod codec;
@@ -6,6 +7,7 @@ pub mod mixer;
 pub mod resample;
 pub mod sounds;
 
+pub use anim_scheduler::*;
 pub use audio::*;
 pub use capture::*;
 pub use codec::*;
