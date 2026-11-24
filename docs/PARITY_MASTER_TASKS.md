@@ -333,9 +333,8 @@
 - [x] **T-046** `[QA-Msgs]` — **P1** — **QA/UX & Menus** — **Testes de regressão para botões/menus inertes (`T-033`, `T-034`), atalhos anunciados (`T-035`) e layout Friends Hub**
   - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `900a512`): `tests/ux_menus_keybinds_regression_test.rs` com 30 testes (17 passaram, **13 falharam reproduzindo `T-033`/`T-034`/`T-035`**).
 
-- [ ] **T-050** `[QA-Net]` — **P1** — **QA/Privacidade & Auth** — **Testes de redação de logs (`T-042`) e não-persistência prematura de token (`T-040`)**
-  - **Arquivos:** `tests/log_redaction_and_auth_safety_test.rs` (novo).
-  - **Status:** Em execução por `QA-Net`.
+- [x] **T-050** `[QA-Net]` — **P1** — **QA/Privacidade & Auth** — **Testes de redação de logs (`T-042`) e não-persistência prematura de token (`T-040`)**
+  - **Concluído em 2026-11-24** (layer `qa-net`, commit `310fcdf`): `tests/log_redaction_and_auth_safety_test.rs` com 10 testes (3 passaram, **7 falharam expondo gaps reais**: vazamento em `Debug`/logs em 17 sites, `TokenStorage::save` sobrescrevendo credencial válida com token inválido, permissão `0644` ao sobrescrever, e botão "Sair da Conta" sem limpar disco).
 
 - [x] **T-051** `[QA-Voice]` — **P0** — **QA/Voz DAVE & Reconexão** — **Testes determinísticos de DAVE fail-closed (`T-021`) e renegociação de mídia após `4006`/`4009` (`T-018`)**
   - **Concluído em 2026-11-24** (layer `qa-voice`, commit `5de2e67`): `tests/voice_dave_and_reconnect_regression_test.rs` com 17 testes (4 passaram, **13 falharam expondo bugs reais**: DAVE sem fail-closed/grace limitada, estado parcial em versão inválida, **pânico com external sender malformado**, MLS inválido não fatal e `NewSession 4006/4009` reusando UDP/SSRC/chave antigos).
