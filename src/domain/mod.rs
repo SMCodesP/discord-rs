@@ -1,4 +1,5 @@
 pub mod channel;
+pub mod events;
 pub mod guild;
 pub mod message;
 pub mod profile;
@@ -16,5 +17,12 @@ pub use profile::{
 pub use settings::*;
 pub use user::{Activity, ActivityType, AvatarDecorationData, CustomStatus, CustomStatusEmoji, Presence, PresenceStatus, User};
 pub use voice::{VoiceParticipant, VoiceState};
+pub use events::{
+    GuildScheduledEvent, GuildScheduledEventEntityMetadata, GuildScheduledEventEntityType,
+    GuildScheduledEventPrivacyLevel, GuildScheduledEventRecurrenceRule,
+    GuildScheduledEventRecurrenceRuleFrequency, GuildScheduledEventRecurrenceRuleMonth,
+    GuildScheduledEventRecurrenceRuleNWeekday, GuildScheduledEventRecurrenceRuleWeekday,
+    GuildScheduledEventStatus, StageInstance, StageInstancePrivacyLevel,
+};
 
 pub mod permissions;
