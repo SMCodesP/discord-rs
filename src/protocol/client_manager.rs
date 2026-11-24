@@ -281,12 +281,23 @@ impl ClientManager {
 
         info!("Cliente autenticado configurado como transporte ativo.");
 
-        // Busca dados iniciais reais sem repetir `/users/@me`.
+        // Para contas de usuário (TokenType::User), o próprio Gateway READY já entrega
+        // guilds (com canais/cargos/emojis), private_channels (DMs), relationships e
+        // user_settings_proto. Disparar rajada de 7 chamadas REST logo após o login não
+        // existe no Discord Desktop oficial e dispara anti-abuso em tokens recém-gerados.
+        if real_client.token().token_type == crate::protocol::auth::TokenType::User {
+            info!(
+                "Conta de usuário autenticada: usando snapshot do Gateway READY sem rajada REST redundante no boot."
+            );
+            return Ok(());
+        }
+
+        // Busca dados iniciais reais para Bot Token (que não recebe DMs/settings no READY).
         let client_clone = real_client.clone();
         let event_tx_clone = self.event_tx.clone();
 
         tokio::spawn(async move {
-            info!("Buscando dados iniciais da API do Discord (servidores, canais e mensagens)...");
+            info!("Buscando dados iniciais da API do Discord (bot: servidores e canais)...");
 
             let (mut guilds, guilds_loaded) = match client_clone.list_guilds().await {
                 Ok(guilds) => {

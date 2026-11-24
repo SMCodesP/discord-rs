@@ -87,28 +87,37 @@ impl AppState {
                 }
             }
         } else {
-            // Modo Direct Messages / Home
+            // Modo Direct Messages / Home: aproveita DMs e relacionamentos já entregues pelo
+            // Gateway READY sem disparar chamadas REST redundantes a cada clique em Home.
             self.sort_dm_channels();
-            if let Some(ref cm) = self.client_manager {
-                let cm = cm.clone();
-                tokio::spawn(async move {
-                    match cm.list_dm_channels().await {
-                        Ok(channels) => {
-                            cm.emit_event(crate::protocol::TransportEvent::DmChannelsUpdated(channels));
+            let need_dms = self.dm_channels.is_empty();
+            let need_rels = self.friends.is_empty();
+            if need_dms || need_rels {
+                if let Some(ref cm) = self.client_manager {
+                    let cm = cm.clone();
+                    tokio::spawn(async move {
+                        if need_dms {
+                            match cm.list_dm_channels().await {
+                                Ok(channels) => {
+                                    cm.emit_event(crate::protocol::TransportEvent::DmChannelsUpdated(channels));
+                                }
+                                Err(e) => {
+                                    log::warn!("Falha ao carregar canais de DM sob demanda: {:?}", e);
+                                }
+                            }
                         }
-                        Err(e) => {
-                            log::warn!("Falha ao carregar canais de DM sob demanda: {:?}", e);
+                        if need_rels {
+                            match cm.list_relationships().await {
+                                Ok(relationships) => {
+                                    cm.emit_event(crate::protocol::TransportEvent::RelationshipsUpdated(relationships));
+                                }
+                                Err(e) => {
+                                    log::warn!("Falha ao carregar relacionamentos/amigos sob demanda: {:?}", e);
+                                }
+                            }
                         }
-                    }
-                    match cm.list_relationships().await {
-                        Ok(relationships) => {
-                            cm.emit_event(crate::protocol::TransportEvent::RelationshipsUpdated(relationships));
-                        }
-                        Err(e) => {
-                            log::warn!("Falha ao carregar relacionamentos/amigos sob demanda: {:?}", e);
-                        }
-                    }
-                });
+                    });
+                }
             }
 
             if let Some(first_dm) = self.dm_channels.first() {

@@ -56,7 +56,7 @@ impl GatewayDisconnectKind {
 
 fn gateway_close_action(code: Option<u16>) -> GatewayDisconnectKind {
     match code {
-        Some(4004) => GatewayDisconnectKind::Fatal(
+        Some(4003) | Some(4004) => GatewayDisconnectKind::Fatal(
             "Falha na autenticação: token inválido ou expirado. Faça login novamente.",
         ),
         Some(4010) => GatewayDisconnectKind::Fatal("Gateway recusou o shard informado."),
@@ -140,15 +140,75 @@ pub struct DiscordApiClient {
     last_voice_server: Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
 }
 
+const DISCORD_DESKTOP_CLIENT_VERSION: &str = "1.0.170";
+const DISCORD_DESKTOP_BROWSER_VERSION: &str = "33.2.0";
+const DISCORD_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.170 Chrome/130.0.6723.191 Electron/33.2.0 Safari/537.36";
+const DISCORD_BOT_USER_AGENT: &str = "DiscordBot (https://github.com/SMCodesP/discord-rs, 0.1.0)";
+
+fn build_user_client_properties() -> serde_json::Value {
+    json!({
+        "os": "Linux",
+        "browser": "Discord Client",
+        "release_channel": "stable",
+        "client_version": DISCORD_DESKTOP_CLIENT_VERSION,
+        "os_version": "6.11.0",
+        "os_arch": "x64",
+        "app_arch": "x64",
+        "system_locale": "pt-BR",
+        "browser_user_agent": DISCORD_DESKTOP_USER_AGENT,
+        "browser_version": DISCORD_DESKTOP_BROWSER_VERSION,
+        "client_build_number": 356995,
+        "native_build_number": null,
+        "client_event_source": null
+    })
+}
+
+fn encode_base64_standard(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((triple >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(triple & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn build_super_properties_b64() -> String {
+    let payload = serde_json::to_vec(&build_user_client_properties()).unwrap_or_default();
+    encode_base64_standard(&payload)
+}
+
+fn build_http_client(token: &AuthToken) -> reqwest::Client {
+    let ua = match token.token_type {
+        TokenType::User => DISCORD_DESKTOP_USER_AGENT,
+        TokenType::Bot => DISCORD_BOT_USER_AGENT,
+    };
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent(ua)
+        .build()
+        .expect("Failed to create HTTP client")
+}
+
 impl DiscordApiClient {
     /// Creates a new Discord API client with the provided authentication token.
     pub fn new(token: AuthToken) -> Self {
         let (event_sender, _) = broadcast::channel(256);
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent("discord-rs/0.1.0 (https://github.com/smcodes/discord-rs)")
-            .build()
-            .expect("Failed to create HTTP client");
+        let http_client = build_http_client(&token);
 
         Self {
             token,
@@ -178,11 +238,7 @@ impl DiscordApiClient {
         rate_limiter: Arc<RateLimitCoordinator>,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(256);
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .user_agent("discord-rs/0.1.0 (https://github.com/smcodes/discord-rs)")
-            .build()
-            .expect("Failed to create HTTP client");
+        let http_client = build_http_client(&token);
 
         Self {
             token,
@@ -227,19 +283,30 @@ impl DiscordApiClient {
 
     // --- Internal REST Request Helpers ---
 
+    fn apply_auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let builder = builder
+            .header("Authorization", self.token.authorization_header())
+            .header("Content-Type", "application/json");
+        if self.token.token_type == TokenType::User {
+            builder
+                .header("X-Super-Properties", build_super_properties_b64())
+                .header("X-Discord-Locale", "pt-BR")
+                .header("X-Discord-Timezone", "America/Sao_Paulo")
+                .header("Origin", "https://discord.com")
+                .header("Referer", "https://discord.com/channels/@me")
+                .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+        } else {
+            builder
+        }
+    }
+
     fn auth_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{}", DISCORD_API_BASE, path);
-        self.http_client
-            .request(method, url)
-            .header("Authorization", self.token.authorization_header())
-            .header("Content-Type", "application/json")
+        self.apply_auth_headers(self.http_client.request(method, url))
     }
 
     fn auth_request_url(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
-        self.http_client
-            .request(method, url)
-            .header("Authorization", self.token.authorization_header())
-            .header("Content-Type", "application/json")
+        self.apply_auth_headers(self.http_client.request(method, url))
     }
 
     async fn send_request(
@@ -1647,21 +1714,7 @@ fn identify_or_resume_payload(
             "d": {
                 "token": token.secret(),
                 "capabilities": 30717,
-                "properties": {
-                    "os": "Linux",
-                    "browser": "Discord Client",
-                    "release_channel": "stable",
-                    "client_version": "1.0.9168",
-                    "os_version": "6.6.0",
-                    "os_arch": "x64",
-                    "app_arch": "x64",
-                    "system_locale": "pt-BR",
-                    "browser_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9168 Chrome/128.0.6613.186 Electron/32.2.0 Safari/537.36",
-                    "browser_version": "32.2.0",
-                    "client_build_number": 331705,
-                    "native_build_number": null,
-                    "client_event_source": null
-                },
+                "properties": build_user_client_properties(),
                 "presence": {
                     "status": "online",
                     "since": 0,
@@ -1943,7 +1996,7 @@ where
                             *resume_gateway_url.write().await = None;
                             last_sequence.store(-1, Ordering::SeqCst);
                         }
-                        if code == Some(4004) {
+                        if matches!(code, Some(4003) | Some(4004)) {
                             auth_failed.store(true, Ordering::SeqCst);
                         }
                         break;
