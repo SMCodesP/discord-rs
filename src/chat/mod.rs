@@ -10,6 +10,7 @@
 
 pub mod chat_view;
 pub mod editor;
+pub mod invite_card;
 pub mod markdown;
 pub mod media_picker;
 pub mod message_list;
@@ -20,6 +21,7 @@ pub mod system_messages;
 
 pub use chat_view::*;
 pub use editor::*;
+pub use invite_card::*;
 pub use markdown::*;
 pub use media_picker::*;
 pub use message_list::*;
