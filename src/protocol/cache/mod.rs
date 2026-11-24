@@ -5,11 +5,13 @@
 //! HTTP com ETags (HTTP 304), revalidação reativa orientada a eventos do Gateway,
 //! Lazy Guilds (Opcode 14) e inicialização instantânea (0ms blank screen).
 
+pub mod batch_writer;
 pub mod directory;
 pub mod lazy_guilds;
 pub mod revalidation;
 pub mod startup;
 
+pub use batch_writer::BatchWriter;
 pub use directory::{AssetCasStore, AssetMetadata, CacheDirectory, CacheManifest};
 pub use lazy_guilds::{
     apply_member_list_update, cache_author_role_color, cache_author_roles, cache_guild_roles,
