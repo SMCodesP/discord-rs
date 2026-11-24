@@ -51,6 +51,7 @@ pub struct RootView {
     active_modal_open: Option<ActiveModal>,
     profile_modal_open: bool,
     spotify_timer: Option<gpui::Task<()>>,
+    login_screen: Option<Entity<crate::app::login_screen::LoginScreen>>,
 }
 
 impl RootView {
@@ -184,6 +185,7 @@ impl RootView {
             active_modal_open: None,
             profile_modal_open: false,
             spotify_timer: None,
+            login_screen: None,
         }
     }
 
@@ -296,6 +298,7 @@ impl RootView {
             active_modal_open: None,
             profile_modal_open: false,
             spotify_timer: None,
+            login_screen: None,
         }
     }
 }
@@ -601,21 +604,14 @@ impl Render for RootView {
         // No chat background or sidebar is leaked.
         // =========================================================================
         if !is_connected_to_gateway {
-            // Autofocus the kit token field itself (its own focus handle).
-            if let Some(st) = self.token_login_state.clone() {
-                let fh = AnyInputState::from(st).focus_handle(cx);
-                if !fh.is_focused(window) {
-                    window.focus(&fh, cx);
-                }
-            }
-            let state_snapshot = self.state.read(cx).clone();
-            return render_login_screen(
-                self.state.clone(),
-                &state_snapshot,
-                self.token_login_state.as_ref().expect("login token state"),
-            )
-            .into_any_element();
+            let screen = self.login_screen.get_or_insert_with(|| {
+                let app_state = self.state.clone();
+                cx.new(|cx| crate::app::login_screen::LoginScreen::new(app_state, window, cx))
+            });
+            return screen.clone().into_any_element();
         }
+        // Release QR WebSocket session once authenticated
+        self.login_screen = None;
 
         // =========================================================================
         // AUTHENTICATED APP SHELL:

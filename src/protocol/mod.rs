@@ -1,5 +1,6 @@
 pub mod attachments_upload;
 pub mod auth;
+pub mod auth_login;
 pub mod bridge;
 pub mod cache;
 pub mod cache_engine;
@@ -19,6 +20,7 @@ pub mod rate_limit;
 pub mod rate_limiter;
 pub mod pinned_dms;
 pub mod read_states;
+pub mod remote_auth;
 pub mod user_settings_proto;
 pub mod transport;
 pub mod voice_crypto;

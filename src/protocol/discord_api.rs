@@ -140,9 +140,9 @@ pub struct DiscordApiClient {
     last_voice_server: Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
 }
 
-const DISCORD_DESKTOP_CLIENT_VERSION: &str = "1.0.170";
+pub(crate) const DISCORD_DESKTOP_CLIENT_VERSION: &str = "1.0.170";
 const DISCORD_DESKTOP_BROWSER_VERSION: &str = "33.2.0";
-const DISCORD_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.170 Chrome/130.0.6723.191 Electron/33.2.0 Safari/537.36";
+pub(crate) const DISCORD_DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.170 Chrome/130.0.6723.191 Electron/33.2.0 Safari/537.36";
 const DISCORD_BOT_USER_AGENT: &str = "DiscordBot (https://github.com/SMCodesP/discord-rs, 0.1.0)";
 
 fn build_user_client_properties() -> serde_json::Value {
@@ -187,7 +187,7 @@ fn encode_base64_standard(input: &[u8]) -> String {
     out
 }
 
-fn build_super_properties_b64() -> String {
+pub(crate) fn build_super_properties_b64() -> String {
     let payload = serde_json::to_vec(&build_user_client_properties()).unwrap_or_default();
     encode_base64_standard(&payload)
 }
