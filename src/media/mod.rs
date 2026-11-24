@@ -4,6 +4,7 @@ pub mod codec;
 pub mod devices;
 pub mod mixer;
 pub mod resample;
+pub mod sounds;
 
 pub use audio::*;
 pub use capture::*;
@@ -11,6 +12,7 @@ pub use codec::*;
 pub use devices::*;
 pub use mixer::*;
 pub use resample::*;
+pub use sounds::*;
 
 use std::fmt;
 
