@@ -59,18 +59,17 @@ async fn test_authenticate_with_client_manager_sets_connecting_state() {
     let (cm, _rx) = ClientManager::new();
     state.client_manager = Some(cm);
 
-    state.authenticate("valid_format_test_token_12345".to_string(), true);
+    // Token curto é rejeitado pelo ClientManager antes de qualquer rede. A
+    // transição síncrona para Connecting ainda ocorre imediatamente.
+    state.authenticate("short".to_string(), true);
 
     // Inicia processo real de conexão
     assert!(state.is_connecting);
     assert!(!state.is_connected_to_gateway);
     assert_eq!(state.connection_status, "Conectando ao Gateway v10...");
     assert_eq!(state.auth_error, None);
-    assert_eq!(
-        state.auth_token,
-        Some("valid_format_test_token_12345".to_string())
-    );
-    assert_eq!(state.token_input, "valid_format_test_token_12345");
+    assert_eq!(state.auth_token, Some("short".to_string()));
+    assert_eq!(state.token_input, "short");
 }
 
 #[tokio::test]

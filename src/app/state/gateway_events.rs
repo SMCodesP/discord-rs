@@ -1,16 +1,26 @@
 use super::*;
-use std::collections::HashMap;
 use crate::domain::channel::ChannelType;
 use crate::protocol::ConnectionMode;
 use crate::protocol::TransportEvent;
+use std::collections::HashMap;
 
 impl AppState {
     /// Dispatches a real-time event received from the Gateway / ClientManager
     pub fn handle_transport_event(&mut self, event: TransportEvent) {
         match event {
-            TransportEvent::Ready { user, guilds, guild_folders } => {
+            TransportEvent::Ready {
+                user,
+                guilds,
+                guild_folders,
+            } => {
                 let display_name = user.display_name().to_string();
-                let avatar_text = user.username.chars().next().unwrap_or('U').to_uppercase().to_string();
+                let avatar_text = user
+                    .username
+                    .chars()
+                    .next()
+                    .unwrap_or('U')
+                    .to_uppercase()
+                    .to_string();
                 let avatar_url = user.avatar_url();
                 let username = user.username;
                 self.current_user.id = user.id;
@@ -25,85 +35,125 @@ impl AppState {
                 self.connection_mode = ConnectionMode::LiveDiscord(username);
                 self.connection_status = format!("Conectado como @{}", self.current_user.username);
                 self.auth_error = None;
-                if !guild_folders.is_empty() {
-                    self.guild_folders = guild_folders;
+                self.token_input.clear();
+                self.guild_folders = guild_folders;
+
+                // Persiste apenas depois de uma confirmação real do Discord.
+                if let Some(token) = self.auth_token.as_ref() {
+                    let auth = if self.is_user_token {
+                        crate::protocol::AuthToken::user(token.clone())
+                    } else {
+                        crate::protocol::AuthToken::bot(token.clone())
+                    };
+                    let storage = crate::protocol::TokenStorage::default();
+                    let result = if self.save_token_to_disk {
+                        storage.save(&auth)
+                    } else {
+                        storage.clear()
+                    };
+                    if let Err(error) = result {
+                        log::warn!(
+                            "Não foi possível atualizar as credenciais salvas: {:#}",
+                            error
+                        );
+                    }
                 }
                 self.close_modal();
 
                 // Limpar mensagens fictícias para exibir apenas dados reais carregados da API
                 self.messages_by_channel.clear();
 
-                if !guilds.is_empty() {
-                    for g in &guilds {
-                        crate::protocol::cache::lazy_guilds::cache_guild_roles(&g.id, g.roles.clone());
-                    }
-                    let mut new_guilds = Vec::new();
-                    for g in guilds {
-                        let icon_url = g.icon_url();
-                        let icon_hash = g.icon.clone();
-                        let categories = super::seed::organize_channels_into_categories(&g.id, g.channels);
+                for g in &guilds {
+                    crate::protocol::cache::lazy_guilds::cache_guild_roles(&g.id, g.roles.clone());
+                }
+                let mut new_guilds = Vec::new();
+                for g in guilds {
+                    let icon_url = g.icon_url();
+                    let icon_hash = g.icon.clone();
+                    let categories =
+                        super::seed::organize_channels_into_categories(&g.id, g.channels);
 
-                        let emojis = if !g.emojis.is_empty() {
-                            let _ = self.media_cache.save_guild_emojis_to_disk(&g.id, &g.emojis);
-                            g.emojis
-                        } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.emojis.clone()) {
-                            if !existing.is_empty() {
-                                existing
-                            } else {
-                                self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
-                            }
+                    let emojis = if !g.emojis.is_empty() {
+                        let _ = self.media_cache.save_guild_emojis_to_disk(&g.id, &g.emojis);
+                        g.emojis
+                    } else if let Some(existing) = self
+                        .guilds
+                        .iter()
+                        .find(|guild| guild.id == g.id)
+                        .map(|guild| guild.emojis.clone())
+                    {
+                        if !existing.is_empty() {
+                            existing
                         } else {
-                            self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
-                        };
-
-                        let stickers = if !g.stickers.is_empty() {
-                            let _ = self.media_cache.save_guild_stickers_to_disk(&g.id, &g.stickers);
-                            g.stickers
-                        } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.stickers.clone()) {
-                            if !existing.is_empty() {
-                                existing
-                            } else {
-                                self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
-                            }
-                        } else {
-                            self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
-                        };
-
-                        new_guilds.push(GuildItemState {
-                            id: g.id.clone(),
-                            name: g.name.clone(),
-                            acronym: g.name.chars().take(3).collect(),
-                            icon_url,
-                            icon_hash,
-                            unread: false,
-                            mention_count: 0,
-                            categories,
-                            emojis,
-                            stickers,
-                        });
-                    }
-
-                    // Ordenar com base na ordem das pastas de servidores
-                    if !self.guild_folders.is_empty() {
-                        let mut order_map = HashMap::new();
-                        let mut idx = 0;
-                        for folder in &self.guild_folders {
-                            for gid in &folder.guild_ids {
-                                order_map.entry(gid.clone()).or_insert(idx);
-                                idx += 1;
-                            }
+                            self.media_cache
+                                .load_guild_emojis_from_disk(&g.id)
+                                .unwrap_or_default()
                         }
-                        new_guilds.sort_by_key(|g| {
-                            order_map.get(&g.id).copied().unwrap_or(usize::MAX)
-                        });
-                    }
+                    } else {
+                        self.media_cache
+                            .load_guild_emojis_from_disk(&g.id)
+                            .unwrap_or_default()
+                    };
 
-                    self.guilds = new_guilds;
-                    self.sync_guild_media();
-                    save_guilds_to_disk(&self.guilds, &self.guild_folders);
-                    if let Some(first) = self.guilds.first() {
-                        self.select_guild(Some(first.id.clone()));
+                    let stickers = if !g.stickers.is_empty() {
+                        let _ = self
+                            .media_cache
+                            .save_guild_stickers_to_disk(&g.id, &g.stickers);
+                        g.stickers
+                    } else if let Some(existing) = self
+                        .guilds
+                        .iter()
+                        .find(|guild| guild.id == g.id)
+                        .map(|guild| guild.stickers.clone())
+                    {
+                        if !existing.is_empty() {
+                            existing
+                        } else {
+                            self.media_cache
+                                .load_guild_stickers_from_disk(&g.id)
+                                .unwrap_or_default()
+                        }
+                    } else {
+                        self.media_cache
+                            .load_guild_stickers_from_disk(&g.id)
+                            .unwrap_or_default()
+                    };
+
+                    new_guilds.push(GuildItemState {
+                        id: g.id.clone(),
+                        name: g.name.clone(),
+                        acronym: g.name.chars().take(3).collect(),
+                        icon_url,
+                        icon_hash,
+                        unread: false,
+                        mention_count: 0,
+                        categories,
+                        emojis,
+                        stickers,
+                    });
+                }
+
+                // Ordenar com base na ordem das pastas de servidores
+                if !self.guild_folders.is_empty() {
+                    let mut order_map = HashMap::new();
+                    let mut idx = 0;
+                    for folder in &self.guild_folders {
+                        for gid in &folder.guild_ids {
+                            order_map.entry(gid.clone()).or_insert(idx);
+                            idx += 1;
+                        }
                     }
+                    new_guilds.sort_by_key(|g| order_map.get(&g.id).copied().unwrap_or(usize::MAX));
+                }
+
+                self.guilds = new_guilds;
+                self.sync_guild_media();
+                save_guilds_to_disk(&self.guilds, &self.guild_folders);
+                if let Some(first) = self.guilds.first() {
+                    self.select_guild(Some(first.id.clone()));
+                } else {
+                    self.selected_guild_id = None;
+                    self.selected_channel_id = None;
                 }
             }
             TransportEvent::MessageCreate(msg) => {
@@ -117,7 +167,9 @@ impl AppState {
                 // - o canal pertencer a qualquer guilda conhecida em self.guilds.
                 let is_guild_message = msg.guild_id.is_some()
                     || self.guilds.iter().any(|g| {
-                        g.categories.iter().any(|cat| cat.channels.iter().any(|c| c.id == channel_id))
+                        g.categories
+                            .iter()
+                            .any(|cat| cat.channels.iter().any(|c| c.id == channel_id))
                     });
 
                 // Se NÃO for mensagem de guilda, verificar se havia mensagem pendente em canal temporário dm-*
@@ -139,8 +191,11 @@ impl AppState {
                     }
                 }
 
-                let channel_msgs = self.messages_by_channel.entry(channel_id.clone()).or_default();
-                
+                let channel_msgs = self
+                    .messages_by_channel
+                    .entry(channel_id.clone())
+                    .or_default();
+
                 // Substituição otimista: se existir uma mensagem temporária pendente com mesmo conteúdo e autor
                 if let Some(pos) = channel_msgs.iter().position(|m| {
                     (m.id.starts_with("temp-") || m.is_pending)
@@ -191,11 +246,16 @@ impl AppState {
 
                         // Migra mensagens pendentes do canal temporário para o canal real
                         if temp_id != channel_id {
-                            if let Some(mut pending_msgs) = self.messages_by_channel.remove(&temp_id) {
+                            if let Some(mut pending_msgs) =
+                                self.messages_by_channel.remove(&temp_id)
+                            {
                                 for m in &mut pending_msgs {
                                     m.channel_id = channel_id.clone();
                                 }
-                                let target_msgs = self.messages_by_channel.entry(channel_id.clone()).or_default();
+                                let target_msgs = self
+                                    .messages_by_channel
+                                    .entry(channel_id.clone())
+                                    .or_default();
                                 for p in pending_msgs {
                                     if !target_msgs.iter().any(|m| m.id == p.id) {
                                         target_msgs.push(p);
@@ -214,7 +274,9 @@ impl AppState {
                         if sel.starts_with("dm-") && sel != &channel_id {
                             let uid = sel.trim_start_matches("dm-");
                             if uid == msg.author.id
-                                && self.dm_channels.iter().any(|d| d.id == channel_id && d.recipient_ids.contains(&uid.to_string()))
+                                && self.dm_channels.iter().any(|d| {
+                                    d.id == channel_id && d.recipient_ids.contains(&uid.to_string())
+                                })
                             {
                                 self.selected_channel_id = Some(channel_id.clone());
                             }
@@ -222,7 +284,10 @@ impl AppState {
                     }
                 }
             }
-            TransportEvent::ChannelMessagesLoaded { channel_id, messages } => {
+            TransportEvent::ChannelMessagesLoaded {
+                channel_id,
+                messages,
+            } => {
                 self.set_channel_messages(&channel_id, messages);
             }
             TransportEvent::MessageUpdate(msg) => {
@@ -233,17 +298,22 @@ impl AppState {
                     }
                 }
             }
-            TransportEvent::MessageDelete { channel_id, message_id } => {
+            TransportEvent::MessageDelete {
+                channel_id,
+                message_id,
+            } => {
                 if let Some(msgs) = self.messages_by_channel.get_mut(&channel_id) {
                     msgs.retain(|m| m.id != message_id);
                 }
             }
-            TransportEvent::MessageDeleteFailed { channel_id, message_id, error } => {
-                log::warn!("Falha ao deletar mensagem {} em {}: {}", message_id, channel_id, error);
+            TransportEvent::MessageDeleteFailed { .. } => {
+                log::warn!("Falha ao deletar mensagem no canal.");
             }
             TransportEvent::GuildMemberListUpdate(update) => {
                 if self.selected_guild_id.as_deref() == Some(&update.guild_id) {
-                    let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(&update.guild_id);
+                    let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(
+                        &update.guild_id,
+                    );
                     crate::protocol::cache::lazy_guilds::apply_member_list_update(
                         &mut self.members,
                         &update,
@@ -251,7 +321,11 @@ impl AppState {
                     );
                 }
             }
-            TransportEvent::GuildMembersChunk { guild_id, members, not_found } => {
+            TransportEvent::GuildMembersChunk {
+                guild_id,
+                members,
+                not_found,
+            } => {
                 for uid in &not_found {
                     crate::protocol::cache::lazy_guilds::mark_op8_requested(&guild_id, uid);
                 }
@@ -265,10 +339,19 @@ impl AppState {
                     }
                 }
             }
-            TransportEvent::ReactionAdd { channel_id, message_id, emoji, .. } => {
+            TransportEvent::ReactionAdd {
+                channel_id,
+                message_id,
+                emoji,
+                ..
+            } => {
                 self.add_reaction_to_message(&channel_id, &message_id, &emoji);
             }
-            TransportEvent::TypingStart { channel_id, user_id, .. } => {
+            TransportEvent::TypingStart {
+                channel_id,
+                user_id,
+                ..
+            } => {
                 self.record_typing(&channel_id, &user_id, None);
             }
             TransportEvent::Connected => {
@@ -282,23 +365,29 @@ impl AppState {
                 self.is_connected_to_gateway = false;
                 self.is_connecting = false;
                 self.auth_error = Some(reason.clone());
+                self.connection_mode = ConnectionMode::Disconnected(reason.clone());
                 self.connection_status = format!("Desconectado: {}", reason);
             }
             TransportEvent::VoiceStateUpdate(state) => {
                 self.update_voice_state(state);
             }
             TransportEvent::GuildChannelsUpdated { guild_id, channels } => {
-                let categories = super::seed::organize_channels_into_categories(&guild_id, channels);
+                let categories =
+                    super::seed::organize_channels_into_categories(&guild_id, channels);
 
                 if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
                     guild.categories = categories;
                 }
                 save_guilds_to_disk(&self.guilds, &self.guild_folders);
 
-                if self.selected_guild_id.as_deref() == Some(&guild_id) && self.selected_channel_id.is_none() {
+                if self.selected_guild_id.as_deref() == Some(&guild_id)
+                    && self.selected_channel_id.is_none()
+                {
                     if let Some(guild) = self.guilds.iter().find(|g| g.id == guild_id) {
                         for cat in &guild.categories {
-                            if let Some(first_text) = cat.channels.iter().find(|c| c.kind == ChannelKind::Text) {
+                            if let Some(first_text) =
+                                cat.channels.iter().find(|c| c.kind == ChannelKind::Text)
+                            {
                                 self.select_channel(first_text.id.clone());
                                 break;
                             }
@@ -315,27 +404,47 @@ impl AppState {
                 let emojis = if !g.emojis.is_empty() {
                     let _ = self.media_cache.save_guild_emojis_to_disk(&g.id, &g.emojis);
                     g.emojis
-                } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.emojis.clone()) {
+                } else if let Some(existing) = self
+                    .guilds
+                    .iter()
+                    .find(|guild| guild.id == g.id)
+                    .map(|guild| guild.emojis.clone())
+                {
                     if !existing.is_empty() {
                         existing
                     } else {
-                        self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
+                        self.media_cache
+                            .load_guild_emojis_from_disk(&g.id)
+                            .unwrap_or_default()
                     }
                 } else {
-                    self.media_cache.load_guild_emojis_from_disk(&g.id).unwrap_or_default()
+                    self.media_cache
+                        .load_guild_emojis_from_disk(&g.id)
+                        .unwrap_or_default()
                 };
 
                 let stickers = if !g.stickers.is_empty() {
-                    let _ = self.media_cache.save_guild_stickers_to_disk(&g.id, &g.stickers);
+                    let _ = self
+                        .media_cache
+                        .save_guild_stickers_to_disk(&g.id, &g.stickers);
                     g.stickers
-                } else if let Some(existing) = self.guilds.iter().find(|guild| guild.id == g.id).map(|guild| guild.stickers.clone()) {
+                } else if let Some(existing) = self
+                    .guilds
+                    .iter()
+                    .find(|guild| guild.id == g.id)
+                    .map(|guild| guild.stickers.clone())
+                {
                     if !existing.is_empty() {
                         existing
                     } else {
-                        self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
+                        self.media_cache
+                            .load_guild_stickers_from_disk(&g.id)
+                            .unwrap_or_default()
                     }
                 } else {
-                    self.media_cache.load_guild_stickers_from_disk(&g.id).unwrap_or_default()
+                    self.media_cache
+                        .load_guild_stickers_from_disk(&g.id)
+                        .unwrap_or_default()
                 };
 
                 let item = GuildItemState {
@@ -364,21 +473,24 @@ impl AppState {
                             idx += 1;
                         }
                     }
-                    self.guilds.sort_by_key(|g| {
-                        order_map.get(&g.id).copied().unwrap_or(usize::MAX)
-                    });
+                    self.guilds
+                        .sort_by_key(|g| order_map.get(&g.id).copied().unwrap_or(usize::MAX));
                 }
                 save_guilds_to_disk(&self.guilds, &self.guild_folders);
             }
             TransportEvent::GuildEmojisUpdated { guild_id, emojis } => {
-                let _ = self.media_cache.save_guild_emojis_to_disk(&guild_id, &emojis);
+                let _ = self
+                    .media_cache
+                    .save_guild_emojis_to_disk(&guild_id, &emojis);
                 if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
                     guild.emojis = emojis;
                 }
                 save_guilds_to_disk(&self.guilds, &self.guild_folders);
             }
             TransportEvent::GuildStickersUpdated { guild_id, stickers } => {
-                let _ = self.media_cache.save_guild_stickers_to_disk(&guild_id, &stickers);
+                let _ = self
+                    .media_cache
+                    .save_guild_stickers_to_disk(&guild_id, &stickers);
                 if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
                     guild.stickers = stickers;
                 }
@@ -390,7 +502,8 @@ impl AppState {
                     .map(|c| {
                         let is_group = c.channel_type == ChannelType::GroupDm;
                         let is_pinned = c.is_pinned || self.pinned_dms.contains(&c.id);
-                        let avatar_decoration_data = c.recipient_avatar_decorations.first().cloned().flatten();
+                        let avatar_decoration_data =
+                            c.recipient_avatar_decorations.first().cloned().flatten();
                         ChannelItemState {
                             id: c.id,
                             name: c.name,
@@ -410,9 +523,10 @@ impl AppState {
                     })
                     .collect();
 
-                // Preservar canais de DM temporários ainda não resolvidos (ex: dm-<user_id> abertos dinamicamente)
+                // Preservar canais temporários legados de fixture sem
+                // reutilizá-los como dados de produção. O filtro existente
+                // continua isolado do fluxo de login real.
                 for existing in &self.dm_channels {
-                    // Ignorar canais mock / fixos de demonstração antigos
                     if existing.id == "dm-ferris"
                         || existing.id == "dm-group-gpui"
                         || existing.id == "dm-ana"
@@ -424,7 +538,10 @@ impl AppState {
 
                     if existing.id.starts_with("dm-") {
                         let already_resolved = new_dms.iter().any(|d| {
-                            existing.recipient_ids.iter().any(|uid| d.recipient_ids.contains(uid))
+                            existing
+                                .recipient_ids
+                                .iter()
+                                .any(|uid| d.recipient_ids.contains(uid))
                         });
                         if !already_resolved && !new_dms.iter().any(|d| d.id == existing.id) {
                             new_dms.push(existing.clone());
@@ -444,14 +561,17 @@ impl AppState {
             TransportEvent::DmChannelCreated(c) => {
                 let is_group = c.channel_type == ChannelType::GroupDm;
                 let real_id = c.id.clone();
-                let avatar_decoration_data = c.recipient_avatar_decorations.first().cloned().flatten();
+                let avatar_decoration_data =
+                    c.recipient_avatar_decorations.first().cloned().flatten();
                 let mut temp_id_to_migrate: Option<String> = None;
                 if let Some(existing) = self.dm_channels.iter_mut().find(|d| {
                     d.id == real_id
                         || (d.id.starts_with("dm-")
                             && !d.is_group_dm
                             && !c.recipient_ids.is_empty()
-                            && c.recipient_ids.iter().any(|uid| d.recipient_ids.contains(uid)))
+                            && c.recipient_ids
+                                .iter()
+                                .any(|uid| d.recipient_ids.contains(uid)))
                 }) {
                     if existing.id.starts_with("dm-") {
                         temp_id_to_migrate = Some(existing.id.clone());
@@ -495,7 +615,8 @@ impl AppState {
                             for msg in &mut pending_msgs {
                                 msg.channel_id = real_id.clone();
                             }
-                            let target_msgs = self.messages_by_channel.entry(real_id.clone()).or_default();
+                            let target_msgs =
+                                self.messages_by_channel.entry(real_id.clone()).or_default();
                             for p_msg in pending_msgs {
                                 if !target_msgs.iter().any(|m| m.id == p_msg.id) {
                                     target_msgs.push(p_msg);
@@ -508,10 +629,18 @@ impl AppState {
             TransportEvent::DmChannelResolved { temp_id, channel } => {
                 let real_id = channel.id.clone();
                 let is_group = channel.channel_type == ChannelType::GroupDm;
-                let avatar_decoration_data = channel.recipient_avatar_decorations.first().cloned().flatten();
+                let avatar_decoration_data = channel
+                    .recipient_avatar_decorations
+                    .first()
+                    .cloned()
+                    .flatten();
 
                 // 1. Atualizar ou inserir em self.dm_channels
-                if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == temp_id || c.id == real_id) {
+                if let Some(dm) = self
+                    .dm_channels
+                    .iter_mut()
+                    .find(|c| c.id == temp_id || c.id == real_id)
+                {
                     dm.id = real_id.clone();
                     dm.name = channel.name.clone();
                     dm.icon_url = channel.icon_url.clone();
@@ -553,7 +682,8 @@ impl AppState {
                         for msg in &mut pending_msgs {
                             msg.channel_id = real_id.clone();
                         }
-                        let target_msgs = self.messages_by_channel.entry(real_id.clone()).or_default();
+                        let target_msgs =
+                            self.messages_by_channel.entry(real_id.clone()).or_default();
                         for p_msg in pending_msgs {
                             if !target_msgs.iter().any(|m| m.id == p_msg.id) {
                                 target_msgs.push(p_msg);
@@ -564,7 +694,10 @@ impl AppState {
 
                 // 4. Carrega histórico de mensagens reais da Discord API ou Mock se ainda não estiver presente
                 if let Some(ref cm) = self.client_manager {
-                    let has_messages = self.messages_by_channel.get(&real_id).map_or(false, |msgs| !msgs.is_empty());
+                    let has_messages = self
+                        .messages_by_channel
+                        .get(&real_id)
+                        .map_or(false, |msgs| !msgs.is_empty());
                     if !has_messages || self.is_connected_to_gateway {
                         let cm = cm.clone();
                         let cid = real_id.clone();
@@ -609,7 +742,10 @@ impl AppState {
                                 if hash.starts_with("http://") || hash.starts_with("https://") {
                                     hash.clone()
                                 } else {
-                                    format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", r.id, hash)
+                                    format!(
+                                        "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                                        r.id, hash
+                                    )
                                 }
                             }),
                             avatar_text,
@@ -634,7 +770,10 @@ impl AppState {
                     if hash.starts_with("http://") || hash.starts_with("https://") {
                         hash.clone()
                     } else {
-                        format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", r.id, hash)
+                        format!(
+                            "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                            r.id, hash
+                        )
                     }
                 });
 
@@ -680,16 +819,20 @@ impl AppState {
                 self.friends.retain(|f| f.id != id);
                 self.active_now_items.retain(|a| a.user_id != id);
             }
-            TransportEvent::FriendRequestResult { username: _, success, message } => {
+            TransportEvent::FriendRequestResult {
+                username: _,
+                success,
+                message,
+            } => {
                 self.is_sending_friend_request = false;
                 self.add_friend_feedback = Some((success, message));
                 if success {
                     self.add_friend_input.clear();
                 }
             }
-            TransportEvent::RelationshipActionFailed { id, error } => {
+            TransportEvent::RelationshipActionFailed { id, .. } => {
                 self.pending_relationship_actions.remove(&id);
-                log::warn!("Relationship action failed for user {}: {}", id, error);
+                log::warn!("Ação de relacionamento recusada pelo Discord.");
             }
             TransportEvent::PresenceUpdate {
                 user_id,
@@ -715,7 +858,9 @@ impl AppState {
                 theme,
                 client_theme_settings,
             } => {
-                self.account_theme = Some(theme);
+                if theme != crate::protocol::user_settings_proto::Theme::Unset {
+                    self.account_theme = Some(theme);
+                }
                 if client_theme_settings.is_some() {
                     self.account_client_theme_settings = client_theme_settings;
                 }
@@ -732,7 +877,13 @@ impl AppState {
                 // status and mute/deafen state are not part of the payload and
                 // stay untouched.
                 let display_name = user.display_name().to_string();
-                let avatar_text = user.username.chars().next().unwrap_or('U').to_uppercase().to_string();
+                let avatar_text = user
+                    .username
+                    .chars()
+                    .next()
+                    .unwrap_or('U')
+                    .to_uppercase()
+                    .to_string();
                 let avatar_url = user.avatar_url();
                 self.current_user.id = user.id;
                 self.current_user.username = user.username;
@@ -742,9 +893,11 @@ impl AppState {
                 self.current_user.avatar_url = avatar_url;
                 self.current_user.avatar_decoration_data = user.avatar_decoration_data;
                 if self.is_connected_to_gateway {
-                    self.connection_status = format!("Conectado como @{}", self.current_user.username);
+                    self.connection_status =
+                        format!("Conectado como @{}", self.current_user.username);
                     if matches!(self.connection_mode, ConnectionMode::LiveDiscord(_)) {
-                        self.connection_mode = ConnectionMode::LiveDiscord(self.current_user.username.clone());
+                        self.connection_mode =
+                            ConnectionMode::LiveDiscord(self.current_user.username.clone());
                     }
                 }
             }

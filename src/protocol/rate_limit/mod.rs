@@ -9,5 +9,7 @@
 pub mod coalescing;
 pub mod token_bucket;
 
-pub use coalescing::UserActionDebouncer;
-pub use token_bucket::{RateLimitCoordinator, RateLimitHeaders, TokenBucket};
+pub use coalescing::{CoalescedResponse, RequestCoalescer, UserActionDebouncer};
+pub use token_bucket::{
+    RateLimitCoordinator, RateLimitHeaders, TokenBucket, retry_after_from_headers,
+};

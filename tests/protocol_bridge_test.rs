@@ -4,7 +4,11 @@ use std::fs;
 use std::time::Duration;
 
 fn make_temp_auth_storage(test_name: &str) -> TokenStorage {
-    let dir = std::env::temp_dir().join(format!("discord_rs_test_{}_{}", test_name, std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "discord_rs_test_{}_{}",
+        test_name,
+        std::process::id()
+    ));
     let _ = fs::create_dir_all(&dir);
     TokenStorage::with_path(dir.join("auth.json"))
 }
@@ -21,12 +25,15 @@ async fn test_protocol_bridge_token_storage_lifecycle() -> anyhow::Result<()> {
     assert!(!bridge.is_connected());
 
     // Save a token
-    let sample_token = AuthToken::bot("MTAwMDAwMDAwMDAwMDAwMDAw.GxYxYz.abcdefghijklmnopqrstuvwxyz123456");
+    let sample_token =
+        AuthToken::bot("MTAwMDAwMDAwMDAwMDAwMDAw.GxYxYz.abcdefghijklmnopqrstuvwxyz123456");
     bridge.save_token(&sample_token)?;
     assert!(auth_path.exists());
 
     // Load saved token
-    let loaded = bridge.load_saved_token()?.expect("Expected token to be loaded");
+    let loaded = bridge
+        .load_saved_token()?
+        .expect("Expected token to be loaded");
     assert_eq!(loaded.secret(), sample_token.secret());
     assert_eq!(loaded.token_type, TokenType::Bot);
 
@@ -66,11 +73,17 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
     matches!(event1, TransportEvent::Connected);
 
     // Verify primary unbounded received
-    let event2 = primary_unbounded_rx.recv().await.expect("Unbounded event expected");
+    let event2 = primary_unbounded_rx
+        .recv()
+        .await
+        .expect("Unbounded event expected");
     matches!(event2, TransportEvent::Connected);
 
     // Verify secondary unbounded received
-    let event3 = secondary_unbounded_rx.recv().await.expect("Secondary unbounded event expected");
+    let event3 = secondary_unbounded_rx
+        .recv()
+        .await
+        .expect("Secondary unbounded event expected");
     matches!(event3, TransportEvent::Connected);
 
     // Emit MessageCreate event
@@ -82,7 +95,12 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
         bot: false,
         avatar_decoration_data: None,
     };
-    let msg = Message::new("msg-101", "chan-test", author, "Hello GPUI from ProtocolBridge!");
+    let msg = Message::new(
+        "msg-101",
+        "chan-test",
+        author,
+        "Hello GPUI from ProtocolBridge!",
+    );
     bridge.emit_event(TransportEvent::MessageCreate(msg.clone()));
 
     let event_msg = broadcast_rx.recv().await?;
@@ -103,7 +121,11 @@ async fn test_protocol_bridge_event_channels() -> anyhow::Result<()> {
 
     let event_typing = broadcast_rx.recv().await?;
     match event_typing {
-        TransportEvent::TypingStart { channel_id, user_id, timestamp } => {
+        TransportEvent::TypingStart {
+            channel_id,
+            user_id,
+            timestamp,
+        } => {
             assert_eq!(channel_id, "chan-test");
             assert_eq!(user_id, "user-123");
             assert_eq!(timestamp, 123456789);
@@ -146,24 +168,26 @@ async fn test_protocol_bridge_connect_raw_validation() {
 }
 
 #[tokio::test]
-async fn test_connect_with_unauthorized_token_emits_disconnected() {
+async fn test_connect_with_invalid_token_emits_disconnected_without_network() {
     let (cm, mut rx) = discord_rs::protocol::ClientManager::new_mock();
-    let token = AuthToken::user("BQBIQvAmXjxFaDK1WqqMbC-DNfYpe8sPr7UOpX-Dqc7BTTtjrufGtOSLbCWOxfp4x2GPYNBpoNn0UMZErC3laefVsUnk15rirXcJ0c6a2TuCnIMDco_CdRh52B40t-6bzc6KXqanRq8G83xCLw2XUQJRwTLdyZWcTYfRAkQvi46sxU5iosw7xNA0sqSzCx5soDp2VECkhiauMBFQ-Us_-NjlvNIq75iMUsXsOU8ySVsTVXbheKOifymc2WGkHKOQaq-w");
 
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // Formato inválido é rejeitado antes de qualquer REST/WS. O teste nunca
+    // depende de token, conta ou conectividade real.
+    let _ = cm.connect_with_token(AuthToken::user("short")).await;
 
-    let _ = cm.connect_with_token(token).await;
-
-    let event = tokio::time::timeout(Duration::from_secs(5), async {
+    let event = tokio::time::timeout(Duration::from_secs(1), async {
         while let Ok(evt) = rx.recv().await {
             if let TransportEvent::Disconnected(reason) = evt {
                 return Some(reason);
             }
         }
         None
-    }).await;
+    })
+    .await;
 
     assert!(event.is_ok(), "Expected Disconnected event before timeout");
-    let reason = event.unwrap().expect("Should have received Disconnected reason");
-    assert!(reason.contains("Falha na autenticação") || reason.contains("401") || reason.contains("Gateway"));
+    let reason = event
+        .unwrap()
+        .expect("Should have received Disconnected reason");
+    assert!(reason.contains("token inválido"));
 }
