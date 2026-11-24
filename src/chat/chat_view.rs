@@ -9,10 +9,10 @@ use std::sync::Arc;
 use crate::app::state::AppState;
 use crate::chat::editor::{ChatComposer, EditorActionCallback, EditorSendCallback};
 use crate::chat::media_picker::{
-    MediaPickerConfig, MediaPickerGuildSection, MediaPickerModal, MediaPickerTab,
-    OnCloseMediaPickerCallback, OnPlaySoundCallback, OnSearchQueryCallback, OnSelectEmojiCallback,
-    OnSelectGifCallback, OnSelectGifCategoryCallback, OnSelectGuildCallback,
-    OnSelectStickerCallback, OnTabChangeCallback,
+    gif_query_from_picker, new_gifs_client, MediaPickerConfig, MediaPickerGuildSection,
+    MediaPickerModal, MediaPickerTab, OnCloseMediaPickerCallback, OnPlaySoundCallback,
+    OnSearchQueryCallback, OnSelectEmojiCallback, OnSelectGifCallback, OnSelectGifCategoryCallback,
+    OnSelectGuildCallback, OnSelectStickerCallback, OnTabChangeCallback,
 };
 use crate::chat::message_list::{
     build_chat_list_items, render_date_separator_element, render_message_context_menu,
@@ -21,6 +21,7 @@ use crate::chat::message_list::{
 };
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
+use crate::protocol::gifs_client::{GifItem, GifsClient};
 use crate::protocol::media_cache::MediaCacheManager;
 use crate::tokens::colors::white;
 use crate::tokens::colors::*;
@@ -111,6 +112,9 @@ pub struct ChatView {
     pub media_picker_focus_handle: FocusHandle,
     pub media_picker_selected_guild_id: Option<String>,
     pub media_picker_list_state: ListState,
+    pub media_picker_gifs: Vec<GifItem>,
+    pub gif_request_seq: u64,
+    pub gifs_client: Arc<GifsClient>,
     pub active_context_menu: Option<(String, Point<Pixels>)>,
     pub pending_delete_message: Option<Message>,
     pub is_deleting: bool,
@@ -144,6 +148,7 @@ impl ChatView {
         list_state.set_follow_mode(FollowMode::Tail);
         // Top-aligned ListState for rich media picker popup with 150px overdraw windowing
         let media_picker_list_state = ListState::new(0, ListAlignment::Top, px(150.0));
+        let gifs_client = Arc::new(new_gifs_client(reqwest::Client::new()));
         cx.observe(&state, |_this, _state, cx| {
             cx.notify();
         })
@@ -168,6 +173,9 @@ impl ChatView {
             media_picker_react_message_id: None,
             media_picker_selected_guild_id: None,
             media_picker_list_state,
+            media_picker_gifs: Vec::new(),
+            gif_request_seq: 0,
+            gifs_client,
             active_context_menu: None,
             pending_delete_message: None,
             is_deleting: false,
@@ -447,6 +455,45 @@ impl ChatView {
         };
         self.retry_send = None;
         self.submit_composer_message(channel_id, content, window, cx);
+    }
+
+    fn refresh_media_picker_gifs(&mut self, cx: &mut Context<Self>) {
+        if !self.media_picker_open || self.media_picker_tab != MediaPickerTab::Gifs {
+            return;
+        }
+        self.gif_request_seq = self.gif_request_seq.wrapping_add(1);
+        let seq = self.gif_request_seq;
+        let query = gif_query_from_picker(&self.media_picker_search);
+        let client = self.gifs_client.clone();
+        let this_entity = cx.entity().clone();
+
+        cx.spawn(move |_view, async_cx: &mut AsyncApp| {
+            let mut async_cx = async_cx.clone();
+            async move {
+                let result = if query.query.trim().is_empty() {
+                    client.trending(query).await
+                } else {
+                    client.search(query).await
+                };
+                let _ = this_entity.update(&mut async_cx, |this, cx| {
+                    if seq != this.gif_request_seq {
+                        return;
+                    }
+                    match result {
+                        Ok(gifs) => {
+                            this.media_picker_gifs = gifs;
+                        }
+                        Err(err) => {
+                            log::warn!("Falha ao carregar GIFs: {}", err);
+                            this.media_picker_gifs.clear();
+                        }
+                    }
+                    this.media_picker_list_state.reset(0);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn load_more_history(&mut self, cx: &mut Context<Self>) {
@@ -1147,6 +1194,7 @@ impl Render for ChatView {
                     this.media_picker_tab = MediaPickerTab::Gifs;
                     this.media_picker_list_state.reset(0);
                     window.focus(&this.media_picker_focus_handle, cx);
+                    this.refresh_media_picker_gifs(cx);
                 }
                 cx.notify();
             });
@@ -1208,6 +1256,9 @@ impl Render for ChatView {
                     self_tab.update(cx, |this, cx| {
                         this.media_picker_tab = tab;
                         this.media_picker_list_state.reset(0);
+                        if tab == MediaPickerTab::Gifs {
+                            this.refresh_media_picker_gifs(cx);
+                        }
                         cx.notify();
                     });
                 }));
@@ -1303,6 +1354,9 @@ impl Render for ChatView {
                     self_search.update(cx, |this, cx| {
                         this.media_picker_search = q;
                         this.media_picker_list_state.reset(0);
+                        if this.media_picker_tab == MediaPickerTab::Gifs {
+                            this.refresh_media_picker_gifs(cx);
+                        }
                         cx.notify();
                     });
                 }));
@@ -1314,6 +1368,9 @@ impl Render for ChatView {
                     self_cat.update(cx, |this, cx| {
                         this.media_picker_search = c;
                         this.media_picker_list_state.reset(0);
+                        if this.media_picker_tab == MediaPickerTab::Gifs {
+                            this.refresh_media_picker_gifs(cx);
+                        }
                         cx.notify();
                     });
                 }));
@@ -1359,9 +1416,7 @@ impl Render for ChatView {
                 recent_emojis,
                 custom_emojis,
                 stickers,
-                gifs: MediaCacheManager::get_curated_tenor_gifs_for_category(
-                    &self.media_picker_search,
-                ),
+                gifs: self.media_picker_gifs.clone(),
                 sounds: Vec::new(),
                 hovered_info: None,
                 guild_sections,
