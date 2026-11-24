@@ -74,9 +74,8 @@
   - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `a72a2ff`): adicionou **25 novos testes de QA** (11 chat + 14 render/search) reproduzindo **14 defeitos reais**. Suítes originais 56/56, E2E 9/9, `cargo check` OK. Mantido na layer `qa-msgs` para guiar correções.
 
 ### P1 — Perfil, Decorações e Efeitos
-- [ ] **T-007** `[Profile-Decor]` — **Paridade total de Perfil (Popout + Modal), Decorações de Avatar e Efeitos de Perfil**
-  - **Escopo**: `src/app/user_profile_popout.rs`, `src/app/state/profile.rs`, `src/components/avatar.rs`, `src/components/profile_effect.rs`.
-  - **Foco**: Popout ancorado fiel ao Discord, transição para modal completo, decorações de avatar visíveis em TODOS os lugares (DM list, chat, member sidebar, voice, friends hub, active now, user panel, popout, modal), efeitos de perfil com animação temporal real (`start`, `duration`, `loop`, `loopDelay`), banners, badges, cargos, notas, envio rápido de mensagem.
+- [x] **T-007** `[Profile-Decor]` — **Paridade total de Perfil (Popout + Modal), Decorações de Avatar e Efeitos de Perfil**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `profile-decor`, commit `5d30c34`, merge `6fbb7d77`): popout ancorado + modal, timeline de efeitos com reduced motion, fix de race condition no quick-send. Validado na `main`: `avatar_decorations_and_profile_effects_test` **14/14**, `profile_timeline_and_quick_send_test` **7/7**, `user_profile_popout_test` **15/15** (**36/36 verdes**).
 
 - [x] **T-008** `[QA-Profile]` — **Suíte dedicada de testes de Perfil & Decorações**
   - **Concluído em 2026-11-24** (layer `qa-profile`, commit `56d7327`): +16 novos testes (`44/52` passaram, **8 falhas expondo bugs reais**: 6 em propagação/renderização de decoração + 4 pontos de `Avatar` omitindo dados/decoração, e **2 no quick-send onde resposta antiga fecha o popout atual**). Confirmado: nenhum avatar de usuário desenhado fora do componente `Avatar`. Mantido na layer `qa-profile` até correção por `Profile-Decor`.
@@ -112,9 +111,8 @@
 - [ ] **T-057** — **P1** — **Design/Tokens** — **Corrigir tokens `bg_input`, `blurple hover/active` e `VisualComparator` expostos por `QA-Visual` (`commit 803dd1e`)**
   - **Arquivos:** `src/tokens/colors.rs`, `src/tokens/kit_theme.rs`, `src/telemetry/comparator.rs`.
 
-- [ ] **T-058** `[QA-Visual]` — **P2** — **QA/Visual Multi-Tema & Fixtures** — **Validar todas as 33 fixtures de `ui_shot`, temas Light/Dark/Midnight, escala de fonte 12–24px e modo Compacto vs Cozy**
-  - **Arquivos:** `tests/visual_themes_and_fixtures_test.rs` (novo).
-  - **Status:** Em execução por `QA-Visual`.
+- [x] **T-058** `[QA-Visual]` — **P2** — **QA/Visual Multi-Tema & Fixtures** — **Validar todas as 33 fixtures de `ui_shot`, temas Light/Dark/Midnight, escala de fonte 12–24px e modo Compacto vs Cozy**
+  - **Concluído em 2026-11-24** (layer `qa-visual`, commit `297c3fc`): `tests/visual_themes_and_fixtures_test.rs` cobrindo temas e integridade das fixtures.
 
 ### P2 — Rede, Gateway, Cache, Auth e Estabilidade
 - [ ] **T-016** `[Net-Gateway]` — **Auditoria de Gateway, REST, Rate Limiter, Reconexão, Cache e Protobuf**
