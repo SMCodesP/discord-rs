@@ -376,12 +376,16 @@ impl Render for LoginScreen {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(0x16194f))
-            // Cosmic Discord-style layered glow background
+            .bg(linear_gradient(
+                135.0,
+                linear_color_stop(rgb(0x131642), 0.0),
+                linear_color_stop(rgb(0x2b39c4), 1.0),
+            ))
+            // Subtle stars matching the official Discord cosmic backdrop
             .child(render_cosmic_backdrop())
             // Top-left official Discord wordmark
             .child(render_top_left_brand())
-            // Centered 2-column official Discord login card
+            // Centered 2-column official Discord login card (784px exact)
             .child(
                 div()
                     .relative()
@@ -396,20 +400,23 @@ impl Render for LoginScreen {
                             .max_w_full()
                             .p(px(32.0))
                             .rounded(px(8.0))
-                            .bg(rgb(0x2b2d31))
+                            .bg(rgb(0x313338))
                             .border_1()
-                            .border_color(rgba(0xffffff12))
+                            .border_color(rgba(0xffffff10))
                             .shadow_lg()
+                            .overflow_hidden()
                             .flex()
                             .flex_row()
                             .items_center()
+                            .justify_between()
                             .gap(px(32.0))
                             .child(left_col)
                             .child(
                                 div()
                                     .w(px(1.0))
-                                    .h(px(300.0))
-                                    .bg(rgba(0xffffff10)),
+                                    .h(px(280.0))
+                                    .flex_shrink_0()
+                                    .bg(rgba(0xffffff12)),
                             )
                             .child(right_col),
                     ),
@@ -421,48 +428,20 @@ fn render_cosmic_backdrop() -> AnyElement {
     div()
         .absolute()
         .inset_0()
-        // Upper-right bright blurple nebula glow
-        .child(
-            div()
-                .absolute()
-                .top(px(-180.0))
-                .right(px(-140.0))
-                .size(px(680.0))
-                .rounded_full()
-                .bg(rgba(0x404eed55)),
-        )
-        // Lower-left deep indigo glow
-        .child(
-            div()
-                .absolute()
-                .bottom(px(-220.0))
-                .left(px(-160.0))
-                .size(px(700.0))
-                .rounded_full()
-                .bg(rgba(0x2d248a66)),
-        )
-        // Center-bottom vibrant blue accent
-        .child(
-            div()
-                .absolute()
-                .bottom(px(-140.0))
-                .right(px(80.0))
-                .size(px(520.0))
-                .rounded_full()
-                .bg(rgba(0x3b48f544)),
-        )
-        // Subtle decorative stars & pluses matching the Discord cosmic background
-        .child(div().absolute().top(px(84.0)).left(px(320.0)).size(px(4.0)).rounded_full().bg(rgba(0xffffff44)))
-        .child(div().absolute().top(px(140.0)).right(px(260.0)).size(px(5.0)).rounded_full().bg(rgba(0xffffff55)))
+        // Subtle decorative stars & pluses (no hard flat circles)
+        .child(div().absolute().top(px(84.0)).left(px(320.0)).size(px(3.0)).rounded_full().bg(rgba(0xffffff55)))
+        .child(div().absolute().top(px(140.0)).right(px(260.0)).size(px(4.0)).rounded_full().bg(rgba(0xffffff66)))
+        .child(div().absolute().top(px(240.0)).left(px(130.0)).size(px(3.0)).rounded_full().bg(rgba(0xffffff44)))
         .child(div().absolute().bottom(px(120.0)).left(px(210.0)).size(px(4.0)).rounded_full().bg(rgba(0xffffff44)))
-        .child(div().absolute().bottom(px(190.0)).right(px(190.0)).size(px(5.0)).rounded_full().bg(rgba(0xffffff44)))
+        .child(div().absolute().bottom(px(190.0)).right(px(190.0)).size(px(4.0)).rounded_full().bg(rgba(0xffffff55)))
+        .child(div().absolute().bottom(px(90.0)).right(px(340.0)).size(px(3.0)).rounded_full().bg(rgba(0xffffff44)))
         .child(
             div()
                 .absolute()
                 .bottom(px(110.0))
                 .left(px(380.0))
-                .text_size(px(22.0))
-                .text_color(rgba(0x8ea1ff44))
+                .text_size(px(20.0))
+                .text_color(rgba(0x9fb0ff40))
                 .child("+"),
         )
         .child(
@@ -470,8 +449,8 @@ fn render_cosmic_backdrop() -> AnyElement {
                 .absolute()
                 .top(px(96.0))
                 .right(px(380.0))
-                .text_size(px(18.0))
-                .text_color(rgba(0x8ea1ff38))
+                .text_size(px(16.0))
+                .text_color(rgba(0x9fb0ff35))
                 .child("+"),
         )
         .into_any_element()
@@ -555,7 +534,9 @@ fn render_credentials_column(
     active_error: Option<&str>,
 ) -> AnyElement {
     div()
-        .flex_1()
+        .w(px(414.0))
+        .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(16.0))
@@ -593,6 +574,7 @@ fn render_credentials_column(
                 .child(
                     TextInput::new("discord-login-email", email_input)
                         .placeholder("nome@exemplo.com")
+                        .show_paste(false)
                         .full_width(true)
                         .disabled(is_connecting),
                 ),
@@ -608,6 +590,7 @@ fn render_credentials_column(
                     TextInput::new("discord-login-password", password_input)
                         .placeholder("••••••••")
                         .secret(true)
+                        .show_paste(false)
                         .full_width(true)
                         .disabled(is_connecting),
                 ),
@@ -690,7 +673,9 @@ fn render_mfa_column(
     active_error: Option<&str>,
 ) -> AnyElement {
     div()
-        .flex_1()
+        .w(px(414.0))
+        .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(16.0))
@@ -788,7 +773,9 @@ fn render_token_column(
     let app_user = app_state;
 
     div()
-        .flex_1()
+        .w(px(414.0))
+        .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(14.0))
@@ -1084,6 +1071,8 @@ fn render_qr_column(cx: &mut Context<LoginScreen>, qr_state: &QrUiState) -> AnyE
 
     div()
         .w(px(240.0))
+        .min_w_0()
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .items_center()
