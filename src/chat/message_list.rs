@@ -196,19 +196,69 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
         )
 }
 
+/// Renders Discord's unread divider: a red rule with the centered `NOVAS` label.
+///
+/// The caller owns the unread boundary because the current `Message` model does
+/// not carry a read-state marker. No divider is invented when that boundary is
+/// unknown.
+pub fn render_new_messages_divider() -> Div {
+    div()
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w_full()
+        .my(space_2())
+        .child(
+            div()
+                .absolute()
+                .w_full()
+                .h_px()
+                .bg(status_danger()),
+        )
+        .child(
+            div()
+                .relative()
+                .bg(bg_chat())
+                .px(space_2())
+                .py(space_1())
+                .text_size(font_size_xxs())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(status_danger())
+                .child("NOVAS"),
+        )
+}
+
 // ============================================================================
 // Hover Action Bar Component
 // ============================================================================
 
 /// Renders the floating action bar displayed on message hover (React, Reply, More).
+///
+/// Kept as the three-action compatibility entry point for callers that do not
+/// expose an edit callback. Own messages should use
+/// [`render_hover_action_bar_with_edit`] so the canonical Edit action is shown.
 pub fn render_hover_action_bar(
     message_id: &str,
     on_react: Option<MessageActionCallback>,
     on_reply: Option<MessageActionCallback>,
     on_more: Option<MessageActionPosCallback>,
 ) -> Div {
+    render_hover_action_bar_with_edit(message_id, on_react, on_reply, None, on_more)
+}
+
+/// Renders the canonical hover action order: React, Reply, Edit (own messages
+/// only), More. The edit button is omitted when no callback is available.
+pub fn render_hover_action_bar_with_edit(
+    message_id: &str,
+    on_react: Option<MessageActionCallback>,
+    on_reply: Option<MessageActionCallback>,
+    on_edit: Option<MessageActionCallback>,
+    on_more: Option<MessageActionPosCallback>,
+) -> Div {
     let msg_id_react = message_id.to_string();
     let msg_id_reply = message_id.to_string();
+    let msg_id_edit = message_id.to_string();
     let msg_id_more = message_id.to_string();
 
     let mut react_btn = IconButton::with_icon(
@@ -216,8 +266,8 @@ pub fn render_hover_action_bar(
         |sz, col| icon_smile(sz, col).into_any_element(),
     )
     .size(px(28.0))
-    .icon_size(px(16.0))
-    .rounded(radius_sm())
+    .icon_size(px(20.0))
+    .rounded(px(6.0))
     .tooltip("Adicionar reação");
 
     if let Some(handler) = on_react {
@@ -231,8 +281,8 @@ pub fn render_hover_action_bar(
         |sz, col| svg().path("icons/undo-2.svg").size(sz).text_color(col).into_any_element(),
     )
     .size(px(28.0))
-    .icon_size(px(16.0))
-    .rounded(radius_sm())
+    .icon_size(px(20.0))
+    .rounded(px(6.0))
     .tooltip("Responder");
 
     if let Some(handler) = on_reply {
@@ -241,29 +291,14 @@ pub fn render_hover_action_bar(
         });
     }
 
-    let mut more_btn = IconButton::with_icon(
-        format!("hover-more-{}", message_id),
-        |sz, col| svg().path("icons/ellipsis.svg").size(sz).text_color(col).into_any_element(),
-    )
-    .size(px(28.0))
-    .icon_size(px(16.0))
-    .rounded(radius_sm())
-    .tooltip("Mais");
-
-    if let Some(handler) = on_more {
-        more_btn = more_btn.on_click(move |event, window, cx| {
-            handler(&msg_id_more, event.position(), window, cx);
-        });
-    }
-
-    div()
+    let mut action_bar = div()
         .absolute()
-        .top(px(4.0))
-        .right(space_8())
+        .top(px(-16.0))
+        .right(px(14.0))
         .bg(bg_chat())
         .border_1()
         .border_color(bg_user_bar())
-        .rounded(px(6.0))
+        .rounded(radius_md())
         .shadow_md()
         .p(px(2.0))
         .flex()
@@ -273,8 +308,39 @@ pub fn render_hover_action_bar(
         .invisible()
         .group_hover("message-row", |s| s.visible())
         .child(react_btn)
-        .child(reply_btn)
-        .child(more_btn)
+        .child(reply_btn);
+
+    if let Some(handler) = on_edit {
+        let edit_btn = IconButton::with_icon(
+            format!("hover-edit-{}", message_id),
+            |sz, col| svg().path("icons/pencil.svg").size(sz).text_color(col).into_any_element(),
+        )
+        .size(px(28.0))
+        .icon_size(px(20.0))
+        .rounded(px(6.0))
+        .tooltip("Editar")
+        .on_click(move |_ev, window, cx| {
+            handler(&msg_id_edit, window, cx);
+        });
+        action_bar = action_bar.child(edit_btn);
+    }
+
+    let mut more_btn = IconButton::with_icon(
+        format!("hover-more-{}", message_id),
+        |sz, col| svg().path("icons/ellipsis.svg").size(sz).text_color(col).into_any_element(),
+    )
+    .size(px(28.0))
+    .icon_size(px(20.0))
+    .rounded(px(6.0))
+    .tooltip("Mais");
+
+    if let Some(handler) = on_more {
+        more_btn = more_btn.on_click(move |event, window, cx| {
+            handler(&msg_id_more, event.position(), window, cx);
+        });
+    }
+
+    action_bar.child(more_btn)
 }
 
 // ============================================================================
@@ -863,6 +929,105 @@ pub fn render_embeds(embeds: &[Embed]) -> Div {
 }
 
 // ============================================================================
+// Reply Preview
+// ============================================================================
+
+/// Returns real message content for a one-line preview. Empty-content media
+/// messages fall back to metadata returned by Discord; no placeholder text is
+/// fabricated when the payload has no displayable content.
+fn reply_preview_text(message: &Message) -> Option<String> {
+    let content = message.content.trim();
+    if !content.is_empty() {
+        return Some(content.to_string());
+    }
+    if let Some(attachment) = message.attachments.first() {
+        return Some(attachment.filename.clone());
+    }
+    if let Some(sticker) = message.sticker_items.first() {
+        return Some(sticker.name.clone());
+    }
+    message
+        .embeds
+        .iter()
+        .find_map(|embed| embed.title.clone())
+}
+
+/// Renders the compact reply reference shown above a message, including the
+/// curved connector used by Discord's Cozy layout.
+pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
+    let author_name = reply.author.display_name().to_string();
+    let author_color = role_color
+        .filter(|color| *color != 0)
+        .map(from_hex)
+        .unwrap_or_else(text_titles);
+    let preview_text = reply_preview_text(reply);
+
+    let mut summary = div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .gap(space_2())
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .text_color(author_color)
+                .font_weight(WEIGHT_SEMIBOLD)
+                .text_size(font_size_sm())
+                .line_height(line_height_sm())
+                .truncate()
+                .child(author_name),
+        );
+
+    if let Some(text) = preview_text {
+        summary = summary.child(
+            div()
+                .text_color(text_primary())
+                .text_size(font_size_sm())
+                .line_height(line_height_sm())
+                .truncate()
+                .child(text),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(space_2())
+        .w_full()
+        .min_w(px(0.0))
+        .mb(space_1())
+        .child(
+            div()
+                .w(space_12())
+                .h(space_10())
+                .flex_shrink_0()
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .left(space_1())
+                        .top(space_2())
+                        .w(font_size_sm())
+                        .h(font_size_xs())
+                        .border_l_2()
+                        .border_b_2()
+                        .border_color(borders())
+                        .rounded_bl(radius_sm()),
+                ),
+        )
+        .child(
+            Avatar::new(reply.author.display_name().to_string())
+                .size(AvatarSize::Px24)
+                .opt_src(reply.author.avatar_url())
+                .opt_decoration(reply.author.avatar_decoration_data.clone()),
+        )
+        .child(summary)
+}
+
+// ============================================================================
 // Single Message Row (Full & Grouped)
 // ============================================================================
 
@@ -879,11 +1044,28 @@ pub struct MessageRowConfig {
 
 /// Renders an individual message item in Cozy format.
 pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
+    render_message_row_with_reply_and_edit(message, config, None, None)
+}
+
+/// Renders a Cozy message row with optional reply context and an own-message
+/// edit callback. This entry point lets the chat view provide Discord's
+/// `message_reference` data without changing the compatibility configuration
+/// used by existing callers.
+pub fn render_message_row_with_reply_and_edit(
+    message: &Message,
+    config: MessageRowConfig,
+    reply: Option<&Message>,
+    on_edit: Option<MessageActionCallback>,
+) -> Div {
     let author_name = message.author.display_name().to_string();
     let name_color = if message.is_pending {
         text_muted()
     } else {
-        config.role_color.map(from_hex).unwrap_or_else(text_titles)
+        config
+            .role_color
+            .filter(|color| *color != 0)
+            .map(from_hex)
+            .unwrap_or_else(text_titles)
     };
 
     let mut row = div()
@@ -893,13 +1075,15 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
         .flex_row()
         .w_full()
         .min_w(px(0.0))
-        .min_h(px(0.0))
+        .min_h(if config.is_grouped { px(22.0) } else { px(44.0) })
+        .mt(if config.is_grouped { px(0.0) } else { px(17.0) })
         .max_w_full()
-        .overflow_hidden()
-        .px(space_8())
-        .py(if config.is_grouped { px(2.0) } else { space_1() })
+        .pl(space_8())
+        .pr(space_12())
+        .py(px(2.0))
         .hover(|s| s.bg(bg_chat_hover()))
-        .rounded(radius_xs());
+        .rounded_tr(radius_sm())
+        .rounded_br(radius_sm());
 
     if message.is_pending {
         row = row.opacity(0.5).text_color(text_muted());
@@ -968,6 +1152,10 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
         content_area = content_area.text_color(text_muted());
     }
 
+    if let Some(reply) = reply {
+        content_area = content_area.child(render_reply_preview(reply, None));
+    }
+
     if !config.is_grouped {
         // Author header row (Username, BOT tag, Timestamp)
         let author_id = message.author.id.clone();
@@ -980,6 +1168,7 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
                 div()
                     .font_weight(WEIGHT_MEDIUM)
                     .text_size(font_size_base())
+                    .line_height(line_height_base())
                     .text_color(name_color)
                     .cursor_pointer()
                     .hover(|s| s.border_b_1().border_color(name_color))
@@ -1016,6 +1205,8 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
             div()
                 .id(ElementId::Name(format!("header-time-{}", message.id).into()))
                 .text_size(font_size_xs())
+                .font_weight(WEIGHT_MEDIUM)
+                .line_height(line_height_base())
                 .text_color(text_muted())
                 .cursor_default()
                 .tooltip(move |window, cx| Tooltip::new(full_timestamp.clone()).build(window, cx))
@@ -1075,10 +1266,11 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
     }
 
     if !message.is_pending {
-        let action_bar = render_hover_action_bar(
+        let action_bar = render_hover_action_bar_with_edit(
             &message.id,
             config.on_react,
             config.on_reply,
+            on_edit,
             config.on_more,
         );
         row = row.child(action_bar);
@@ -1093,8 +1285,9 @@ pub fn render_message_row(message: &Message, config: MessageRowConfig) -> Div {
 
 /// Determines if two consecutive messages should be grouped in Cozy mode (within 5 minutes by same author).
 pub fn should_group_messages(prev: &Message, current: &Message) -> bool {
+    let elapsed = (current.timestamp - prev.timestamp).num_seconds();
     prev.author.id == current.author.id
-        && (current.timestamp - prev.timestamp).num_seconds().abs() < 300
+        && (0..300).contains(&elapsed)
         && current.timestamp.with_timezone(&Local).date_naive() == prev.timestamp.with_timezone(&Local).date_naive()
 }
 
@@ -1214,6 +1407,49 @@ pub fn render_message_list(
     on_reaction_click: Option<ReactionActionCallback>,
     on_add_reaction: Option<AddReactionCallback>,
 ) -> Div {
+    render_message_list_inner(
+        messages,
+        on_react,
+        on_reply,
+        on_more,
+        on_reaction_click,
+        on_add_reaction,
+        None,
+    )
+}
+
+/// Renders the bounded non-virtualized history with an explicit first-unread
+/// message boundary. Virtualized chat should map the same boundary to a list
+/// item once read-state data is available in the chat view model.
+pub fn render_message_list_with_unread(
+    messages: &[Message],
+    on_react: Option<MessageActionCallback>,
+    on_reply: Option<MessageActionCallback>,
+    on_more: Option<MessageActionPosCallback>,
+    on_reaction_click: Option<ReactionActionCallback>,
+    on_add_reaction: Option<AddReactionCallback>,
+    first_unread_message_id: Option<&str>,
+) -> Div {
+    render_message_list_inner(
+        messages,
+        on_react,
+        on_reply,
+        on_more,
+        on_reaction_click,
+        on_add_reaction,
+        first_unread_message_id,
+    )
+}
+
+fn render_message_list_inner(
+    messages: &[Message],
+    on_react: Option<MessageActionCallback>,
+    on_reply: Option<MessageActionCallback>,
+    on_more: Option<MessageActionPosCallback>,
+    on_reaction_click: Option<ReactionActionCallback>,
+    on_add_reaction: Option<AddReactionCallback>,
+    first_unread_message_id: Option<&str>,
+) -> Div {
     let mut list = div()
         .flex()
         .flex_col()
@@ -1262,6 +1498,11 @@ pub fn render_message_list(
             list = list.child(render_date_separator_element(msg_date));
             last_date = Some(msg_date);
             prev_message = None; // Reset grouping across dates
+        }
+
+        if first_unread_message_id == Some(msg.id.as_str()) {
+            list = list.child(render_new_messages_divider());
+            prev_message = None; // Unread messages start a fresh visual group
         }
 
         // 2. Check 5-minute Cozy grouping
@@ -1486,5 +1727,59 @@ mod tests {
             None,
         );
         drop(guild_banner);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_grouping_rejects_backwards_and_exact_five_minute_boundaries() {
+        let author = Author::new("1001", "Alice");
+        let t0 = DateTime::from_timestamp(1700000000, 0).unwrap();
+        let first = Message::new("1", "c1", author.clone(), "first").with_timestamp(t0);
+        let backwards =
+            Message::new("2", "c1", author.clone(), "backwards").with_timestamp(t0 - chrono::Duration::seconds(1));
+        let exact_five =
+            Message::new("3", "c1", author.clone(), "five").with_timestamp(t0 + chrono::Duration::minutes(5));
+
+        assert!(!should_group_messages(&first, &backwards));
+        assert!(!should_group_messages(&first, &exact_five));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_render_reply_unread_divider_and_edit_hover_action() {
+        let author = Author::new("1001", "Alice");
+        let reply = Message::new("reply-1", "c1", author.clone(), "Mensagem respondida");
+        let message = Message::new("message-1", "c1", author, "Resposta");
+
+        drop(render_reply_preview(&reply, Some(0x2ecc71)));
+        drop(render_new_messages_divider());
+        drop(render_hover_action_bar_with_edit(
+            "message-1",
+            None,
+            None,
+            Some(Arc::new(|_id, _window, _cx| {})),
+            None,
+        ));
+        drop(render_message_row_with_reply_and_edit(
+            &message,
+            MessageRowConfig {
+                is_grouped: false,
+                role_color: Some(0),
+                on_react: None,
+                on_reply: None,
+                on_more: None,
+                on_reaction_click: None,
+                on_add_reaction: None,
+            },
+            Some(&reply),
+            None,
+        ));
+        drop(render_message_list_with_unread(
+            &[reply, message],
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("message-1"),
+        ));
     }
 }
