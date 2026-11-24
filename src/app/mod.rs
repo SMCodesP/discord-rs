@@ -16,6 +16,7 @@ pub mod guild_rail;
 pub mod header_bar;
 pub mod member_sidebar;
 pub mod root_view;
+pub mod responsive;
 pub mod state;
 pub mod user_profile_popout;
 pub mod user_settings;

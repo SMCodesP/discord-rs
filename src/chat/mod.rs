@@ -18,8 +18,10 @@ pub mod message_list;
 pub mod polls;
 pub mod reactions;
 pub mod search;
+pub mod blocked_group;
 pub mod system_messages;
 
+pub use blocked_group::*;
 pub use channel_guards::*;
 pub use chat_view::*;
 pub use editor::*;
