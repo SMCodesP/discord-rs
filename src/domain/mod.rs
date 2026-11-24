@@ -5,6 +5,7 @@ pub mod guild_admin;
 pub mod hierarchy;
 pub mod message;
 pub mod profile;
+pub mod rich_presence;
 pub mod settings;
 pub mod snowflake;
 pub mod user;
@@ -27,6 +28,11 @@ pub use message::{Attachment, Author, Embed, EmbedAuthor, EmbedField, EmbedFoote
 pub use profile::{
     snowflake_to_datetime, ConnectedAccount, MutualGuild, ProfileBadge, ProfilePopoutState,
     ProfileTab, UserProfileData,
+};
+pub use rich_presence::{
+    activity_details, activity_headline, activity_image_urls, activity_large_image_url,
+    activity_small_image_url, activity_state, format_activity, format_activity_at,
+    is_spotify_activity, resolve_asset_url, ActivityImageUrls, RichPresence, SpotifyProgress,
 };
 pub use settings::*;
 pub use snowflake::{Snowflake, DISCORD_EPOCH_MS};
