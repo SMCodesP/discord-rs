@@ -46,7 +46,11 @@ impl MediaDeviceManager {
         let default_name = self.host.default_input_device().and_then(|d| d.name().ok());
         let devices = match self.host.input_devices() {
             Ok(iter) => iter,
-            Err(e) => return Err(AudioError::DeviceUnavailable(format!("Failed to enumerate input devices: {e:?}"))),
+            Err(e) => {
+                return Err(AudioError::DeviceUnavailable(format!(
+                    "Failed to enumerate input devices: {e:?}"
+                )));
+            }
         };
 
         let mut result = Vec::new();
@@ -72,10 +76,17 @@ impl MediaDeviceManager {
     /// Lists real system audio output devices (speakers/headphones).
     /// If no devices exist on the host, returns an empty list without inventing mock data.
     pub fn list_output_devices(&self) -> Result<Vec<MediaDeviceInfo>, AudioError> {
-        let default_name = self.host.default_output_device().and_then(|d| d.name().ok());
+        let default_name = self
+            .host
+            .default_output_device()
+            .and_then(|d| d.name().ok());
         let devices = match self.host.output_devices() {
             Ok(iter) => iter,
-            Err(e) => return Err(AudioError::DeviceUnavailable(format!("Failed to enumerate output devices: {e:?}"))),
+            Err(e) => {
+                return Err(AudioError::DeviceUnavailable(format!(
+                    "Failed to enumerate output devices: {e:?}"
+                )));
+            }
         };
 
         let mut result = Vec::new();
@@ -101,14 +112,13 @@ impl MediaDeviceManager {
     /// Retrieves the system default input device, or returns `AudioError::NoDefaultDevice`
     /// if none is configured.
     pub fn default_input_device(&self) -> Result<MediaDeviceInfo, AudioError> {
-        let dev = self
-            .host
-            .default_input_device()
-            .ok_or_else(|| AudioError::NoDefaultDevice("No default input device available".to_string()))?;
+        let dev = self.host.default_input_device().ok_or_else(|| {
+            AudioError::NoDefaultDevice("No default input device available".to_string())
+        })?;
 
-        let name = dev
-            .name()
-            .map_err(|e| AudioError::DeviceUnavailable(format!("Cannot read input device name: {e:?}")))?;
+        let name = dev.name().map_err(|e| {
+            AudioError::DeviceUnavailable(format!("Cannot read input device name: {e:?}"))
+        })?;
 
         let (rates, channels) = extract_device_capabilities(&dev, DeviceType::Input);
 
@@ -125,14 +135,13 @@ impl MediaDeviceManager {
     /// Retrieves the system default output device, or returns `AudioError::NoDefaultDevice`
     /// if none is configured.
     pub fn default_output_device(&self) -> Result<MediaDeviceInfo, AudioError> {
-        let dev = self
-            .host
-            .default_output_device()
-            .ok_or_else(|| AudioError::NoDefaultDevice("No default output device available".to_string()))?;
+        let dev = self.host.default_output_device().ok_or_else(|| {
+            AudioError::NoDefaultDevice("No default output device available".to_string())
+        })?;
 
-        let name = dev
-            .name()
-            .map_err(|e| AudioError::DeviceUnavailable(format!("Cannot read output device name: {e:?}")))?;
+        let name = dev.name().map_err(|e| {
+            AudioError::DeviceUnavailable(format!("Cannot read output device name: {e:?}"))
+        })?;
 
         let (rates, channels) = extract_device_capabilities(&dev, DeviceType::Output);
 
@@ -156,7 +165,7 @@ impl MediaDeviceManager {
 
     /// Sets the selected input device by ID. If `None` or empty, resets to default.
     pub fn select_input_device(&mut self, id: Option<&str>) -> Result<(), AudioError> {
-        if let Some(target_id) = id {
+        if let Some(target_id) = selected_device_id(id) {
             let available = self.list_input_devices()?;
             if !available.iter().any(|d| d.id == target_id) {
                 return Err(AudioError::DeviceNotFound(target_id.to_string()));
@@ -170,7 +179,7 @@ impl MediaDeviceManager {
 
     /// Sets the selected output device by ID. If `None` or empty, resets to default.
     pub fn select_output_device(&mut self, id: Option<&str>) -> Result<(), AudioError> {
-        if let Some(target_id) = id {
+        if let Some(target_id) = selected_device_id(id) {
             let available = self.list_output_devices()?;
             if !available.iter().any(|d| d.id == target_id) {
                 return Err(AudioError::DeviceNotFound(target_id.to_string()));
@@ -184,11 +193,10 @@ impl MediaDeviceManager {
 
     /// Finds the corresponding `cpal::Device` for an input device ID (or system default if None).
     pub fn get_cpal_input_device(&self, id: Option<&str>) -> Result<cpal::Device, AudioError> {
-        if let Some(target_id) = id {
-            let devices = self
-                .host
-                .input_devices()
-                .map_err(|e| AudioError::DeviceUnavailable(format!("Cannot enumerate input devices: {e:?}")))?;
+        if let Some(target_id) = selected_device_id(id) {
+            let devices = self.host.input_devices().map_err(|e| {
+                AudioError::DeviceUnavailable(format!("Cannot enumerate input devices: {e:?}"))
+            })?;
 
             for dev in devices {
                 if let Ok(name) = dev.name() {
@@ -199,19 +207,18 @@ impl MediaDeviceManager {
             }
             Err(AudioError::DeviceNotFound(target_id.to_string()))
         } else {
-            self.host
-                .default_input_device()
-                .ok_or_else(|| AudioError::NoDefaultDevice("No default input device found".to_string()))
+            self.host.default_input_device().ok_or_else(|| {
+                AudioError::NoDefaultDevice("No default input device found".to_string())
+            })
         }
     }
 
     /// Finds the corresponding `cpal::Device` for an output device ID (or system default if None).
     pub fn get_cpal_output_device(&self, id: Option<&str>) -> Result<cpal::Device, AudioError> {
-        if let Some(target_id) = id {
-            let devices = self
-                .host
-                .output_devices()
-                .map_err(|e| AudioError::DeviceUnavailable(format!("Cannot enumerate output devices: {e:?}")))?;
+        if let Some(target_id) = selected_device_id(id) {
+            let devices = self.host.output_devices().map_err(|e| {
+                AudioError::DeviceUnavailable(format!("Cannot enumerate output devices: {e:?}"))
+            })?;
 
             for dev in devices {
                 if let Ok(name) = dev.name() {
@@ -222,11 +229,15 @@ impl MediaDeviceManager {
             }
             Err(AudioError::DeviceNotFound(target_id.to_string()))
         } else {
-            self.host
-                .default_output_device()
-                .ok_or_else(|| AudioError::NoDefaultDevice("No default output device found".to_string()))
+            self.host.default_output_device().ok_or_else(|| {
+                AudioError::NoDefaultDevice("No default output device found".to_string())
+            })
         }
     }
+}
+
+fn selected_device_id(id: Option<&str>) -> Option<&str> {
+    id.filter(|id| !id.is_empty())
 }
 
 fn extract_device_capabilities(dev: &cpal::Device, dev_type: DeviceType) -> (Vec<u32>, Vec<u16>) {
@@ -234,8 +245,12 @@ fn extract_device_capabilities(dev: &cpal::Device, dev_type: DeviceType) -> (Vec
     let mut channels = Vec::new();
 
     let configs_result = match dev_type {
-        DeviceType::Input => dev.supported_input_configs().map(|iter| iter.collect::<Vec<_>>()),
-        DeviceType::Output => dev.supported_output_configs().map(|iter| iter.collect::<Vec<_>>()),
+        DeviceType::Input => dev
+            .supported_input_configs()
+            .map(|iter| iter.collect::<Vec<_>>()),
+        DeviceType::Output => dev
+            .supported_output_configs()
+            .map(|iter| iter.collect::<Vec<_>>()),
     };
 
     if let Ok(configs) = configs_result {
@@ -257,4 +272,25 @@ fn extract_device_capabilities(dev: &cpal::Device, dev_type: DeviceType) -> (Vec
     rates.sort_unstable();
     channels.sort_unstable();
     (rates, channels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_device_id_resets_selection_to_system_default() {
+        let mut manager = MediaDeviceManager::new();
+        manager.select_input_device(Some("")).unwrap();
+        manager.select_output_device(Some("")).unwrap();
+        assert_eq!(manager.selected_input_id(), None);
+        assert_eq!(manager.selected_output_id(), None);
+    }
+
+    #[test]
+    fn only_empty_ids_are_treated_as_default_without_enumeration() {
+        assert_eq!(selected_device_id(None), None);
+        assert_eq!(selected_device_id(Some("")), None);
+        assert_eq!(selected_device_id(Some("real-device")), Some("real-device"));
+    }
 }
