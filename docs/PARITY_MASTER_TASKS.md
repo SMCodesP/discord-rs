@@ -505,7 +505,7 @@
   - **O que falta/corrigir:** detectar token sob o cursor, filtrar membros/canais/emojis reais, ancorar o popup ao composer, substituir apenas o token, suportar setas/Tab/Enter/Esc e não roubar Enter quando não houver seleção.
   - **Critério de pronto:** testes determinísticos cobrem `@`, `#`, `:`, consulta vazia, acentos, emoji customizado animado, seleção por setas/Tab/Enter e cancelamento; a mensagem enviada contém `<@id>`, `<#id>` ou `<a:name:id>` corretos, sem nome fabricado.
 
-- [ ] **T-084** — **P1** — **Chat/Convites** — **Resolver `discord.gg/...`, renderizar embed e abrir modal real de entrar**
+- [x] **T-084** — **P1** — **Chat/Convites** — **Resolver `discord.gg/...`, renderizar embed e abrir modal real de entrar** *(PR #19 `src/chat/invite_card.rs`, `invite_card_test` 10/10 verdes)*
   - **Arquivos:** `src/chat/markdown.rs:85-91`, `src/chat/markdown.rs:451-475`, `src/chat/markdown.rs:838-844`, `src/chat/message_list.rs:762-859`, `src/protocol/discord_api.rs:292-306`, `src/protocol/transport.rs:238-297`, `src/app/state/models.rs:57-67`, `src/app/invite_modal.rs` (novo).
   - **Evidência:** o RS trata a URL como `InlineSpan::Link` sem `on_click`; não há rota `/invites/{code}` nem estado de convite. O bundle oficial define ``INVITE:e=>`/invites/${e}` `` em `/tmp/opencode/discord-web-entry.js:23` e resolve links de markdown para `INVITE_MODAL_OPEN`. O CSS CDP observou card `guildInviteContainer` com 300px/r16, splash 64px, `inviteEmbed` r12, título com margem inferior 12px e linha de membro com gap 8px.
   - **O que falta/corrigir:** parser de domínio/código, GET do convite, embed com splash/ícone/membros/estado, clique seguro, modal Entrar com confirmação da API e tratamento de expirado/inválido/banido/já-membro.
@@ -541,7 +541,7 @@
   - **O que falta/corrigir:** normalizar URLs animadas, decoder/cache de múltiplos quadros, renderer Lottie, integração de attachments (sem duplicar o upload de `T-027`), reduced motion e fallback estático explícito em falha.
   - **Critério de pronto:** fixtures GIF/APNG de dois quadros, avatar `a_`, emoji `<a:...>` e sticker Lottie comprovam reprodução/cache; reduced motion pausa ou reduz a animação; falha de CDN mostra fallback estático, nunca imagem quebrada ou animação fabricada.
 
-- [ ] **T-090** — **P1** — **UX/Responsividade** — **Definir largura mínima, colapso de sidebars e overflow seguro ao redimensionar**
+- [x] **T-090** — **P1** — **UX/Responsividade** — **Definir largura mínima, colapso de sidebars e overflow seguro ao redimensionar** *(PR #17 `src/app/responsive.rs`, `responsive_layout_test` 8/8 verdes)*
   - **Arquivos:** `src/main.rs:35-62`, `src/app/root_view.rs:691-768`, `src/app/channel_sidebar.rs:74-119`, `src/app/member_sidebar.rs:155-165`, `src/app/friends_hub.rs:66-75`, `src/app/friends_hub.rs:1511-1518`, `src/app/user_settings/mod.rs:140-155`, `src/app/user_settings/mod.rs:340`, `src/app/user_profile_popout.rs:949`.
   - **Evidência:** a janela nasce com clamp 940–1280px, mas `WindowOptions` não define `min_width`; o shell sempre monta rail + sidebar + member sidebar e vários modais têm largura fixa. No CDP oficial a 1017×605, shell=344px e página=673px; ao emular larguras menores, a sidebar permaneceu 344px e a página encolheu até 0px, sem overflow documental. O CSS oficial esconde `inviteToolbar` em `max-width:940px` e torna membros full-width em `max-width:485px`.
   - **O que falta/corrigir:** breakpoints explícitos, min width ou drawers, auto-ocultar membros/Active Now, clamp de modais e preservação de estado ao redimensionar; consolidar `T-072`/`T-074`/`T-075`/`T-079` em um comportamento de janela único.
@@ -571,7 +571,7 @@
   - **O que falta/corrigir:** hidratar `rate_limit_per_user`, calendário monotônico de próxima permissão, contagem regressiva, bloqueio de envio/typing durante cooldown e respeito a `BYPASS_SLOWMODE`.
   - **Critério de pronto:** relógio injetado cobre 0/5/60s, troca de canal, tentativa prematura, expiração e bypass por permissão; UI mostra segundos reais e nenhuma mensagem otimista é criada enquanto bloqueada.
 
-- [ ] **T-094** — **P1** — **UX/Conteúdo Age-Gated** — **Modelar NSFW/age-restricted e exigir confirmação antes de renderizar conteúdo**
+- [x] **T-094** — **P1** — **UX/Conteúdo Age-Gated** — **Modelar NSFW/age-restricted e exigir confirmação antes de renderizar conteúdo** *(PR #20 `src/chat/channel_guards.rs`, `channel_guards_test` 15/15 verdes)*
   - **Arquivos:** `src/domain/channel.rs:148-191`, `src/domain/guild.rs:75-101`, `src/protocol/discord_api.rs:2205-2280`, `src/app/channel_sidebar.rs:546-793`, `src/chat/message_list.rs:605-859`, `src/app/user_settings/mod.rs`.
   - **Evidência:** `Channel` e `Guild` não possuem `nsfw`/`age_restricted`; o parser descarta esses campos e a UI não tem gate. O locale oficial contém “This channel contains adult content marked as age-restricted. Do you wish to proceed?”, a variante para servidor e “You must be over legal age in order to view age-restricted servers”.
   - **O que falta/corrigir:** preservar flags de canal/guilda, preferência do usuário, bloqueio de mídia/conteúdo até confirmação, lembrança por sessão/conta e estados de erro/sem permissão.
@@ -589,7 +589,7 @@
   - **O que falta/corrigir:** wrapper único com delay/posição configuráveis, clamp nas bordas da janela, seta, foco/hover e reduced motion; preservar textos/atalhos reais.
   - **Critério de pronto:** capturas sintéticas de Guild Rail, User Panel e Header nas bordas da janela confirmam dimensões/seta/posição; teste de relógio cobre 150/300/500ms, foco por teclado e nenhum tooltip em controle desabilitado sem explicação.
 
-- [ ] **T-097** — **P1** — **Performance/Memória** — **Implementar LRU limitado para mensagens, mídia e AST em sessões longas**
+- [x] **T-097** — **P1** — **Performance/Memória** — **Implementar LRU limitado para mensagens, mídia e AST em sessões longas** *(PR #22 `src/protocol/memory_lru.rs`, `memory_lru_test` 7/7 verdes)*
   - **Arquivos:** `src/app/state/app_state.rs:73`, `src/app/state/messages.rs:94-119`, `src/app/state/guilds_channels.rs:281-323`, `src/protocol/cache_engine.rs:39-45`, `src/protocol/cache_engine.rs:158-194`, `src/protocol/media_cache.rs:355-384`, `src/protocol/media_cache.rs:478-500`, `src/protocol/media_cache.rs:564-566`, `src/chat/markdown.rs:97-119`.
   - **Evidência:** `messages_by_channel`, `DiscordCacheEngine.memory_messages` e `MediaCacheManager.memory_cache` são `HashMap` sem limite; comentários dizem “LRU”, mas não há ordem de acesso/evicção. `MARKDOWN_AST_CACHE` limpa tudo apenas ao alcançar 1.000 entradas. Navegar por 50+ canais/guildas acumula mensagens e bytes de mídia indefinidamente.
   - **O que falta/corrigir:** LRU por canal e por bytes de mídia, orçamentos configuráveis, pinning do canal ativo/rascunho, evicção segura de AST e métricas de hit/miss/RSS; manter disco como fonte persistente.
@@ -637,7 +637,7 @@
   - **O que falta/corrigir:** modelo de snapshot/autor/conteúdo/anexos, indicação “Encaminhado”, link para origem quando permitido e ação de encaminhar no menu; não confundir com reply de `T-024`.
   - **Critério de pronto:** fixture com snapshot completo, origem removida e canal restrito renderiza o card correto sem conteúdo inventado; encaminhar cria `message_snapshots` válido e preserva anexos/metadados.
 
-- [ ] **T-104** — **P1** — **Chat/System Messages** — **Renderizar tipos modernos de mensagens de sistema com semântica própria**
+- [x] **T-104** — **P1** — **Chat/System Messages** — **Renderizar tipos modernos de mensagens de sistema com semântica própria** *(PR #21 `src/chat/blocked_group.rs`, `blocked_group_test` 10/10 verdes)*
   - **Arquivos:** `src/domain/message.rs:183-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/message_list.rs:880-1088`, `src/chat/chat_view.rs:545-600`.
   - **Evidência:** o parser não guarda `message.type`; join/boost/call/pin aparecem como mensagem normal do autor. O CDP oficial tem `.isSystemMessage`, `.systemMessageContainer`, `.userJoinSystemMessageIcon`, `.boostMessage` e `.stageSystemMessage`; o locale contém “Joined the server!”, “Call Ended” e textos de pin/unpin.
   - **O que falta/corrigir:** enum de tipos de sistema, layout compacto/ícones, agrupamento correto, links para usuário/canal/mensagem e tradução i18n; manter ações de moderação quando aplicáveis.
@@ -842,10 +842,10 @@
 ## 5. Frente de Otimização Extrema (Renderização 120 FPS & Algoritmos — Cloud Swarm)
 
 - [ ] **T-126** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização Chat** — **Cache LRU O(1) de Markdown parseado por `(message_id, content_hash)`** (`src/chat/markdown_cache.rs` + `tests/markdown_cache_perf_test.rs`) — elimina re-parsing de Markdown a 120 FPS.
-- [ ] **T-127** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Áudio DSP** — **Fast-path 48 kHz zero-copy, conversor `i16↔f32` auto-SIMD sem alocação e soft-limiter transparente** (`src/media/dsp_fast.rs` + `tests/dsp_perf_test.rs`).
+- [x] **T-127** `[Cloud Swarm: wave6-perf-d]` — **P1** — **Perf/Áudio DSP** — **Fast-path 48 kHz zero-copy, conversor `i16↔f32` auto-SIMD sem alocação e soft-limiter transparente** (`src/media/dsp_fast.rs` + `tests/dsp_perf_test.rs`, PR #23, 11/11 verdes).
 - [x] **T-128** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Algoritmo Gateway** — **Deserialização tipada direta sem `serde_json::Value` intermediário (`RawValue`)** (`src/protocol/fast_parse.rs` + `tests/gateway_fast_parse_test.rs`).
 - [x] **T-129** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/I/O Disco** — **Batch/debounced async disk writer atômico para `CacheEngine`** (`src/protocol/cache/batch_writer.rs` + `tests/cache_batch_writer_test.rs`) — elimina `fs::write` a cada mensagem recebida.
-- [ ] **T-130** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização UI** — **Memoização por `generation counter` de ordenação de canais e agrupamento de membros por cargo** (`src/app/view_memo.rs` + `tests/view_memo_perf_test.rs`).
+- [x] **T-130** `[Cloud Swarm: wave6-perf-d]` — **P1** — **Perf/Renderização UI** — **Memoização por `generation counter` de ordenação de canais e agrupamento de membros por cargo** (`src/app/view_memo.rs` + `tests/view_memo_perf_test.rs`, PR #24).
 
 - [x] **T-028b** `[Cloud Swarm PR #12]` — **P1** — **Mídia/GIFs** — **Cliente real `/gifs/trending` e `/gifs/search` com cache e debounce (`src/protocol/gifs_client.rs`, 5/5 testes verdes)**
 - [x] **T-036b** `[Cloud Swarm PR #2]` — **P1** — **Protocolo/CDN** — **Construtor canônico de URLs CDN `.png`/`.gif` para `a_` (`src/protocol/cdn.rs`, +453 linhas)**
