@@ -35,3 +35,9 @@ pub use context_menus::{
     apply_entries_to_popup_menu, build_menu_entries, build_popup_menu, ContextMenuContext,
     MenuAction, MenuCallbacks, MenuEntry, MenuPermissions, MenuTargetKind,
 };
+
+pub mod status_picker;
+pub use status_picker::{
+    build_gateway_presence_update_payload, build_settings_custom_status_payload, CustomStatusDraft,
+    CustomStatusExpiration, StatusPickerState, UserStatusSelection,
+};
