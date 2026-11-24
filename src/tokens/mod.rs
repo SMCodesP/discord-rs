@@ -62,17 +62,33 @@ mod tests {
     fn test_layout_widths() {
         assert_eq!(RAW_RAIL_WIDTH, 72.0);
         assert_eq!(RAW_CHANNELS_WIDTH, 240.0);
+        assert_eq!(RAW_CHANNEL_SIDEBAR_WIDTH, 272.0);
         assert_eq!(RAW_MEMBERS_WIDTH, 240.0);
+        assert_eq!(RAW_SERVER_ICON_SIZE, 40.0);
+        assert_eq!(RAW_USER_PANEL_WIDTH, 328.0);
+        assert_eq!(RAW_USER_BAR_HEIGHT, 58.0);
+        assert_eq!(RAW_USER_PANEL_RESERVE, 66.0);
+        assert_eq!(RAW_CHANNEL_NAVIGATION_RESERVE, 50.0);
+        assert_eq!(RAW_HEADER_HEIGHT, 49.0);
+        assert_eq!(RAW_GUILD_ITEM_HEIGHT, 40.0);
+        assert_eq!(RAW_GUILD_FOLDER_SIZE, 48.0);
+        assert_eq!(RAW_GUILD_FOLDER_PREVIEW_SIZE, 19.0);
+        assert_eq!(RAW_CHANNEL_ITEM_HEIGHT, 32.0);
+        assert_eq!(RAW_HEADER_SEARCH_WIDTH, 244.0);
+        assert_eq!(RAW_HEADER_SEARCH_HEIGHT, 32.0);
     }
 
     #[::core::prelude::v1::test]
     fn test_all_icons() {
-        assert_eq!(ALL_ICONS.len(), 51);
+        assert_eq!(ALL_ICONS.len(), 52);
         for icon in ALL_ICONS {
             assert!(!icon.name().is_empty());
             assert!(!icon.path_data().is_empty());
             assert!(icon.svg_data().contains("<svg"));
-            assert!(icon.svg_data().contains("viewBox=\"0 0 24 24\""));
+            assert!(
+                icon.svg_data()
+                    .contains(&format!("viewBox=\"{}\"", icon.view_box()))
+            );
         }
     }
 
@@ -82,6 +98,12 @@ mod tests {
         assert_eq!(DURATION_NORMAL.as_millis(), 150);
         assert_eq!(DURATION_MODERATE.as_millis(), 200);
         assert_eq!(DURATION_SLOW.as_millis(), 300);
+
+        // Measured Discord Desktop shell timings.
+        assert_eq!(TRANSITION_SERVER_ICON.duration, DURATION_NORMAL);
+        assert_eq!(TRANSITION_SERVER_PILL.duration, DURATION_MODERATE);
+        assert_eq!(EASE_SERVER_ICON, EASE_OUT);
+        assert_eq!(EASE_PILL, EASE_OUT);
 
         // Bezier solver test
         let val_start = EASE_SERVER_ICON.solve(0.0);
