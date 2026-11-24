@@ -97,6 +97,7 @@
 - [ ] **T-012** `[Design-Chat]` — **Paridade visual: Message List, Editor, Member Sidebar, Search**
   - **Escopo**: `src/chat/message_list.rs`, `src/chat/editor.rs`, `src/app/member_sidebar.rs`, `src/chat/search.rs`.
   - **Foco**: Agrupamento de mensagens consecutivas, hover actions bar (reagir/responder/editar/mais), cores de cargos, timestamps, divisores de data/não lidas, sidebar de membros agrupada por cargo + offline, painel de busca.
+  - **Evidência CDP do Ciclo 2:** `/tmp/opencode/discord-composer-friends-measurements.md` mediu composer **658.5×58/r8**, textarea 56px (máx. 50vh), editor 16px/400/22px com padding `17px 0 17px 10px`, botão `+` efetivo 32×32/r8/ícone 20px e ações mínimas 32×32. O RS usa `+` 24×24/r16/ícone 16px (`src/chat/editor.rs:105-122`) e input sem o gradiente/altura medidos (`src/chat/editor.rs:589-612`).
 
 - [ ] **T-013** `[Design-Friends]` — **Paridade visual & funcional: Friends Hub, Active Now, DMs Fixadas, Presença**
   - **Escopo**: `src/app/friends_hub.rs`, `src/app/state/friends_dms.rs`, `src/protocol/pinned_dms.rs`.
@@ -243,7 +244,7 @@
 
 - [ ] **T-034** — **P1** — **UX/Menus** — **Concluir controles inertes e paridade estrutural do Friends Hub**
   - **Arquivos:** `src/app/channel_sidebar.rs:166-193`, `src/app/channel_sidebar.rs:242-255`, `src/app/channel_sidebar.rs:512-519`, `src/app/channel_sidebar.rs:772-783`, `src/app/member_sidebar.rs:332-343`, `src/app/friends_hub.rs:66-75`, `src/app/friends_hub.rs:298-317`, `src/app/friends_hub.rs:385-402`, `src/app/friends_hub.rs:1316-1327`, `src/app/friends_hub.rs:1465-1508`.
-  - **Evidência:** busca de DM, Nitro, Loja, fechar DM, itens do menu de canal, “Mencionar”, ícones do header Friends, menu “Mais” e descobrir servidores não têm ação. “Mensagem” no menu de membro abre perfil, não DM. No oficial desktop 1272×756, `Add Friend` é botão separado à direita e Active Now não aparece sem conteúdo; no RS, Add Friend fica dentro da tab bar e o painel de 360px é sempre montado.
+  - **Evidência:** busca de DM, Nitro, Loja, fechar DM, itens do menu de canal, “Mencionar”, ícones do header Friends, menu “Mais” e descobrir servidores não têm ação. “Mensagem” no menu de membro abre perfil, não DM. No oficial desktop 1272×756, `Add Friend` é botão separado à direita e Active Now não aparece sem conteúdo; no RS, Add Friend fica dentro da tab bar e o painel de 360px é sempre montado. Medição CDP adicional em `/tmp/opencode/discord-composer-friends-measurements.md`: header 49px; tabs 32px com item `padding 4px 12px`, margem 8px e r8; `Add Friend` 99.75×32/r8; busca 634.5×40; linha de amigo 61px; avatar 32px/margem 12px; nome 16px/600/20px; subtexto 12px/500/15px; ações 36×36.
   - **O que falta/corrigir:** ligar cada ação ao estado/API correto, adicionar estados pendentes/erro e ajustar layout responsivo do Friends Hub medido no cliente oficial.
   - **Critério de pronto:** matriz de testes cobre todos os controles; nenhum item de menu visível é no-op; screenshots em 1280×800 e largura maior/menor comprovam posição de Add Friend e comportamento responsivo do Active Now.
 
@@ -358,6 +359,17 @@
 
 **Metodologia e fontes:** medições somente leitura via CDP em `http://127.0.0.1:9222`, viewport lógico **1018×605**, `devicePixelRatio=2`, cliente oficial Electron em `theme-dark theme-darker images-dark`; screenshots do cliente oficial e de `DiscordRS-SMCodes` (tela 1272×756); código atual da `main` e logs em `/tmp/discord-rs-logs`. Nenhuma mensagem, amizade, configuração ou chamada foi alterada. Upload, drag-and-drop, clipboard de imagem e voz/vídeo remoto já estão cobertos por `T-027`, `T-044` e `T-023`; não foram duplicados aqui.
 
+**Retornos consolidados:**
+
+| Fonte | Evidência principal | Tarefas alimentadas |
+|---|---|---|
+| `Explorer-UI` | `/tmp/opencode/discord-desktop-measurements.md` e `/tmp/opencode/discord-composer-friends-measurements.md` | `T-073`, `T-079`, `T-012`, `T-034` |
+| `Design-Chat-H2` (`hub-task-3025`) | `/tmp/opencode/discord-shell-measurements.md` | `T-071`, `T-072`, `T-078`, `T-079` |
+| `Explorer-Deep` | auditoria de código/API/Gateway para threads, permissões, notificações, typing, unread, reconnect e desempenho | `T-076`, `T-077`, `T-080`, `T-081`, `T-062`..`T-067` |
+| `Explorer-Live` (`hub-task-3020`) | logs e CDP somente leitura; captura oficial preta/timeout, 14×404 de ícones no RS, foco sem role e fonte efetiva | `T-070`, `T-068`, `T-066`; ícones mantidos em `T-036` |
+
+**Limites de comparação:** idioma, servidor/canal, banner, lista de membros, conteúdo e permissão do composer diferentes não foram tratados como defeitos de layout. Os hexs medidos pertencem ao tema customizado ativo; não foram generalizados para o tema escuro padrão. A captura oficial preta bloqueou diff visual confiável e permanece explicitamente em `T-070`.
+
 - [ ] **T-071** — **P1** — **Design/Guild Rail** — **Alinhar geometria, tema e indicadores do trilho de servidores ao cliente oficial medido**
   - **Arquivos:** `src/components/guild_item.rs:158-161`, `src/components/guild_item.rs:189-205`, `src/components/guild_item.rs:208-245`, `src/components/guild_item.rs:544-576`, `src/app/guild_rail.rs:43-71`, `src/tokens/spacing.rs:230-239`.
   - **Evidência:** medição oficial `/tmp/opencode/discord-shell-measurements.md`: trilho 72px; wrappers 40×40 em `x=16`, passo 48px; separador 32×1/r1; fundo `#0e0b17`, texto forte `#e1e1fe`; pill 8px em `x=-4`, raio `0 4px 4px 0`, alturas 8/20/40; miniaturas de pasta 19×19 com raios `13px 4px 4px`, `4px 13px 4px 4px`, `4px 4px 4px 13px`, `4px 4px 13px`. O ícone **não usa `border-radius`**: é recortado por máscara SVG squircle 40×40 com curvas em `(0,17.4545)`→`(17.4545,0)`; `border-radius:0` não significa quadrado. O RS aproxima com raio 16px, pill 4px em `x=0` e miniaturas 15×15/r10-3.
@@ -372,7 +384,7 @@
 
 - [ ] **T-073** — **P1** — **Design/Chat** — **Alinhar Cozy, timestamps de hover e action bar das mensagens**
   - **Arquivos:** `src/chat/message_list.rs:204-278`, `src/chat/message_list.rs:889-902`, `src/chat/message_list.rs:908-965`, `src/chat/message_list.rs:971-1035`.
-  - **Evidência:** CDP oficial: mensagem de grupo 48px, agrupada 26px; `padding: 2px 24px 2px 72px`; conteúdo 16px com `line-height:22px`; timestamp compacto 56×22 visível no hover; action bar interna 183×34, raio 8px, fundo `oklab(0.213851 0.0108911 -0.0251416)`, seis botões 28×28/r6. O RS usa gutter 48px + `pl16px`, action bar de três botões, fundo `bg_chat`, raio 6px e não oferece editar/fixar no hover.
+  - **Evidência:** CDP oficial `/tmp/opencode/discord-desktop-measurements.md`: início de grupo com `margin-top:17px` e `min-height:44px`; continuação `min-height:22px`; padding cozy `2px 72px 2px 24px`; avatar 40×40 em `x=16/y=2`; username 16px/500/22px, timestamp 12px/500/22px com margem 4px e corpo 16px/400/22px; hover `#181422` com raio 4px apenas à direita. Action bar externa 229×34; interna **183×34/r8**, padding 2px, borda `#1c1a27`, fundo `#1a1725`, seis botões 28×28/r6/ícones 20px e separador 9px. O RS usa gutter 48px + `pl16px`, action bar de três botões, fundo `bg_chat`, raio 6px e não oferece editar/fixar no hover.
   - **O que falta/corrigir:** ajustar grid/padding/altura, timestamp compacto e barra completa de ações contextuais; respeitar mensagem própria e permissões.
   - **Critério de pronto:** fixture sintética com grupo, mensagem isolada, bot, editada, reply, embed e reação gera captura ≤1px de diferença; hover mostra todos os ações permitidos e timestamp sem deslocar conteúdo.
 
@@ -474,6 +486,6 @@
 
 - [ ] **T-079** — **P2** — **Design/Member Sidebar** — **Corrigir largura e hierarquia visual da lista de membros**
   - **Arquivos:** `src/app/member_sidebar.rs:145-165`, `src/app/member_sidebar.rs:230-245`, `src/app/member_sidebar.rs:275-305`.
-  - **Evidência:** o relatório `Design-Chat-H2` mediu **Member Sidebar 264px** no Discord Desktop real; o RS fixa **240px** em `member_sidebar.rs:156`. As linhas usam 44px, nome 14px semibold e atividade 11px, mas não há medição oficial registrada para esses subcomponentes.
-  - **O que falta/corrigir:** adotar 264px e medir no CDP grupos de cargo, online/offline, atividade, bot e hover antes de ajustar os demais valores.
-  - **Critério de pronto:** captura sintética com cargos, bot, atividade e offline confirma largura 264px e hierarquia sem overflow; teste de toggle da sidebar preserva a largura do chat.
+  - **Evidência:** `/tmp/opencode/discord-desktop-measurements.md` mediu Member Sidebar com **264px** de conteúdo (265px incluindo borda), grupo útil 256×42/padding `20px 4px 4px 16px`, header 18px/14px/500, linha 248×42 sem subtexto ou 248×44 com status, avatar 32px/margem 12px, status 10px em `left/top:22px` e nome 16px/500/20px. O RS fixa **240px** (`src/app/member_sidebar.rs:156`), header 40px/texto 12px semibold (`:203-215`), linha sempre 44px/gap10 (`:232-245`) e nome 14px semibold (`:275-288`).
+  - **O que falta/corrigir:** adotar 264px e as métricas medidas de grupo/header/linha/avatar/status; medir no CDP ícone de cargo, offline e hover antes de ajustar cores/subtexto.
+  - **Critério de pronto:** captura sintética com cargos, bot, atividade e offline confirma largura 264px, header 18px e linhas 42/44px sem overflow; teste de toggle da sidebar preserva a largura do chat.
