@@ -17,6 +17,7 @@ use gpui::*;
 use std::sync::Arc;
 
 use crate::chat::markdown::render_markdown;
+use crate::chat::polls::render_poll_card;
 use crate::chat::reactions::{render_reaction_bar, AddReactionCallback, ReactionActionCallback};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::button::IconButton;
@@ -1238,6 +1239,11 @@ pub fn render_message_row_with_reply_and_edit(
     // Attachments
     if !message.attachments.is_empty() {
         content_area = content_area.child(render_attachments(&message.attachments));
+    }
+
+    // Poll
+    if let Some(poll) = &message.poll {
+        content_area = content_area.child(render_poll_card(poll, chrono::Utc::now()));
     }
 
     // Embeds

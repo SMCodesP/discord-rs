@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::chat::polls::Poll;
+
 use super::user::AvatarDecorationData;
 
 /// The author of a message.
@@ -207,6 +209,9 @@ pub struct Message {
     /// List of stickers attached to the message.
     #[serde(default)]
     pub sticker_items: Vec<MessageStickerItem>,
+    /// Native Discord poll attached to the message, when present.
+    #[serde(default)]
+    pub poll: Option<Poll>,
     /// Timestamp of last edit, if edited.
     pub edited_timestamp: Option<DateTime<Utc>>,
     /// Whether the message is pinned in the channel.
@@ -235,6 +240,7 @@ impl Message {
             reactions: Vec::new(),
             embeds: Vec::new(),
             sticker_items: Vec::new(),
+            poll: None,
             edited_timestamp: None,
             pinned: false,
             is_pending: false,
