@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod events;
 pub mod guild;
+pub mod guild_admin;
 pub mod hierarchy;
 pub mod message;
 pub mod profile;
@@ -11,6 +12,12 @@ pub mod voice;
 
 pub use channel::{Channel, ChannelType};
 pub use guild::{Category, Guild, Role};
+pub use guild_admin::{
+    AuditLog, AuditLogActionType, AuditLogChange, AuditLogEntry, AuditLogEntryOptionalInfo,
+    CreateChannelInvitePayload, CreateGuildBanPayload, GuildAdminValidationError,
+    GuildRoleHierarchy, InviteMetadata, InviteTargetType, InviteType, KickGuildMemberRequest,
+    RoleHierarchyError, TimeoutGuildMemberPayload,
+};
 pub use hierarchy::{
     compare_categories, compare_channels, compare_role_rank, compare_snowflakes, highest_role,
     order_channel_groups, order_channel_groups_from_channels, sort_categories, sort_channels,
