@@ -1,0 +1,136 @@
+name: Continuous Swarm Auto-Dispatcher
+
+on:
+  workflow_run:
+    workflows: ["OpenCode Cloud Swarm (Streaming)"]
+    types: [completed]
+  issues:
+    types: [labeled]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_vms:
+        description: "Max concurrent Swarm VMs (default 10 => 30 agents at 3/VM)"
+        required: false
+        default: "10"
+        type: string
+      agents_per_vm:
+        description: "Agents per VM (default 3 for faster rustc + less IP throttling)"
+        required: false
+        default: "3"
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+
+concurrency:
+  group: continuous-swarm-dispatcher
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Fill Cloud Swarm Queue
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'issues' ||
+      github.event.label.name == 'status:todo'
+    steps:
+      - name: Recover stale in-progress issues & dispatch next Swarm VMs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAX_VMS: ${{ github.event.inputs.max_vms || '10' }}
+          AGENTS_PER_VM: ${{ github.event.inputs.agents_per_vm || '3' }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
+          # 1. Auto-recover issues stuck in status:in-progress for > 45 minutes with no open PR
+          NOW_EPOCH=$(date +%s)
+          STALE_JSON=$(gh issue list -R "$REPO" --state open --label "status:in-progress" --limit 50 --json number,updatedAt)
+          for num in $(echo "$STALE_JSON" | jq -r '.[].number'); do
+            UPDATED=$(echo "$STALE_JSON" | jq -r ".[] | select(.number==$num) | .updatedAt")
+            UPD_EPOCH=$(date -d "$UPDATED" +%s)
+            AGE=$((NOW_EPOCH - UPD_EPOCH))
+            if [ "$AGE" -gt 2700 ]; then
+              echo "Recovering stale issue #$num (in-progress for ${AGE}s)"
+              gh issue edit "$num" -R "$REPO" --remove-label "status:in-progress" --add-label "status:todo" || true
+            fi
+          done
+
+          # 2. Count currently running/queued Swarm VMs
+          ACTIVE_VMS=$(gh run list -R "$REPO" --workflow="opencode-swarm.yml" --limit 30 --json status \
+            --jq '[.[] | select(.status == "in_progress" or .status == "queued" or .status == "waiting")] | length')
+          echo "Active Swarm VMs: $ACTIVE_VMS / $MAX_VMS"
+
+          SLOTS=$((MAX_VMS - ACTIVE_VMS))
+          if [ "$SLOTS" -le 0 ]; then
+            echo "All $MAX_VMS Swarm VM slots are busy. Nothing to dispatch."
+            exit 0
+          fi
+
+          # 3. Fetch open status:todo issues (P0 first, then P1, then rest)
+          P0=$(gh issue list -R "$REPO" --state open --label "status:todo" --label "priority:p0" --limit 30 --json number,title,body)
+          ALL=$(gh issue list -R "$REPO" --state open --label "status:todo" --limit 60 --json number,title,body)
+          QUEUE=$(jq -n --argjson p0 "$P0" --argjson all "$ALL" '
+            ($p0 + [$all[] | select(.number as $n | ($p0 | map(.number) | index($n)) == null)])
+          ')
+          QCOUNT=$(echo "$QUEUE" | jq 'length')
+          echo "Queued status:todo issues: $QCOUNT"
+          if [ "$QCOUNT" -eq 0 ]; then
+            echo "Queue is empty!"
+            exit 0
+          fi
+
+          # 4. Dispatch up to $SLOTS VMs with $AGENTS_PER_VM issues each, alternating free models
+          MODELS=("opencode/iceman-free" "opencode/deepseek-v4.1-flash-free")
+          OFFSET=0
+          DISPATCHED=0
+
+          for s in $(seq 0 $((SLOTS - 1))); do
+            BATCH=$(echo "$QUEUE" | jq --argjson off "$OFFSET" --argjson n "$AGENTS_PER_VM" '.[$off : ($off + $n)]')
+            BLEN=$(echo "$BATCH" | jq 'length')
+            if [ "$BLEN" -eq 0 ]; then
+              break
+            fi
+
+            MODEL="${MODELS[$(( (ACTIVE_VMS + s) % 2 ))]}"
+            SWARM_ID="auto-$(date +%H%M%S)-${s}"
+
+            # Atomically claim each issue (status:todo -> status:in-progress) and build tasks_json
+            TASKS="[]"
+            for idx in $(seq 0 $((BLEN - 1))); do
+              INUM=$(echo "$BATCH" | jq -r ".[$idx].number")
+              ITITLE=$(echo "$BATCH" | jq -r ".[$idx].title")
+              IBODY=$(echo "$BATCH" | jq -r ".[$idx].body // \"\"")
+
+              # Extract optional TEST_ARGS: line from issue body
+              TEST_ARGS=$(echo "$IBODY" | grep -m1 '^TEST_ARGS:' | sed 's/^TEST_ARGS:[[:space:]]*//' || true)
+              TID=$(echo "$ITITLE" | grep -oE 'T-[0-9]+[a-z]?' | head -n1 || echo "ISSUE-${INUM}")
+
+              gh issue edit "$INUM" -R "$REPO" --remove-label "status:todo" --add-label "status:in-progress" || true
+
+              PROMPT="Implementa a GitHub Issue #${INUM} (${ITITLE}). Detalhes:\n${IBODY}\n\nRegras: Zero mocks, nenhum dado pessoal, mantenha cargo check e testes verdes."
+              TASKS=$(echo "$TASKS" | jq \
+                --arg id "$TID" \
+                --argjson issue "$INUM" \
+                --arg title "$ITITLE" \
+                --arg prompt "$PROMPT" \
+                --arg test_args "$TEST_ARGS" \
+                --arg model "$MODEL" \
+                '. + [{"id":$id,"issue":$issue,"title":$title,"prompt":$prompt,"test_args":$test_args,"model":$model}]')
+            done
+
+            echo "Dispatching $SWARM_ID ($BLEN agents, $MODEL)..."
+            gh workflow run opencode-swarm.yml -R "$REPO" \
+              -f swarm_id="$SWARM_ID" \
+              -f tasks_json="$TASKS"
+
+            DISPATCHED=$((DISPATCHED + 1))
+            OFFSET=$((OFFSET + BLEN))
+            sleep 2
+          done
+
+          echo "Dispatched $DISPATCHED new Swarm VMs."

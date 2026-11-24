@@ -1,14 +1,14 @@
-name: OpenCode Cloud Swarm (5-6 Agents per VM)
+name: OpenCode Cloud Swarm (Streaming)
 
 on:
   workflow_dispatch:
     inputs:
       swarm_id:
-        description: "Swarm batch ID (e.g. wave2-batch1)"
+        description: "Swarm batch ID (e.g. auto-123)"
         required: true
         type: string
       tasks_json:
-        description: 'JSON array of up to 6 tasks: [{"id":"T-XXX","title":"...","prompt":"...","test_args":"--test ...","model":"opencode/..."}]'
+        description: 'JSON array of up to 5 tasks: [{"id":"T-XXX","issue":42,"title":"...","prompt":"...","test_args":"--test ...","model":"opencode/..."}]'
         required: true
         type: string
 
@@ -27,7 +27,7 @@ jobs:
   swarm-vm:
     name: Swarm (${{ github.event.inputs.swarm_id }})
     runs-on: ubuntu-latest
-    timeout-minutes: 55
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -57,90 +57,111 @@ jobs:
             chmod 600 "$HOME/.local/share/opencode/auth.json"
           fi
 
-      - name: Run N OpenCode Agents in Parallel Worktrees
+      - name: Run Streaming OpenCode Agents (Immediate PR / Draft PR per Agent)
         env:
           TASKS_JSON: ${{ github.event.inputs.tasks_json }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
           OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          set -euo pipefail
+          set -u
           mkdir -p /tmp/swarm /tmp/swarm-logs
           echo "$TASKS_JSON" > /tmp/swarm/tasks.json
           COUNT=$(jq 'length' /tmp/swarm/tasks.json)
-          echo "Launching $COUNT parallel OpenCode agents inside this VM..."
+          echo "## Swarm Summary (${{ github.event.inputs.swarm_id }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "Launching $COUNT streaming OpenCode agents (PR opens immediately as each finishes)..."
 
           PIDS=()
           for i in $(seq 0 $((COUNT - 1))); do
             TID=$(jq -r ".[$i].id" /tmp/swarm/tasks.json)
-            SLUG=$(echo "$TID" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-_')
-            MODEL=$(jq -r ".[$i].model // \"opencode/deepseek-v4.1-flash-free\"" /tmp/swarm/tasks.json)
+            ISSUE=$(jq -r ".[$i].issue // \"\"" /tmp/swarm/tasks.json)
+            TITLE=$(jq -r ".[$i].title" /tmp/swarm/tasks.json)
+            TEST_ARGS=$(jq -r ".[$i].test_args // \"\"" /tmp/swarm/tasks.json)
+            MODEL=$(jq -r ".[$i].model // \"opencode/iceman-free\"" /tmp/swarm/tasks.json)
             PROMPT=$(jq -r ".[$i].prompt" /tmp/swarm/tasks.json)
+            SLUG=$(echo "$TID" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-_')
             BRANCH="swarm/${SLUG}-${GITHUB_RUN_ID}-${i}"
             WT="/tmp/swarm/${SLUG}-${i}"
 
             git worktree add -b "$BRANCH" "$WT" HEAD
-            echo "$BRANCH" > "/tmp/swarm-logs/${i}.branch"
-            echo "$WT" > "/tmp/swarm-logs/${i}.wt"
 
             (
               cd "$WT"
               export XDG_CONFIG_HOME="/tmp/swarm-xdg-${i}"
               mkdir -p "$XDG_CONFIG_HOME/opencode"
               printf '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.json"
+
               echo "=== [$TID] Starting opencode ($MODEL) in $WT (max 15m) ==="
-              timeout 900 opencode run -m "$MODEL" "Voce esta em uma VM Linux headless do GitHub Actions SEM navegador/Chrome. NAO tente ler ~/.config ou abrir Chrome; use apenas os arquivos do repositorio atual. $PROMPT"
-            ) > "/tmp/swarm-logs/${i}.log" 2>&1 &
-            PIDS+=($!)
-          done
+              DISCOVERY_NOTE="Se descobrir algum bug real ou pendencia fora do seu escopo, voce pode opcionalmente salvar ate 2 tarefas novas em .swarm-discovered-tasks.json no formato [{\"title\":\"[AUTO] ...\",\"body\":\"...\",\"priority\":\"p1\"}] (esse arquivo sera transformado em GitHub Issues automaticamente e nao entrara no PR)."
+              timeout 900 opencode run -m "$MODEL" "Voce esta em uma VM Linux headless do GitHub Actions SEM navegador/Chrome. NAO tente ler ~/.config ou abrir Chrome; use apenas os arquivos do repositorio atual. $DISCOVERY_NOTE $PROMPT" || true
 
-          for idx in "${!PIDS[@]}"; do
-            if wait "${PIDS[$idx]}"; then
-              echo "Agent #$idx finished OK"
-            else
-              echo "Agent #$idx exited non-zero (will still inspect worktree)"
-            fi
-          done
+              # Process discovered tasks (if any) and remove temp file before git add
+              if [ -f ".swarm-discovered-tasks.json" ]; then
+                DCOUNT=$(jq 'if type=="array" then (length | if . > 2 then 2 else . end) else 0 end' .swarm-discovered-tasks.json 2>/dev/null || echo 0)
+                if [ "$DCOUNT" -gt 0 ]; then
+                  for d in $(seq 0 $((DCOUNT - 1))); do
+                    DTITLE=$(jq -r ".[$d].title // \"\"" .swarm-discovered-tasks.json)
+                    DBODY=$(jq -r ".[$d].body // \"\"" .swarm-discovered-tasks.json)
+                    DPRIO=$(jq -r ".[$d].priority // \"p1\"" .swarm-discovered-tasks.json)
+                    if [ -n "$DTITLE" ] && [ -n "$DBODY" ]; then
+                      EXISTING=$(gh issue list --state all --search "\"$DTITLE\" in:title" --json number --jq 'length' 2>/dev/null || echo 1)
+                      if [ "$EXISTING" = "0" ]; then
+                        gh issue create --title "$DTITLE" --body "$DBODY" --label "status:todo" --label "priority:${DPRIO}" --label "source:agent-discovery" || true
+                      fi
+                    fi
+                  done
+                fi
+                rm -f .swarm-discovered-tasks.json
+              fi
 
-      - name: Verify, Commit & Open Separate PRs
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: |
-          set -u
-          COUNT=$(jq 'length' /tmp/swarm/tasks.json)
-          echo "## Swarm Summary (${{ github.event.inputs.swarm_id }})" >> "$GITHUB_STEP_SUMMARY"
-
-          for i in $(seq 0 $((COUNT - 1))); do
-            TID=$(jq -r ".[$i].id" /tmp/swarm/tasks.json)
-            TITLE=$(jq -r ".[$i].title" /tmp/swarm/tasks.json)
-            TEST_ARGS=$(jq -r ".[$i].test_args // \"\"" /tmp/swarm/tasks.json)
-            BRANCH=$(cat "/tmp/swarm-logs/${i}.branch")
-            WT=$(cat "/tmp/swarm-logs/${i}.wt")
-
-            echo "=== Verifying $TID in $WT ==="
-            (
-              cd "$WT"
               git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md 2>/dev/null || true
+
+              mark_issue_retry() {
+                if [ -n "$ISSUE" ]; then
+                  HAS_RETRY=$(gh issue view "$ISSUE" --json labels --jq '[.labels[].name] | index("retry-1") != null' 2>/dev/null || echo "false")
+                  if [ "$HAS_RETRY" = "true" ]; then
+                    gh issue edit "$ISSUE" --remove-label "status:in-progress" --add-label "status:blocked" || true
+                    gh issue comment "$ISSUE" --body "Swarm (${{ github.event.inputs.swarm_id }}) falhou pela 2a vez ($1). Marcada como status:blocked para revisao." || true
+                  else
+                    gh issue edit "$ISSUE" --remove-label "status:in-progress" --add-label "status:todo" --add-label "retry-1" || true
+                    gh issue comment "$ISSUE" --body "Swarm (${{ github.event.inputs.swarm_id }}) nao concluiu ($1). Recolocada na fila status:todo (tentativa 2)." || true
+                  fi
+                fi
+              }
+
               if [ -z "$(git status --porcelain)" ]; then
-                echo "- **$TID**: no changes produced" >> "$GITHUB_STEP_SUMMARY"
+                flock /tmp/vm-summary.lock bash -c "echo '- **$TID**: no changes produced' >> '$GITHUB_STEP_SUMMARY'"
+                mark_issue_retry "no changes produced"
                 exit 0
               fi
 
-              if ! cargo check; then
-                echo "- **$TID**: FAILED cargo check" >> "$GITHUB_STEP_SUMMARY"
-                tail -n 30 "/tmp/swarm-logs/${i}.log" || true
+              # Serialize cargo check/test inside this VM with flock so agents don't fight over target/
+              CHECK_OK=1
+              TEST_OK=1
+              TEST_LOG="/tmp/swarm-logs/${i}.test.log"
+              flock /tmp/vm-cargo.lock bash -c "
+                set -e
+                cd '$WT'
+                cargo check
+              " > "$TEST_LOG" 2>&1 || CHECK_OK=0
+
+              if [ "$CHECK_OK" -eq 0 ]; then
+                flock /tmp/vm-summary.lock bash -c "echo '- **$TID**: FAILED cargo check' >> '$GITHUB_STEP_SUMMARY'"
+                mark_issue_retry "FAILED cargo check"
                 exit 0
               fi
 
               if [ -n "$TEST_ARGS" ]; then
-                export XDG_CONFIG_HOME="$(mktemp -d)"
-                if ! cargo test $TEST_ARGS --no-fail-fast; then
-                  echo "- **$TID**: FAILED cargo test ($TEST_ARGS)" >> "$GITHUB_STEP_SUMMARY"
-                  exit 0
-                fi
+                flock /tmp/vm-cargo.lock bash -c "
+                  set -e
+                  cd '$WT'
+                  export XDG_CONFIG_HOME=\"\$(mktemp -d)\"
+                  cargo test $TEST_ARGS --no-fail-fast
+                " > "$TEST_LOG" 2>&1 || TEST_OK=0
               fi
 
               git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md 2>/dev/null || true
@@ -148,10 +169,45 @@ jobs:
               git config user.email "opencode-cloud-swarm[bot]@users.noreply.github.com"
               git add -A
               git commit -m "[$TID] $TITLE"
-              git fetch origin main
-              git rebase origin/main || git rebase --abort
-              git push -u origin "$BRANCH"
-              PR_URL=$(gh pr create --base main --head "$BRANCH" --title "[$TID] $TITLE" --body "PR gerado pelo OpenCode Cloud Swarm (${{ github.event.inputs.swarm_id }}, Run #${{ github.run_id }}).")
-              echo "- **$TID**: PR opened -> $PR_URL" >> "$GITHUB_STEP_SUMMARY"
-            )
+
+              flock /tmp/vm-git.lock bash -c "
+                cd '$WT'
+                git fetch origin main
+                git rebase origin/main || git rebase --abort
+                git push -u origin '$BRANCH'
+              "
+
+              CLOSES_LINE=""
+              if [ -n "$ISSUE" ]; then
+                CLOSES_LINE="Closes #${ISSUE}"
+              fi
+
+              if [ "$TEST_OK" -eq 1 ]; then
+                PR_URL=$(gh pr create --base main --head "$BRANCH" \
+                  --title "[$TID] $TITLE" \
+                  --label "swarm-ready" \
+                  --body "$(printf 'PR gerado pelo OpenCode Cloud Swarm (%s, Run #%s, modelo `%s`).\n\n%s\n\n- `cargo check`: OK\n- `cargo test %s`: OK' '${{ github.event.inputs.swarm_id }}' '${{ github.run_id }}' "$MODEL" "$CLOSES_LINE" "$TEST_ARGS")")
+                if [ -n "$ISSUE" ]; then
+                  gh issue edit "$ISSUE" --remove-label "status:in-progress" --add-label "status:review" || true
+                fi
+                flock /tmp/vm-summary.lock bash -c "echo '- **$TID**: PR READY -> $PR_URL' >> '$GITHUB_STEP_SUMMARY'"
+              else
+                FAIL_TAIL=$(tail -n 35 "$TEST_LOG" | sed 's/`/\\`/g')
+                PR_URL=$(gh pr create --draft --base main --head "$BRANCH" \
+                  --title "[DRAFT][$TID] $TITLE" \
+                  --label "needs-fix" \
+                  --body "$(printf 'Draft PR gerado pelo OpenCode Cloud Swarm (%s, Run #%s, modelo `%s`).\n\n`cargo check` PASSOU, mas `cargo test %s` teve falha — preservado como Draft PR para ajuste rapido em vez de descartar.\n\n%s\n\n```\n%s\n```' '${{ github.event.inputs.swarm_id }}' '${{ github.run_id }}' "$MODEL" "$TEST_ARGS" "$CLOSES_LINE" "$FAIL_TAIL")")
+                if [ -n "$ISSUE" ]; then
+                  gh issue edit "$ISSUE" --remove-label "status:in-progress" --add-label "status:review" --add-label "needs-fix" || true
+                fi
+                flock /tmp/vm-summary.lock bash -c "echo '- **$TID**: DRAFT PR (test fail preserved) -> $PR_URL' >> '$GITHUB_STEP_SUMMARY'"
+              fi
+            ) > "/tmp/swarm-logs/${i}.log" 2>&1 &
+            PIDS+=($!)
+          done
+
+          for idx in "${!PIDS[@]}"; do
+            wait "${PIDS[$idx]}" || true
+            echo "=== Agent #$idx finished ==="
+            tail -n 15 "/tmp/swarm-logs/${idx}.log" || true
           done
