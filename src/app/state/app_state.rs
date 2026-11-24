@@ -25,6 +25,8 @@ pub struct AppState {
     pub active_voice_call: Option<ActiveVoiceCall>,
     /// Whether the member sidebar (right column) is visible
     pub show_members: bool,
+    /// Whether the channel sidebar (left column) is visible when space allows
+    pub show_channel_sidebar: bool,
     /// Currently opened modal dialog
     pub active_modal: Option<ActiveModal>,
     /// Active tab in User Settings modal
@@ -205,6 +207,7 @@ impl AppState {
             selected_channel_id,
             active_voice_call: None,
             show_members: true,
+            show_channel_sidebar: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
             collapsed_categories: HashSet::new(),

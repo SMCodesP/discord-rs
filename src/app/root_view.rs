@@ -674,7 +674,13 @@ impl Render for RootView {
         }
 
         let state = self.state.read(cx);
-        let show_members = state.show_members && state.selected_guild_id.is_some();
+        let viewport_width = window.viewport_size().width / px(1.0);
+        let layout = super::responsive::ResponsiveLayout::compute(
+            viewport_width,
+            state.show_members,
+            state.show_channel_sidebar,
+        );
+        let show_members = layout.show_member_sidebar && state.selected_guild_id.is_some();
         let selected_channel = state.get_selected_channel().map(|(_, ch)| ch.clone());
         let in_voice_channel = selected_channel
             .as_ref()
@@ -703,7 +709,7 @@ impl Render for RootView {
             // =========================================================================
             // COLUMN 2: Channel Sidebar (240px)
             // =========================================================================
-            .child(self.channel_sidebar.clone())
+            .children(layout.show_channel_sidebar.then(|| self.channel_sidebar.clone()))
             // =========================================================================
             // COLUMN 3: Main Chat / Voice Call Stage Area (Flex-1)
             // =========================================================================
@@ -750,6 +756,7 @@ impl Render for RootView {
                                     search_state,
                                     &self.friends_search_query,
                                     add_friend_state,
+                                    viewport_width,
                                 )
                                 .into_any_element()
                             } else {
@@ -1765,6 +1772,7 @@ fn render_friends_view(
     search_state: &Entity<InputState>,
     search_query: &str,
     add_friend_state: &Entity<InputState>,
+    viewport_width: f32,
 ) -> Div {
     super::friends_hub::render_friends_hub(
         entity,
@@ -1772,6 +1780,7 @@ fn render_friends_view(
         search_state,
         search_query,
         add_friend_state,
+        viewport_width,
     )
 }
 

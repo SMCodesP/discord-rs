@@ -614,6 +614,7 @@ impl AppState {
             selected_channel_id,
             active_voice_call: None,
             show_members: true,
+            show_channel_sidebar: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
             collapsed_categories: HashSet::new(),

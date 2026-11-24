@@ -48,6 +48,7 @@ fn main() {
 
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+                window_min_size: Some(size(px(485.0), px(480.0))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Discord".into()),
                     appears_transparent: false,

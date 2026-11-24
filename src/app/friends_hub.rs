@@ -44,6 +44,7 @@ pub fn render_friends_hub(
     search_state: &Entity<InputState>,
     search_query: &str,
     add_friend_state: &Entity<InputState>,
+    viewport_width: f32,
 ) -> Div {
     let mut container = div()
         .size_full()
@@ -63,16 +64,21 @@ pub fn render_friends_hub(
         render_friends_list_view(entity.clone(), state, search_state, search_query)
     };
 
-    container.child(
-        div()
-            .flex_1()
-            .w_full()
-            .flex()
-            .flex_row()
-            .overflow_hidden()
-            .child(left_column)
-            .child(render_active_now_panel(entity.clone(), state)),
-    )
+    let show_active_now = crate::app::responsive::should_show_active_now(viewport_width);
+
+    let mut body = div()
+        .flex_1()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_row()
+        .overflow_hidden()
+        .child(left_column);
+    if show_active_now {
+        body = body.child(render_active_now_panel(entity.clone(), state));
+    }
+
+    container.child(body)
 }
 
 /// Top navigation header bar (48px): section label + kit tab bar + inbox/help.

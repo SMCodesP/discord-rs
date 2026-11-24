@@ -390,6 +390,14 @@ impl AppState {
         }
         self.show_members = !self.show_members;
     }
+
+    /// Toggles channel sidebar visibility
+    pub fn toggle_channel_sidebar(&mut self) {
+        if let Some(ref tel) = self.telemetry {
+            tel.track_button_click("toggle_channel_sidebar", "Toggle Channel Sidebar", 0);
+        }
+        self.show_channel_sidebar = !self.show_channel_sidebar;
+    }
 }
 
 impl AppState {
