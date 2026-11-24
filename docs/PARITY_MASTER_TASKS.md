@@ -321,9 +321,11 @@
 - [ ] **T-060** — **P2** — **Protocolo/Canais & Threads** — **Corrigir 11 gaps reais de Canais, Permissões e Threads expostos por `QA-Media` (`commit a895231`)**
   - **Arquivos:** `src/domain/channel.rs`, `src/protocol/discord_api.rs`, `src/app/state/gateway_events.rs`, `src/app/state/guilds_channels.rs`.
 
-- [ ] **T-061** `[QA-Media]` — **P2** — **QA/Pastas & Member List Esparsa** — **Suíte de regressão para Guild Folders, ordenação de servidores, Member List esparsa (`op 14` ranges) e cores de cargo (`op 8`)**
-  - **Arquivos:** `tests/guild_folders_and_member_ranges_test.rs` (novo).
-  - **Status:** Em execução por `QA-Media`.
+- [x] **T-061** `[QA-Media]` — **P2** — **QA/Pastas & Member List Esparsa** — **Suíte de regressão para Guild Folders, ordenação de servidores, Member List esparsa (`op 14` ranges) e cores de cargo (`op 8`)**
+  - **Concluído em 2026-11-24** (layer `qa-media`, commit `b1f4e07`): `tests/guild_folders_and_member_ranges_test.rs` com 18 testes (13 passaram, **5 falharam expondo gaps reais**: `guild_folders` no protobuf, `INVALIDATE` deslocando índices, `UPDATE` de grupo descartado, isolamento por `list_id` e preservação do grupo ONLINE).
+
+- [x] **T-047** `[QA-Profile]` — **P1** — **QA/Settings, Tema & Dispositivos** — **Suíte de regressão para `T-038`/`T-039`/`T-041` (`tests/settings_theme_and_devices_regression_test.rs`)**
+  - **Concluído em 2026-11-24** (layer `qa-profile`, commit `86908cd`): 740 linhas, 28 testes (10 passaram, **18 falharam expondo `T-038`/`T-039`/`T-041`**).
 
 - [x] **T-045** `[QA-Voice]` — **P0** — **QA/Áudio** — **Testes de regressão para PCM/resampling 44.1↔48kHz, jitter/underrun, Opus PLC, mixer multi-speaker e transições mute/deafen/speaking**
   - **Concluído em 2026-11-24** (layer `qa-voice`, commit `0e4062a`): `tests/audio_engine_regression_test.rs` com 13 testes (10 passaram, **3 falharam expondo bugs reais na voz**: PLC ausente no mixer, soft clip distorcendo mistura de baixo nível e SSRC fantasma após Opus inválido).
@@ -338,9 +340,8 @@
 - [x] **T-051** `[QA-Voice]` — **P0** — **QA/Voz DAVE & Reconexão** — **Testes determinísticos de DAVE fail-closed (`T-021`) e renegociação de mídia após `4006`/`4009` (`T-018`)**
   - **Concluído em 2026-11-24** (layer `qa-voice`, commit `5de2e67`): `tests/voice_dave_and_reconnect_regression_test.rs` com 17 testes (4 passaram, **13 falharam expondo bugs reais**: DAVE sem fail-closed/grace limitada, estado parcial em versão inválida, **pânico com external sender malformado**, MLS inválido não fatal e `NewSession 4006/4009` reusando UDP/SSRC/chave antigos).
 
-- [ ] **T-054** `[QA-Voice]` — **P1** — **QA/Voz Vídeo & DM Call** — **Testes de regressão para Captura de Câmera/Tela, Troca de Dispositivos sem bridge no-op (`T-022`/`T-039`) e ciclo completo DM Call (`CALL_CREATE`/`CALL_UPDATE`/`CALL_DELETE`)**
-  - **Arquivos:** `tests/voice_video_and_dm_call_regression_test.rs` (novo).
-  - **Status:** Em execução por `QA-Voice`.
+- [x] **T-054** `[QA-Voice]` — **P1** — **QA/Voz Vídeo & DM Call** — **Testes de regressão para Captura de Câmera/Tela, Troca de Dispositivos sem bridge no-op (`T-022`/`T-039`) e ciclo completo DM Call (`CALL_CREATE`/`CALL_UPDATE`/`CALL_DELETE`)**
+  - **Concluído em 2026-11-24** (layer `qa-voice`, commit `6073861`): `tests/voice_video_and_dm_call_regression_test.rs` com 18 testes (12 passaram, **4 falharam expondo bugs reais**: hardware ALSA nulo gera sessão ativa, troca de dispositivo sem rollback no `AppState`, `CALL_DELETE` não encerra sessão e frame RGBA inválido aceito).
 
 - [x] **T-052** `[QA-Msgs]` — **P1** — **QA/Histórico & Paginação** — **Testes de paginação infinita `before` (`T-031`), `jump_to_message` `around` (`T-032`) e replies `message_reference` (`T-024`)**
   - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `d2a41fc`): `tests/chat_pagination_reply_regression_test.rs` com 16 testes (2 passaram, **14 falharam reproduzindo `T-024`/`T-031`/`T-032`**).
@@ -348,9 +349,8 @@
 - [x] **T-053** `[QA-Msgs]` — **P1** — **QA/Guildas & DMs** — **Testes de regressão para ícones de guilda 404/animados (`T-036`), ordenação de DMs por `last_message_id`, migração de pin temporário e Active Now**
   - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `2ca06ab`): `tests/friends_dms_guild_icons_regression_test.rs` com 19 testes (8 passaram, **11 falharam reproduzindo `T-036`/`T-053`**).
 
-- [ ] **T-059** `[QA-Msgs]` — **P2** — **QA/i18n & Busca Avançada** — **Testes de regressão para `i18n` (`pt_br`/`en_us`, `set_locale`, placeholders) e filtros/paginação de Search (`from:`, `in:`, `has:`, `before:`, `after:`)**
-  - **Arquivos:** `tests/i18n_and_search_advanced_test.rs` (novo).
-  - **Status:** Em execução por `QA-Msgs`.
+- [x] **T-059** `[QA-Msgs]` — **P2** — **QA/i18n & Busca Avançada** — **Testes de regressão para `i18n` (`pt_br`/`en_us`, `set_locale`, placeholders) e filtros/paginação de Search (`from:`, `in:`, `has:`, `before:`, `after:`)**
+  - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `0aad384`): `tests/i18n_and_search_advanced_test.rs` com 19 testes (13 passaram, **6 falharam reproduzindo gaps de `i18n`/Settings e busca avançada**).
 
 ### Ciclo 2 — Auditoria CDP, funcional e desempenho de 2026-11-24
 
