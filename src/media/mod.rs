@@ -7,6 +7,7 @@ pub mod dsp_fast;
 pub mod mixer;
 pub mod resample;
 pub mod sounds;
+pub mod user_volumes;
 
 pub use anim_scheduler::*;
 pub use audio::*;
@@ -17,6 +18,7 @@ pub use dsp_fast::*;
 pub use mixer::*;
 pub use resample::*;
 pub use sounds::*;
+pub use user_volumes::*;
 
 use std::fmt;
 
