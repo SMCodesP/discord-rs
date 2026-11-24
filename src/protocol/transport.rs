@@ -252,6 +252,11 @@ pub trait DiscordTransport: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Fetch the official Discord sticker packs (/sticker-packs).
+    async fn get_sticker_packs(&self) -> anyhow::Result<Vec<crate::protocol::media_cache::StickerPack>> {
+        Ok(Vec::new())
+    }
+
     /// List all channels within a guild.
     async fn list_channels(&self, guild_id: &str) -> anyhow::Result<Vec<Channel>>;
 

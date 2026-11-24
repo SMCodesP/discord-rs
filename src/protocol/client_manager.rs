@@ -700,6 +700,17 @@ impl ClientManager {
         transport.get_guild_stickers(guild_id).await
     }
 
+    /// Fetches the official Discord sticker packs using the active transport
+    pub async fn get_sticker_packs(
+        &self,
+    ) -> Result<Vec<crate::protocol::media_cache::StickerPack>> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.get_sticker_packs().await
+    }
+
     /// Sends a friend request to a user (/users/@me/relationships)
     pub async fn send_friend_request(
         &self,
