@@ -462,7 +462,10 @@ fn test_state_machine_close_code_handling_offline() {
     let (decision, action) = sm_active.handle_close_code(4006, "Invalidated");
     assert_eq!(decision, VoiceCloseDecision::NewSession);
     assert_eq!(action, None);
-    assert_eq!(*sm_active.current_state(), VoiceConnectionState::WaitingForHello);
+    assert!(matches!(
+        *sm_active.current_state(),
+        VoiceConnectionState::NeedsNewSession(_)
+    ));
     assert_eq!(sm_active.last_seq(), -1);
 
     // Test 3: Code 4017 (DAVE Required) -> Fatal, state Failed, action CloseConnection
@@ -529,18 +532,21 @@ fn test_dave_opcodes_and_framing() {
     assert_eq!(DaveOpcode::from_u8(30), Some(DaveOpcode::MlsWelcome));
     assert_eq!(DaveOpcode::from_u8(31), Some(DaveOpcode::MlsInvalidCommitWelcome));
     assert_eq!(DaveOpcode::from_u8(100), None);
+    assert!(discord_rs::protocol::voice_gateway::VoiceOpcode::from_u8(12).is_none());
 
     assert!(DaveOpcode::MlsExternalSender.is_binary());
     assert!(DaveOpcode::MlsKeyPackage.is_binary());
     assert!(DaveOpcode::MlsProposals.is_binary());
     assert!(DaveOpcode::MlsCommitWelcome.is_binary());
+    assert!(DaveOpcode::MlsAnnounceCommitTransition.is_binary());
     assert!(DaveOpcode::MlsWelcome.is_binary());
+    assert!(!DaveOpcode::MlsAnnounceCommitTransition.is_json());
 
     assert!(DaveOpcode::PrepareTransition.is_json());
     assert!(DaveOpcode::ExecuteTransition.is_json());
     assert!(DaveOpcode::TransitionReady.is_json());
     assert!(DaveOpcode::PrepareEpoch.is_json());
-    assert!(DaveOpcode::MlsAnnounceCommitTransition.is_json());
+    assert!(!DaveOpcode::MlsAnnounceCommitTransition.is_json());
     assert!(DaveOpcode::MlsInvalidCommitWelcome.is_json());
 
     // Test client binary formatting: [opcode (1 byte), payload...]
@@ -659,11 +665,15 @@ fn test_dave_signaling_and_media_contract_flow() {
     sm.handle_incoming_text(speaking_msg).unwrap();
     assert_eq!(sm.dave_session().get_user_id_by_ssrc(7777), Some(999888777));
 
-    // 5. Media contract verification: Passthrough while MLS key negotiation proceeds
+    // 5. Media contract verification: negotiated DAVE fails closed until the
+    // MLS ratchet is active. Only the exact three-byte silence frame bypasses.
     let raw_opus_audio = vec![0xF8, 0xFF, 0xFE, 0x01, 0x02, 0x03];
-    let encrypted = sm.dave_session_mut().encrypt_opus_frame(&raw_opus_audio).unwrap();
-    assert_eq!(encrypted, raw_opus_audio); // Passthrough intact
-
-    let decrypted = sm.dave_session_mut().decrypt_opus_frame_by_ssrc(7777, &raw_opus_audio).unwrap();
-    assert_eq!(decrypted, raw_opus_audio); // Passthrough intact
+    assert!(sm.dave_session_mut().encrypt_opus_frame(&raw_opus_audio).is_err());
+    assert!(sm.dave_session_mut().decrypt_opus_frame_by_ssrc(7777, &raw_opus_audio).is_err());
+    let silence = vec![0xF8, 0xFF, 0xFE];
+    assert_eq!(sm.dave_session_mut().encrypt_opus_frame(&silence).unwrap(), silence);
+    assert_eq!(
+        sm.dave_session_mut().decrypt_opus_frame_by_ssrc(7777, &silence).unwrap(),
+        silence
+    );
 }

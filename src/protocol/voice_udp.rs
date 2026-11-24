@@ -11,14 +11,14 @@
 //! 4. **Keepalive UDP**: Envio periódico de pacotes de 8 bytes (contador u64 little-endian) a cada ~5 s
 //!    para manter abertos os pinholes de NAT, e descarte transparente de respostas no caminho de recepção.
 //! 5. **Recepção e Filtragem RTCP**: Entrega de `ssrc`, `sequence`, `timestamp` e `payload` Opus,
-//!    com descarte explícito de pacotes RTCP (payload types 200-204 no byte 1).
+//!    com descarte explícito de pacotes RTCP (payload types 200-206 no byte 1) e RTP não-Opus.
 //! 6. **Silêncio**: Envio dos 5 quadros canônicos de silêncio (`0xF8, 0xFF, 0xFE`) ao cessar fala.
 
+use anyhow::{Context, Result, anyhow, bail};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use anyhow::{anyhow, bail, Result};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
@@ -76,11 +76,22 @@ pub fn build_ip_discovery_packet(ssrc: u32) -> [u8; IP_DISCOVERY_PACKET_LEN] {
     packet
 }
 
-/// Realiza o parsing do pacote de resposta de IP Discovery retornado pelo Discord.
-pub fn parse_ip_discovery_response(buf: &[u8]) -> Result<(String, u16)> {
-    if buf.len() < IP_DISCOVERY_PACKET_LEN {
+/// Realiza o parsing estrito da resposta de IP Discovery, correlacionando o
+/// SSRC com a sessão que enviou a requisição.
+pub fn parse_ip_discovery_response(
+    buf: &[u8],
+    expected_ssrc: u32,
+) -> Result<(String, u16)> {
+    parse_ip_discovery_response_inner(buf, expected_ssrc)
+}
+
+fn parse_ip_discovery_response_inner(
+    buf: &[u8],
+    expected_ssrc: u32,
+) -> Result<(String, u16)> {
+    if buf.len() != IP_DISCOVERY_PACKET_LEN {
         bail!(
-            "Pacote de IP Discovery menor que o esperado (recebido {}, esperado {})",
+            "Tamanho inválido na resposta de IP Discovery: recebido {}, esperado {}",
             buf.len(),
             IP_DISCOVERY_PACKET_LEN
         );
@@ -102,63 +113,127 @@ pub fn parse_ip_discovery_response(buf: &[u8]) -> Result<(String, u16)> {
         );
     }
 
-    let ip_slice = &buf[8..72];
-    let null_pos = ip_slice.iter().position(|&b| b == 0).unwrap_or(ip_slice.len());
-    let ip_str = std::str::from_utf8(&ip_slice[..null_pos])
-        .map_err(|e| anyhow!("Falha ao decodificar IP UTF-8 da resposta: {e}"))?
-        .trim()
-        .to_string();
+    let response_ssrc = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if expected_ssrc != response_ssrc {
+        bail!(
+            "SSRC inválido na resposta de IP Discovery: esperado {}, recebido {}",
+            expected_ssrc,
+            response_ssrc
+        );
+    }
 
+    let ip_slice = &buf[8..72];
+    let null_pos = ip_slice
+        .iter()
+        .position(|&b| b == 0)
+        .context("Endereço IP da resposta não é null-terminated")?;
+    let ip_str = std::str::from_utf8(&ip_slice[..null_pos])
+        .map_err(|e| anyhow!("Falha ao decodificar IP UTF-8 da resposta: {e}"))?;
     if ip_str.is_empty() {
         bail!("Endereço IP retornado pelo servidor está vazio");
     }
+    ip_str
+        .parse::<std::net::IpAddr>()
+        .map_err(|e| anyhow!("Endereço IP inválido na resposta de Discovery: {e}"))?;
 
     let port = u16::from_be_bytes([buf[72], buf[73]]);
     if port == 0 {
         bail!("Porta UDP retornada na descoberta de IP é zero");
     }
 
-    Ok((ip_str, port))
+    Ok((ip_str.to_string(), port))
 }
 
 /// Contrato obrigatório com VoiceGW:
 /// Executa a descoberta de IP e porta pública através de um `tokio::net::UdpSocket` conectado.
 pub async fn discover_ip(socket: &UdpSocket, ssrc: u32) -> Result<(String, u16)> {
     let req = build_ip_discovery_packet(ssrc);
+    if socket.peer_addr().is_err() {
+        bail!("UdpSocket precisa estar conectado ao endpoint de voz para usar discover_ip()");
+    }
 
-    if socket.peer_addr().is_ok() {
-        let mut attempts = 0;
-        loop {
-            attempts += 1;
-            socket.send(&req).await?;
-
-            let mut resp = [0u8; 128];
-            match tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut resp)).await {
-                Ok(Ok(n)) => return parse_ip_discovery_response(&resp[..n]),
-                Ok(Err(e)) => bail!("Erro de I/O no socket UDP durante IP Discovery: {e}"),
-                Err(_) if attempts < 3 => continue,
-                Err(_) => bail!("Timeout de IP Discovery após 3 tentativas"),
+    let mut attempts = 0;
+    let mut last_error = None;
+    loop {
+        attempts += 1;
+        socket.send(&req).await?;
+        let mut resp = [0u8; 128];
+        match tokio::time::timeout(Duration::from_millis(1500), socket.recv(&mut resp)).await {
+            Ok(Ok(n)) => match parse_ip_discovery_response(&resp[..n], ssrc) {
+                Ok(parsed) => return Ok(parsed),
+                Err(err) => {
+                    last_error = Some(err);
+                    if attempts < 3 {
+                        continue;
+                    }
+                }
+            },
+            Ok(Err(e)) => bail!("Erro de I/O no socket UDP durante IP Discovery: {e}"),
+            Err(_) if attempts < 3 => continue,
+            Err(_) => {
+                if let Some(err) = last_error.take() {
+                    bail!("IP Discovery inválido após 3 tentativas: {err:#}");
+                }
+                bail!("Timeout de IP Discovery após 3 tentativas");
             }
         }
-    } else {
-        bail!("UdpSocket precisa estar conectado ao endpoint de voz para usar discover_ip()");
+        if attempts == 3 {
+            bail!(
+                "IP Discovery inválido após 3 tentativas: {:#}",
+                last_error.unwrap_or_else(|| anyhow!("resposta inválida"))
+            );
+        }
     }
 }
 
 /// Variante de IP discovery que aceita endereço remoto explicitamente.
-pub async fn discover_ip_to(socket: &UdpSocket, target: SocketAddr, ssrc: u32) -> Result<(String, u16)> {
+pub async fn discover_ip_to(
+    socket: &UdpSocket,
+    target: SocketAddr,
+    ssrc: u32,
+) -> Result<(String, u16)> {
     let req = build_ip_discovery_packet(ssrc);
     let mut attempts = 0;
+    let mut last_error = None;
     loop {
         attempts += 1;
         socket.send_to(&req, target).await?;
 
         let mut resp = [0u8; 128];
         match tokio::time::timeout(Duration::from_millis(1500), socket.recv_from(&mut resp)).await {
-            Ok(Ok((n, _from))) => return parse_ip_discovery_response(&resp[..n]),
+            Ok(Ok((n, from))) if from == target => {
+                match parse_ip_discovery_response(&resp[..n], ssrc) {
+                    Ok(parsed) => return Ok(parsed),
+                    Err(err) => {
+                        last_error = Some(err);
+                        if attempts < 3 {
+                            continue;
+                        }
+                    }
+                }
+            }
+            Ok(Ok((_, from))) => {
+                last_error = Some(anyhow!(
+                    "Resposta de IP Discovery de origem inesperada: {from}"
+                ));
+                if attempts < 3 {
+                    continue;
+                }
+            }
             Ok(Err(e)) => bail!("Erro de I/O no socket UDP durante IP Discovery: {e}"),
             Err(_) if attempts < 3 => continue,
-            Err(_) => bail!("Timeout de IP Discovery após 3 tentativas para {target}"),
+            Err(_) => {
+                if let Some(err) = last_error.take() {
+                    bail!("IP Discovery inválido após 3 tentativas para {target}: {err:#}");
+                }
+                bail!("Timeout de IP Discovery após 3 tentativas para {target}");
+            }
+        }
+        if attempts == 3 {
+            bail!(
+                "IP Discovery inválido após 3 tentativas para {target}: {:#}",
+                last_error.unwrap_or_else(|| anyhow!("resposta inválida"))
+            );
         }
     }
 }
@@ -382,7 +457,8 @@ impl VoiceUdpSender {
 ///
 /// Decifra pacotes RTP e filtra transparentemente:
 /// - Pacotes de keepalive (8 bytes);
-/// - Pacotes RTCP (RFC 3550, tipos de carga 200..=204 no byte 1);
+/// - Pacotes RTCP (RFC 3550, tipos de carga 200..=206 no byte 1);
+/// - Pacotes RTP que não sejam Opus (payload type 120);
 /// - Pacotes não-RTP v2.
 pub struct VoiceUdpReceiver {
     socket: Arc<UdpSocket>,
@@ -411,11 +487,15 @@ impl VoiceUdpReceiver {
                 continue;
             }
 
-            // 3. Filtrar explicitamente pacotes RTCP (RFC 3550 seção 6: tipos 200 a 204 no byte 1).
-            // SR=200, RR=201, SDES=202, BYE=203, APP=204
+            // 3. Filtrar RTCP (SR/RR/SDES/BYE/APP e relatórios estendidos 205/206)
+            // e payloads RTP que não sejam Opus. Só áudio Opus chega ao FrameCipher.
             let pt = buf[1];
-            if (200..=204).contains(&pt) {
+            if (200..=206).contains(&pt) {
                 log::trace!("Pacote RTCP recebido (tipo {pt}), ignorado explicitamente");
+                continue;
+            }
+            if (pt & 0x7F) != RTP_PAYLOAD_TYPE_OPUS {
+                log::trace!("Pacote RTP não-Opus recebido (tipo {pt}), ignorado");
                 continue;
             }
 
@@ -486,7 +566,12 @@ impl VoiceUdpConnection {
     }
 
     /// Cria a conexão a partir de um `UdpSocket` já existente.
-    pub fn from_socket(socket: UdpSocket, remote_addr: SocketAddr, ssrc: u32, crypto: RtpCrypto) -> Self {
+    pub fn from_socket(
+        socket: UdpSocket,
+        remote_addr: SocketAddr,
+        ssrc: u32,
+        crypto: RtpCrypto,
+    ) -> Self {
         Self::from_shared_socket(Arc::new(socket), remote_addr, ssrc, crypto)
     }
 
@@ -641,7 +726,7 @@ mod tests {
 
         resp[72..74].copy_from_slice(&54321u16.to_be_bytes());
 
-        let (ip, port) = parse_ip_discovery_response(&resp).unwrap();
+        let (ip, port) = parse_ip_discovery_response(&resp, 0x12345678).unwrap();
         assert_eq!(ip, "203.0.113.195");
         assert_eq!(port, 54321);
     }
@@ -730,8 +815,10 @@ mod tests {
         server_socket.connect(client_addr).await.unwrap();
 
         let ssrc = 0x11223344;
-        let mut sender = VoiceUdpConnection::from_socket(client_socket, server_addr, ssrc, crypto_send);
-        let receiver = VoiceUdpConnection::from_socket(server_socket, client_addr, ssrc, crypto_recv);
+        let mut sender =
+            VoiceUdpConnection::from_socket(client_socket, server_addr, ssrc, crypto_send);
+        let receiver =
+            VoiceUdpConnection::from_socket(server_socket, client_addr, ssrc, crypto_recv);
 
         // 1. Enviar um keepalive de 8 bytes
         sender.send_keepalive().await.unwrap();
@@ -762,5 +849,144 @@ mod tests {
         assert_eq!(packet.sequence, 0);
         assert_eq!(packet.timestamp, 0);
         assert_eq!(packet.payload, opus_data);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_ignores_extended_rtcp_and_non_opus_rtp() {
+        let key = test_secret_key();
+        let crypto_send = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let crypto_recv = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = client_socket.local_addr().unwrap();
+        client_socket.connect(server_addr).await.unwrap();
+        server_socket.connect(client_addr).await.unwrap();
+
+        let ssrc = 0x10203040;
+        let mut sender =
+            VoiceUdpConnection::from_socket(client_socket, server_addr, ssrc, crypto_send);
+        let receiver =
+            VoiceUdpConnection::from_socket(server_socket, client_addr, ssrc, crypto_recv);
+
+        for rtcp_type in [205u8, 206] {
+            let mut packet = [0u8; 24];
+            packet[0] = 0x80;
+            packet[1] = rtcp_type;
+            sender.socket().send(&packet).await.unwrap();
+        }
+
+        let mut video_header = build_rtp_header(0, 0, ssrc);
+        video_header[1] = 96; // VP8/RTX não é áudio Opus
+        let mut video_crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let encrypted_video = video_crypto.encrypt(&video_header, b"not opus").unwrap();
+        sender.socket().send(&encrypted_video).await.unwrap();
+
+        let opus = b"only opus should be delivered";
+        sender.send_opus_frame(opus).await.unwrap();
+        let packet = receiver
+            .recv_packet_timeout(Duration::from_millis(500))
+            .await
+            .unwrap();
+        assert_eq!(packet.payload, opus);
+        assert_eq!(packet.sequence, 0);
+    }
+
+    fn discovery_response(ssrc: u32) -> [u8; IP_DISCOVERY_PACKET_LEN] {
+        let mut response = [0u8; IP_DISCOVERY_PACKET_LEN];
+        response[0..2].copy_from_slice(&IP_DISCOVERY_RESPONSE_TYPE.to_be_bytes());
+        response[2..4].copy_from_slice(&IP_DISCOVERY_BODY_LEN.to_be_bytes());
+        response[4..8].copy_from_slice(&ssrc.to_be_bytes());
+        let ip = b"127.0.0.1";
+        response[8..8 + ip.len()].copy_from_slice(ip);
+        response[72..74].copy_from_slice(&50000u16.to_be_bytes());
+        response
+    }
+
+    #[test]
+    fn test_ip_discovery_rejects_bad_size_ssrc_and_address() {
+        let valid = discovery_response(0x11223344);
+        assert!(parse_ip_discovery_response(&valid[..73], 0x11223344).is_err());
+        let mut oversized = valid.to_vec();
+        oversized.push(0);
+        assert!(parse_ip_discovery_response(&oversized, 0x11223344).is_err());
+        assert!(parse_ip_discovery_response(&valid, 0x55667788).is_err());
+
+        let mut wrong_type = valid;
+        wrong_type[0..2].copy_from_slice(&1u16.to_be_bytes());
+        assert!(parse_ip_discovery_response(&wrong_type, 0x11223344).is_err());
+
+        let mut wrong_length = valid;
+        wrong_length[2..4].copy_from_slice(&69u16.to_be_bytes());
+        assert!(parse_ip_discovery_response(&wrong_length, 0x11223344).is_err());
+
+        let mut zero_port = valid;
+        zero_port[72..74].fill(0);
+        assert!(parse_ip_discovery_response(&zero_port, 0x11223344).is_err());
+
+        let mut no_nul = valid;
+        no_nul[8..72].fill(b'A');
+        assert!(parse_ip_discovery_response(&no_nul, 0x11223344).is_err());
+
+        let mut invalid_ip = valid;
+        invalid_ip[8..12].copy_from_slice(b"nope");
+        assert!(parse_ip_discovery_response(&invalid_ip, 0x11223344).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_discover_ip_retries_after_malformed_response() {
+        let ssrc = 0x12345678;
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 128];
+            let (_, client_addr) = server.recv_from(&mut buf).await.unwrap();
+            let mut malformed = discovery_response(ssrc).to_vec();
+            malformed.push(0);
+            server.send_to(&malformed, client_addr).await.unwrap();
+            server
+                .send_to(&discovery_response(ssrc), client_addr)
+                .await
+                .unwrap();
+        });
+
+        let parsed = discover_ip(&client, ssrc).await.unwrap();
+        assert_eq!(parsed, ("127.0.0.1".to_string(), 50000));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_discover_ip_to_rejects_wrong_sender_then_accepts_target() {
+        let ssrc = 0x87654321;
+        let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let attacker = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_addr = client.local_addr().unwrap();
+
+        let attacker_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            attacker
+                .send_to(&discovery_response(ssrc), client_addr)
+                .await
+                .unwrap();
+        });
+        let target_task = tokio::spawn(async move {
+            let mut buf = [0u8; 128];
+            let (_, client_addr) = target.recv_from(&mut buf).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            target
+                .send_to(&discovery_response(ssrc), client_addr)
+                .await
+                .unwrap();
+        });
+
+        let parsed = discover_ip_to(&client, target_addr, ssrc).await.unwrap();
+        assert_eq!(parsed, ("127.0.0.1".to_string(), 50000));
+        attacker_task.await.unwrap();
+        target_task.await.unwrap();
     }
 }
