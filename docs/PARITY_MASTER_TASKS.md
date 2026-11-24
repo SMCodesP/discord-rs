@@ -422,7 +422,7 @@
   - **Arquivos:** `Cargo.toml:6-34`, `src/app/user_settings/notifications.rs:9-174`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/models.rs:57-64`.
   - **Evidência:** Settings só alterna campos locais; não há backend de notificação, som ou badge. `MessageCreate` atualiza histórico/ordenação, mas não emite notificação. O projeto não depende de `notify-rust`/serviço D-Bus de notificações.
   - **O que falta/corrigir:** integração desktop oficial (freedesktop/D-Bus), som real configurável, badge de tarefa/unread, respeito a DND e escopo todas/@menções/nada; agrupar por canal e não notificar mensagem própria.
-  - **Critério de pronto:** testes com backend injetado validam menção, DM, canal mutado, DND e mensagem própria; teste manual em Linux exibe notificação/som/badge e remove o badge ao ler.
+  - **Critério de pronto:** testes com backend injetado validam menção, DM, canal mutado, DND e mensagem própria; teste manual em Linux exibe notificação/som/badge, remove o badge ao ler e o clique na notificação abre/foca o canal correto sem vazar dados pessoais.
 
 - [ ] **T-062** — **P1** — **Chat/Typing** — **Enviar `TYPING_START` e expirar indicadores sem timer ativo**
   - **Arquivos:** `src/app/state/messages.rs:405-451`, `src/protocol/rate_limit/coalescing.rs:35-91`, `src/protocol/discord_api.rs:1887-1897`, `src/chat/chat_view.rs:615-621`.
@@ -691,3 +691,51 @@
   - **Evidência:** a auditoria não encontrou literais `TODO`/`FIXME`, mas encontrou defaults de transporte que retornam `Ok(())` sem ação (`request_guild_members`, viewport, subscribe, voice state), `edit/pin/unpin` que sempre falham, três campos de telemetória marcados `allow(dead_code)`, `ArrowDropupTrigger` não usado e controles ainda desabilitados/comentados como pendentes. `cargo check` não detecta esses caminhos porque compilam.
   - **O que falta/corrigir:** inventário de métodos pendentes, implementar ou retornar `Unsupported` explícito, remover `allow(dead_code)` desnecessário e garantir que UI não exiba controle cujo transporte fabrica sucesso.
   - **Critério de pronto:** teste de contrato percorre a trait `DiscordTransport` e falha se método obrigatório retornar `Ok` sem efeito; nenhum `allow(dead_code)` novo sem justificativa e cada controle pendente está removido ou ligado a implementação real.
+
+### Ciclo 6 — Sons, Status Picker, painel de voz compacto, ações de servidor e drag-and-drop de 2026-11-24
+
+**Metodologia e limites:** auditoria somente leitura da `main` e do Discord Desktop já aberto. CDP acessado por `list_pages` + `select_page`; **nenhum `new_page`, clique destrutivo, digitação ou navegação**. CSS/DOM, bundle e locale oficiais foram usados sem dados pessoais. Viewport observado: **1017×605**, `devicePixelRatio=1.4375`.
+
+**Itens já cobertos:** notificações nativas/badge permanecem em `T-081` (critério ampliado para clique→canal); drag-and-drop de arquivos para o chat permanece em `T-027`. O Ciclo 6 adiciona o catálogo de sons do cliente e o reordering de servidores/pastas, que não estavam cobertos.
+
+- [ ] **T-113** — **P1** — **Áudio/Sons do Cliente** — **Reproduzir sons reais de mensagem, chamada, entrada/saída de voz e mute/deafen**
+  - **Arquivos:** `Cargo.toml:6-34`, `src/app/user_settings/notifications.rs:9-174`, `src/app/user_settings/mod.rs:56-64`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/voice.rs:551-613`, `src/protocol/client_manager.rs:823-919`.
+  - **Evidência:** Settings expõe toggles de mensagem/voice join/mute/deafen, mas nenhum callback toca áudio; não há backend de reprodução no `Cargo.toml` e `ring_call` apenas envia a API. O bundle oficial inclui `message1`, `mention*`, `call_calling`, `call_ringing`, `user_join`, `user_leave`, `user_moved`, `mute`, `unmute`, `deafen` e `undeafen` (`/tmp/opencode/discord-web-entry.js:1`).
+  - **O que falta/corrigir:** player não bloqueante com volume real, catálogo de eventos, prioridade/coalescing, seleção de som de mensagem/chamada e respeito a DND/mute do sistema; usar apenas assets oficiais/licenciados.
+  - **Critério de pronto:** player injetado recebe exatamente um evento por transição real, toca o asset correto e para ring ao aceitar/recusar; nenhum som é inventado e falha do dispositivo aparece sem sucesso fabricado.
+
+- [ ] **T-114** — **P1** — **UX/Status Picker** — **Abrir seletor de status no User Panel e sincronizar presença/custom status**
+  - **Arquivos:** `src/app/channel_sidebar.rs:1003-1077`, `src/app/state/models.rs:5-67`, `src/app/state/connection.rs:79-113`, `src/protocol/transport.rs:88-95`, `src/protocol/discord_api.rs:1916-1919`, `src/protocol/discord_api.rs:354-391`.
+  - **Evidência:** clicar no próprio avatar/nome abre `UserSettings`, não um status picker; só há parser de `PRESENCE_UPDATE` recebido e nenhum envio de Gateway Opcode 3 ou atualização de custom status. O CDP oficial mede `.statusPickerModalMenu` com 300px, `max-height:calc(-72px + 100vh)` e `.customStatusEmoji` 14×14; o locale contém Online/Idle/DND/Invisible, “Clear custom status” e expiração.
+  - **O que falta/corrigir:** popover ancorado, quatro status, custom status com emoji/texto/expiração, limpar, copiar username e atualização otimista com rollback via Opcode 3/REST.
+  - **Critério de pronto:** Gateway sintético valida payload de status e expiração; UI mostra estado real, restaura valor anterior em falha e não confirma mudança antes da resposta/echo.
+
+- [ ] **T-115** — **P1** — **Auth/Account Switcher** — **Gerenciar múltiplas contas com troca segura e caches isolados**
+  - **Arquivos:** `src/protocol/auth.rs:83-140`, `src/app/state/app_state.rs:67-79`, `src/app/state/connection.rs:8-69`, `src/app/root_view.rs:60-80`, `src/app/state/models.rs:57-67`, `src/protocol/client_manager.rs:328-350`.
+  - **Evidência:** `TokenStorage` persiste um único `auth.json` e `AppState` mantém um único `auth_token`; não há lista de contas nem ação de troca. O locale oficial contém “Switch accounts”/“Switching accounts...” e o bundle usa `switchAccountToken` (`/tmp/opencode/discord-web-entry.js:23`).
+  - **O que falta/corrigir:** cofre de múltiplas credenciais, rótulos/avatares não sensíveis, adicionar/remover conta, logout individual, troca sem vazar cache/mensagens entre contas e persistência segura.
+  - **Critério de pronto:** testes com tokens sintéticos comprovam isolamento de mensagens/guildas/DMs, falha de login preservando a conta anterior e nenhum token em log; troca real exige confirmação do Gateway antes de mostrar a nova conta.
+
+- [ ] **T-116** — **P1** — **Voz/Painel Compacto** — **Completar a barra “Voz Conectada” fora do palco com qualidade e controles reais**
+  - **Arquivos:** `src/app/channel_sidebar.rs:908-1001`, `src/app/voice_call_panel.rs:251-305`, `src/app/state/models.rs:344-361`, `src/app/state/voice.rs:230-264`, `src/protocol/voice_session.rs:774-782`.
+  - **Evidência:** já existe uma barra de 52px com canal, RTT e botão desconectar, mas faltam nome da guilda, câmera, screen share, soundboard e popout de qualidade; os botões de vídeo/tela no palco continuam desabilitados (`T-023`). O CDP oficial define classes de qualidade Fine/Average/Bad com cores positiva/warning/critical e usa “Voice Connected”.
+  - **O que falta/corrigir:** exibir guilda/canal, classificar qualidade por métricas reais, popout com RTT/perda/codec quando disponível, controles de câmera/tela/soundboard e retorno ao palco; não exibir controle sem pipeline real.
+  - **Critério de pronto:** fixture com RTT/perda sintéticos valida classes e popout; navegar para outro canal mantém a barra e seus controles, e desconectar limpa toda a UI sem estado fantasma.
+
+- [ ] **T-117** — **P1** — **Servidores/Apelido & Saída** — **Editar o próprio apelido por guilda e sair do servidor com confirmação**
+  - **Arquivos:** `src/domain/guild.rs:75-101`, `src/protocol/discord_api.rs:825-900`, `src/protocol/transport.rs:238-297`, `src/app/channel_sidebar.rs:74-163`, `src/app/state/guilds_channels.rs`.
+  - **Evidência:** não há `PATCH /guilds/{id}/members/@me`, `DELETE /users/@me/guilds/{id}` nem menu de saída; o locale oficial contém “Change Nickname” e “Leave Server”. O bundle oficial define `SET_GUILD_MEMBER` e `GUILD_LEAVE` (`/tmp/opencode/discord-web-entry.js:23`).
+  - **O que falta/corrigir:** menu de perfil do servidor, edição de nick com permissão, confirmação de saída, remoção de guilda/canais/cache após sucesso e seleção do próximo destino.
+  - **Critério de pronto:** HTTP sintético valida payload/erros; UI não remove a guilda antes do 2xx, mostra confirmação clara e atualiza trilho/sidebar sem deixar seleção órfã.
+
+- [ ] **T-118** — **P1** — **Servidores/Criar Canal & Categoria** — **Criar canais/categorias reais quando o usuário tiver permissão**
+  - **Arquivos:** `src/i18n/pt_br.rs:26-27`, `src/protocol/discord_api.rs:911-925`, `src/protocol/transport.rs:238-297`, `src/app/channel_sidebar.rs:546-635`, `src/app/state/guilds_channels.rs`, `src/app/state/gateway_events.rs:290-307`.
+  - **Evidência:** as strings “Criar canal/categoria” existem, mas não há POST, modal ou handler; `list_channels` só faz GET. O bundle oficial implementa `createChannel` com tipo, nome, `parent_id`, permissões, bitrate e limite (`/tmp/opencode/discord-web-entry.js:23`); o locale contém “Create Category”/“Create Channel in …”.
+  - **O que falta/corrigir:** modal por tipo/categoria, validação de nome/permissão, POST oficial, reconciliação por `CHANNEL_CREATE` e posicionamento; integrar `T-080`.
+  - **Critério de pronto:** servidor sintético valida tipos 0/2/4, categoria pai, bitrate/limite e 403; canal só aparece após resposta/evento real e a ordem segue `position` sem item fictício.
+
+- [ ] **T-119** — **P2** — **UX/Drag & Drop** — **Reordenar servidores e pastas no Guild Rail com persistência**
+  - **Arquivos:** `src/app/guild_rail.rs:164-248`, `src/components/guild_item.rs:632-687`, `src/app/state/app_state.rs:88-91`, `src/app/state/disk_cache.rs:1-60`, `src/protocol/discord_api.rs:354-391`, `src/protocol/transport.rs:8-15`.
+  - **Evidência:** itens de guilda/pasta só têm clique/toggle; não há handlers de arraste, drop, reorder ou PATCH de `guild_folders`. O CDP oficial usa indicadores de alvo (linha 4px/círculo 16px), preview de pasta e estados `dragging`/`dragOver`; o bundle persiste `guildFolders` nas settings.
+  - **O que falta/corrigir:** arraste de guilda para posição/pasta, criação/expansão de pasta por drop, preview e indicadores, persistência em `/users/@me/settings` e rollback em falha.
+  - **Critério de pronto:** teste sintético move guilda entre posições/pastas, cria pasta e persiste após reinício; cancelar/falhar restaura a ordem anterior e nenhum ID real vai para log.
