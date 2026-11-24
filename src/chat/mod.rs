@@ -20,6 +20,7 @@ pub mod reactions;
 pub mod search;
 pub mod blocked_group;
 pub mod system_messages;
+pub mod virtual_window;
 
 pub use blocked_group::*;
 pub use channel_guards::*;
