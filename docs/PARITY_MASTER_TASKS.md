@@ -106,9 +106,15 @@
   - **Escopo**: `src/app/user_settings/*`, `src/app/state/settings.rs`, `src/app/state/seed.rs`.
   - **Foco**: Garantir 0 dados fictícios em produção, abas fiéis ao Discord, seleção real de dispositivos de áudio/vídeo em Voz e Vídeo, troca de idioma e tema funcionando.
 
-- [ ] **T-015** `[QA-Visual]` — **Auditoria Visual Automatizada & Comparação com Discord Oficial**
-  - **Escopo**: `examples/ui_shot.rs`, `tests/tokens_spec_test.rs`, `tests/kit_theme_test.rs`, `tests/guild_icon_radius_test.rs`, `tests/telemetry_service_test.rs`.
-  - **Foco**: Comparar screenshots do `discord-rs` com `Discord-Oficial` via `mao portal screenshot`, catalogar divergências exatas (px, hex, layout) na seção final.
+- [x] **T-015** `[QA-Visual]` — **Auditoria Visual Automatizada & Comparação com Discord Oficial**
+  - **Concluído em 2026-11-24** (layer `qa-visual`, commit `803dd1e`): suíte base 21/21 verde; adicionou `tests/visual_regression_test.rs` (6 passaram, **3 falharam expondo divergências reais**: `bg_input` `#111214` vs `#383a40`, `blurple hover/active` `#4752c4/#3c45a5` vs `#4452bb/#3a48a3`, `VisualComparator` com cores hardcoded e fallback de fonte marcado como 100%).
+
+- [ ] **T-057** — **P1** — **Design/Tokens** — **Corrigir tokens `bg_input`, `blurple hover/active` e `VisualComparator` expostos por `QA-Visual` (`commit 803dd1e`)**
+  - **Arquivos:** `src/tokens/colors.rs`, `src/tokens/kit_theme.rs`, `src/telemetry/comparator.rs`.
+
+- [ ] **T-058** `[QA-Visual]` — **P2** — **QA/Visual Multi-Tema & Fixtures** — **Validar todas as 33 fixtures de `ui_shot`, temas Light/Dark/Midnight, escala de fonte 12–24px e modo Compacto vs Cozy**
+  - **Arquivos:** `tests/visual_themes_and_fixtures_test.rs` (novo).
+  - **Status:** Em execução por `QA-Visual`.
 
 ### P2 — Rede, Gateway, Cache, Auth e Estabilidade
 - [ ] **T-016** `[Net-Gateway]` — **Auditoria de Gateway, REST, Rate Limiter, Reconexão, Cache e Protobuf**
@@ -302,8 +308,21 @@
   - **Evidência:** `QA-Media` (`commit 37e8b5a`, `tests/attachments_embeds_markdown_test.rs`, 13 falhas reais).
   - **Critério de pronto:** 28/28 testes de `tests/attachments_embeds_markdown_test.rs` passando.
 
-- [ ] **T-049** `[QA-Media]` — **P1** — **QA/Notificações & Presença** — **Suíte de regressão para Notificações, Badges de Unread/Menção, Contadores e Presença em Tempo Real**
-  - **Arquivos:** `tests/notifications_badges_and_presence_test.rs` (novo).
+- [x] **T-049** `[QA-Media]` — **P1** — **QA/Notificações & Presença** — **Suíte de regressão para Notificações, Badges de Unread/Menção, Contadores e Presença em Tempo Real**
+  - **Concluído em 2026-11-24** (layer `qa-media`, commit `2e47289`): `tests/notifications_badges_and_presence_test.rs` com 24 testes isolados (13 passaram, **11 falharam expondo gaps reais**: unread/mention/ack, agregados de guilda, presença fabricada no Friends Hub, custom status emoji-only, `created_at` em ms, classificação Spotify e defaults/labels de presença).
+
+- [ ] **T-055** — **P1** — **Notificações/Presença** — **Corrigir 11 gaps reais de Unread/Mention/Ack, Agregados de Guilda, Presença e Spotify expostos por `QA-Media`**
+  - **Arquivos:** `src/app/state/gateway_events.rs`, `src/app/state/friends_dms.rs`, `src/app/friends_hub.rs`, `src/app/guild_rail.rs`, `src/protocol/discord_api.rs`.
+  - **Evidência:** `QA-Media` (`commit 2e47289`, `tests/notifications_badges_and_presence_test.rs`, 11 falhas reais).
+
+- [x] **T-056** `[QA-Media]` — **P2** — **QA/Canais & Permissões** — **Suíte de regressão para Categorias, Canais de Texto/Voz/Anúncio/Fórum/Threads e Permissões de Canal**
+  - **Concluído em 2026-11-24** (layer `qa-media`, commit `a895231`): `tests/channels_permissions_and_threads_test.rs` com 18 testes (7 passaram, **11 falharam expondo gaps reais**: tipos modernos/threads, `parent_id` no serde, `permission_overwrites` descartados, ordenação por empate, `CHANNEL_CREATE` ignorado e eventos `CHANNEL_UPDATE`/`DELETE`/`THREAD_*` ausentes).
+
+- [ ] **T-060** — **P2** — **Protocolo/Canais & Threads** — **Corrigir 11 gaps reais de Canais, Permissões e Threads expostos por `QA-Media` (`commit a895231`)**
+  - **Arquivos:** `src/domain/channel.rs`, `src/protocol/discord_api.rs`, `src/app/state/gateway_events.rs`, `src/app/state/guilds_channels.rs`.
+
+- [ ] **T-061** `[QA-Media]` — **P2** — **QA/Pastas & Member List Esparsa** — **Suíte de regressão para Guild Folders, ordenação de servidores, Member List esparsa (`op 14` ranges) e cores de cargo (`op 8`)**
+  - **Arquivos:** `tests/guild_folders_and_member_ranges_test.rs` (novo).
   - **Status:** Em execução por `QA-Media`.
 
 - [x] **T-045** `[QA-Voice]` — **P0** — **QA/Áudio** — **Testes de regressão para PCM/resampling 44.1↔48kHz, jitter/underrun, Opus PLC, mixer multi-speaker e transições mute/deafen/speaking**
@@ -316,10 +335,145 @@
   - **Arquivos:** `tests/log_redaction_and_auth_safety_test.rs` (novo).
   - **Status:** Em execução por `QA-Net`.
 
-- [ ] **T-051** `[QA-Voice]` — **P0** — **QA/Voz DAVE & Reconexão** — **Testes determinísticos de DAVE fail-closed (`T-021`) e renegociação de mídia após `4006`/`4009` (`T-018`)**
-  - **Arquivos:** `tests/voice_dave_and_reconnect_regression_test.rs` (novo).
+- [x] **T-051** `[QA-Voice]` — **P0** — **QA/Voz DAVE & Reconexão** — **Testes determinísticos de DAVE fail-closed (`T-021`) e renegociação de mídia após `4006`/`4009` (`T-018`)**
+  - **Concluído em 2026-11-24** (layer `qa-voice`, commit `5de2e67`): `tests/voice_dave_and_reconnect_regression_test.rs` com 17 testes (4 passaram, **13 falharam expondo bugs reais**: DAVE sem fail-closed/grace limitada, estado parcial em versão inválida, **pânico com external sender malformado**, MLS inválido não fatal e `NewSession 4006/4009` reusando UDP/SSRC/chave antigos).
+
+- [ ] **T-054** `[QA-Voice]` — **P1** — **QA/Voz Vídeo & DM Call** — **Testes de regressão para Captura de Câmera/Tela, Troca de Dispositivos sem bridge no-op (`T-022`/`T-039`) e ciclo completo DM Call (`CALL_CREATE`/`CALL_UPDATE`/`CALL_DELETE`)**
+  - **Arquivos:** `tests/voice_video_and_dm_call_regression_test.rs` (novo).
   - **Status:** Em execução por `QA-Voice`.
 
-- [ ] **T-052** `[QA-Msgs]` — **P1** — **QA/Histórico & Paginação** — **Testes de paginação infinita `before` (`T-031`), `jump_to_message` `around` (`T-032`) e replies `message_reference` (`T-024`)**
-  - **Arquivos:** `tests/chat_pagination_reply_regression_test.rs` (novo).
+- [x] **T-052** `[QA-Msgs]` — **P1** — **QA/Histórico & Paginação** — **Testes de paginação infinita `before` (`T-031`), `jump_to_message` `around` (`T-032`) e replies `message_reference` (`T-024`)**
+  - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `d2a41fc`): `tests/chat_pagination_reply_regression_test.rs` com 16 testes (2 passaram, **14 falharam reproduzindo `T-024`/`T-031`/`T-032`**).
+
+- [x] **T-053** `[QA-Msgs]` — **P1** — **QA/Guildas & DMs** — **Testes de regressão para ícones de guilda 404/animados (`T-036`), ordenação de DMs por `last_message_id`, migração de pin temporário e Active Now**
+  - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `2ca06ab`): `tests/friends_dms_guild_icons_regression_test.rs` com 19 testes (8 passaram, **11 falharam reproduzindo `T-036`/`T-053`**).
+
+- [ ] **T-059** `[QA-Msgs]` — **P2** — **QA/i18n & Busca Avançada** — **Testes de regressão para `i18n` (`pt_br`/`en_us`, `set_locale`, placeholders) e filtros/paginação de Search (`from:`, `in:`, `has:`, `before:`, `after:`)**
+  - **Arquivos:** `tests/i18n_and_search_advanced_test.rs` (novo).
   - **Status:** Em execução por `QA-Msgs`.
+
+### Ciclo 2 — Auditoria CDP, funcional e desempenho de 2026-11-24
+
+**Nota de IDs:** durante a auditoria, agentes QA criaram concorrentemente `T-048`..`T-061`. Para evitar colisão no arquivo vivo, as descobertas do Explorer neste ciclo foram renumeradas para **`T-071`..`T-081`**; `T-047` permanece como lacuna reservada no board compartilhado. As medições de shell foram consolidadas de `/tmp/opencode/discord-shell-measurements.md`.
+
+**Metodologia e fontes:** medições somente leitura via CDP em `http://127.0.0.1:9222`, viewport lógico **1018×605**, `devicePixelRatio=2`, cliente oficial Electron em `theme-dark theme-darker images-dark`; screenshots do cliente oficial e de `DiscordRS-SMCodes` (tela 1272×756); código atual da `main` e logs em `/tmp/discord-rs-logs`. Nenhuma mensagem, amizade, configuração ou chamada foi alterada. Upload, drag-and-drop, clipboard de imagem e voz/vídeo remoto já estão cobertos por `T-027`, `T-044` e `T-023`; não foram duplicados aqui.
+
+- [ ] **T-071** — **P1** — **Design/Guild Rail** — **Alinhar geometria, tema e indicadores do trilho de servidores ao cliente oficial medido**
+  - **Arquivos:** `src/components/guild_item.rs:158-161`, `src/components/guild_item.rs:189-205`, `src/components/guild_item.rs:208-245`, `src/components/guild_item.rs:544-576`, `src/app/guild_rail.rs:43-71`, `src/tokens/spacing.rs:230-239`.
+  - **Evidência:** medição oficial `/tmp/opencode/discord-shell-measurements.md`: trilho 72px; wrappers 40×40 em `x=16`, passo 48px; separador 32×1/r1; fundo `#0e0b17`, texto forte `#e1e1fe`; pill 8px em `x=-4`, raio `0 4px 4px 0`, alturas 8/20/40; miniaturas de pasta 19×19 com raios `13px 4px 4px`, `4px 13px 4px 4px`, `4px 4px 4px 13px`, `4px 4px 13px`. O ícone **não usa `border-radius`**: é recortado por máscara SVG squircle 40×40 com curvas em `(0,17.4545)`→`(17.4545,0)`; `border-radius:0` não significa quadrado. O RS aproxima com raio 16px, pill 4px em `x=0` e miniaturas 15×15/r10-3.
+  - **O que falta/corrigir:** implementar a máscara squircle (ou aproximação explicitamente documentada), tokens de pill/pasta/separador e tema `darker`; corrigir clipping sem achatar a máscara.
+  - **Critério de pronto:** screenshots sintéticos lado a lado em repouso, hover, selecionado, unread, menção e pasta fechada/aberta com diferença ≤1px; teste de máscara compara o path/contorno e imagem local cobre todos os estados.
+
+- [ ] **T-072** — **P1** — **Design/Channel Sidebar** — **Corrigir largura, cantos, redimensionamento e painel do usuário**
+  - **Arquivos:** `src/app/channel_sidebar.rs:74-119`, `src/app/channel_sidebar.rs:127-163`, `src/app/channel_sidebar.rs:704-715`, `src/app/channel_sidebar.rs:796-902`, `src/app/channel_sidebar.rs:1003-1077`.
+  - **Evidência:** medição oficial `/tmp/opencode/discord-shell-measurements.md`: rail 72px + sidebar 272px + handle 4px = **344px**; header 49px/r12 superior esquerdo, nome 16px/600; canal wrapper 34px, link 255×32/r8 com `padding 4px 8px`, ícone 20px e nome 16px/500/24px; cores normal `#8989aa`, selecionado `#e1e1fe`, fundo selecionado `#131316`; painel **328×58** em `x=8`, bottom margin 8px, bloco usuário 153×46, controles 146×32/gap8 e botões 32×32/r8. O RS fixa sidebar em 240px, não tem handle/margem inferior, usa nome 13px bold e subtexto 11px.
+  - **O que falta/corrigir:** adotar largura/redimensionamento, cantos, cores, métricas do painel e tipografia; manter voice rows e badges dentro da nova largura.
+  - **Critério de pronto:** teste de layout em 1018×605 e 1272×756 confirma 344px no estado padrão, resize persistente, painel 328×58 com margem 8px e links 32px/r8; captura com canal de voz sintético valida participantes, mute/deafen e capacidade.
+
+- [ ] **T-073** — **P1** — **Design/Chat** — **Alinhar Cozy, timestamps de hover e action bar das mensagens**
+  - **Arquivos:** `src/chat/message_list.rs:204-278`, `src/chat/message_list.rs:889-902`, `src/chat/message_list.rs:908-965`, `src/chat/message_list.rs:971-1035`.
+  - **Evidência:** CDP oficial: mensagem de grupo 48px, agrupada 26px; `padding: 2px 24px 2px 72px`; conteúdo 16px com `line-height:22px`; timestamp compacto 56×22 visível no hover; action bar interna 183×34, raio 8px, fundo `oklab(0.213851 0.0108911 -0.0251416)`, seis botões 28×28/r6. O RS usa gutter 48px + `pl16px`, action bar de três botões, fundo `bg_chat`, raio 6px e não oferece editar/fixar no hover.
+  - **O que falta/corrigir:** ajustar grid/padding/altura, timestamp compacto e barra completa de ações contextuais; respeitar mensagem própria e permissões.
+  - **Critério de pronto:** fixture sintética com grupo, mensagem isolada, bot, editada, reply, embed e reação gera captura ≤1px de diferença; hover mostra todos os ações permitidos e timestamp sem deslocar conteúdo.
+
+- [ ] **T-074** — **P1** — **Design/Perfil** — **Reduzir modal de perfil e corrigir avatar/banner/tabs ao oficial**
+  - **Arquivos:** `src/app/user_profile_popout.rs:340-351`, `src/app/user_profile_popout.rs:434-460`, `src/app/user_profile_popout.rs:492-497`, `src/app/user_profile_popout.rs:936-965`, `src/app/user_profile_popout.rs:991-1017`, `src/app/user_profile_popout.rs:1049-1054`.
+  - **Evidência:** CDP oficial: popout 300×348/r8, banner 105px e avatar 80px (estes já batem); modal **600×557/r8**, banner 210px, avatar **120px**, tabs em `y=397` com 25px de altura. O RS abre modal **1184×704/r12** e usa avatar 80px, além de largura fixa que não cabe em viewports menores.
+  - **O que falta/corrigir:** modal 600px responsivo, avatar 120px, offsets/tabs medidos, remover borda/cor sem origem e limitar altura à viewport com scroll interno.
+  - **Critério de pronto:** capturas de popout e modal em 1018×605 e 800px de largura confirmam dimensões, sobreposição do avatar, banner, tabs e fechamento por Esc/clique fora; decoração e efeito continuam ancorados ao avatar/banner.
+
+- [ ] **T-075** — **P1** — **Design/Settings** — **Alinhar shell responsivo e navegação de User Settings**
+  - **Arquivos:** `src/app/user_settings/mod.rs:140-155`, `src/app/user_settings/mod.rs:169-288`, `src/app/user_settings/mod.rs:325-370`, `src/app/user_settings/mod.rs:441-463`.
+  - **Evidência:** CDP oficial em 1018×605: sidebar 253px, conteúdo 766px, header 49px iniciando em `y=33`, item de navegação 220×36/r8 com padding 8px e ativo `rgba(151,151,159,0.16)`. O RS usa sidebar 240px, conteúdo fixo 700px, topo 60px e itens 192×32.
+  - **O que falta/corrigir:** shell fluido `253px + flex`, header/top offsets e itens de 36px; remover largura fixa que estoura em janelas pequenas.
+  - **Critério de pronto:** screenshots de todas as abas em 1018×605, 1272×756 e 800×600 sem overflow; navegação, busca e fechamento por Esc funcionam; medidas ativas/inativas batem com o CDP.
+
+- [ ] **T-076** — **P1** — **Chat/Threads/Forum** — **Adicionar tipos de canal Forum, Threads, Stage e Directory sem descartá-los no parser**
+  - **Arquivos:** `src/domain/channel.rs:6-47`, `src/domain/channel.rs:148-191`, `src/app/state/models.rs:118-143`, `src/protocol/discord_api.rs:2205-2208`, `src/app/state/gateway_events.rs:290-307`.
+  - **Evidência:** `ChannelType::from_discord_code` só aceita 0..5; `parse_channel_from_json` retorna `None` para tipos 10–15. `ChannelKind` só tem Text/Voice/Announcement. Forum, threads, Stage Voice e Directory desaparecem da sidebar e não podem ser abertos.
+  - **O que falta/corrigir:** modelar tipos 10–15, `parent_id`, `thread_metadata`, `default_tag_ids`, `available_tags` e flags de forum; criar ícones, ordenação e view de forum em grade/lista.
+  - **Critério de pronto:** fixture da API com cada tipo 10–15 é preservada e renderizada; fórum mostra tags, contadores, ordenação e criação de post; Stage Voice entra no fluxo de voz sem virar canal de texto.
+
+- [ ] **T-077** — **P1** — **Chat/Threads** — **Implementar ciclo de vida de threads e eventos do Gateway**
+  - **Arquivos:** `src/protocol/transport.rs:125-146`, `src/protocol/discord_api.rs:2916-3062`, `src/app/state/gateway_events.rs:9-754`, `src/chat/chat_view.rs:1795-1808`, `src/app/header_bar.rs:309-487`.
+  - **Evidência:** não existem rotas de list/create/join/archive/lock/delete thread nem eventos `THREAD_CREATE/UPDATE/DELETE`, `THREAD_MEMBER_UPDATE` ou `THREAD_LIST_SYNC`; `ChannelCreate` é declarado, mas não tratado no `AppState`. O composer não oferece “Criar tópico”.
+  - **O que falta/corrigir:** endpoints oficiais, inscrição `GUILD_MEMBERS`/threads quando necessário, lista de threads sob o canal pai, header de thread ativa, criação/entrada/saída/arquivamento e reconciliação em tempo real.
+  - **Critério de pronto:** testes sintéticos cobrem create/update/delete/list-sync e perda de mensagem; UI cria thread, mostra membros/estado e navega entre pai/thread sem duplicar mensagens.
+
+- [ ] **T-080** — **P1** — **Permissões/UX** — **Calcular permissões reais e ocultar/bloquear ações sem autorização**
+  - **Arquivos:** `src/domain/guild.rs:5-23`, `src/domain/channel.rs:148-191`, `src/app/state/models.rs:147-170`, `src/chat/editor.rs:419`, `src/chat/chat_view.rs:1795-1808`, `src/app/channel_sidebar.rs:546-793`.
+  - **Evidência:** só `Role.permissions` é guardado; não há `permissions` do membro atual nem `permission_overwrites` no canal. `ChatComposer` nasce habilitado e a sidebar renderiza todos os canais. No canal oficial inspecionado, o composer exibia “You do not have permission to send messages in this channel”; o RS não tem como reproduzir esse estado.
+  - **O que falta/corrigir:** resolver `@everyone` + cargos + overwrites de canal/categoria, com allow/deny; esconder canais sem `VIEW_CHANNEL`, travar composer/ações sem `SEND_MESSAGES`, `ADD_REACTIONS`, `ATTACH_FILES`, `CONNECT`/`SPEAK`.
+  - **Critério de pronto:** testes de bitfield cobrem administrador, dono, negação explícita, timeout e overwrite de categoria; UI sintética comprova canal oculto, composer desabilitado e ações removidas antes de qualquer request.
+
+- [ ] **T-081** — **P1** — **Notificações** — **Implementar notificações desktop, sons e badge de unread reais**
+  - **Arquivos:** `Cargo.toml:6-34`, `src/app/user_settings/notifications.rs:9-174`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/models.rs:57-64`.
+  - **Evidência:** Settings só alterna campos locais; não há backend de notificação, som ou badge. `MessageCreate` atualiza histórico/ordenação, mas não emite notificação. O projeto não depende de `notify-rust`/serviço D-Bus de notificações.
+  - **O que falta/corrigir:** integração desktop oficial (freedesktop/D-Bus), som real configurável, badge de tarefa/unread, respeito a DND e escopo todas/@menções/nada; agrupar por canal e não notificar mensagem própria.
+  - **Critério de pronto:** testes com backend injetado validam menção, DM, canal mutado, DND e mensagem própria; teste manual em Linux exibe notificação/som/badge e remove o badge ao ler.
+
+- [ ] **T-062** — **P1** — **Chat/Typing** — **Enviar `TYPING_START` e expirar indicadores sem timer ativo**
+  - **Arquivos:** `src/app/state/messages.rs:405-451`, `src/protocol/rate_limit/coalescing.rs:35-91`, `src/protocol/discord_api.rs:1887-1897`, `src/chat/chat_view.rs:615-621`.
+  - **Evidência:** o recebimento é registrado, mas não há `POST /channels/{id}/typing`; `should_send_typing` existe e só é usado em testes. O TTL de 9s é filtrado apenas quando alguém lê o vetor; sem timer, o indicador pode permanecer desenhado até outro render.
+  - **O que falta/corregir:** disparar typing no editor com coalescing oficial, limpar no envio e agendar expiração que chame `notify`; resolver nome por membro/amigo/DM sem exibir ID bruto.
+  - **Critério de pronto:** teste determinístico com relógio injetado comprova um request por janela, parada após envio e remoção visual em 9s; Gateway sintético cobre vários usuários e canal trocado.
+
+- [ ] **T-063** — **P1** — **Chat/Unread** — **Implementar read state, badges e barra de não lidas/jump to present**
+  - **Arquivos:** `src/app/state/models.rs:147-170`, `src/app/state/gateway_events.rs:72-83`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/guilds_channels.rs:281-323`, `src/protocol/discord_api.rs:1268-1275`, `src/chat/chat_view.rs:602-612`.
+  - **Evidência:** canais nascem com `unread=false` e `mention_count=0`; `MessageCreate` não incrementa esses campos; não há ACK de leitura nem modelo de `last_read_message_id`. O oficial mostra badges, divisor “NEW” e barra de não lidas; o RS não renderiza nenhum desses estados.
+  - **O que falta/corregir:** manter `read_state_version`, `last_message_id`, `last_read_message_id` e contagem de menções; ACK ao visualizar; divisor/new badge e botão “Jump to Present” quando afastado do fim.
+  - **Critério de pronto:** fixture com 100 mensagens, menções e leitura parcial comprova badges, divisor, ACK uma vez e salto preservando o destino; troca de canal limpa o estado correto.
+
+- [ ] **T-064** — **P1** — **Rede/Reconnect** — **Preservar o shell autenticado e mostrar banner de reconexão**
+  - **Arquivos:** `src/protocol/discord_api.rs:1202-1207`, `src/protocol/discord_api.rs:1387-1419`, `src/app/state/gateway_events.rs:275-287`, `src/app/root_view.rs:554-580`.
+  - **Evidência:** cada fechamento de socket emite `TransportEvent::Disconnected`, e `RootView` troca imediatamente toda a interface pela tela de login quando `is_connected_to_gateway=false`. Não existe estado `Reconnecting`; o loop reconecta em segundo plano, causando perda visual de contexto e cache.
+  - **O que falta/corrigir:** estados Connecting/Connected/Reconnecting/Offline, manter shell/cache durante retry, banner discreto com tentativa/backoff e recuperação silenciosa após READY/RESUME.
+  - **Critério de pronto:** teste de socket sintético cobre Op7, Op9, EOF e falha de DNS; UI permanece na tela atual, mostra banner e volta a conectar sem solicitar token novamente.
+
+- [ ] **T-065** — **P1** — **Performance/UI** — **Remover clones e enumeração de hardware do hot path de render**
+  - **Arquivos:** `src/app/guild_rail.rs:28-41`, `src/app/voice_call_panel.rs:122-146`, `src/chat/chat_view.rs:351-391`, `src/chat/chat_view.rs:531-600`, `src/app/friends_hub.rs:898-919`.
+  - **Evidência:** `GuildRail::render` clona a árvore inteira de guildas/pastas a cada render (o log inicial carregou 200 guildas); `VoiceCallPanel` cria `MediaDeviceManager` e enumera entrada/saída em todo frame; `ChatView` recria `Arc<Vec<ChatListItem>>`; Friends renderiza todas as linhas sem virtualização.
+  - **O que falta/corregir:** borrow/snapshots `Arc`, cache de dispositivos atualizado por evento, virtualização de listas grandes e memoização de métricas de layout.
+  - **Critério de pronto:** benchmark com 200 guildas/10k mensagens/1k amigos mantém montagem <8,33ms p95 e não cresce memória linearmente a cada frame; enumeração de dispositivos não ocorre no thread de render.
+
+- [ ] **T-066** — **P1** — **Design/Tipografia/Tema** — **Alinhar fonte e tema ao cliente oficial sem usar ativo não licenciado**
+  - **Arquivos:** `src/main.rs:30-33`, `src/tokens/kit_theme.rs:285-310`, `src/tokens/typography.rs`, `src/app/state/settings.rs:82-110`.
+  - **Evidência:** CDP oficial usa `gg sans`, 16px/22px e classe `theme-darker`; o log do RS informa que `.SystemUIFont` resolve para **Adwaita Sans**. `main` instala apenas o tema escuro uma vez e `AccountThemeUpdated` não reaplica paleta.
+  - **O que falta/corregir:** usar `gg sans` somente se houver licença; caso contrário, adotar fallback aberto com métricas documentadas e cessar alegação de pixel-parity tipográfica; aplicar Dark/Light/Darker/Midnight e custom colors da conta.
+  - **Critério de pronto:** teste de métricas compara largura/altura de glifos e line-height; screenshots registram a fonte efetiva; troca de tema reaplica cores sem reiniciar e não distribui fonte proprietária sem autorização.
+
+- [ ] **T-067** — **P1** — **Performance/Telemetria** — **Instrumentar FPS, frame time, RSS e long tasks de verdade**
+  - **Arquivos:** `src/telemetry/service.rs:82-93`, `src/telemetry/types.rs:5-17`, `src/telemetry/reporter.rs:192`, `examples/ui_shot.rs`.
+  - **Evidência:** `track_render` existe, mas não tem nenhum call site; só há durations manuais de interação. Não são medidos FPS, p95/p99 de frame, RSS/heap ou tarefas longas, portanto as metas de 8,33/16,66ms não são comprovadas.
+  - **O que falta/corregir:** instrumentar render/frame e memória com baixo overhead, exportar percentis e adicionar modo de stress reproduzível.
+  - **Critério de pronto:** relatório gerado por cenário sintético contém FPS, p50/p95/p99, RSS e pico; teste de regressão falha se o orçamento for excedido em máquina controlada.
+
+- [ ] **T-068** — **P2** — **Acessibilidade/UX** — **Expor papéis, nomes e foco acessível na árvore GPUI**
+  - **Arquivos:** `src/components/avatar.rs:240-283`, `src/chat/message_list.rs:889-902`, `src/app/header_bar.rs:317-487`, `src/app/user_settings/mod.rs:441-463`.
+  - **Evidência:** `/tmp/discord-rs-logs/smcodes.log:44` registra elemento focado sem nó de acessibilidade (“has an id but no role”). O CDP oficial publica `navigation`, `list`, `article`, `button`, `heading` e labels; vários componentes RS usam `.id(...)` sem `.role(...)`/label.
+  - **O que falta/corregir:** roles e labels em avatar, mensagem, canais, botões e tabs; ordem de foco, foco visível e anúncio de estados; garantir que ícones decorativos não sejam anunciados.
+  - **Critério de pronto:** snapshot de acessibilidade sintético contém mensagens como `article`, ações como `button` e nomes significativos; navegação por teclado cobre chat, sidebar, perfil e Settings sem armadilha de foco.
+
+- [ ] **T-069** — **P1** — **Chat/DM/Regressão** — **Eliminar de vez os canais legados de demonstração e restaurar o teste de higiene de DMs**
+  - **Arquivos:** `src/app/state/gateway_events.rs:387-435`, `tests/dm_messaging_test.rs:170-207`, `src/app/state/seed.rs`.
+  - **Evidência:** a suíte completa do Ciclo 2 executou `dm_messaging_test` com **5 passaram e 1 falhou**: `test_no_hardcoded_ferris_dm_and_clean_state` afirma que `dm-ferris` sobreviveu a `DmChannelsUpdated`. O código ainda carrega uma blocklist explícita de `dm-ferris`, `dm-group-gpui`, `dm-ana` e `user-ferris` em vez de garantir que apenas DMs temporários legítimos sejam preservados.
+  - **O que falta/corrigir:** remover IDs/nomes de demonstração do modelo e da persistência; preservar somente `dm-*` criados após uma ação real do usuário e ainda não resolvidos; investigar por que a blocklist atual não elimina o item no teste.
+  - **Critério de pronto:** `cargo test --test dm_messaging_test` passa 6/6; fixture com DM legado, DM temporário real e DM do Gateway comprova remoção/preservação corretas; nenhum ID de demonstração permanece em produção.
+
+- [ ] **T-070** — **P1** — **QA/Captura Visual** — **Tornar o pipeline de screenshots confiável e comparável**
+  - **Arquivos:** `examples/ui_shot.rs:1-20`, `scripts/ui-shot.sh`, `scripts/ui-compare.sh`, `tests/fixtures/ui_shot/`.
+  - **Evidência:** o relatório `Explorer-Live` registrou captura oficial totalmente preta e timeout de `Page.captureScreenshot` apesar do DOM visível; `/tmp/discord-ciclo2-oficial-channel.png` e `/tmp/discord-ciclo2-rs-channel.png` estavam em servidores/canais, idiomas, banners, membros e estados de composer diferentes. O harness atual usa fixture offline e `import -window`, sem validar imagem preta, viewport, DPR ou equivalência de estado.
+  - **O que falta/corregir:** validar captura não preta/não vazia, registrar viewport/DPR/título/rota sem dados pessoais, exigir mesma fixture/estado nas duas pontas e ter fallback de captura com timeout/log de causa.
+  - **Critério de pronto:** script sintético gera par comparável com checksum/dimensões iguais, falha explicitamente em imagem preta ou timeout e nunca salva IDs/nomes/conteúdo real no repositório.
+
+- [ ] **T-078** — **P1** — **Design/Header/Search** — **Alinhar Header Bar, botões e campo de busca às medidas oficiais**
+  - **Arquivos:** `src/app/header_bar.rs:133-158`, `src/app/header_bar.rs:351-408`, `src/app/header_bar.rs:422-485`, `src/app/header_bar.rs:557-585`.
+  - **Evidência:** `/tmp/opencode/discord-shell-measurements.md`: header 49px, padding `8px 8px 8px 16px`, conteúdo/toolbar 32px, gap 8px; botões 32×32 com SVG 20×20, cor `#9999b9` e hover `#e1e1fe`; busca **244×32/r8**, editor 218×22, fonte 14px/500/22px, placeholder `#9493b4` e gradiente de fundo real. O RS usa botões 28×28 com ícones 16px e busca fixa 144px.
+  - **O que falta/corrigir:** ajustar header/toolbar/botões/busca, gradiente e transição de largura; preservar foco, clear e popover de filtros.
+  - **Critério de pronto:** captura sintética em 1018×605 e 1272×756 confirma header 49px, botões 32px e busca 244×32/r8; teste de foco/clear/filtros passa sem deslocar o toolbar.
+
+- [ ] **T-079** — **P2** — **Design/Member Sidebar** — **Corrigir largura e hierarquia visual da lista de membros**
+  - **Arquivos:** `src/app/member_sidebar.rs:145-165`, `src/app/member_sidebar.rs:230-245`, `src/app/member_sidebar.rs:275-305`.
+  - **Evidência:** o relatório `Design-Chat-H2` mediu **Member Sidebar 264px** no Discord Desktop real; o RS fixa **240px** em `member_sidebar.rs:156`. As linhas usam 44px, nome 14px semibold e atividade 11px, mas não há medição oficial registrada para esses subcomponentes.
+  - **O que falta/corrigir:** adotar 264px e medir no CDP grupos de cargo, online/offline, atividade, bot e hover antes de ajustar os demais valores.
+  - **Critério de pronto:** captura sintética com cargos, bot, atividade e offline confirma largura 264px e hierarquia sem overflow; teste de toggle da sidebar preserva a largura do chat.
