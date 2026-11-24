@@ -20,6 +20,7 @@ pub mod responsive;
 pub mod state;
 pub mod user_profile_popout;
 pub mod user_settings;
+pub mod view_memo;
 pub mod voice_call_panel;
 
 pub use channel_sidebar::ChannelSidebar;
