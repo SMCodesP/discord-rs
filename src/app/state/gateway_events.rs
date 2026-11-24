@@ -786,7 +786,7 @@ impl AppState {
                                     hash.clone()
                                 } else {
                                     format!(
-                                        "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                                        "https://cdn.discordapp.com/avatars/{}/{}.png?size=128",
                                         r.id, hash
                                     )
                                 }
@@ -814,7 +814,7 @@ impl AppState {
                         hash.clone()
                     } else {
                         format!(
-                            "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                            "https://cdn.discordapp.com/avatars/{}/{}.png?size=128",
                             r.id, hash
                         )
                     }

@@ -1291,7 +1291,7 @@ impl DiscordTransport for DiscordApiClient {
                     hash.to_string()
                 } else {
                     format!(
-                        "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
+                        "https://cdn.discordapp.com/icons/{}/{}.png?size=128",
                         id, hash
                     )
                 }
@@ -1350,7 +1350,7 @@ impl DiscordTransport for DiscordApiClient {
                 hash.to_string()
             } else {
                 format!(
-                    "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
+                    "https://cdn.discordapp.com/icons/{}/{}.png?size=128",
                     id, hash
                 )
             }
@@ -2207,23 +2207,50 @@ async fn handle_dispatch(
 
             *current_user_id.write().await = Some(user.id.clone());
 
+            // Lookup map of users from READY (used by capabilities=30717 for relationships & private_channels)
+            let mut ready_users_by_id: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
+            if let Some(raw_users) = data.get("users").and_then(|v| v.as_array()) {
+                for u in raw_users {
+                    if let Some(uid) = u.get("id").and_then(|v| v.as_str()) {
+                        ready_users_by_id.insert(uid.to_string(), u.clone());
+                    }
+                }
+            }
+
             let mut guilds = Vec::new();
             if let Some(raw_guilds) = data.get("guilds").and_then(|v| v.as_array()) {
                 for g in raw_guilds {
                     let id = g.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                    let name = g.get("name").and_then(|v| v.as_str()).unwrap_or("Server");
-                    let icon = g.get("icon").and_then(|v| v.as_str()).map(|hash| {
-                        if hash.starts_with("http://") || hash.starts_with("https://") {
-                            hash.to_string()
-                        } else {
-                            format!(
-                                "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
-                                id, hash
-                            )
-                        }
-                    });
+                    let props = g.get("properties");
+                    let name = props
+                        .and_then(|p| p.get("name"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| g.get("name").and_then(|v| v.as_str()))
+                        .unwrap_or("Server");
+                    let icon = props
+                        .and_then(|p| p.get("icon"))
+                        .and_then(|v| v.as_str())
+                        .or_else(|| g.get("icon").and_then(|v| v.as_str()))
+                        .map(|hash| {
+                            if hash.starts_with("http://") || hash.starts_with("https://") {
+                                hash.to_string()
+                            } else {
+                                let ext = if hash.starts_with("a_") { "gif" } else { "png" };
+                                format!(
+                                    "https://cdn.discordapp.com/icons/{}/{}.{}?size=128",
+                                    id, hash, ext
+                                )
+                            }
+                        });
                     let mut guild = Guild::new(id, name, "");
                     guild.icon = icon;
+                    if let Some(raw_channels) = g.get("channels").and_then(|v| v.as_array()) {
+                        guild.channels = raw_channels
+                            .iter()
+                            .filter_map(|ch| parse_channel_from_json(ch, Some(id)))
+                            .collect();
+                    }
                     if let Some(raw_emojis) = g.get("emojis").and_then(|v| v.as_array()) {
                         guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
                     }
@@ -2320,11 +2347,58 @@ async fn handle_dispatch(
                 guild_folders,
             });
 
-            // Extrair relacionamentos iniciais do payload READY (Gateway)
+            // Extrair canais de DM (private_channels) do payload READY (resolvendo recipient_ids via data.users)
+            if let Some(raw_dms) = data.get("private_channels").and_then(|v| v.as_array()) {
+                let mut dms = Vec::new();
+                for ch_val in raw_dms {
+                    let mut enriched = ch_val.clone();
+                    let has_recipients = enriched
+                        .get("recipients")
+                        .and_then(|v| v.as_array())
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    if !has_recipients {
+                        if let Some(rids) = ch_val.get("recipient_ids").and_then(|v| v.as_array()) {
+                            let resolved: Vec<serde_json::Value> = rids
+                                .iter()
+                                .filter_map(|idv| idv.as_str())
+                                .filter_map(|uid| ready_users_by_id.get(uid).cloned())
+                                .collect();
+                            if !resolved.is_empty() {
+                                if let Some(obj) = enriched.as_object_mut() {
+                                    obj.insert("recipients".to_string(), serde_json::Value::Array(resolved));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(ch) = parse_channel_from_json(&enriched, None) {
+                        dms.push(ch);
+                    }
+                }
+                if !dms.is_empty() {
+                    let _ = event_tx.send(TransportEvent::DmChannelsUpdated(dms));
+                }
+            }
+
+            // Extrair relacionamentos iniciais do payload READY (resolvendo user_id via data.users)
             if let Some(raw_relationships) = data.get("relationships").and_then(|v| v.as_array()) {
                 let mut relationships = Vec::new();
                 for r in raw_relationships {
-                    if let Some(rel) = parse_relationship_from_json(r) {
+                    let mut enriched = r.clone();
+                    if enriched.get("user").is_none() {
+                        let lookup_id = r
+                            .get("user_id")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| r.get("id").and_then(|v| v.as_str()));
+                        if let Some(uid) = lookup_id {
+                            if let Some(u) = ready_users_by_id.get(uid) {
+                                if let Some(obj) = enriched.as_object_mut() {
+                                    obj.insert("user".to_string(), u.clone());
+                                }
+                            }
+                        }
+                    }
+                    if let Some(rel) = parse_relationship_from_json(&enriched) {
                         relationships.push(rel);
                     }
                 }
@@ -2333,10 +2407,29 @@ async fn handle_dispatch(
                 }
             }
 
-            // Extrair presenças iniciais de amigos/contatos do payload READY
+            // Extrair presenças iniciais de amigos/contatos (presences e merged_presences.friends)
             if let Some(raw_presences) = data.get("presences").and_then(|v| v.as_array()) {
                 for p in raw_presences {
                     if let Some(evt) = parse_presence_from_json(p) {
+                        let _ = event_tx.send(evt);
+                    }
+                }
+            }
+            if let Some(friend_presences) = data
+                .get("merged_presences")
+                .and_then(|mp| mp.get("friends"))
+                .and_then(|v| v.as_array())
+            {
+                for p in friend_presences {
+                    let mut enriched = p.clone();
+                    if enriched.get("user").is_none() {
+                        if let Some(uid) = p.get("user_id").and_then(|v| v.as_str()) {
+                            if let Some(obj) = enriched.as_object_mut() {
+                                obj.insert("user".to_string(), json!({ "id": uid }));
+                            }
+                        }
+                    }
+                    if let Some(evt) = parse_presence_from_json(&enriched) {
                         let _ = event_tx.send(evt);
                     }
                 }
@@ -2397,9 +2490,10 @@ async fn handle_dispatch(
                     if hash.starts_with("http://") || hash.starts_with("https://") {
                         hash.to_string()
                     } else {
+                        let ext = if hash.starts_with("a_") { "gif" } else { "png" };
                         format!(
-                            "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
-                            id, hash
+                            "https://cdn.discordapp.com/icons/{}/{}.{}?size=128",
+                            id, hash, ext
                         )
                     }
                 });
@@ -2831,7 +2925,7 @@ pub fn parse_relationship_from_json(r: &serde_json::Value) -> Option<Relationshi
             hash.to_string()
         } else {
             format!(
-                "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                "https://cdn.discordapp.com/avatars/{}/{}.png?size=128",
                 id, hash
             )
         }
@@ -3190,14 +3284,14 @@ fn parse_channel_from_json(
             let rec_id = first_rec.get("id")?.as_str()?;
             let rec_avatar = first_rec.get("avatar")?.as_str()?;
             Some(format!(
-                "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                "https://cdn.discordapp.com/avatars/{}/{}.png?size=128",
                 rec_id, rec_avatar
             ))
         })
         .or_else(|| {
             val.get("icon").and_then(|v| v.as_str()).map(|icon_hash| {
                 format!(
-                    "https://cdn.discordapp.com/channel-icons/{}/{}.png?size=96",
+                    "https://cdn.discordapp.com/channel-icons/{}/{}.png?size=128",
                     id, icon_hash
                 )
             })
