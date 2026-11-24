@@ -2,6 +2,7 @@ use gpui::prelude::*;
 use gpui::*;
 use gpui::component::tooltip::Tooltip;
 use gpui::component::popover::Popover;
+use gpui::component::scroll::ScrollableElement;
 use gpui::component::Selectable;
 
 use super::state::{ActiveVoiceCall, AppState, VoiceParticipantState};
@@ -32,21 +33,30 @@ impl VoiceCallPanel {
 }
 
 impl Render for VoiceCallPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let active_call = state.active_voice_call.clone();
         let app_entity = self.state.clone();
+        let viewport = window.viewport_size();
+        let stage_width = call_stage_width(viewport.width);
+        let stage_height = (viewport.height - px(180.0)).max(px(180.0));
 
         if let Some(call) = active_call {
             div()
                 .flex()
                 .flex_col()
                 .size_full()
-                .bg(bg_floating())
+                .bg(cx.discord().bg_server)
                 .justify_between()
                 .p(px(16.0))
                 .child(render_top_bar(&call, cx))
-                .child(render_stage_body(app_entity.clone(), &call, cx))
+                .child(render_stage_body(
+                    app_entity.clone(),
+                    &call,
+                    stage_width,
+                    stage_height,
+                    cx,
+                ))
                 .child(render_bottom_controls(app_entity, &call, cx))
         } else {
             div()
@@ -60,6 +70,46 @@ impl Render for VoiceCallPanel {
     }
 }
 
+/// Largura útil do palco após o trilho de servidores (72px), a sidebar de
+/// canais/DMs (240px) e o padding do painel (16px em cada lado).
+fn call_stage_width(viewport_width: Pixels) -> Pixels {
+    px((viewport_width.as_f32() - 72.0 - 240.0 - 32.0).max(240.0))
+}
+
+fn grid_tile_size(
+    available_width: Pixels,
+    available_height: Pixels,
+    participant_count: usize,
+    focused: bool,
+) -> (Pixels, Pixels) {
+    if focused {
+        return (px(480.0), px(300.0));
+    }
+
+    let desired_columns = match participant_count {
+        0 | 1 => 1,
+        2..=4 => 2,
+        5..=9 => 3,
+        _ => 4,
+    };
+    let columns = desired_columns
+        .min((available_width.as_f32() / 200.0).floor() as usize)
+        .max(1);
+    let rows = participant_count.max(1).div_ceil(columns);
+    let width = ((available_width.as_f32()
+        - 16.0 * (columns.saturating_sub(1)) as f32)
+        / columns as f32)
+        .clamp(180.0, 480.0);
+    let height = (width * 9.0 / 16.0)
+        .min(
+            (available_height.as_f32()
+                - 16.0 * rows.saturating_sub(1) as f32)
+                / rows as f32,
+        )
+        .clamp(80.0, 300.0);
+    (px(width), px(height))
+}
+
 // ============================================================================
 // Top Bar: Channel info, RTC status badge & fatal error banner
 // ============================================================================
@@ -71,23 +121,28 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
 
     // Verificação de dispositivos de áudio reais de hardware (Zero mocks em produção)
     let device_manager = MediaDeviceManager::new();
-    let has_input = device_manager
-        .list_input_devices()
-        .map(|d| !d.is_empty())
-        .unwrap_or(false);
-    let has_output = device_manager
-        .list_output_devices()
-        .map(|d| !d.is_empty())
-        .unwrap_or(false);
-
-    let device_warning = if !has_input && !has_output {
-        Some("Nenhum microfone ou saída de áudio detectados no sistema.")
-    } else if !has_input {
-        Some("Nenhum microfone de entrada detectado no sistema.")
-    } else if !has_output {
-        Some("Nenhum dispositivo de saída de áudio detectado no sistema.")
-    } else {
-        None
+    let input_devices = device_manager.list_input_devices();
+    let output_devices = device_manager.list_output_devices();
+    let device_warning = match (&input_devices, &output_devices) {
+        (Err(input_error), Err(output_error)) => Some(format!(
+            "Não foi possível enumerar os dispositivos de áudio: entrada: {input_error}; saída: {output_error}"
+        )),
+        (Err(input_error), _) => {
+            Some(format!("Não foi possível enumerar os microfones: {input_error}"))
+        }
+        (_, Err(output_error)) => {
+            Some(format!("Não foi possível enumerar as saídas de áudio: {output_error}"))
+        }
+        (Ok(inputs), Ok(outputs)) if inputs.is_empty() && outputs.is_empty() => {
+            Some("Nenhum microfone ou saída de áudio detectados no sistema.".to_string())
+        }
+        (Ok(inputs), _) if inputs.is_empty() => {
+            Some("Nenhum microfone de entrada detectado no sistema.".to_string())
+        }
+        (_, Ok(outputs)) if outputs.is_empty() => {
+            Some("Nenhum dispositivo de saída de áudio detectado no sistema.".to_string())
+        }
+        _ => None,
     };
 
     div()
@@ -108,8 +163,8 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
                 .child(render_rtc_badge(call, cx)),
         )
         .children(has_fatal_error.then(|| render_fatal_error_banner(call, discord.white)))
-        .children(call_warning.map(|msg| render_call_warning_banner(&msg, discord.bg_server)))
-        .children(device_warning.map(|msg| render_audio_device_warning_banner(msg, discord.bg_server)))
+        .children(call_warning.map(|msg| render_call_warning_banner(&msg, discord.white)))
+        .children(device_warning.map(|msg| render_audio_device_warning_banner(&msg, discord.white)))
         .into_any_element()
 }
 
@@ -271,27 +326,39 @@ fn render_fatal_error_banner(call: &ActiveVoiceCall, text_col: Rgba) -> AnyEleme
         .fatal_error
         .clone()
         .unwrap_or_else(|| "Erro desconhecido na sessão de voz".into());
-    let err_desc = sanitize_user_error_message(&raw_desc);
+    let summary = sanitize_user_error_message(&raw_desc);
+    let show_details = summary != raw_desc;
 
     div()
         .w_full()
         .px(px(12.0))
-        .py(px(6.0))
+        .py(px(8.0))
         .rounded(px(6.0))
         .bg(status_dnd())
         .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .child(icon_warning(px(16.0), text_col))
+        .flex_col()
+        .gap(px(4.0))
         .child(
             div()
-                .text_color(text_col)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(12.0))
-                .truncate()
-                .child(err_desc),
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(icon_warning(px(16.0), text_col))
+                .child(
+                    div()
+                        .text_color(text_col)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(12.0))
+                        .child(summary),
+                ),
         )
+        .children(show_details.then(|| {
+            div()
+                .text_color(text_col)
+                .text_size(px(11.0))
+                .child(raw_desc)
+        }))
         .into_any_element()
 }
 
@@ -302,9 +369,15 @@ fn render_fatal_error_banner(call: &ActiveVoiceCall, text_col: Rgba) -> AnyEleme
 fn render_stage_body(
     app_entity: Entity<AppState>,
     call: &ActiveVoiceCall,
+    available_width: Pixels,
+    available_height: Pixels,
     cx: &App,
 ) -> AnyElement {
-    let is_focus = call.is_screen_sharing || call.focus_user_id.is_some();
+    let screen_share = call
+        .participants
+        .iter()
+        .find(|participant| participant.is_screen_sharing);
+    let is_focus = call.focus_user_id.is_some() || screen_share.is_some();
 
     div()
         .flex_1()
@@ -314,9 +387,21 @@ fn render_stage_body(
         .overflow_hidden()
         .w_full()
         .child(if is_focus {
-            render_focus_layout(app_entity, call, cx)
+            render_focus_layout(
+                app_entity,
+                call,
+                available_width,
+                available_height,
+                cx,
+            )
         } else {
-            render_grid_layout(app_entity, call, cx)
+            render_grid_layout(
+                app_entity,
+                call,
+                available_width,
+                available_height,
+                cx,
+            )
         })
         .into_any_element()
 }
@@ -324,9 +409,17 @@ fn render_stage_body(
 fn render_grid_layout(
     app_entity: Entity<AppState>,
     call: &ActiveVoiceCall,
+    available_width: Pixels,
+    available_height: Pixels,
     cx: &App,
 ) -> AnyElement {
     let participants = &call.participants;
+    let (tile_w, tile_h) = grid_tile_size(
+        available_width,
+        available_height,
+        participants.len(),
+        false,
+    );
 
     div()
         .flex()
@@ -336,8 +429,16 @@ fn render_grid_layout(
         .justify_center()
         .gap(px(16.0))
         .w_full()
-        .children(participants.iter().map(|p| {
-            render_participant_tile(app_entity.clone(), p, false, cx)
+        .h_full()
+        .overflow_y_scrollbar()
+        .children(participants.iter().map(|participant| {
+            render_participant_tile(
+                app_entity.clone(),
+                participant,
+                tile_w,
+                tile_h,
+                cx,
+            )
         }))
         .into_any_element()
 }
@@ -345,25 +446,41 @@ fn render_grid_layout(
 fn render_focus_layout(
     app_entity: Entity<AppState>,
     call: &ActiveVoiceCall,
+    available_width: Pixels,
+    available_height: Pixels,
     cx: &App,
 ) -> AnyElement {
     let focus_uid = call
         .focus_user_id
         .clone()
-        .or_else(|| call.participants.first().map(|p| p.id.clone()));
+        .or_else(|| {
+            call.participants
+                .iter()
+                .find(|participant| participant.is_screen_sharing)
+                .map(|participant| participant.id.clone())
+        })
+        .or_else(|| call.participants.first().map(|participant| participant.id.clone()));
 
     let focused_p = call
         .participants
         .iter()
-        .find(|p| Some(&p.id) == focus_uid.as_ref())
+        .find(|participant| Some(&participant.id) == focus_uid.as_ref())
         .cloned();
 
     let other_participants: Vec<_> = call
         .participants
         .iter()
-        .filter(|p| Some(&p.id) != focus_uid.as_ref())
+        .filter(|participant| Some(&participant.id) != focus_uid.as_ref())
         .cloned()
         .collect();
+    let (tile_w, tile_h) = grid_tile_size(
+        available_width,
+        (available_height - px(102.0)).max(px(120.0)),
+        1,
+        true,
+    );
+    let tile_w = tile_w.min(available_width);
+    let tile_h = tile_h.min((available_height - px(102.0)).max(px(120.0)));
 
     div()
         .flex()
@@ -379,10 +496,17 @@ fn render_focus_layout(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(if call.is_screen_sharing {
-                    render_screen_share_focus_tile(focused_p.as_ref(), cx)
-                } else if let Some(ref p) = focused_p {
-                    render_participant_tile(app_entity.clone(), p, true, cx)
+                .child(if let Some(ref participant) = focused_p {
+                    // Não existe decodificador de vídeo remoto neste cliente.
+                    // O estado real de stream é mostrado no tile, nunca um
+                    // quadro de tela inventado.
+                    render_participant_tile(
+                        app_entity.clone(),
+                        participant,
+                        tile_w,
+                        tile_h,
+                        cx,
+                    )
                 } else {
                     div().into_any_element()
                 }),
@@ -395,75 +519,31 @@ fn render_focus_layout(
                 .justify_center()
                 .gap(px(10.0))
                 .w_full()
-                .overflow_x_hidden()
-                .children(other_participants.into_iter().map(|p| {
-                    render_mini_tile(app_entity.clone(), &p, cx)
+                .overflow_x_scrollbar()
+                .children(other_participants.into_iter().map(|participant| {
+                    render_mini_tile(app_entity.clone(), &participant, cx)
                 }))
         }))
-        .into_any_element()
-}
-
-fn render_screen_share_focus_tile(
-    presenter: Option<&VoiceParticipantState>,
-    cx: &App,
-) -> AnyElement {
-    let discord = cx.discord();
-    let presenter_name = presenter
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| "Você".into());
-
-    div()
-        .size_full()
-        .max_w(px(720.0))
-        .max_h(px(440.0))
-        .rounded(px(8.0))
-        .bg(discord.bg_channels)
-        .border_2()
-        .border_color(status_online())
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(16.0))
-        .child(icon_screen_share(px(48.0), discord.white))
-        .child(
-            div()
-                .text_color(discord.text_titles)
-                .font_weight(FontWeight::BOLD)
-                .text_size(px(16.0))
-                .child("Compartilhamento de Tela"),
-        )
-        .child(
-            div()
-                .text_color(discord.text_secondary)
-                .text_size(px(13.0))
-                .child(format!("Apresentado por {}", presenter_name)),
-        )
         .into_any_element()
 }
 
 fn render_participant_tile(
     app_entity: Entity<AppState>,
     participant: &VoiceParticipantState,
-    is_focused: bool,
+    tile_w: Pixels,
+    tile_h: Pixels,
     cx: &App,
 ) -> AnyElement {
     let discord = cx.discord();
     let is_speaking = participant.is_speaking;
-    let is_muted = participant.is_muted;
     let uid = participant.id.clone();
     let entity = app_entity;
-
-    let (tile_w, tile_h) = if is_focused {
-        (px(480.0), px(300.0))
-    } else {
-        (px(260.0), px(170.0))
-    };
 
     div()
         .relative()
         .w(tile_w)
         .h(tile_h)
+        .flex_shrink_0()
         .rounded(px(8.0))
         .bg(discord.bg_channels)
         .border_2()
@@ -496,13 +576,10 @@ fn render_participant_tile(
             Avatar::new(participant.name.clone())
                 .size(AvatarSize::Px80)
                 .opt_src(participant.avatar_url.clone())
-                .opt_decoration(participant.avatar_decoration_data.clone()),
+                .opt_decoration(participant.avatar_decoration_data.clone())
+                .cutout_color(discord.bg_channels),
         )
-        .child(render_tile_name_badge(
-            &participant.name,
-            is_muted,
-            discord.text_titles,
-        ))
+        .child(render_tile_name_badge(participant, discord.text_titles))
         .into_any_element()
 }
 
@@ -513,7 +590,6 @@ fn render_mini_tile(
 ) -> AnyElement {
     let discord = cx.discord();
     let is_speaking = participant.is_speaking;
-    let is_muted = participant.is_muted;
     let uid = participant.id.clone();
     let entity = app_entity;
 
@@ -521,6 +597,7 @@ fn render_mini_tile(
         .relative()
         .w(px(140.0))
         .h(px(90.0))
+        .flex_shrink_0()
         .rounded(px(6.0))
         .bg(discord.bg_channels)
         .border_2()
@@ -544,21 +621,19 @@ fn render_mini_tile(
             Avatar::new(participant.name.clone())
                 .size(AvatarSize::Px40)
                 .opt_src(participant.avatar_url.clone())
-                .opt_decoration(participant.avatar_decoration_data.clone()),
+                .opt_decoration(participant.avatar_decoration_data.clone())
+                .cutout_color(discord.bg_channels),
         )
-        .child(render_tile_name_badge(
-            &participant.name,
-            is_muted,
-            discord.text_titles,
-        ))
+        .child(render_tile_name_badge(participant, discord.text_titles))
         .into_any_element()
 }
 
-fn render_tile_name_badge(name: &str, is_muted: bool, text_col: Rgba) -> AnyElement {
+fn render_tile_name_badge(participant: &VoiceParticipantState, text_col: Rgba) -> AnyElement {
     div()
         .absolute()
         .bottom(px(8.0))
         .left(px(8.0))
+        .max_w(px(180.0))
         .px(px(8.0))
         .py(px(2.0))
         .rounded(px(4.0))
@@ -567,14 +642,31 @@ fn render_tile_name_badge(name: &str, is_muted: bool, text_col: Rgba) -> AnyElem
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .child(
+        .children((!participant.name.is_empty()).then(|| {
             div()
                 .text_color(text_col)
                 .text_size(px(12.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(name.to_string()),
-        )
-        .children(is_muted.then(|| icon_mic_off(px(14.0), status_dnd())))
+                .truncate()
+                .child(participant.name.clone())
+        }))
+        .children(participant.is_screen_sharing.then(|| {
+            div()
+                .px(px(4.0))
+                .rounded_xs()
+                .bg(status_dnd())
+                .text_color(crate::tokens::colors::white())
+                .text_size(px(9.0))
+                .font_weight(FontWeight::BOLD)
+                .child("AO VIVO")
+        }))
+        .children(participant.is_camera_on.then(|| {
+            render_camera_glyph(px(14.0), text_col)
+        }))
+        .children(participant.is_muted.then(|| icon_mic_off(px(14.0), status_dnd())))
+        .children(participant.is_deafened.then(|| {
+            icon_headphones_off(px(14.0), status_dnd())
+        }))
         .into_any_element()
 }
 
@@ -597,12 +689,15 @@ fn render_bottom_controls(
             div()
                 .flex()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
+                .justify_center()
                 .gap(px(12.0))
                 .p(px(8.0))
                 .rounded(px(12.0))
                 .bg(discord.bg_server)
                 .child(render_mute_control(app_entity.clone(), call, cx))
+                .child(render_deafen_control(app_entity.clone(), call, cx))
                 .child(render_camera_control(app_entity.clone(), call.is_camera_on, cx))
                 .child(render_screen_share_control(
                     app_entity.clone(),
@@ -622,6 +717,7 @@ pub struct ArrowDropupTrigger {
     pub id: SharedString,
     pub bg_col: Rgba,
     pub hover_col: Rgba,
+    pub tooltip: SharedString,
 }
 
 impl Selectable for ArrowDropupTrigger {
@@ -649,8 +745,8 @@ impl RenderOnce for ArrowDropupTrigger {
             .justify_center()
             .cursor_pointer()
             .hover(move |s| s.bg(self.hover_col))
-            .tooltip(|window, cx| {
-                Tooltip::new("Dispositivos de áudio").build(window, cx)
+            .tooltip(move |window, cx| {
+                Tooltip::new(self.tooltip.clone()).build(window, cx)
             })
             .child(
                 div()
@@ -714,6 +810,7 @@ fn render_mute_control(
         id: "call-mic-arrow".into(),
         bg_col,
         hover_col,
+        tooltip: "Selecionar microfone".into(),
     };
 
     let mic_arrow = Popover::new("call-mic-device-popover")
@@ -723,7 +820,7 @@ fn render_mute_control(
         .content({
             let entity = app_entity.clone();
             move |_state, _window, cx| {
-                render_audio_device_menu(entity.clone(), cx)
+                render_input_device_menu(entity.clone(), cx)
             }
         });
 
@@ -737,7 +834,84 @@ fn render_mute_control(
         .into_any_element()
 }
 
-fn render_camera_control(_app_entity: Entity<AppState>, _is_camera_on: bool, cx: &App) -> AnyElement {
+fn render_deafen_control(
+    app_entity: Entity<AppState>,
+    call: &ActiveVoiceCall,
+    cx: &App,
+) -> AnyElement {
+    let discord = cx.discord();
+    let entity_btn = app_entity.clone();
+    let is_deafened = call.is_deafened;
+    let bg_col = if is_deafened {
+        control_critical_primary_bg_default()
+    } else {
+        control_secondary_bg_default()
+    };
+    let hover_col = if is_deafened {
+        control_critical_primary_bg_hover()
+    } else {
+        control_secondary_bg_hover()
+    };
+
+    let deafen_btn = div()
+        .id("call-deafen-btn")
+        .w(px(44.0))
+        .h(px(44.0))
+        .rounded(px(8.0))
+        .bg(bg_col)
+        .text_color(discord.white)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_col))
+        .tooltip(move |window, cx| {
+            Tooltip::new(if is_deafened {
+                "Ativar áudio"
+            } else {
+                "Desativar áudio"
+            })
+            .build(window, cx)
+        })
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            entity_btn.update(cx, |state, cx| {
+                state.toggle_deafen();
+                cx.notify();
+            });
+        })
+        .child(if is_deafened {
+            icon_headphones_off(px(20.0), discord.white)
+        } else {
+            icon_headphones(px(20.0), discord.white)
+        });
+
+    let trigger = ArrowDropupTrigger {
+        is_open: false,
+        id: "call-output-arrow".into(),
+        bg_col,
+        hover_col,
+        tooltip: "Selecionar saída de áudio".into(),
+    };
+    let output_popover = Popover::new("call-output-device-popover")
+        .anchor(Anchor::TopCenter)
+        .offset(px(6.0))
+        .trigger(trigger)
+        .content({
+            let entity = app_entity.clone();
+            move |_state, _window, cx| render_output_device_menu(entity.clone(), cx)
+        });
+
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .child(deafen_btn)
+        .child(output_popover)
+        .into_any_element()
+}
+
+fn render_camera_control(app_entity: Entity<AppState>, _is_camera_on: bool, cx: &App) -> AnyElement {
     let discord = cx.discord();
 
     // Botão de câmera desabilitado: transmissão de vídeo ainda não suportada (Zero Mocks / Item 4)
@@ -757,26 +931,21 @@ fn render_camera_control(_app_entity: Entity<AppState>, _is_camera_on: bool, cx:
         })
         .child(render_camera_glyph(px(20.0), discord.white));
 
-    let cam_arrow = div()
-        .id("call-cam-arrow")
-        .w(px(18.0))
-        .h(px(44.0))
-        .rounded(px(4.0))
-        .bg(control_secondary_bg_default())
-        .opacity(0.5)
-        .cursor_not_allowed()
-        .flex()
-        .items_center()
-        .justify_center()
-        .tooltip(|window, cx| {
-            Tooltip::new("Transmissão de vídeo ainda não suportada nesta versão").build(window, cx)
-        })
-        .child(
-            div()
-                .text_color(discord.white)
-                .text_size(px(10.0))
-                .child("▲"),
-        );
+    let camera_trigger = ArrowDropupTrigger {
+        is_open: false,
+        id: "call-cam-arrow".into(),
+        bg_col: control_secondary_bg_default(),
+        hover_col: control_secondary_bg_hover(),
+        tooltip: "Selecionar câmera (transmissão indisponível)".into(),
+    };
+    let cam_arrow = Popover::new("call-camera-device-popover")
+        .anchor(Anchor::TopCenter)
+        .offset(px(6.0))
+        .trigger(camera_trigger)
+        .content({
+            let entity = app_entity.clone();
+            move |_state, _window, cx| render_camera_device_menu(entity.clone(), cx)
+        });
 
     div()
         .flex()
@@ -856,19 +1025,47 @@ fn render_disconnect_control(app_entity: Entity<AppState>, cx: &App) -> AnyEleme
 // Real Hardware Device Menus (MediaDeviceManager & CameraManager)
 // ============================================================================
 
-fn render_audio_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElement {
-    let (selected_input, selected_output) = {
+fn render_input_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElement {
+    render_audio_device_menu(
+        app_entity,
+        crate::media::DeviceType::Input,
+        "MICROFONES",
+        "Nenhum microfone encontrado",
+        cx,
+    )
+}
+
+fn render_output_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElement {
+    render_audio_device_menu(
+        app_entity,
+        crate::media::DeviceType::Output,
+        "SAÍDAS DE ÁUDIO",
+        "Nenhum alto-falante encontrado",
+        cx,
+    )
+}
+
+fn render_audio_device_menu(
+    app_entity: Entity<AppState>,
+    device_type: crate::media::DeviceType,
+    title: &str,
+    empty_message: &str,
+    cx: &App,
+) -> AnyElement {
+    let selected_device = {
         let state = app_entity.read(cx);
         let call = state.active_voice_call.as_ref();
-        (
-            call.and_then(|c| c.selected_input_device.clone()),
-            call.and_then(|c| c.selected_output_device.clone()),
-        )
+        match device_type {
+            crate::media::DeviceType::Input => call.and_then(|call| call.selected_input_device.clone()),
+            crate::media::DeviceType::Output => call.and_then(|call| call.selected_output_device.clone()),
+        }
     };
 
     let device_manager = MediaDeviceManager::new();
-    let input_devices = device_manager.list_input_devices().unwrap_or_default();
-    let output_devices = device_manager.list_output_devices().unwrap_or_default();
+    let devices = match device_type {
+        crate::media::DeviceType::Input => device_manager.list_input_devices(),
+        crate::media::DeviceType::Output => device_manager.list_output_devices(),
+    };
 
     let mut menu = div()
         .flex()
@@ -887,93 +1084,33 @@ fn render_audio_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElemen
                 .font_weight(FontWeight::BOLD)
                 .text_size(px(11.0))
                 .px(px(6.0))
-                .child("DISPOSITIVOS DE ENTRADA"),
+                .child(title.to_string()),
         );
 
-    if input_devices.is_empty() {
-        menu = menu.child(
-            div()
-                .text_color(text_muted())
-                .text_size(px(12.0))
-                .px(px(6.0))
-                .py(px(4.0))
-                .child("Nenhum microfone encontrado"),
-        );
-    } else {
-        for dev in input_devices {
-            let is_selected = match selected_input {
-                Some(ref sel) => sel == &dev.id,
-                None => dev.is_default,
-            };
-            let dev_id = dev.id.clone();
-            let entity = app_entity.clone();
+    match devices {
+        Err(error) => {
             menu = menu.child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
+                    .text_color(status_dnd())
+                    .text_size(px(12.0))
                     .px(px(6.0))
                     .py(px(4.0))
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(channel_hover()))
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                        let dev_id = dev_id.clone();
-                        entity.update(cx, |state, cx| {
-                            state.set_input_device(Some(dev_id));
-                            cx.notify();
-                        });
-                    })
-                    .child(
-                        div()
-                            .text_color(if is_selected { text_primary() } else { text_secondary() })
-                            .text_size(px(13.0))
-                            .child(dev.name),
-                    )
-                    .children(is_selected.then(|| {
-                        div()
-                            .text_color(status_online())
-                            .text_size(px(12.0))
-                            .child("✓")
-                    })),
+                    .child(format!("Não foi possível listar os dispositivos: {error}")),
             );
         }
-    }
-
-    menu = menu.child(
-        div()
-            .h(px(1.0))
-            .my(px(4.0))
-            .bg(borders()),
-    );
-
-    menu = menu.child(
-        div()
-            .text_color(text_secondary())
-            .font_weight(FontWeight::BOLD)
-            .text_size(px(11.0))
-            .px(px(6.0))
-            .child("DISPOSITIVOS DE SAÍDA"),
-    );
-
-    if output_devices.is_empty() {
-        menu = menu.child(
-            div()
-                .text_color(text_muted())
-                .text_size(px(12.0))
-                .px(px(6.0))
-                .py(px(4.0))
-                .child("Nenhum alto-falante encontrado"),
-        );
-    } else {
-        for dev in output_devices {
-            let is_selected = match selected_output {
-                Some(ref sel) => sel == &dev.id,
-                None => dev.is_default,
-            };
-            let dev_id = dev.id.clone();
-            let entity = app_entity.clone();
+        Ok(devices) if devices.is_empty() => {
+            menu = menu.child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(12.0))
+                    .px(px(6.0))
+                    .py(px(4.0))
+                    .child(empty_message.to_string()),
+            );
+        }
+        Ok(devices) => {
+            let default_entity = app_entity.clone();
+            let default_selected = selected_device.is_none();
             menu = menu.child(
                 div()
                     .flex()
@@ -983,37 +1120,90 @@ fn render_audio_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElemen
                     .px(px(6.0))
                     .py(px(4.0))
                     .rounded(px(4.0))
-                    .hover(|s| s.bg(channel_hover()))
+                    .hover(|style| style.bg(channel_hover()))
                     .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                        let dev_id = dev_id.clone();
-                        entity.update(cx, |state, cx| {
-                            state.set_output_device(Some(dev_id));
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        default_entity.update(cx, |state, cx| {
+                            match device_type {
+                                crate::media::DeviceType::Input => state.set_input_device(None),
+                                crate::media::DeviceType::Output => state.set_output_device(None),
+                            }
                             cx.notify();
                         });
                     })
                     .child(
                         div()
-                            .text_color(if is_selected { text_primary() } else { text_secondary() })
+                            .text_color(if default_selected {
+                                text_primary()
+                            } else {
+                                text_secondary()
+                            })
                             .text_size(px(13.0))
-                            .child(dev.name),
+                            .child("Padrão do sistema"),
                     )
-                    .children(is_selected.then(|| {
-                        div()
-                            .text_color(status_online())
-                            .text_size(px(12.0))
-                            .child("✓")
+                    .children(default_selected.then(|| {
+                        icon_check(px(14.0), status_online()).into_any_element()
                     })),
             );
+
+            for device in devices {
+                let is_selected = selected_device.as_deref() == Some(device.id.as_str());
+                let device_id = device.id.clone();
+                let entity = app_entity.clone();
+                menu = menu.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .hover(|style| style.bg(channel_hover()))
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let device_id = device_id.clone();
+                            entity.update(cx, |state, cx| {
+                                match device_type {
+                                    crate::media::DeviceType::Input => {
+                                        state.set_input_device(Some(device_id))
+                                    }
+                                    crate::media::DeviceType::Output => {
+                                        state.set_output_device(Some(device_id))
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .text_color(if is_selected {
+                                    text_primary()
+                                } else {
+                                    text_secondary()
+                                })
+                                .text_size(px(13.0))
+                                .truncate()
+                                .child(device.name),
+                        )
+                        .children(is_selected.then(|| {
+                            icon_check(px(14.0), status_online()).into_any_element()
+                        })),
+                );
+            }
         }
     }
 
     menu.into_any_element()
 }
 
-#[allow(dead_code)]
-fn render_camera_device_menu() -> AnyElement {
-    let devices = CameraManager::list_devices().unwrap_or_default();
+fn render_camera_device_menu(app_entity: Entity<AppState>, cx: &App) -> AnyElement {
+    let selected_camera = app_entity
+        .read(cx)
+        .active_voice_call
+        .as_ref()
+        .and_then(|call| call.selected_camera_device.clone());
+    let devices = CameraManager::list_devices();
 
     let mut menu = div()
         .flex()
@@ -1025,6 +1215,7 @@ fn render_camera_device_menu() -> AnyElement {
         .bg(bg_floating())
         .border_1()
         .border_color(borders())
+        .shadow_lg()
         .child(
             div()
                 .text_color(text_secondary())
@@ -1033,34 +1224,64 @@ fn render_camera_device_menu() -> AnyElement {
                 .child("CÂMERAS DISPONÍVEIS"),
         );
 
-    if devices.is_empty() {
-        menu = menu.child(
-            div()
-                .text_color(text_muted())
-                .text_size(px(12.0))
-                .py(px(4.0))
-                .child("Nenhuma câmera encontrada"),
-        );
-    } else {
-        for dev in devices {
+    match devices {
+        Err(error) => {
             menu = menu.child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .px(px(6.0))
+                    .text_color(status_dnd())
+                    .text_size(px(12.0))
                     .py(px(4.0))
-                    .rounded(px(4.0))
-                    .hover(|s| s.bg(channel_hover()))
-                    .cursor_pointer()
-                    .child(
-                        div()
-                            .text_color(text_primary())
-                            .text_size(px(13.0))
-                            .child(dev.name),
-                    ),
+                    .child(format!("Não foi possível listar as câmeras: {error}")),
             );
+        }
+        Ok(devices) if devices.is_empty() => {
+            menu = menu.child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(px(12.0))
+                    .py(px(4.0))
+                    .child("Nenhuma câmera encontrada"),
+            );
+        }
+        Ok(devices) => {
+            for device in devices {
+                let is_selected = selected_camera.as_deref() == Some(device.id.as_str());
+                let device_id = device.id.clone();
+                let entity = app_entity.clone();
+                menu = menu.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .px(px(6.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .hover(|style| style.bg(channel_hover()))
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                            let device_id = device_id.clone();
+                            entity.update(cx, |state, cx| {
+                                state.set_camera_device(Some(device_id));
+                                cx.notify();
+                            });
+                        })
+                        .child(
+                            div()
+                                .text_color(if is_selected {
+                                    text_primary()
+                                } else {
+                                    text_secondary()
+                                })
+                                .text_size(px(13.0))
+                                .truncate()
+                                .child(device.name),
+                        )
+                        .children(is_selected.then(|| {
+                            icon_check(px(14.0), status_online()).into_any_element()
+                        })),
+                );
+            }
         }
     }
 

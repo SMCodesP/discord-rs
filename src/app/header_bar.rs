@@ -336,7 +336,7 @@ fn render_toolbar(
             .iter()
             .find(|d| d.id == channel_id)
             .map(|d| d.name.clone())
-            .unwrap_or_else(|| "DM".into());
+            .unwrap_or_default();
         let recipient_ids = state
             .dm_channels
             .iter()
@@ -348,6 +348,14 @@ fn render_toolbar(
         let cid_v = channel_id.clone();
         let cname_v = channel_name.clone();
         let recips_v = recipient_ids;
+        let call_in_channel = state.active_voice_call.as_ref().is_some_and(|call| {
+            call.channel_id == channel_id
+                && !matches!(
+                    call.connection_state,
+                    crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }
+                )
+        });
+        let voice_call_disabled = !state.is_connected_to_gateway || call_in_channel;
         toolbar = toolbar.child(
             IconButton::with_icon("header-btn-voice-call", |sz, col| {
                 icon_phone(sz, col).into_any_element()
@@ -355,7 +363,15 @@ fn render_toolbar(
             .size(px(28.0))
             .icon_size(px(16.0))
             .rounded(px(4.0))
-            .tooltip("Iniciar chamada de voz")
+            .disabled(voice_call_disabled)
+            .active(call_in_channel)
+            .tooltip(if !state.is_connected_to_gateway {
+                "Conecte-se ao Discord para iniciar uma chamada"
+            } else if call_in_channel {
+                "Chamada em andamento"
+            } else {
+                "Iniciar chamada de voz"
+            })
             .on_click(move |_event, _window, cx| {
                 // Proteção contra clique duplo: se já conectando ou conectado nesta chamada, ignora
                 let is_already_connecting = {
