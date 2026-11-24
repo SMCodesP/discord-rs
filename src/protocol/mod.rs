@@ -1,3 +1,4 @@
+pub mod attachments_upload;
 pub mod auth;
 pub mod bridge;
 pub mod cache;
@@ -24,6 +25,7 @@ pub mod voice_gateway;
 pub mod voice_dave;
 pub mod voice_session;
 
+pub use attachments_upload::*;
 pub use auth::{AuthToken, TokenStorage, TokenType};
 pub use bridge::ProtocolBridge;
 pub use cache::*;
