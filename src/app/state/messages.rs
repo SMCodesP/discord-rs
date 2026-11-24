@@ -2,24 +2,125 @@ use super::*;
 use crate::domain::message::Message;
 use crate::domain::message::Reaction;
 use crate::protocol::TransportEvent;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+/// Correlation metadata for one optimistic send. Discord's REST transport in
+/// this repository does not yet expose a nonce parameter, so the nonce is kept
+/// here as a stable client correlation token and reconciled by the REST message
+/// ID plus channel/author/content. This still makes REST/Gateway confirmation
+/// idempotent and prevents duplicate rows.
+#[derive(Debug, Clone)]
+pub struct PendingMessageSend {
+    pub temp_id: String,
+    pub client_nonce: String,
+    pub channel_id: String,
+    pub content: String,
+    pub author_id: String,
+    pub created_at: Instant,
+    pub confirmed_id: Option<String>,
+}
+
+static PENDING_MESSAGE_SENDS: LazyLock<
+    Mutex<std::collections::HashMap<String, PendingMessageSend>>,
+> = LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+static FAILED_MESSAGE_SENDS: LazyLock<Mutex<Vec<(String, String, String, String)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+static SEND_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_client_nonce() -> String {
+    // Hex timestamp + monotonic sequence stays below Discord's 25-character
+    // nonce limit while remaining unique within this process.
+    format!(
+        "{:x}{:x}",
+        chrono::Utc::now().timestamp_millis(),
+        SEND_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn register_pending_send(pending: PendingMessageSend) {
+    if let Ok(mut sends) = PENDING_MESSAGE_SENDS.lock() {
+        sends.retain(|_, existing| existing.created_at.elapsed() < Duration::from_secs(300));
+        sends.insert(pending.temp_id.clone(), pending);
+    }
+}
+
+fn pending_send(temp_id: &str) -> Option<PendingMessageSend> {
+    PENDING_MESSAGE_SENDS
+        .lock()
+        .ok()
+        .and_then(|sends| sends.get(temp_id).cloned())
+}
+
+fn take_pending_send(temp_id: &str) -> Option<PendingMessageSend> {
+    PENDING_MESSAGE_SENDS
+        .lock()
+        .ok()
+        .and_then(|mut sends| sends.remove(temp_id))
+}
+
+fn mark_pending_send_confirmed(temp_id: &str, confirmed_id: &str) {
+    if let Ok(mut sends) = PENDING_MESSAGE_SENDS.lock() {
+        if let Some(pending) = sends.get_mut(temp_id) {
+            pending.confirmed_id = Some(confirmed_id.to_string());
+        }
+    }
+}
+
+fn mark_message_send_failed(temp_id: &str, channel_id: &str, content: &str, error: &str) {
+    if let Ok(mut failures) = FAILED_MESSAGE_SENDS.lock() {
+        failures.retain(|(existing_temp, _, _, _)| existing_temp != temp_id);
+        failures.push((
+            temp_id.to_string(),
+            channel_id.to_string(),
+            content.to_string(),
+            error.to_string(),
+        ));
+    }
+}
+
+fn prewarm_message_markdown(message: &Message) {
+    crate::chat::markdown::prewarm_markdown_cache(&message.content);
+    for embed in &message.embeds {
+        if let Some(description) = &embed.description {
+            crate::chat::markdown::prewarm_markdown_cache(description);
+        }
+        for field in &embed.fields {
+            crate::chat::markdown::prewarm_markdown_cache(&field.value);
+        }
+    }
+}
 
 impl AppState {
     /// Gets message history for the currently selected channel without copying
     pub fn get_active_messages(&self) -> &[Message] {
         if let Some(ref cid) = self.selected_channel_id {
-            self.messages_by_channel.get(cid).map(|v| v.as_slice()).unwrap_or(&[])
+            self.messages_by_channel
+                .get(cid)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
         } else {
             &[]
         }
     }
 
-    /// Injects or appends a message to a channel's history
+    /// Injects or replaces a message in a channel's history by Discord ID.
     pub fn inject_message(&mut self, channel_id: &str, message: Message) {
-        crate::chat::markdown::prewarm_markdown_cache(&message.content);
-        self.messages_by_channel
+        prewarm_message_markdown(&message);
+        let messages = self
+            .messages_by_channel
             .entry(channel_id.to_string())
-            .or_default()
-            .push(message);
+            .or_default();
+        if let Some(existing) = messages
+            .iter_mut()
+            .find(|existing| existing.id == message.id)
+        {
+            *existing = message;
+        } else {
+            messages.push(message);
+        }
     }
 
     /// Adds an emoji reaction to a message in state
@@ -77,7 +178,19 @@ impl AppState {
                 }
             });
         } else {
-            log::warn!("Não conectado ao Discord: client_manager ausente ao tentar deletar mensagem {}", mid);
+            log::warn!(
+                "Não conectado ao Discord: client_manager ausente ao tentar deletar mensagem {}",
+                mid
+            );
+        }
+    }
+
+    /// Sets the pinned status from a confirmed API response.
+    pub fn set_message_pinned(&mut self, channel_id: &str, message_id: &str, pinned: bool) {
+        if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
+            if let Some(message) = messages.iter_mut().find(|message| message.id == message_id) {
+                message.pinned = pinned;
+            }
         }
     }
 
@@ -90,32 +203,71 @@ impl AppState {
         }
     }
 
-    /// Sets / synchronizes real messages received from the API/Gateway for a channel
+    /// Sets / synchronizes real messages received from the API/Gateway for a channel.
+    /// Pending sends are preserved until their correlated REST/Gateway message is
+    /// present; content matching is only a fallback for legacy pending rows.
     pub fn set_channel_messages(&mut self, channel_id: &str, mut messages: Vec<Message>) {
-        for msg in &messages {
-            crate::chat::markdown::prewarm_markdown_cache(&msg.content);
+        for message in &messages {
+            prewarm_message_markdown(message);
         }
-        // Preserva quaisquer mensagens otimistas/pendentes ainda não confirmadas no histórico carregado
+
+        let mut seen_ids: HashSet<String> =
+            messages.iter().map(|message| message.id.clone()).collect();
         if let Some(existing) = self.messages_by_channel.get(channel_id) {
-            for m in existing {
-                if (m.is_pending || m.id.starts_with("temp-"))
-                    && !messages.iter().any(|new_m| {
-                        new_m.id == m.id
-                            || (new_m.content == m.content
-                                && (new_m.author.id == m.author.id
-                                    || new_m.author.username == m.author.username
-                                    || m.author.id == "user-me"
-                                    || m.author.id == self.current_user.id))
-                    })
-                {
-                    messages.push(m.clone());
+            for message in existing {
+                if seen_ids.contains(&message.id) {
+                    continue;
+                }
+                let keep = if message.is_pending || message.id.starts_with("temp-") {
+                    let correlated = pending_send(&message.id)
+                        .and_then(|pending| pending.confirmed_id)
+                        .map(|confirmed_id| seen_ids.contains(&confirmed_id))
+                        .unwrap_or(false);
+                    let legacy_match = pending_send(&message.id).is_none()
+                        && messages.iter().any(|incoming| {
+                            incoming.content == message.content
+                                && (incoming.author.id == message.author.id
+                                    || incoming.author.username == message.author.username)
+                        });
+                    !correlated && !legacy_match
+                } else {
+                    // Keep live rows not included in a stale history response.
+                    true
+                };
+                if keep {
+                    seen_ids.insert(message.id.clone());
+                    messages.push(message.clone());
                 }
             }
         }
+        messages.sort_by_key(|message| message.timestamp);
+
         if let Some(ref gid) = self.selected_guild_id {
             self.request_missing_author_colors(gid, &messages);
         }
-        self.messages_by_channel.insert(channel_id.to_string(), messages);
+        self.messages_by_channel
+            .insert(channel_id.to_string(), messages);
+    }
+
+    /// Merges an older REST page into the current history without duplicating
+    /// messages or dropping live/pending rows. Returns the number of new rows.
+    pub fn merge_older_messages(&mut self, channel_id: &str, mut older: Vec<Message>) -> usize {
+        let messages = self
+            .messages_by_channel
+            .entry(channel_id.to_string())
+            .or_default();
+        let mut seen_ids: HashSet<String> =
+            messages.iter().map(|message| message.id.clone()).collect();
+        let mut added = 0;
+        for message in older.drain(..) {
+            prewarm_message_markdown(&message);
+            if seen_ids.insert(message.id.clone()) {
+                messages.push(message);
+                added += 1;
+            }
+        }
+        messages.sort_by_key(|message| message.timestamp);
+        added
     }
 
     /// Requests missing author roles and colors for historical messages via Gateway Opcode 8
@@ -129,9 +281,14 @@ impl AppState {
             if crate::protocol::cache::lazy_guilds::is_op8_requested(guild_id, uid) {
                 continue;
             }
-            let has_color = self.members.iter().any(|m| &m.id == uid && m.role_color != 0)
-                || crate::protocol::cache::lazy_guilds::get_cached_author_role_color(guild_id, uid).is_some()
-                || crate::protocol::cache::lazy_guilds::get_cached_author_roles(guild_id, uid).is_some();
+            let has_color = self
+                .members
+                .iter()
+                .any(|m| &m.id == uid && m.role_color != 0)
+                || crate::protocol::cache::lazy_guilds::get_cached_author_role_color(guild_id, uid)
+                    .is_some()
+                || crate::protocol::cache::lazy_guilds::get_cached_author_roles(guild_id, uid)
+                    .is_some();
             if !has_color && !missing_uids.contains(uid) {
                 missing_uids.push(uid.clone());
             }
@@ -162,11 +319,19 @@ impl AppState {
         }
     }
 
-    /// Sends a message to a specific channel via ClientManager with optimistic UI update
-    pub fn send_message(&mut self, channel_id: &str, content: &str) {
+    /// Creates a correlated optimistic row without dispatching it. The composer
+    /// uses this API so REST failures can be shown and retried immediately.
+    pub fn begin_message_send(
+        &mut self,
+        channel_id: &str,
+        content: &str,
+    ) -> Result<String, String> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
-            return;
+            return Err("Mensagem vazia".to_string());
+        }
+        if self.client_manager.is_none() {
+            return Err("Não conectado ao Discord: cliente não inicializado".to_string());
         }
 
         let cid = channel_id.to_string();
@@ -174,51 +339,227 @@ impl AppState {
             tel.track_message_send(&cid, trimmed.len(), true, 0);
             tel.track_button_click("send_message", "Enviar Mensagem", 0);
         }
-        // Optimistically insert message into UI with temporary ID temp-<timestamp> and pending flag
-        let new_id = format!("temp-{}", chrono::Utc::now().timestamp_millis());
-        let new_msg = Message::new(
-            new_id,
+
+        let client_nonce = next_client_nonce();
+        let temp_id = format!("temp-{}", client_nonce);
+        let mut message = Message::new(
+            temp_id.clone(),
             cid.clone(),
             crate::domain::message::Author {
                 id: self.current_user.id.clone(),
                 username: self.current_user.username.clone(),
                 global_name: Some(self.current_user.display_name.clone()),
-                avatar: None,
+                avatar: self.current_user.avatar_url.clone(),
                 bot: false,
                 avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
             },
             trimmed,
         )
         .with_pending(true);
+        if let Some(guild_id) = &self.selected_guild_id {
+            message.guild_id = Some(guild_id.clone());
+        }
 
-        self.inject_message(&cid, new_msg);
-        if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == cid) {
-            dm.last_message_id = Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+        register_pending_send(PendingMessageSend {
+            temp_id: temp_id.clone(),
+            client_nonce,
+            channel_id: cid.clone(),
+            content: trimmed.to_string(),
+            author_id: self.current_user.id.clone(),
+            created_at: Instant::now(),
+            confirmed_id: None,
+        });
+        self.inject_message(&cid, message);
+        if let Some(dm) = self
+            .dm_channels
+            .iter_mut()
+            .find(|channel| channel.id == cid)
+        {
+            dm.last_message_id = Some(temp_id.clone());
             self.sort_dm_channels();
         }
-        self.replying_to_message = None;
-        self.active_draft = String::new();
+        Ok(temp_id)
+    }
 
-        // Dispatch via ClientManager if present
-        if let Some(ref cm) = self.client_manager {
-            let cm = cm.clone();
-            let target_cid = cid;
-            let text = trimmed.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = cm.send_message(&target_cid, &text).await {
-                    log::warn!("Falha ao enviar mensagem via ClientManager: {:?}", e);
+    /// Reconciles a successful REST response with its optimistic row. Safe to
+    /// call before or after the duplicate Gateway `MESSAGE_CREATE` event.
+    pub fn confirm_message_send(&mut self, temp_id: &str, mut confirmed: Message) {
+        prewarm_message_markdown(&confirmed);
+        let pending = take_pending_send(temp_id);
+        if let Some(pending) = pending {
+            log::debug!(
+                "Confirmando mensagem otimista {} com nonce de correlação {}",
+                pending.temp_id,
+                pending.client_nonce
+            );
+            if let Some(messages) = self.messages_by_channel.get_mut(&pending.channel_id) {
+                messages.retain(|message| message.id != pending.temp_id);
+            }
+            if pending.channel_id != confirmed.channel_id {
+                if let Some(messages) = self.messages_by_channel.get_mut(&confirmed.channel_id) {
+                    messages.retain(|message| message.id != pending.temp_id);
                 }
-            });
+            }
+        } else {
+            // The row may already have been migrated to the resolved DM channel.
+            for messages in self.messages_by_channel.values_mut() {
+                messages.retain(|message| message.id != temp_id);
+            }
+        }
+
+        confirmed.is_pending = false;
+        let channel_id = confirmed.channel_id.clone();
+        let messages = self
+            .messages_by_channel
+            .entry(channel_id.clone())
+            .or_default();
+        if let Some(existing) = messages
+            .iter_mut()
+            .find(|message| message.id == confirmed.id)
+        {
+            *existing = confirmed;
+        } else {
+            let insert_at = messages
+                .iter()
+                .position(|message| message.timestamp > confirmed.timestamp)
+                .unwrap_or(messages.len());
+            messages.insert(insert_at, confirmed);
+        }
+        if let Some(dm) = self
+            .dm_channels
+            .iter_mut()
+            .find(|channel| channel.id == channel_id)
+        {
+            dm.last_message_id = messages.last().map(|message| message.id.clone());
+            self.sort_dm_channels();
         }
     }
 
+    /// Removes a failed optimistic row and returns its channel/content for retry.
+    /// If Gateway already confirmed the send, no error is returned.
+    pub fn fail_message_send(&mut self, temp_id: &str) -> Option<(String, String)> {
+        let pending = take_pending_send(temp_id)?;
+        let mut candidate_channels = vec![pending.channel_id.as_str()];
+        if let Some(recipient_id) = pending.channel_id.strip_prefix("dm-") {
+            for dm in &self.dm_channels {
+                if dm.recipient_ids.iter().any(|id| id == recipient_id) {
+                    candidate_channels.push(dm.id.as_str());
+                }
+            }
+        }
+        let already_confirmed = candidate_channels.iter().any(|channel_id| {
+            self.messages_by_channel
+                .get(*channel_id)
+                .map(|messages| {
+                    messages.iter().any(|message| {
+                        !message.is_pending
+                            && message.id != temp_id
+                            && message.author.id == pending.author_id
+                            && message.content == pending.content
+                    }) || pending
+                        .confirmed_id
+                        .as_ref()
+                        .is_some_and(|id| messages.iter().any(|message| &message.id == id))
+                })
+                .unwrap_or(false)
+        });
+        if already_confirmed {
+            return None;
+        }
+
+        if let Some(messages) = self.messages_by_channel.get_mut(&pending.channel_id) {
+            messages.retain(|message| message.id != temp_id);
+        }
+        Some((pending.channel_id, pending.content))
+    }
+
+    /// Drains failures from the legacy `send_message` dispatcher, removes their
+    /// temporary rows and returns `(channel_id, content, error)` for UI retry.
+    pub fn take_failed_message_sends(&mut self) -> Vec<(String, String, String)> {
+        let failures = FAILED_MESSAGE_SENDS
+            .lock()
+            .map(|mut failures| std::mem::take(&mut *failures))
+            .unwrap_or_default();
+        let mut result = Vec::with_capacity(failures.len());
+        for (temp_id, channel_id, content, error) in failures {
+            let _ = take_pending_send(&temp_id);
+            if let Some(messages) = self.messages_by_channel.get_mut(&channel_id) {
+                messages.retain(|message| message.id != temp_id);
+            }
+            result.push((channel_id, content, error));
+        }
+        result
+    }
+
+    /// Sends a message to a specific channel via ClientManager with optimistic UI update.
+    /// Kept for non-composer callers; the composer uses `begin_message_send` for
+    /// explicit failure/retry handling.
+    pub fn send_message(&mut self, channel_id: &str, content: &str) {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        if self.client_manager.is_some() {
+            let Ok(temp_id) = self.begin_message_send(channel_id, trimmed) else {
+                return;
+            };
+            let Some(cm) = self.client_manager.clone() else {
+                return;
+            };
+            let target_cid = channel_id.to_string();
+            let text = trimmed.to_string();
+            tokio::spawn(async move {
+                match cm.send_message(&target_cid, &text).await {
+                    Ok(message) => mark_pending_send_confirmed(&temp_id, &message.id),
+                    Err(error) => {
+                        let error = error.to_string();
+                        // Keep the correlation entry until the UI drains the
+                        // failure. A late Gateway MESSAGE_CREATE can still prove
+                        // that the request succeeded even when REST failed.
+                        mark_message_send_failed(&temp_id, &target_cid, &text, &error);
+                        log::warn!("Falha ao enviar mensagem via ClientManager: {:?}", error);
+                    }
+                }
+            });
+            return;
+        }
+
+        // Offline/local callers still get a clearly pending row, never a
+        // fabricated confirmation. The production composer rejects this state.
+        let temp_id = format!("temp-{}", next_client_nonce());
+        self.inject_message(
+            channel_id,
+            Message::new(
+                temp_id,
+                channel_id.to_string(),
+                crate::domain::message::Author {
+                    id: self.current_user.id.clone(),
+                    username: self.current_user.username.clone(),
+                    global_name: Some(self.current_user.display_name.clone()),
+                    avatar: self.current_user.avatar_url.clone(),
+                    bot: false,
+                    avatar_decoration_data: self.current_user.avatar_decoration_data.clone(),
+                },
+                trimmed,
+            )
+            .with_pending(true),
+        );
+        self.replying_to_message = None;
+        self.active_draft.clear();
+    }
+
     /// Sends a sticker message to a specific channel immediately with authentic sticker rendering
-    pub fn send_sticker(&mut self, channel_id: &str, sticker: &crate::protocol::media_cache::DiscordSticker) {
+    pub fn send_sticker(
+        &mut self,
+        channel_id: &str,
+        sticker: &crate::protocol::media_cache::DiscordSticker,
+    ) {
         let cid = channel_id.to_string();
-        let new_id = format!("temp-{}", chrono::Utc::now().timestamp_millis());
+        let new_id = format!("temp-{}", next_client_nonce());
 
         let mut new_msg = Message::new(
-            new_id,
+            new_id.clone(),
             cid.clone(),
             crate::domain::message::Author {
                 id: self.current_user.id.clone(),
@@ -232,15 +573,17 @@ impl AppState {
         )
         .with_pending(true);
 
-        new_msg.sticker_items.push(crate::domain::message::MessageStickerItem::new(
-            sticker.id.clone(),
-            sticker.name.clone(),
-            sticker.format_type as u8,
-        ));
+        new_msg
+            .sticker_items
+            .push(crate::domain::message::MessageStickerItem::new(
+                sticker.id.clone(),
+                sticker.name.clone(),
+                sticker.format_type as u8,
+            ));
 
         self.inject_message(&cid, new_msg);
         if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == cid) {
-            dm.last_message_id = Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+            dm.last_message_id = Some(new_id.clone());
             self.sort_dm_channels();
         }
         self.replying_to_message = None;
@@ -341,8 +684,14 @@ impl AppState {
             let cm = cm.clone();
             if let Some(ref gid) = self.selected_guild_id {
                 let target_gid = gid.clone();
-                let needs_stickers = self.guilds.iter().any(|g| g.id == target_gid && g.stickers.is_empty())
-                    && self.media_cache.load_guild_stickers_from_disk(&target_gid).is_none();
+                let needs_stickers = self
+                    .guilds
+                    .iter()
+                    .any(|g| g.id == target_gid && g.stickers.is_empty())
+                    && self
+                        .media_cache
+                        .load_guild_stickers_from_disk(&target_gid)
+                        .is_none();
                 if needs_stickers {
                     let cm_stickers = cm.clone();
                     tokio::spawn(async move {
@@ -404,20 +753,33 @@ impl AppState {
 
     /// Records a typing event with 9-10 second coalescing window
     pub fn record_typing(&mut self, channel_id: &str, user_id: &str, username: Option<&str>) {
+        if user_id == self.current_user.id {
+            return;
+        }
         let resolved_name = if let Some(un) = username {
             un.to_string()
         } else if let Some(m) = self.members.iter().find(|m| m.id == user_id) {
             m.name.clone()
         } else if let Some(f) = self.friends.iter().find(|f| f.id == user_id) {
             f.display_name.clone()
-        } else if let Some(dm) = self.dm_channels.iter().find(|d| d.id == user_id || d.name.to_lowercase() == user_id.to_lowercase()) {
+        } else if let Some(dm) = self
+            .dm_channels
+            .iter()
+            .find(|d| d.id == user_id || d.name.to_lowercase() == user_id.to_lowercase())
+        {
             dm.name.clone()
         } else {
             user_id.to_string()
         };
 
-        let channel_map = self.typing_tracker.entry(channel_id.to_string()).or_default();
-        channel_map.insert(user_id.to_string(), (resolved_name, std::time::Instant::now()));
+        let channel_map = self
+            .typing_tracker
+            .entry(channel_id.to_string())
+            .or_default();
+        channel_map.insert(
+            user_id.to_string(),
+            (resolved_name, std::time::Instant::now()),
+        );
 
         if self.selected_channel_id.as_deref() == Some(channel_id) {
             self.typing_users = self.get_active_typing_users(channel_id);
@@ -451,6 +813,21 @@ impl AppState {
         }
     }
 
+    /// Delay until the composer should refresh the typing indicator. A one-second
+    /// floor guarantees expired TYPING_START entries disappear without user input.
+    pub fn typing_refresh_delay(&self, channel_id: &str) -> Option<Duration> {
+        let now = std::time::Instant::now();
+        let channel_map = self.typing_tracker.get(channel_id)?;
+        let remaining = channel_map
+            .values()
+            .filter_map(|(_, timestamp)| {
+                let elapsed = now.saturating_duration_since(*timestamp);
+                Duration::from_secs(9).checked_sub(elapsed)
+            })
+            .min()?;
+        Some(remaining.max(Duration::from_secs(1)))
+    }
+
     /// Formats active typing users into localized natural language string
     pub fn get_active_typing_text(&self, channel_id: &str) -> Option<String> {
         let users = self.get_active_typing_users(channel_id);
@@ -458,8 +835,234 @@ impl AppState {
             0 => None,
             1 => Some(format!("{} está digitando...", users[0])),
             2 => Some(format!("{} e {} estão digitando...", users[0], users[1])),
-            3 => Some(format!("{}, {} e {} estão digitando...", users[0], users[1], users[2])),
+            3 => Some(format!(
+                "{}, {} e {} estão digitando...",
+                users[0], users[1], users[2]
+            )),
             _ => Some("Várias pessoas estão digitando...".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::message::Author;
+    use crate::protocol::ClientManager;
+
+    fn synthetic_state() -> AppState {
+        let mut state = AppState::default();
+        state.current_user.id = "user-synthetic-send".into();
+        state.current_user.username = "synthetic_send".into();
+        state.current_user.display_name = "Synthetic Send".into();
+        state.client_manager = Some(ClientManager::new_mock().0);
+        state.selected_channel_id = Some("channel-synthetic-send".into());
+        state
+    }
+
+    fn confirmed_message(temp: &Message) -> Message {
+        let mut message = Message::new(
+            "message-synthetic-confirmed",
+            temp.channel_id.clone(),
+            temp.author.clone(),
+            temp.content.clone(),
+        );
+        message.is_pending = false;
+        message
+    }
+
+    #[test]
+    fn optimistic_send_rest_confirmation_is_idempotent() {
+        let mut state = synthetic_state();
+        let temp_id = state
+            .begin_message_send("channel-synthetic-send", "Mensagem sintética")
+            .unwrap();
+        assert!(pending_send(&temp_id).unwrap().client_nonce.len() <= 25);
+        let pending = state
+            .messages_by_channel
+            .get("channel-synthetic-send")
+            .unwrap()
+            .iter()
+            .find(|message| message.id == temp_id)
+            .unwrap()
+            .clone();
+        let confirmed = confirmed_message(&pending);
+
+        state.confirm_message_send(&temp_id, confirmed.clone());
+        state.confirm_message_send(&temp_id, confirmed);
+
+        let messages = &state.messages_by_channel["channel-synthetic-send"];
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "message-synthetic-confirmed");
+        assert!(!messages[0].is_pending);
+    }
+
+    #[test]
+    fn gateway_before_rest_does_not_duplicate_or_report_failure() {
+        let mut state = synthetic_state();
+        let temp_id = state
+            .begin_message_send("channel-synthetic-send", "Gateway primeiro")
+            .unwrap();
+        let pending = state
+            .messages_by_channel
+            .get("channel-synthetic-send")
+            .unwrap()
+            .iter()
+            .find(|message| message.id == temp_id)
+            .unwrap()
+            .clone();
+        let confirmed = confirmed_message(&pending);
+
+        state.handle_transport_event(TransportEvent::MessageCreate(confirmed.clone()));
+        state.confirm_message_send(&temp_id, confirmed.clone());
+        assert!(state.fail_message_send(&temp_id).is_none());
+        assert_eq!(state.messages_by_channel["channel-synthetic-send"].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gateway_confirmation_in_resolved_dm_suppresses_rest_failure() {
+        let mut state = synthetic_state();
+        state.open_dm_with_user("user-synthetic-dm", "Synthetic DM");
+        let temp_channel = state.selected_channel_id.clone().unwrap();
+        let temp_id = state
+            .begin_message_send(&temp_channel, "DM sintética")
+            .unwrap();
+        let pending = state.messages_by_channel[&temp_channel]
+            .iter()
+            .find(|message| message.id == temp_id)
+            .unwrap()
+            .clone();
+
+        let real_channel = crate::domain::channel::Channel::new(
+            "channel-synthetic-dm-real",
+            "Synthetic DM",
+            crate::domain::channel::ChannelType::Dm,
+        )
+        .with_recipient_ids(vec!["user-synthetic-dm".to_string()]);
+        state.handle_transport_event(TransportEvent::DmChannelResolved {
+            temp_id: temp_channel,
+            channel: real_channel.clone(),
+        });
+
+        let mut confirmed = confirmed_message(&pending);
+        confirmed.channel_id = real_channel.id.clone();
+        state.handle_transport_event(TransportEvent::MessageCreate(confirmed));
+
+        assert!(state.fail_message_send(&temp_id).is_none());
+        let messages = &state.messages_by_channel[&real_channel.id];
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "message-synthetic-confirmed");
+        assert!(!messages[0].is_pending);
+    }
+
+    #[test]
+    fn failed_send_is_removed_and_retry_payload_is_returned() {
+        let mut state = synthetic_state();
+        let temp_id = state
+            .begin_message_send("channel-synthetic-send", "Falhou sinteticamente")
+            .unwrap();
+        let retry = state.fail_message_send(&temp_id);
+        assert_eq!(
+            retry,
+            Some((
+                "channel-synthetic-send".into(),
+                "Falhou sinteticamente".into()
+            ))
+        );
+        assert!(state.messages_by_channel["channel-synthetic-send"].is_empty());
+    }
+
+    #[test]
+    fn retry_after_failure_confirms_exactly_one_row() {
+        let mut state = synthetic_state();
+        let first_temp = state
+            .begin_message_send("channel-synthetic-send", "Mensagem repetida")
+            .unwrap();
+        let (channel_id, content) = state.fail_message_send(&first_temp).unwrap();
+
+        let retry_temp = state.begin_message_send(&channel_id, &content).unwrap();
+        let pending = state.messages_by_channel[&channel_id]
+            .iter()
+            .find(|message| message.id == retry_temp)
+            .unwrap()
+            .clone();
+        state.confirm_message_send(&retry_temp, confirmed_message(&pending));
+
+        let messages = &state.messages_by_channel[&channel_id];
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "message-synthetic-confirmed");
+        assert!(!messages[0].is_pending);
+    }
+
+    #[test]
+    fn older_history_merge_deduplicates_and_preserves_pending() {
+        let mut state = synthetic_state();
+        state
+            .begin_message_send("channel-synthetic-send", "Pendente")
+            .unwrap();
+        let older = vec![
+            Message::new(
+                "old-1",
+                "channel-synthetic-send",
+                Author::new("user-old", "old"),
+                "Antiga 1",
+            ),
+            Message::new(
+                "old-2",
+                "channel-synthetic-send",
+                Author::new("user-old", "old"),
+                "Antiga 2",
+            ),
+        ];
+        assert_eq!(
+            state.merge_older_messages("channel-synthetic-send", older.clone()),
+            2
+        );
+        assert_eq!(
+            state.merge_older_messages("channel-synthetic-send", older),
+            0
+        );
+        let messages = &state.messages_by_channel["channel-synthetic-send"];
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().any(|message| message.is_pending));
+    }
+
+    #[test]
+    fn legacy_dispatch_failure_is_drained_without_pending_row() {
+        let mut state = synthetic_state();
+        let temp_id = state
+            .begin_message_send("channel-synthetic-send", "Falha legada")
+            .unwrap();
+        mark_message_send_failed(
+            &temp_id,
+            "channel-synthetic-send",
+            "Falha legada",
+            "erro sintético",
+        );
+        let failures = state.take_failed_message_sends();
+        assert!(failures.iter().any(|(channel, content, error)| {
+            channel == "channel-synthetic-send"
+                && content == "Falha legada"
+                && error == "erro sintético"
+        }));
+        assert!(state.messages_by_channel["channel-synthetic-send"].is_empty());
+    }
+
+    #[test]
+    fn typing_refresh_is_scheduled_only_for_active_users() {
+        let mut state = synthetic_state();
+        assert!(state
+            .typing_refresh_delay("channel-synthetic-send")
+            .is_none());
+        state.record_typing("channel-synthetic-send", "user-other", Some("Other"));
+        assert!(state
+            .typing_refresh_delay("channel-synthetic-send")
+            .is_some());
+        let own_id = state.current_user.id.clone();
+        state.record_typing("channel-synthetic-send", &own_id, Some("Eu"));
+        assert_eq!(
+            state.get_active_typing_users("channel-synthetic-send"),
+            vec!["Other"]
+        );
     }
 }
