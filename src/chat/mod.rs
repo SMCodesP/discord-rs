@@ -8,6 +8,7 @@
 //! - `editor`: Bottom input textarea, active reply banner, rich buttons, typing indicator
 //! - `polls`: Native poll model, parsing, percentages, and GPUI card
 
+pub mod channel_guards;
 pub mod chat_view;
 pub mod editor;
 pub mod invite_card;
@@ -19,6 +20,7 @@ pub mod reactions;
 pub mod search;
 pub mod system_messages;
 
+pub use channel_guards::*;
 pub use chat_view::*;
 pub use editor::*;
 pub use invite_card::*;
