@@ -286,25 +286,60 @@ async fn run_remote_auth_loop(tx: &mpsc::UnboundedSender<RemoteAuthEvent>) -> Re
 async fn exchange_remote_auth_ticket(ticket: &str, private_key: &RsaPrivateKey) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .cookie_store(true)
         .user_agent(DISCORD_DESKTOP_USER_AGENT)
         .build()
         .context("Falha ao criar cliente HTTP para Remote Auth")?;
 
-    let resp = client
-        .post(REMOTE_AUTH_LOGIN_URL)
-        .header("Content-Type", "application/json")
-        .header("X-Super-Properties", build_super_properties_b64())
+    let super_props = build_super_properties_b64();
+
+    // Bootstrap Discord cookies (__dcfduid, __sdcfduid, _cfuvid) and X-Fingerprint
+    let fingerprint = match client
+        .get("https://discord.com/api/v9/experiments")
+        .header("X-Super-Properties", &super_props)
         .header("X-Discord-Locale", "pt-BR")
         .header("X-Discord-Timezone", "America/Sao_Paulo")
         .header("Origin", "https://discord.com")
         .header("Referer", "https://discord.com/login")
-        .json(&json!({ "ticket": ticket }))
+        .send()
+        .await
+    {
+        Ok(exp_resp) => exp_resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("fingerprint").and_then(|f| f.as_str()).map(|s| s.to_string())),
+        Err(_) => None,
+    };
+
+    let mut req = client
+        .post(REMOTE_AUTH_LOGIN_URL)
+        .header("Content-Type", "application/json")
+        .header("X-Super-Properties", &super_props)
+        .header("X-Discord-Locale", "pt-BR")
+        .header("X-Discord-Timezone", "America/Sao_Paulo")
+        .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+        .header("Origin", "https://discord.com")
+        .header("Referer", "https://discord.com/login")
+        .json(&json!({ "ticket": ticket }));
+
+    if let Some(ref fp) = fingerprint {
+        req = req.header("X-Fingerprint", fp);
+    }
+
+    let resp = req
         .send()
         .await
         .context("Falha ao trocar ticket de Remote Auth")?;
 
     if !resp.status().is_success() {
         let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        log::warn!(
+            "[RemoteAuth] POST /users/@me/remote-auth/login retornou HTTP {}: {}",
+            status.as_u16(),
+            err_body
+        );
         return Err(anyhow!(
             "Discord recusou a troca do ticket QR (HTTP {}). Tente gerar um novo QR Code.",
             status.as_u16()
