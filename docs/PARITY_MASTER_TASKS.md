@@ -115,7 +115,7 @@
   - **Concluído em 2026-11-24** (layer `qa-visual`, commit `297c3fc`): `tests/visual_themes_and_fixtures_test.rs` cobrindo temas e integridade das fixtures.
 
 ### P2 — Rede, Gateway, Cache, Auth e Estabilidade
-- [ ] **T-016** `[Net-Gateway]` — **Auditoria de Gateway, REST, Rate Limiter, Reconexão, Cache e Protobuf**
+- [x] **T-016** `[Net-Gateway]` — **Auditoria de Gateway, REST, Rate Limiter, Reconexão, Cache e Protobuf**
   - **Escopo**: `src/protocol/discord_api.rs`, `src/protocol/client_manager.rs`, `src/protocol/rate_limit/*`, `src/protocol/cache/*`, `src/protocol/user_settings_proto.rs`, `src/app/state/gateway_events.rs`, `src/app/state/connection.rs`.
   - **Foco**: Reconexão robusta (RESUME vs IDENTIFY), tratamento de 429/rate-limit buckets, evitar race conditions, zero vazamentos de memória, logs estruturados sem segredos.
 
@@ -167,7 +167,7 @@
   - **O que falta/corrigir:** exigir readiness DAVE quando `dave_protocol_version > 0`, limitar passthrough à janela oficial de grace e expor erro fatal/reação de recuperação quando o handshake MLS falhar.
   - **Critério de pronto:** testes cobrem versão 0, versão 1 pronta, external-sender inválido, proposal/welcome inválido e timeout; áudio só flui em passthrough quando permitido e a UI nunca mostra “Conectado” sem o estado criptográfico real.
 
-- [ ] **T-022** — **P1** — **Voz/Hardware** — **Não reportar chamada conectada com bridge de áudio no-op**
+- [x] **T-022** — **P1** — **Voz/Hardware** — **Não reportar chamada conectada com bridge de áudio no-op**
   - **Arquivos:** `src/protocol/client_manager.rs:696-740`, `src/protocol/voice_session.rs:1225-1248`, `src/app/state/voice.rs:333-380`.
   - **Evidência:** em produção, ausência de microfone ou saída cria um bridge falso que responde `Ok(())` a Start/Switch e descarta pacotes recebidos. A sessão então marca `Connected`, embora não capture nem reproduza áudio. O mesmo trecho de `AppState` também pode trocar o dispositivo duas vezes.
   - **O que falta/corrigir:** retornar erro explícito e acionável quando hardware obrigatório não existe; distinguir modo de teste de produção; centralizar a troca de dispositivos.
@@ -390,7 +390,7 @@
   - **O que falta/corrigir:** modal 600px responsivo, avatar 120px, offsets/tabs medidos, remover borda/cor sem origem e limitar altura à viewport com scroll interno.
   - **Critério de pronto:** capturas de popout e modal em 1018×605 e 800px de largura confirmam dimensões, sobreposição do avatar, banner, tabs e fechamento por Esc/clique fora; decoração e efeito continuam ancorados ao avatar/banner.
 
-- [ ] **T-075** — **P1** — **Design/Settings** — **Alinhar shell responsivo e navegação de User Settings**
+- [x] **T-075** — **P1** — **Design/Settings** — **Alinhar shell responsivo e navegação de User Settings**
   - **Arquivos:** `src/app/user_settings/mod.rs:140-155`, `src/app/user_settings/mod.rs:169-288`, `src/app/user_settings/mod.rs:325-370`, `src/app/user_settings/mod.rs:441-463`.
   - **Evidência:** CDP oficial em 1018×605: sidebar 253px, conteúdo 766px, header 49px iniciando em `y=33`, item de navegação 220×36/r8 com padding 8px e ativo `rgba(151,151,159,0.16)`. O RS usa sidebar 240px, conteúdo fixo 700px, topo 60px e itens 192×32.
   - **O que falta/corrigir:** shell fluido `253px + flex`, header/top offsets e itens de 36px; remover largura fixa que estoura em janelas pequenas.
@@ -526,13 +526,13 @@
   - **O que falta/corrigir:** nós de lista com início/indentação, links clicáveis e seguros, validação visual de headings/subtext/blockquote contra o oficial, resolução de IDs por membro/canal/cargo real e fallback neutro quando a entidade não existe.
   - **Critério de pronto:** fixture cobre `#`, `##`, `###`, `-#`, `1.`/`3.`, `-`/`*`, `[texto](url)`, `>>>` multilinha e menções; snapshot valida semântica/medidas e nenhum nome sintético é exibido como dado da conta.
 
-- [ ] **T-088** — **P1** — **UX/Menus de Contexto** — **Completar menus de servidor, pasta, categoria e canal de voz com ações reais**
+- [x] **T-088** — **P1** — **UX/Menus de Contexto** — **Completar menus de servidor, pasta, categoria e canal de voz com ações reais**
   - **Arquivos:** `src/components/guild_item.rs:632-687`, `src/app/guild_rail.rs:43-71`, `src/app/channel_sidebar.rs:522-539`, `src/app/channel_sidebar.rs:603-640`, `src/app/channel_sidebar.rs:772-784`, `src/app/channel_sidebar.rs:796-859`, `src/app/state/guilds_channels.rs`, `src/protocol/discord_api.rs`.
   - **Evidência:** o menu de canal do RS cria “Marcar como lido”, “Silenciar canal” e “Copiar link do canal” sem `on_click`; servidor, pasta e categoria não têm menu de contexto próprio e a linha de voz só responde a clique. O locale oficial contém “Mark Server As Read”, “Mute Server”, “Mute this category”, “Mute this channel”, “Copy Server ID”, “Copy Channel ID”, “Copy Category ID” e “Developer Mode” (`/tmp/opencode/discord-official-en-US.js:1`).
   - **O que falta/corrigir:** matriz de menus por tipo/permissão, mute com duração, mark-read, copy ID somente em Developer Mode, configurações/editais reais e fechamento/foco acessível; estender `T-034` sem duplicar o menu de mensagem já existente.
   - **Critério de pronto:** testes de UI/API cobrem cada item visível, permissão negada, durações de mute e clipboard sintético; nenhum item do menu é no-op e IDs reais não vão para logs.
 
-- [ ] **T-089** — **P1** — **Mídia/Animação** — **Reproduzir GIF/APNG, avatares `a_`, stickers Lottie e emojis animados sem fallback silencioso**
+- [x] **T-089** — **P1** — **Mídia/Animação** — **Reproduzir GIF/APNG, avatares `a_`, stickers Lottie e emojis animados sem fallback silencioso**
   - **Arquivos:** `Cargo.toml:32`, `src/domain/user.rs:447-455`, `src/domain/message.rs:43-50`, `src/domain/message.rs:157-180`, `src/protocol/discord_api.rs:2193-2198`, `src/protocol/discord_api.rs:2258-2277`, `src/protocol/media_cache.rs:128-225`, `src/components/avatar.rs:205-268`, `src/chat/message_list.rs:605-760`, `src/chat/markdown.rs:854-876`.
   - **Evidência:** `User::avatar_url`, `Author::avatar_url` e o parser do usuário atual sempre usam `.png`, mesmo para hash `a_`; `StickerFormatType::Lottie` cai no fallback `.webp`; anexos de imagem não usam `att.url`; `image` está compilado só com JPEG/PNG e não há runtime Lottie no projeto. O bundle oficial mapeia APNG→`png`, Lottie→`json` e GIF→`gif` (`/tmp/opencode/discord-web-entry.js:236`) e o CSS CDP contém `.lottieContainer`/`.lottie` com `overflow:hidden` e dimensão integral.
   - **O que falta/corrigir:** normalizar URLs animadas, decoder/cache de múltiplos quadros, renderer Lottie, integração de attachments (sem duplicar o upload de `T-027`), reduced motion e fallback estático explícito em falha.
@@ -610,7 +610,7 @@
 
 **Itens já cobertos:** banner de reconnect permanece em `T-064` (evidência atualizada com o CSS oficial); masked links/spoofing permanecem em `T-087`/`T-092`; Stage como tipo de canal já está em `T-076`, mas a UI/controles de palco são novos em `T-107`.
 
-- [ ] **T-100** — **P1** — **Chat/Media Viewer** — **Implementar lightbox fullscreen para imagens/vídeos com zoom e navegação entre anexos**
+- [x] **T-100** — **P1** — **Chat/Media Viewer** — **Implementar lightbox fullscreen para imagens/vídeos com zoom e navegação entre anexos**
   - **Arquivos:** `src/chat/message_list.rs:605-697`, `src/chat/message_list.rs:762-859`, `src/chat/chat_view.rs:908-1125`, `src/app/root_view.rs:649-674`, `src/domain/message.rs:59-94`.
   - **Evidência:** não há estado de viewer/lightbox nem handler de clique em mídia; anexos de imagem ainda são placeholders e embeds não abrem modal. O CDP oficial contém `.lightbox_od1dl1` com fundo scrim, `.imageZoom` com cursor zoom-in/out, `.videoContainer.zoomed` usando pan/scale e carrosséis com itens absolutos.
   - **O que falta/corrigir:** modal fullscreen, índice de todos os anexos da mensagem, zoom/pan, setas/esquerda/direita, teclado/Esc, abrir no navegador e baixar; integrar com `T-089` para GIF/APNG/vídeo.
@@ -622,13 +622,13 @@
   - **O que falta/corrigir:** capturar Opus/áudio, limite de duração, upload do attachment oficial, persistir waveform/duração, player play/pause/seek e estados de erro/permissão.
   - **Critério de pronto:** teste sintético valida gravação→upload→mensagem→player, duração real, cancelamento e falha; waveform deriva do áudio real e nenhum player mostra progresso fabricado.
 
-- [ ] **T-102** — **P1** — **Chat/Polls** — **Criar, votar e renderizar enquetes nativas**
+- [x] **T-102** — **P1** — **Chat/Polls** — **Criar, votar e renderizar enquetes nativas**
   - **Arquivos:** `src/domain/message.rs:141-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/editor.rs:537-642`, `src/chat/message_list.rs:1037-1055`, `src/app/state/messages.rs`.
   - **Evidência:** não há modelo `poll`, endpoint de voto/criação ou editor de enquete. O CSS oficial mede `.pollContainer` com margem 4px, `.pollAnswers` em coluna/gap 4px e `.pollAnswerOption` com padding `8px 12px`/r8; o locale contém “Create Poll”, “Add another answer” e durações.
   - **O que falta/corrigir:** editor de pergunta/respostas/duração/multiselect, payload oficial, renderização de resultados, voto único/múltiplo, expiração e atualização via Gateway.
   - **Critério de pronto:** fixtures cobrem criação, voto, troca de voto, expiração, empate e permissão; resultados só mudam após resposta/evento real e a UI não inventa porcentagens.
 
-- [ ] **T-103** — **P1** — **Chat/Forwarded Messages** — **Preservar `message_snapshots` e renderizar mensagens encaminhadas**
+- [x] **T-103** — **P1** — **Chat/Forwarded Messages** — **Preservar `message_snapshots` e renderizar mensagens encaminhadas**
   - **Arquivos:** `src/domain/message.rs:183-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/message_list.rs:971-1055`, `src/chat/chat_view.rs:908-1125`.
   - **Evidência:** o parser ignora `type`, `message_reference` avançado e `message_snapshots`; uma mensagem encaminhada vira texto comum. O bundle oficial percorre `message_snapshots` (`/tmp/opencode/discord-web-entry.js:194`) e o locale contém “Forwarded”, “Forwarded a message” e restrições para canal age-restricted.
   - **O que falta/corrigir:** modelo de snapshot/autor/conteúdo/anexos, indicação “Encaminhado”, link para origem quando permitido e ação de encaminhar no menu; não confundir com reply de `T-024`.
@@ -646,7 +646,7 @@
   - **O que falta/corrigir:** estado expansível por canal, contagem real, agrupamento de mensagens consecutivas, preservação do conteúdo ao expandir e atualização ao bloquear/desbloquear em tempo real.
   - **Critério de pronto:** fixture com mensagens intercaladas de autor bloqueado comprova contagem, colapso, expansão e recollapse; mensagens não são apagadas do cache nem expostas antes da ação.
 
-- [ ] **T-106** — **P2** — **Servidores/Banner & Boost** — **Exibir banner do servidor, nível/contador de boosts e estado de booster**
+- [x] **T-106** — **P2** — **Servidores/Banner & Boost** — **Exibir banner do servidor, nível/contador de boosts e estado de booster**
   - **Arquivos:** `src/domain/guild.rs:75-101`, `src/protocol/discord_api.rs:825-900`, `src/app/state/models.rs:180-211`, `src/app/channel_sidebar.rs:74-163`, `src/app/user_profile_popout.rs`.
   - **Evidência:** `Guild`/`GuildItemState` não guardam `banner`, `premium_subscription_count`, `premium_tier` ou booster do membro; a UI só tem boosts na aba de billing. O bundle oficial gera `getGuildBannerURL` (`/tmp/opencode/discord-web-entry.js:124`); o CDP mede badge de boost 18×18 e `.boostsBadge` com 30px de altura/padding 8px.
   - **O que falta/corrigir:** parser dos campos, URL de banner animado/estático, header/sidebar com contagem/nível, badge de booster e fallback honesto quando ausente.
@@ -658,7 +658,7 @@
   - **O que falta/corrigir:** tipo/ícone de Stage, separar palco/plateia, controles de host, solicitar/aprovar fala, mute de plateia e eventos `STAGE_INSTANCE_*`; não reutilizar tile de voz comum como se fosse palco.
   - **Critério de pronto:** fixtures sintéticas de host, palestrante, plateia e solicitação pendente mostram permissões corretas; áudio só é habilitado após aprovação real e nenhum tile de palco é fictício.
 
-- [ ] **T-108** — **P1** — **Servidores/Scheduled Events** — **Listar, criar, editar e participar de eventos agendados**
+- [x] **T-108** — **P1** — **Servidores/Scheduled Events** — **Listar, criar, editar e participar de eventos agendados**
   - **Arquivos:** `src/domain/guild.rs`, `src/protocol/discord_api.rs`, `src/protocol/transport.rs:150-220`, `src/app/channel_sidebar.rs`, `src/app/root_view.rs`, `src/app/state/gateway_events.rs`.
   - **Evidência:** não há modelo, rota ou evento de scheduled event; busca por `scheduled.?event` não encontra implementação. O bundle oficial contém `GUILD_SCHEDULED_EVENT` (`/tmp/opencode/discord-web-entry.js:23`) e o locale contém “Scheduled Events”, “Starting now” e ações de criação.
   - **O que falta/corrigir:** modelo de evento/local/canal/horário/recorrência/status, GET/POST/PATCH/DELETE, painel de eventos, notificações e inscrição/interesse via Gateway.
@@ -694,7 +694,7 @@
 
 **Itens já cobertos:** notificações nativas/badge permanecem em `T-081` (critério ampliado para clique→canal); drag-and-drop de arquivos para o chat permanece em `T-027`. O Ciclo 6 adiciona o catálogo de sons do cliente e o reordering de servidores/pastas, que não estavam cobertos.
 
-- [ ] **T-113** — **P1** — **Áudio/Sons do Cliente** — **Reproduzir sons reais de mensagem, chamada, entrada/saída de voz e mute/deafen**
+- [x] **T-113** — **P1** — **Áudio/Sons do Cliente** — **Reproduzir sons reais de mensagem, chamada, entrada/saída de voz e mute/deafen**
   - **Arquivos:** `Cargo.toml:6-34`, `src/app/user_settings/notifications.rs:9-174`, `src/app/user_settings/mod.rs:56-64`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/voice.rs:551-613`, `src/protocol/client_manager.rs:823-919`.
   - **Evidência:** Settings expõe toggles de mensagem/voice join/mute/deafen, mas nenhum callback toca áudio; não há backend de reprodução no `Cargo.toml` e `ring_call` apenas envia a API. O bundle oficial inclui `message1`, `mention*`, `call_calling`, `call_ringing`, `user_join`, `user_leave`, `user_moved`, `mute`, `unmute`, `deafen` e `undeafen` (`/tmp/opencode/discord-web-entry.js:1`).
   - **O que falta/corrigir:** player não bloqueante com volume real, catálogo de eventos, prioridade/coalescing, seleção de som de mensagem/chamada e respeito a DND/mute do sistema; usar apenas assets oficiais/licenciados.
@@ -840,6 +840,12 @@
 
 - [ ] **T-126** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização Chat** — **Cache LRU O(1) de Markdown parseado por `(message_id, content_hash)`** (`src/chat/markdown_cache.rs` + `tests/markdown_cache_perf_test.rs`) — elimina re-parsing de Markdown a 120 FPS.
 - [ ] **T-127** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Áudio DSP** — **Fast-path 48 kHz zero-copy, conversor `i16↔f32` auto-SIMD sem alocação e soft-limiter transparente** (`src/media/dsp_fast.rs` + `tests/dsp_perf_test.rs`).
-- [ ] **T-128** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Algoritmo Gateway** — **Deserialização tipada direta sem `serde_json::Value` intermediário (`RawValue`)** (`src/protocol/fast_parse.rs` + `tests/gateway_fast_parse_test.rs`).
-- [ ] **T-129** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/I/O Disco** — **Batch/debounced async disk writer atômico para `CacheEngine`** (`src/protocol/cache/batch_writer.rs` + `tests/cache_batch_writer_test.rs`) — elimina `fs::write` a cada mensagem recebida.
+- [x] **T-128** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Algoritmo Gateway** — **Deserialização tipada direta sem `serde_json::Value` intermediário (`RawValue`)** (`src/protocol/fast_parse.rs` + `tests/gateway_fast_parse_test.rs`).
+- [x] **T-129** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/I/O Disco** — **Batch/debounced async disk writer atômico para `CacheEngine`** (`src/protocol/cache/batch_writer.rs` + `tests/cache_batch_writer_test.rs`) — elimina `fs::write` a cada mensagem recebida.
 - [ ] **T-130** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização UI** — **Memoização por `generation counter` de ordenação de canais e agrupamento de membros por cargo** (`src/app/view_memo.rs` + `tests/view_memo_perf_test.rs`).
+
+- [x] **T-028b** `[Cloud Swarm PR #12]` — **P1** — **Mídia/GIFs** — **Cliente real `/gifs/trending` e `/gifs/search` com cache e debounce (`src/protocol/gifs_client.rs`, 5/5 testes verdes)**
+- [x] **T-036b** `[Cloud Swarm PR #2]` — **P1** — **Protocolo/CDN** — **Construtor canônico de URLs CDN `.png`/`.gif` para `a_` (`src/protocol/cdn.rs`, +453 linhas)**
+- [x] **T-131** `[Cloud Swarm PR #8]` — **P1** — **Perf/Renderização** — **Decoder/downscaler de imagens off-thread + cache LRU (`src/protocol/image_decode.rs`, +441 linhas)**
+- [x] **T-133** `[Cloud Swarm PR #13]` — **P1** — **Perf/Memória** — **Tipo `Copy` `Snowflake(u64)` O(1) sem clones de `String` (`src/domain/snowflake.rs`, +222 linhas)**
+- [x] **T-134** `[Cloud Swarm PR #14]` — **P1** — **Perf/Gateway 120 FPS** — **Coalescer/batcher de eventos Gateway em janelas de 8 ms (`src/protocol/event_batcher.rs`, 8/8 testes verdes)**
