@@ -90,8 +90,8 @@ jobs:
               export XDG_CONFIG_HOME="/tmp/swarm-xdg-${i}"
               mkdir -p "$XDG_CONFIG_HOME/opencode"
               printf '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.json"
-              echo "=== [$TID] Starting opencode ($MODEL) in $WT ==="
-              opencode run -m "$MODEL" "Voce esta em uma VM Linux headless do GitHub Actions SEM navegador/Chrome. NAO tente ler ~/.config ou abrir Chrome; use apenas os arquivos do repositorio atual. $PROMPT"
+              echo "=== [$TID] Starting opencode ($MODEL) in $WT (max 15m) ==="
+              timeout 900 opencode run -m "$MODEL" "Voce esta em uma VM Linux headless do GitHub Actions SEM navegador/Chrome. NAO tente ler ~/.config ou abrir Chrome; use apenas os arquivos do repositorio atual. $PROMPT"
             ) > "/tmp/swarm-logs/${i}.log" 2>&1 &
             PIDS+=($!)
           done
