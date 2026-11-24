@@ -35,13 +35,13 @@ impl BatchKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PendingEvent {
     event: TransportEvent,
     deadline: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EventBatcher {
     window: Duration,
     pending: HashMap<BatchKey, PendingEvent>,

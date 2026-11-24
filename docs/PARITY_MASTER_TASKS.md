@@ -206,7 +206,7 @@
   - **O que falta/corrigir:** file picker, drag-and-drop e paste de imagem; preview/remover; upload multipart oficial; renderizar imagem/GIF/vídeo e card de arquivo com abrir/baixar/copiar link; respeitar limites reais da conta.
   - **Critério de pronto:** teste sintético de multipart valida campos/headers; UI exibe mídia recebida e arquivo; falha de upload preserva o anexo local e não insere mensagem confirmada.
 
-- [ ] **T-028** — **P1** — **Mídia/GIFs** — **Conectar o picker de GIFs à API real**
+- [x] **T-028** — **P1** — **Mídia/GIFs** — **Conectar o picker de GIFs à API real** *(PR #27: `gifs_client.rs` conectado ao `chat_view.rs` e `media_picker.rs`)*
   - **Arquivos:** `src/chat/chat_view.rs:804-822`, `src/chat/chat_view.rs:849-856`, `src/chat/media_picker.rs:1823-1875`, `src/protocol/media_cache.rs:1057-1075`, `src/protocol/discord_api.rs:457-539`.
   - **Evidência:** `MediaPickerConfig.gifs` recebe `get_curated_tenor_gifs_for_category`, que retorna `Vec::new()`. O callback de busca só altera uma string. Os métodos `get_trending_gifs`/`search_gifs` existem, mas não são chamados pela UI; portanto a aba sempre mostra “Nenhum GIF disponível”.
   - **O que falta/corrigir:** estado assíncrono de loading/erro/vazio, debounce, cache por query/categoria, chamada real de trending/search, preview animado e envio do URL confirmado.
@@ -852,3 +852,9 @@
 - [x] **T-131** `[Cloud Swarm PR #8]` — **P1** — **Perf/Renderização** — **Decoder/downscaler de imagens off-thread + cache LRU (`src/protocol/image_decode.rs`, +441 linhas)**
 - [x] **T-133** `[Cloud Swarm PR #13]` — **P1** — **Perf/Memória** — **Tipo `Copy` `Snowflake(u64)` O(1) sem clones de `String` (`src/domain/snowflake.rs`, +222 linhas)**
 - [x] **T-134** `[Cloud Swarm PR #14]` — **P1** — **Perf/Gateway 120 FPS** — **Coalescer/batcher de eventos Gateway em janelas de 8 ms (`src/protocol/event_batcher.rs`, 8/8 testes verdes)**
+- [x] **T-136** `[Cloud Swarm PR #25]` — **P1** — **Perf/Renderização Chat** — **Virtualização O(1)/O(log N) da viewport de mensagens com Fenwick tree e preservação de âncora (`src/chat/virtual_window.rs`, `virtual_window_perf_test` 12/12 verdes)**
+- [x] **T-137** `[Cloud Swarm PR #26]` — **P1** — **UI/Status Picker** — **Popout de Status do Usuário e editor de Custom Status com expiração (`src/components/status_picker.rs`)**
+- [x] **T-134w** `[Cloud Swarm PR #28]` — **P1** — **Perf/Gateway 120 FPS** — **`EventBatcher` conectado ao `root_view.rs` e `gateway_events.rs` para coalescer bursts de `cx.notify()`**
+- [x] **T-138** `[Cloud Swarm PR #29]` — **P1** — **Voz/Áudio** — **Volume individual por usuário (0%–200%) + mute local persistido (`src/media/user_volumes.rs`)**
+- [x] **T-135** `[Cloud Swarm PR #30]` — **P1** — **Perf/Vídeo 60 FPS** — **Ring buffer lock-free de frames de vídeo com drop de frames obsoletos (`src/capture/frame_ring.rs`)**
+- [x] **T-139** `[Cloud Swarm PR #31]` — **P1** — **Domínio/Admin** — **Modelo de administração de servidor: cargos, bans, timeouts, convites e Audit Log (`src/domain/guild_admin.rs`)**

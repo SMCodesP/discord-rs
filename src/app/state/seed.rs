@@ -610,6 +610,7 @@ impl AppState {
         let messages_by_channel = generate_seed_messages();
 
         let mut state = Self {
+            event_batcher: crate::protocol::EventBatcher::new(),
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
