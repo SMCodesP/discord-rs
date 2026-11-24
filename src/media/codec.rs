@@ -9,6 +9,38 @@ pub const SAMPLES_PER_CHANNEL: usize = (OPUS_SAMPLE_RATE * FRAME_DURATION_MS / 1
 pub const STEREO_FRAME_SAMPLES: usize = SAMPLES_PER_CHANNEL * OPUS_CHANNELS;
 pub const MAX_OPUS_PACKET_SIZE: usize = 1275;
 
+/// Validates the Discord Opus transport contract without mutating decoder state.
+pub fn validate_opus_packet(packet: &[u8]) -> Result<(), AudioError> {
+    if packet.is_empty() {
+        return Err(AudioError::OpusDecodeError("Empty Opus packet".to_string()));
+    }
+    if packet.len() > MAX_OPUS_PACKET_SIZE {
+        return Err(AudioError::OpusDecodeError(format!(
+            "Opus packet exceeds {MAX_OPUS_PACKET_SIZE} bytes: {}",
+            packet.len()
+        )));
+    }
+
+    let samples = opus::packet::get_nb_samples(packet, OPUS_SAMPLE_RATE)
+        .map_err(|err| AudioError::OpusDecodeError(format!("Invalid Opus packet: {err:?}")))?;
+    if samples != SAMPLES_PER_CHANNEL {
+        return Err(AudioError::InvalidFrameSize {
+            expected: STEREO_FRAME_SAMPLES,
+            actual: samples * OPUS_CHANNELS,
+        });
+    }
+
+    let channels = opus::packet::get_nb_channels(packet)
+        .map_err(|err| AudioError::OpusDecodeError(format!("Invalid Opus channels: {err:?}")))?;
+    if channels != Channels::Stereo {
+        return Err(AudioError::OpusDecodeError(format!(
+            "Discord voice requires stereo Opus, got {channels:?}"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Opus audio encoder configured for Discord's 48 kHz stereo VoIP transport.
 pub struct OpusAudioEncoder {
     encoder: Encoder,
@@ -64,6 +96,7 @@ impl OpusAudioDecoder {
 
     /// Decodes a packet into exactly 20 ms of interleaved stereo f32 samples.
     pub fn decode_frame(&mut self, opus_packet: &[u8]) -> Result<Vec<f32>, AudioError> {
+        validate_opus_packet(opus_packet)?;
         let mut out = vec![0.0f32; STEREO_FRAME_SAMPLES];
         let samples_per_channel = self
             .decoder
@@ -163,6 +196,65 @@ mod tests {
             rms(concealed.iter()) > 0.01,
             "PLC should continue the previous signal"
         );
+    }
+
+    #[test]
+    fn normal_plc_normal_returns_complete_finite_frames() {
+        let mut encoder = OpusAudioEncoder::new().unwrap();
+        let mut decoder = OpusAudioDecoder::new().unwrap();
+        let packet = encoder.encode_frame(&sine_frame(440.0, 0.5)).unwrap();
+        for decoded in [
+            decoder.decode_frame(&packet).unwrap(),
+            decoder.decode_loss().unwrap(),
+            decoder.decode_frame(&packet).unwrap(),
+        ] {
+            assert_eq!(decoded.len(), STEREO_FRAME_SAMPLES);
+            assert!(decoded.iter().all(|sample| sample.is_finite()));
+        }
+    }
+
+    #[test]
+    fn packet_validation_rejects_wrong_duration_and_channels_without_decoder_state() {
+        let mut encoder = OpusAudioEncoder::new().unwrap();
+        let mut decoder = OpusAudioDecoder::new().unwrap();
+        let valid = encoder.encode_frame(&sine_frame(440.0, 0.5)).unwrap();
+        decoder.decode_frame(&valid).unwrap();
+
+        let mut raw =
+            opus::Encoder::new(OPUS_SAMPLE_RATE, Channels::Stereo, Application::Voip).unwrap();
+        let mut short_packet = vec![0u8; MAX_OPUS_PACKET_SIZE];
+        let short_len = raw
+            .encode_float(&vec![0.0; SAMPLES_PER_CHANNEL], &mut short_packet)
+            .unwrap();
+        short_packet.truncate(short_len);
+        assert!(matches!(
+            validate_opus_packet(&short_packet),
+            Err(AudioError::InvalidFrameSize {
+                expected: STEREO_FRAME_SAMPLES,
+                actual: SAMPLES_PER_CHANNEL
+            })
+        ));
+
+        let mut raw_mono =
+            opus::Encoder::new(OPUS_SAMPLE_RATE, Channels::Mono, Application::Voip).unwrap();
+        let mut mono_packet = vec![0u8; MAX_OPUS_PACKET_SIZE];
+        let mono_len = raw_mono
+            .encode_float(&vec![0.0; SAMPLES_PER_CHANNEL], &mut mono_packet)
+            .unwrap();
+        mono_packet.truncate(mono_len);
+        assert!(matches!(
+            validate_opus_packet(&mono_packet),
+            Err(AudioError::OpusDecodeError(_))
+        ));
+
+        assert!(matches!(
+            validate_opus_packet(&vec![0u8; MAX_OPUS_PACKET_SIZE + 1]),
+            Err(AudioError::OpusDecodeError(_))
+        ));
+        assert!(validate_opus_packet(&valid).is_ok());
+        let plc = decoder.decode_loss().unwrap();
+        assert_eq!(plc.len(), STEREO_FRAME_SAMPLES);
+        assert!(rms(plc.iter()) > 0.01);
     }
 
     #[test]

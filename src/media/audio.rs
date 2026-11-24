@@ -8,9 +8,11 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 
 use crate::media::AudioError;
 use crate::media::capture::{CaptureProcessor, SpeakingEvent};
-use crate::media::codec::{FRAME_DURATION_MS, OPUS_CHANNELS, OPUS_SAMPLE_RATE};
+use crate::media::codec::{
+    FRAME_DURATION_MS, OPUS_CHANNELS, OPUS_SAMPLE_RATE, STEREO_FRAME_SAMPLES,
+};
 use crate::media::devices::MediaDeviceManager;
-use crate::media::mixer::AudioMixer;
+use crate::media::mixer::{AudioMixer, soft_clip};
 use crate::media::resample::{
     LinearResampler, convert_stereo_to_channels, f32_to_i16, f32_to_u16, i16_to_f32, u16_to_f32,
 };
@@ -19,6 +21,8 @@ const CAPTURE_RING_MS: usize = 500;
 const PLAYBACK_RING_MS: usize = 250;
 const PLAYBACK_PREBUFFER_FRAMES: usize = 3;
 const CAPTURE_WORKER_POLL: Duration = Duration::from_millis(2);
+const CALLBACK_SCRATCH_SAMPLES: usize = 4096;
+const MAX_AUDIO_GAIN: f32 = 2.0;
 
 /// Core audio engine that implements real hardware capture/playback via `cpal`,
 /// 48 kHz stereo VoIP encoding/decoding via Opus, multi-participant mixing,
@@ -35,6 +39,8 @@ pub struct AudioEngine {
     is_muted: Arc<AtomicBool>,
     is_deafened: Arc<AtomicBool>,
     audio_level_bits: Arc<AtomicU32>,
+    input_gain_bits: Arc<AtomicU32>,
+    output_gain_bits: Arc<AtomicU32>,
     is_speaking: Arc<AtomicBool>,
     vad_threshold_bits: Arc<AtomicU32>,
 
@@ -68,6 +74,8 @@ impl AudioEngine {
             is_muted: Arc::new(AtomicBool::new(false)),
             is_deafened: Arc::new(AtomicBool::new(false)),
             audio_level_bits: Arc::new(AtomicU32::new(0f32.to_bits())),
+            input_gain_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            output_gain_bits: Arc::new(AtomicU32::new(1.0f32.to_bits())),
             is_speaking: Arc::new(AtomicBool::new(false)),
             vad_threshold_bits: Arc::new(AtomicU32::new(0.01f32.to_bits())),
             input_stream: None,
@@ -107,12 +115,18 @@ impl AudioEngine {
 
     /// Transport contract method: receives an Opus frame (`&[u8]`) identified by participant SSRC (`u32`).
     /// Decoding happens on the audio-engine thread, never on a cpal callback.
-    pub fn receive_opus_packet(&self, ssrc: u32, opus_data: &[u8]) -> Result<(), AudioError> {
+    pub fn receive_opus_packet(
+        &self,
+        ssrc: u32,
+        sequence: u16,
+        timestamp: u32,
+        opus_data: &[u8],
+    ) -> Result<(), AudioError> {
         let mut mixer = self
             .mixer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        mixer.feed_opus_packet(ssrc, opus_data)
+        mixer.feed_opus_packet(ssrc, sequence, timestamp, opus_data)
     }
 
     /// Returns whether the user is locally muted.
@@ -143,6 +157,41 @@ impl AudioEngine {
     /// Returns current real microphone audio level (RMS, 0.0 to 1.0).
     pub fn audio_level(&self) -> f32 {
         f32::from_bits(self.audio_level_bits.load(Ordering::Relaxed))
+    }
+
+    /// Shared real RMS handle for UI/meter polling without fabricating a value.
+    pub fn audio_level_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.audio_level_bits)
+    }
+
+    pub fn input_gain_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.input_gain_bits)
+    }
+
+    pub fn output_gain_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.output_gain_bits)
+    }
+
+    /// Sets microphone gain in the inclusive range 0.0..=2.0.
+    /// Non-finite values reset to unity; the capture limiter remains active.
+    pub fn set_input_gain(&self, gain: f32) {
+        self.input_gain_bits
+            .store(normalize_gain(gain).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn input_gain(&self) -> f32 {
+        f32::from_bits(self.input_gain_bits.load(Ordering::Relaxed))
+    }
+
+    /// Sets remote playback gain in the inclusive range 0.0..=2.0.
+    /// Non-finite values reset to unity; the output limiter remains active.
+    pub fn set_output_gain(&self, gain: f32) {
+        self.output_gain_bits
+            .store(normalize_gain(gain).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn output_gain(&self) -> f32 {
+        f32::from_bits(self.output_gain_bits.load(Ordering::Relaxed))
     }
 
     /// Returns true if local voice activity is detected.
@@ -202,6 +251,7 @@ impl AudioEngine {
                 .expect("capture processor must be present"),
             Arc::clone(&input.ring),
             Arc::clone(&input.stop),
+            input.channels,
         ) {
             Ok(worker) => worker,
             Err(err) => {
@@ -274,6 +324,7 @@ impl AudioEngine {
                     .expect("capture processor must be present"),
                 Arc::clone(&input.ring),
                 Arc::clone(&input.stop),
+                input.channels,
             )
             .map_err(|err| {
                 AudioError::StreamError(format!("Failed to start capture worker: {err}"))
@@ -368,6 +419,7 @@ impl AudioEngine {
             Some(self.speaking_tx.clone()),
             Arc::clone(&self.is_muted),
             Arc::clone(&self.audio_level_bits),
+            Arc::clone(&self.input_gain_bits),
             Arc::clone(&self.is_speaking),
             Arc::clone(&self.vad_threshold_bits),
         )?;
@@ -398,14 +450,18 @@ impl AudioEngine {
             }
             SampleFormat::I16 => {
                 let callback_ring = Arc::clone(&ring);
-                let mut scratch = Vec::new();
+                let callback_chunk_samples = aligned_scratch_samples(device_channels);
+                let mut scratch = [0.0f32; CALLBACK_SCRATCH_SAMPLES];
                 device
                     .build_input_stream(
                         &stream_config,
                         move |data: &[i16], _| {
-                            scratch.clear();
-                            scratch.extend(data.iter().copied().map(i16_to_f32));
-                            callback_ring.push(&scratch);
+                            push_i16_input(
+                                &callback_ring,
+                                data,
+                                &mut scratch,
+                                callback_chunk_samples,
+                            );
                         },
                         err_fn,
                         None,
@@ -418,14 +474,18 @@ impl AudioEngine {
             }
             SampleFormat::U16 => {
                 let callback_ring = Arc::clone(&ring);
-                let mut scratch = Vec::new();
+                let callback_chunk_samples = aligned_scratch_samples(device_channels);
+                let mut scratch = [0.0f32; CALLBACK_SCRATCH_SAMPLES];
                 device
                     .build_input_stream(
                         &stream_config,
                         move |data: &[u16], _| {
-                            scratch.clear();
-                            scratch.extend(data.iter().copied().map(u16_to_f32));
-                            callback_ring.push(&scratch);
+                            push_u16_input(
+                                &callback_ring,
+                                data,
+                                &mut scratch,
+                                callback_chunk_samples,
+                            );
                         },
                         err_fn,
                         None,
@@ -453,6 +513,7 @@ impl AudioEngine {
             processor: Some(processor),
             ring,
             stop,
+            channels: device_channels,
         })
     }
 
@@ -511,16 +572,19 @@ impl AudioEngine {
             SampleFormat::I16 => {
                 let callback_ring = Arc::clone(&ring);
                 let callback_deafened = Arc::clone(&is_deafened);
-                let mut scratch = Vec::new();
+                let callback_chunk_samples = aligned_scratch_samples(device_channels);
+                let mut scratch = [0.0f32; CALLBACK_SCRATCH_SAMPLES];
                 device
                     .build_output_stream(
                         &stream_config,
                         move |data: &mut [i16], _| {
-                            scratch.resize(data.len(), 0.0);
-                            fill_f32_output(&mut scratch, &callback_ring, &callback_deafened);
-                            for (dest, src) in data.iter_mut().zip(scratch.iter()) {
-                                *dest = f32_to_i16(*src);
-                            }
+                            fill_i16_output(
+                                data,
+                                &callback_ring,
+                                &callback_deafened,
+                                &mut scratch,
+                                callback_chunk_samples,
+                            );
                         },
                         err_fn,
                         None,
@@ -534,16 +598,19 @@ impl AudioEngine {
             SampleFormat::U16 => {
                 let callback_ring = Arc::clone(&ring);
                 let callback_deafened = Arc::clone(&is_deafened);
-                let mut scratch = Vec::new();
+                let callback_chunk_samples = aligned_scratch_samples(device_channels);
+                let mut scratch = [0.0f32; CALLBACK_SCRATCH_SAMPLES];
                 device
                     .build_output_stream(
                         &stream_config,
                         move |data: &mut [u16], _| {
-                            scratch.resize(data.len(), 0.0);
-                            fill_f32_output(&mut scratch, &callback_ring, &callback_deafened);
-                            for (dest, src) in data.iter_mut().zip(scratch.iter()) {
-                                *dest = f32_to_u16(*src);
-                            }
+                            fill_u16_output(
+                                data,
+                                &callback_ring,
+                                &callback_deafened,
+                                &mut scratch,
+                                callback_chunk_samples,
+                            );
                         },
                         err_fn,
                         None,
@@ -564,6 +631,7 @@ impl AudioEngine {
         let mut worker = spawn_playback_worker(
             Arc::clone(&self.mixer),
             is_deafened,
+            Arc::clone(&self.output_gain_bits),
             device_rate,
             device_channels,
             Arc::clone(&ring),
@@ -611,6 +679,7 @@ struct InputStreamResources {
     processor: Option<CaptureProcessor>,
     ring: Arc<AudioSampleRing>,
     stop: Arc<AtomicBool>,
+    channels: usize,
 }
 
 struct OutputStreamResources {
@@ -644,11 +713,13 @@ fn spawn_capture_worker(
     mut processor: CaptureProcessor,
     ring: Arc<AudioSampleRing>,
     stop: Arc<AtomicBool>,
+    device_channels: usize,
 ) -> Result<JoinHandle<()>, std::io::Error> {
     thread::Builder::new()
         .name("discord-audio-capture".into())
         .spawn(move || {
-            let mut scratch = vec![0.0f32; ring.capacity().min(4096)];
+            let scratch_len = aligned_scratch_samples(device_channels);
+            let mut scratch = vec![0.0f32; scratch_len];
             while !stop.load(Ordering::Acquire) {
                 let count = ring.pop(&mut scratch);
                 if count == 0 {
@@ -665,6 +736,7 @@ fn spawn_capture_worker(
 struct PlaybackRenderer {
     mixer: Arc<Mutex<AudioMixer>>,
     is_deafened: Arc<AtomicBool>,
+    output_gain: Arc<AtomicU32>,
     resampler: LinearResampler,
     output_channels: usize,
     ring: Arc<AudioSampleRing>,
@@ -674,6 +746,7 @@ impl PlaybackRenderer {
     fn new(
         mixer: Arc<Mutex<AudioMixer>>,
         is_deafened: Arc<AtomicBool>,
+        output_gain: Arc<AtomicU32>,
         device_rate: u32,
         output_channels: usize,
         ring: Arc<AudioSampleRing>,
@@ -681,6 +754,7 @@ impl PlaybackRenderer {
         Self {
             mixer,
             is_deafened,
+            output_gain,
             resampler: LinearResampler::new(OPUS_SAMPLE_RATE, device_rate, OPUS_CHANNELS),
             output_channels,
             ring,
@@ -696,6 +770,19 @@ impl PlaybackRenderer {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             mixer.pull_mixed_frame(deafened)
         };
+        self.render_pcm(mixed);
+    }
+
+    fn render_pcm(&mut self, mut mixed: Vec<f32>) {
+        let gain = f32::from_bits(self.output_gain.load(Ordering::Relaxed));
+        let gain = if gain.is_finite() {
+            gain.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        for sample in &mut mixed {
+            *sample = soft_clip(*sample * gain);
+        }
         let resampled = self.resampler.resample(&mixed);
         let converted = convert_stereo_to_channels(&resampled, self.output_channels);
 
@@ -709,8 +796,9 @@ impl PlaybackRenderer {
     }
 
     fn prebuffer(&mut self) {
+        // Prebuffer device silence without consuming logical RTP playout slots.
         for _ in 0..PLAYBACK_PREBUFFER_FRAMES {
-            self.render_frame();
+            self.render_pcm(vec![0.0; STEREO_FRAME_SAMPLES]);
         }
     }
 }
@@ -718,14 +806,21 @@ impl PlaybackRenderer {
 fn spawn_playback_worker(
     mixer: Arc<Mutex<AudioMixer>>,
     is_deafened: Arc<AtomicBool>,
+    output_gain: Arc<AtomicU32>,
     device_rate: u32,
     output_channels: usize,
     ring: Arc<AudioSampleRing>,
 ) -> Result<PlaybackWorker, AudioError> {
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
-    let mut renderer =
-        PlaybackRenderer::new(mixer, is_deafened, device_rate, output_channels, ring);
+    let mut renderer = PlaybackRenderer::new(
+        mixer,
+        is_deafened,
+        output_gain,
+        device_rate,
+        output_channels,
+        ring,
+    );
     renderer.prebuffer();
 
     let thread = thread::Builder::new()
@@ -758,11 +853,19 @@ fn spawn_playback_worker(
     })
 }
 
+fn normalize_gain(gain: f32) -> f32 {
+    if gain.is_finite() {
+        gain.clamp(0.0, MAX_AUDIO_GAIN)
+    } else {
+        1.0
+    }
+}
+
 fn validate_stream_config(sample_rate: u32, channels: u16) -> Result<(), AudioError> {
     if sample_rate == 0 {
         return Err(AudioError::InvalidSampleRate(sample_rate));
     }
-    if channels == 0 {
+    if channels == 0 || channels as usize > CALLBACK_SCRATCH_SAMPLES {
         return Err(AudioError::InvalidChannels(channels));
     }
     Ok(())
@@ -782,6 +885,71 @@ fn fill_f32_output(output: &mut [f32], ring: &AudioSampleRing, is_deafened: &Ato
 
     let count = ring.pop(output);
     output[count..].fill(0.0);
+}
+
+fn aligned_scratch_samples(device_channels: usize) -> usize {
+    let channels = device_channels.max(1);
+    (CALLBACK_SCRATCH_SAMPLES / channels).max(1) * channels
+}
+
+fn push_i16_input(
+    ring: &AudioSampleRing,
+    data: &[i16],
+    scratch: &mut [f32; CALLBACK_SCRATCH_SAMPLES],
+    chunk_samples: usize,
+) {
+    for chunk in data.chunks(chunk_samples) {
+        for (destination, &source) in scratch.iter_mut().zip(chunk) {
+            *destination = i16_to_f32(source);
+        }
+        ring.push(&scratch[..chunk.len()]);
+    }
+}
+
+fn push_u16_input(
+    ring: &AudioSampleRing,
+    data: &[u16],
+    scratch: &mut [f32; CALLBACK_SCRATCH_SAMPLES],
+    chunk_samples: usize,
+) {
+    for chunk in data.chunks(chunk_samples) {
+        for (destination, &source) in scratch.iter_mut().zip(chunk) {
+            *destination = u16_to_f32(source);
+        }
+        ring.push(&scratch[..chunk.len()]);
+    }
+}
+
+fn fill_i16_output(
+    output: &mut [i16],
+    ring: &AudioSampleRing,
+    is_deafened: &AtomicBool,
+    scratch: &mut [f32; CALLBACK_SCRATCH_SAMPLES],
+    chunk_samples: usize,
+) {
+    for chunk in output.chunks_mut(chunk_samples) {
+        let len = chunk.len();
+        fill_f32_output(&mut scratch[..len], ring, is_deafened);
+        for (destination, &source) in chunk.iter_mut().zip(&scratch[..len]) {
+            *destination = f32_to_i16(source);
+        }
+    }
+}
+
+fn fill_u16_output(
+    output: &mut [u16],
+    ring: &AudioSampleRing,
+    is_deafened: &AtomicBool,
+    scratch: &mut [f32; CALLBACK_SCRATCH_SAMPLES],
+    chunk_samples: usize,
+) {
+    for chunk in output.chunks_mut(chunk_samples) {
+        let len = chunk.len();
+        fill_f32_output(&mut scratch[..len], ring, is_deafened);
+        for (destination, &source) in chunk.iter_mut().zip(&scratch[..len]) {
+            *destination = f32_to_u16(source);
+        }
+    }
 }
 
 /// Single-producer/single-consumer sample ring used to cross the cpal callback boundary.
@@ -855,7 +1023,50 @@ impl AudioSampleRing {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::codec::{OpusAudioEncoder, STEREO_FRAME_SAMPLES};
+    use crate::media::codec::OpusAudioEncoder;
+    use std::sync::atomic::AtomicU64;
+
+    struct ManualClock {
+        base: Instant,
+        offset_micros: AtomicU64,
+    }
+
+    impl ManualClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                base: Instant::now(),
+                offset_micros: AtomicU64::new(0),
+            })
+        }
+
+        fn advance(&self, duration: Duration) {
+            self.offset_micros
+                .fetch_add(duration.as_micros() as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn timed_mixer() -> (Arc<Mutex<AudioMixer>>, Arc<ManualClock>) {
+        let clock = ManualClock::new();
+        let mixer = AudioMixer::with_clock({
+            let clock = Arc::clone(&clock);
+            move || clock.base + Duration::from_micros(clock.offset_micros.load(Ordering::Relaxed))
+        });
+        (Arc::new(Mutex::new(mixer)), clock)
+    }
+
+    fn sine_packet(frequency: f32, amplitude: f32) -> Vec<u8> {
+        let frame: Vec<f32> = (0..crate::media::codec::SAMPLES_PER_CHANNEL)
+            .flat_map(|index| {
+                let sample =
+                    amplitude * (std::f32::consts::TAU * frequency * index as f32 / 48_000.0).sin();
+                [sample, sample]
+            })
+            .collect();
+        OpusAudioEncoder::new()
+            .unwrap()
+            .encode_frame(&frame)
+            .unwrap()
+    }
 
     #[test]
     fn sample_ring_wraps_without_overwriting_unread_samples() {
@@ -912,6 +1123,45 @@ mod tests {
     }
 
     #[test]
+    fn integer_callbacks_handle_chunks_larger_than_stack_scratch() {
+        let sample_count = CALLBACK_SCRATCH_SAMPLES * 2 + 123;
+        let mut scratch = [0.0f32; CALLBACK_SCRATCH_SAMPLES];
+        let deafened = AtomicBool::new(false);
+
+        let i16_ring = AudioSampleRing::new(16_384);
+        push_i16_input(&i16_ring, &vec![i16::MAX; sample_count], &mut scratch, 4096);
+        let mut i16_samples = vec![0.0; sample_count];
+        assert_eq!(i16_ring.pop(&mut i16_samples), sample_count);
+        assert!(
+            i16_samples
+                .iter()
+                .all(|sample| (*sample - 32_767.0 / 32_768.0).abs() < 1e-6)
+        );
+
+        let u16_ring = AudioSampleRing::new(16_384);
+        push_u16_input(&u16_ring, &vec![u16::MAX; sample_count], &mut scratch, 4096);
+        let mut u16_samples = vec![0.0; sample_count];
+        assert_eq!(u16_ring.pop(&mut u16_samples), sample_count);
+        assert!(
+            u16_samples
+                .iter()
+                .all(|sample| (*sample - 32_767.0 / 32_768.0).abs() < 1e-6)
+        );
+
+        let output_ring = AudioSampleRing::new(16_384);
+        output_ring.push(&vec![0.5; sample_count]);
+        let mut i16_output = vec![0i16; sample_count];
+        fill_i16_output(&mut i16_output, &output_ring, &deafened, &mut scratch, 4096);
+        assert!(i16_output.iter().all(|sample| *sample == 16_384));
+
+        output_ring.push(&vec![0.5; sample_count]);
+        let mut u16_output = vec![0u16; sample_count];
+        fill_u16_output(&mut u16_output, &output_ring, &deafened, &mut scratch, 4096);
+        assert!(u16_output.iter().all(|sample| *sample == 49_152));
+        assert_eq!(aligned_scratch_samples(3), 4095);
+    }
+
+    #[test]
     fn output_callback_fills_underrun_with_silence() {
         let ring = AudioSampleRing::new(8);
         ring.push(&[0.25; 4]);
@@ -934,24 +1184,27 @@ mod tests {
 
     #[test]
     fn playback_renderer_resamples_48k_to_44100_without_drift() {
-        let mixer = Arc::new(Mutex::new(AudioMixer::new()));
-        let packet = OpusAudioEncoder::new()
-            .unwrap()
-            .encode_frame(&vec![0.3; STEREO_FRAME_SAMPLES])
-            .unwrap();
-        for _ in 0..100 {
-            mixer.lock().unwrap().feed_opus_packet(1, &packet).unwrap();
+        let (mixer, clock) = timed_mixer();
+        let packet = sine_packet(440.0, 0.1);
+        for sequence in 1..=100u16 {
+            mixer
+                .lock()
+                .unwrap()
+                .feed_opus_packet(1, sequence, u32::from(sequence) * 960, &packet)
+                .unwrap();
         }
 
         let ring = Arc::new(AudioSampleRing::new(131_072));
         let mut renderer = PlaybackRenderer::new(
             Arc::clone(&mixer),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
             44_100,
             2,
             Arc::clone(&ring),
         );
         for _ in 0..50 {
+            clock.advance(Duration::from_millis(20));
             renderer.render_frame();
         }
 
@@ -965,25 +1218,127 @@ mod tests {
 
     #[test]
     fn playback_renderer_converts_to_mono_device_channels() {
-        let mixer = Arc::new(Mutex::new(AudioMixer::new()));
-        let packet = OpusAudioEncoder::new()
-            .unwrap()
-            .encode_frame(&vec![0.3; STEREO_FRAME_SAMPLES])
-            .unwrap();
-        for _ in 0..10 {
-            mixer.lock().unwrap().feed_opus_packet(2, &packet).unwrap();
+        let (mixer, clock) = timed_mixer();
+        let packet = sine_packet(440.0, 0.1);
+        for sequence in 1..=10u16 {
+            mixer
+                .lock()
+                .unwrap()
+                .feed_opus_packet(2, sequence, u32::from(sequence) * 960, &packet)
+                .unwrap();
         }
 
         let ring = Arc::new(AudioSampleRing::new(16_384));
         let mut renderer = PlaybackRenderer::new(
             mixer,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(1.0f32.to_bits())),
             48_000,
             1,
             Arc::clone(&ring),
         );
+        clock.advance(Duration::from_millis(20));
         renderer.render_frame();
         assert_eq!(ring.len(), 960);
+    }
+
+    #[test]
+    fn output_gain_scales_low_level_audio_without_clipping() {
+        let packet = sine_packet(440.0, 0.05);
+        let mut levels = Vec::new();
+        for gain in [1.0f32, 2.0] {
+            let (mixer, clock) = timed_mixer();
+            mixer
+                .lock()
+                .unwrap()
+                .feed_opus_packet(7, 1, 960, &packet)
+                .unwrap();
+            let ring = Arc::new(AudioSampleRing::new(4_096));
+            let mut renderer = PlaybackRenderer::new(
+                mixer,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicU32::new(gain.to_bits())),
+                48_000,
+                2,
+                Arc::clone(&ring),
+            );
+            clock.advance(Duration::from_millis(20));
+            renderer.render_frame();
+            let mut output = vec![0.0; ring.len()];
+            ring.pop(&mut output);
+            levels.push(
+                (output.iter().map(|sample| sample * sample).sum::<f32>() / output.len() as f32)
+                    .sqrt(),
+            );
+            assert!(output.iter().all(|sample| sample.abs() <= 1.0));
+        }
+        assert!((levels[0] * 2.0 - levels[1]).abs() < 0.02);
+    }
+
+    #[test]
+    fn non_finite_output_gain_handle_falls_back_to_unity() {
+        let packet = sine_packet(440.0, 0.05);
+        let mut levels = Vec::new();
+        for gain in [1.0f32, f32::NAN, f32::INFINITY] {
+            let (mixer, clock) = timed_mixer();
+            mixer
+                .lock()
+                .unwrap()
+                .feed_opus_packet(8, 1, 960, &packet)
+                .unwrap();
+            let ring = Arc::new(AudioSampleRing::new(4_096));
+            let mut renderer = PlaybackRenderer::new(
+                mixer,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicU32::new(gain.to_bits())),
+                48_000,
+                2,
+                Arc::clone(&ring),
+            );
+            clock.advance(Duration::from_millis(20));
+            renderer.render_frame();
+            let mut output = vec![0.0; ring.len()];
+            ring.pop(&mut output);
+            levels.push(
+                (output.iter().map(|sample| sample * sample).sum::<f32>() / output.len() as f32)
+                    .sqrt(),
+            );
+        }
+        assert!((levels[0] - levels[1]).abs() < 1e-6);
+        assert!((levels[0] - levels[2]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn engine_forwards_rtp_metadata_to_the_mixer() {
+        let engine = AudioEngine::new();
+        let packet = sine_packet(440.0, 0.1);
+        engine
+            .receive_opus_packet(77, 65_535, 0xFFFF_FF00, &packet)
+            .unwrap();
+        let stats = engine
+            .mixer()
+            .lock()
+            .unwrap()
+            .participant_stats(77)
+            .unwrap();
+        assert_eq!(stats.received, 1);
+        assert_eq!(stats.played, 0, "packet must not be decoded before playout");
+        assert_eq!(stats.queue_len, 1);
+    }
+
+    #[test]
+    fn engine_gain_api_is_bounded_and_defaults_to_unity() {
+        let engine = AudioEngine::new();
+        assert_eq!(engine.input_gain(), 1.0);
+        assert_eq!(engine.output_gain(), 1.0);
+        engine.set_input_gain(-1.0);
+        engine.set_output_gain(3.0);
+        assert_eq!(engine.input_gain(), 0.0);
+        assert_eq!(engine.output_gain(), 2.0);
+        engine.set_input_gain(f32::NAN);
+        engine.set_output_gain(f32::INFINITY);
+        assert_eq!(engine.input_gain(), 1.0);
+        assert_eq!(engine.output_gain(), 1.0);
     }
 
     #[test]
@@ -995,6 +1350,10 @@ mod tests {
         assert!(matches!(
             validate_stream_config(48_000, 0),
             Err(AudioError::InvalidChannels(0))
+        ));
+        assert!(matches!(
+            validate_stream_config(48_000, CALLBACK_SCRATCH_SAMPLES as u16 + 1),
+            Err(AudioError::InvalidChannels(_))
         ));
         assert!(validate_stream_config(44_100, 1).is_ok());
     }

@@ -390,6 +390,9 @@ pub struct AudioBridge {
     pub outgoing_rx: Option<mpsc::Receiver<Vec<u8>>>,
     pub speaking_rx: Option<mpsc::Receiver<SpeakingEvent>>,
     command_tx: mpsc::Sender<AudioBridgeCommand>,
+    audio_level: Option<Arc<AtomicU32>>,
+    input_gain: Option<Arc<AtomicU32>>,
+    output_gain: Option<Arc<AtomicU32>>,
 }
 
 impl AudioBridge {
@@ -407,7 +410,12 @@ impl AudioBridge {
                 let mut engine = factory();
                 let outgoing_rx = engine.take_outgoing_receiver();
                 let speaking_rx = engine.take_speaking_receiver();
-                let _ = init_tx.send((outgoing_rx, speaking_rx));
+                let meter_handles = (
+                    Some(engine.audio_level_handle()),
+                    Some(engine.input_gain_handle()),
+                    Some(engine.output_gain_handle()),
+                );
+                let _ = init_tx.send((outgoing_rx, speaking_rx, meter_handles));
 
                 while let Some(cmd) = command_rx.blocking_recv() {
                     match cmd {
@@ -432,8 +440,13 @@ impl AudioBridge {
                             let res = engine.switch_output_device(device_id.as_deref());
                             let _ = responder.send(res);
                         }
-                        AudioBridgeCommand::ReceiveOpusPacket { ssrc, opus_data, .. } => {
-                            let _ = engine.receive_opus_packet(ssrc, &opus_data);
+                        AudioBridgeCommand::ReceiveOpusPacket {
+                            ssrc,
+                            sequence,
+                            timestamp,
+                            opus_data,
+                        } => {
+                            let _ = engine.receive_opus_packet(ssrc, sequence, timestamp, &opus_data);
                         }
                         AudioBridgeCommand::Shutdown => {
                             engine.stop_session();
@@ -444,14 +457,17 @@ impl AudioBridge {
             })
             .expect("Falha ao iniciar thread dedicada do AudioEngine");
 
-        let (outgoing_rx, speaking_rx) = init_rx
+        let (outgoing_rx, speaking_rx, (audio_level, input_gain, output_gain)) = init_rx
             .recv()
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, (None, None, None)));
 
         Self {
             outgoing_rx,
             speaking_rx,
             command_tx,
+            audio_level,
+            input_gain,
+            output_gain,
         }
     }
 
@@ -470,7 +486,53 @@ impl AudioBridge {
             outgoing_rx: Some(outgoing_rx),
             speaking_rx: Some(speaking_rx),
             command_tx,
+            audio_level: None,
+            input_gain: None,
+            output_gain: None,
         }
+    }
+
+    /// Real microphone RMS for Mic Test. `None` means this bridge has no audio
+    /// engine (for example a test channel), not a fabricated zero level.
+    pub fn audio_level(&self) -> Option<f32> {
+        self.audio_level
+            .as_ref()
+            .map(|level| f32::from_bits(level.load(Ordering::Relaxed)))
+    }
+
+    pub fn input_gain(&self) -> Option<f32> {
+        self.gain_value(&self.input_gain)
+    }
+
+    pub fn output_gain(&self) -> Option<f32> {
+        self.gain_value(&self.output_gain)
+    }
+
+    pub fn set_input_gain(&self, gain: f32) -> Result<()> {
+        self.set_gain(&self.input_gain, gain)
+    }
+
+    pub fn set_output_gain(&self, gain: f32) -> Result<()> {
+        self.set_gain(&self.output_gain, gain)
+    }
+
+    fn gain_value(&self, handle: &Option<Arc<AtomicU32>>) -> Option<f32> {
+        handle
+            .as_ref()
+            .map(|gain| f32::from_bits(gain.load(Ordering::Relaxed)))
+    }
+
+    fn set_gain(&self, handle: &Option<Arc<AtomicU32>>, gain: f32) -> Result<()> {
+        let handle = handle
+            .as_ref()
+            .ok_or_else(|| anyhow!("Bridge de áudio sem engine real"))?;
+        let gain = if gain.is_finite() {
+            gain.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        handle.store(gain.to_bits(), Ordering::Relaxed);
+        Ok(())
     }
 
     /// Inicia a captura e reprodução de hardware através da thread dedicada.
@@ -789,6 +851,27 @@ impl VoiceSession {
     /// Retorna uma referência para o mapa SSRC -> User ID.
     pub fn ssrc_to_user_map(&self) -> Arc<RwLock<HashMap<u32, u64>>> {
         self.ssrc_to_user.clone()
+    }
+
+    /// Real microphone RMS for Mic Test; `None` when no real engine exists.
+    pub async fn audio_level(&self) -> Option<f32> {
+        self.audio_bridge.lock().await.audio_level()
+    }
+
+    pub async fn set_input_gain(&self, gain: f32) -> Result<()> {
+        self.audio_bridge.lock().await.set_input_gain(gain)
+    }
+
+    pub async fn input_gain(&self) -> Option<f32> {
+        self.audio_bridge.lock().await.input_gain()
+    }
+
+    pub async fn set_output_gain(&self, gain: f32) -> Result<()> {
+        self.audio_bridge.lock().await.set_output_gain(gain)
+    }
+
+    pub async fn output_gain(&self) -> Option<f32> {
+        self.audio_bridge.lock().await.output_gain()
     }
 
     /// Troca dinamicamente o microfone ativo na sessão de áudio em andamento.

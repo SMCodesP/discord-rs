@@ -5,6 +5,7 @@ use crate::media::AudioError;
 use crate::media::codec::{
     OPUS_CHANNELS, OPUS_SAMPLE_RATE, OpusAudioEncoder, STEREO_FRAME_SAMPLES,
 };
+use crate::media::mixer::soft_clip;
 use crate::media::resample::{AudioFrameAccumulator, LinearResampler, convert_to_stereo};
 
 /// Voice activity speaking event transitions emitted to the transport layer.
@@ -28,6 +29,7 @@ pub struct CaptureProcessor {
 
     is_muted: Arc<AtomicBool>,
     audio_level_bits: Arc<AtomicU32>,
+    input_gain_bits: Arc<AtomicU32>,
     is_speaking: Arc<AtomicBool>,
     vad_threshold_bits: Arc<AtomicU32>,
 
@@ -45,6 +47,7 @@ impl CaptureProcessor {
         speaking_tx: Option<tokio::sync::mpsc::Sender<SpeakingEvent>>,
         is_muted: Arc<AtomicBool>,
         audio_level_bits: Arc<AtomicU32>,
+        input_gain_bits: Arc<AtomicU32>,
         is_speaking: Arc<AtomicBool>,
         vad_threshold_bits: Arc<AtomicU32>,
     ) -> Result<Self, AudioError> {
@@ -68,6 +71,7 @@ impl CaptureProcessor {
             speaking_tx,
             is_muted,
             audio_level_bits,
+            input_gain_bits,
             is_speaking,
             vad_threshold_bits,
             speaking_state: false,
@@ -79,7 +83,19 @@ impl CaptureProcessor {
     /// Emits Opus packets into `outgoing_tx` (and returns produced packets).
     /// Emits `SpeakingEvent` transitions on speaking start and end.
     pub fn process_input_samples(&mut self, samples: &[f32]) -> Result<Vec<Vec<u8>>, AudioError> {
-        let stereo = convert_to_stereo(samples, self.dev_channels);
+        let mut stereo = convert_to_stereo(samples, self.dev_channels);
+        let gain = f32::from_bits(self.input_gain_bits.load(Ordering::Relaxed));
+        let gain = if gain.is_finite() {
+            gain.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        // Sanitize before interpolation so one invalid driver sample cannot turn
+        // its finite neighbours into NaN/Inf. Gain is always followed by a limiter.
+        for sample in &mut stereo {
+            let finite = if sample.is_finite() { *sample } else { 0.0 };
+            *sample = soft_clip(finite * gain);
+        }
         let resampled = self.resampler.resample(&stereo);
         self.accumulator.push_samples(&resampled);
 
@@ -167,21 +183,33 @@ impl CaptureProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::codec::OpusAudioDecoder;
+    use crate::media::codec::{OpusAudioDecoder, SAMPLES_PER_CHANNEL};
 
-    fn processor(rate: u32, channels: usize, threshold: f32) -> CaptureProcessor {
+    fn processor_with_gain(
+        rate: u32,
+        channels: usize,
+        threshold: f32,
+        gain: f32,
+    ) -> (CaptureProcessor, Arc<AtomicU32>) {
         let (outgoing_tx, _) = tokio::sync::mpsc::channel(128);
-        CaptureProcessor::new(
+        let level = Arc::new(AtomicU32::new(0));
+        let processor = CaptureProcessor::new(
             rate,
             channels,
             outgoing_tx,
             None,
             Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
+            Arc::clone(&level),
+            Arc::new(AtomicU32::new(gain.to_bits())),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicU32::new(threshold.to_bits())),
         )
-        .unwrap()
+        .unwrap();
+        (processor, level)
+    }
+
+    fn processor(rate: u32, channels: usize, threshold: f32) -> CaptureProcessor {
+        processor_with_gain(rate, channels, threshold, 1.0).0
     }
 
     #[test]
@@ -195,6 +223,7 @@ mod tests {
                 None,
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicU32::new(0)),
+                Arc::new(AtomicU32::new(1.0f32.to_bits())),
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicU32::new(0.01f32.to_bits())),
             )
@@ -263,6 +292,72 @@ mod tests {
                 STEREO_FRAME_SAMPLES
             );
         }
+    }
+
+    #[test]
+    fn input_gain_changes_real_rms_and_stays_linear_at_low_level() {
+        let signal: Vec<f32> = (0..SAMPLES_PER_CHANNEL)
+            .flat_map(|index| {
+                let sample = 0.1 * (std::f32::consts::TAU * 440.0 * index as f32 / 48_000.0).sin();
+                [sample, sample]
+            })
+            .collect();
+        let mut levels = Vec::new();
+        for gain in [0.5f32, 1.0, 2.0] {
+            let (mut capture, level) = processor_with_gain(48_000, 2, 0.0, gain);
+            let packets = capture.process_input_samples(&signal).unwrap();
+            assert_eq!(packets.len(), 1);
+            let mut decoder = OpusAudioDecoder::new().unwrap();
+            let decoded = decoder.decode_frame(&packets[0]).unwrap();
+            let rms = (decoded.iter().map(|sample| sample * sample).sum::<f32>()
+                / decoded.len() as f32)
+                .sqrt();
+            levels.push(rms);
+            let expected_rms = 0.1 / 2.0f32.sqrt() * gain;
+            assert!(
+                (f32::from_bits(level.load(Ordering::Relaxed)) - expected_rms).abs() < 1e-3,
+                "meter must report pre-Opus RMS: {} vs {expected_rms}",
+                f32::from_bits(level.load(Ordering::Relaxed))
+            );
+        }
+        assert!((levels[0] * 2.0 - levels[1]).abs() < 0.02);
+        assert!((levels[1] * 2.0 - levels[2]).abs() < 0.02);
+    }
+
+    #[test]
+    fn non_finite_gain_handle_falls_back_to_unity() {
+        let signal: Vec<f32> = (0..SAMPLES_PER_CHANNEL)
+            .flat_map(|index| {
+                let sample = 0.1 * (std::f32::consts::TAU * 440.0 * index as f32 / 48_000.0).sin();
+                [sample, sample]
+            })
+            .collect();
+        for gain in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (mut capture, level) = processor_with_gain(48_000, 2, 0.0, gain);
+            capture.process_input_samples(&signal).unwrap();
+            let measured = f32::from_bits(level.load(Ordering::Relaxed));
+            assert!((measured - 0.1 / 2.0f32.sqrt()).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn invalid_samples_are_zeroed_before_44100_to_48000_interpolation() {
+        let mut invalid = vec![0.25f32; 8_820];
+        let mut clean = invalid.clone();
+        for index in [0, 1, 173, 1_000, 4_001, 8_818] {
+            invalid[index] = if index % 2 == 0 {
+                f32::NAN
+            } else {
+                f32::INFINITY
+            };
+            clean[index] = 0.0;
+        }
+
+        let (mut invalid_capture, _) = processor_with_gain(44_100, 2, 0.0, 1.0);
+        let (mut clean_capture, _) = processor_with_gain(44_100, 2, 0.0, 1.0);
+        let invalid_packets = invalid_capture.process_input_samples(&invalid).unwrap();
+        let clean_packets = clean_capture.process_input_samples(&clean).unwrap();
+        assert_eq!(invalid_packets, clean_packets);
     }
 
     #[test]
