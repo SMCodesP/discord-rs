@@ -645,6 +645,16 @@ impl AudioBridge {
     }
 }
 
+impl Drop for AudioBridge {
+    fn drop(&mut self) {
+        // Se a ponte for destruída sem um shutdown explícito (por exemplo no
+        // fechamento da janela), pede a parada do engine sem bloquear a UI. O
+        // drop do `command_tx` fecha o canal e encerra a thread dedicada mesmo
+        // que este `try_send` não encontre espaço no buffer.
+        let _ = self.command_tx.try_send(AudioBridgeCommand::Shutdown);
+    }
+}
+
 // ============================================================================
 // 6. Configuração e Estrutura Principal da Sessão de Voz (VoiceSession)
 // ============================================================================
@@ -689,6 +699,7 @@ pub struct VoiceSession {
     call_warning: Arc<std::sync::RwLock<Option<String>>>,
     entry_confirmed_tx: watch::Sender<bool>,
     entry_confirmed_rx: watch::Receiver<bool>,
+    shutdown_started: Arc<AtomicBool>,
 }
 
 impl VoiceSession {
@@ -745,6 +756,7 @@ impl VoiceSession {
             call_warning,
             entry_confirmed_tx,
             entry_confirmed_rx,
+            shutdown_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -945,6 +957,7 @@ impl VoiceSession {
 
     /// Inicia o processo de conexão em segundo plano.
     pub async fn start(&self) -> Result<()> {
+        self.shutdown_started.store(false, Ordering::SeqCst);
         let _ = self.state_tx.send(VoiceSessionState::Connecting);
 
         let config = self.config.clone();
@@ -1016,46 +1029,93 @@ impl VoiceSession {
     /// 4. Para o motor de áudio;
     /// 5. Atualiza o estado para `Disconnected`.
     pub async fn disconnect(&self) -> Result<()> {
-        log::info!("[VoiceSession] Desconectando sessão de voz...");
+        self.shutdown().await;
+        Ok(())
+    }
 
-        // 1. Envia Opcode 4 com channel_id nulo no canal de sinalização principal
-        let guild_id_str = self.config.guild_id.map(|g| g.to_string());
-        let _ = self
-            .signaling
-            .send_voice_state_update(guild_id_str.as_deref(), None, false, false)
+    /// Encerra a sessão de voz, o Voice Gateway e a thread de áudio de forma
+    /// idempotente e ordenada.
+    pub async fn shutdown(&self) {
+        self.shutdown_with_timeout(VOICE_SESSION_SHUTDOWN_TIMEOUT)
             .await;
-        self.signaling.clear_voice_server().await;
+    }
 
-        // 2. Desconecta gateway de voz ativo
-        let mut gw_lock = self.active_gateway.lock().await;
-        if let Some(gw) = gw_lock.take() {
-            let _ = gw.disconnect().await;
+    /// Encerramento com orçamento compartilhado entre sinalização, gateway,
+    /// task de sessão e áudio. A primeira chamada executa; as seguintes são
+    /// no-op.
+    pub async fn shutdown_with_timeout(&self, timeout: Duration) {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        log::info!("[VoiceSession] Desconectando sessão de voz...");
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        // 1. Sai do canal na sinalização principal sem deixar a UI presa.
+        let guild_id_str = self.config.guild_id.map(|g| g.to_string());
+        let _ = tokio::time::timeout(
+            remaining_budget(deadline),
+            self.signaling
+                .send_voice_state_update(guild_id_str.as_deref(), None, false, false),
+        )
+        .await;
+        let _ = tokio::time::timeout(
+            remaining_budget(deadline),
+            self.signaling.clear_voice_server(),
+        )
+        .await;
+
+        // 2. Para o gateway de voz antes de abortar a task que o possui.
+        let gateway = {
+            let mut gw_lock = self.active_gateway.lock().await;
+            gw_lock.take()
+        };
+        if let Some(gw) = gateway {
+            let _ = tokio::time::timeout(remaining_budget(deadline), gw.disconnect()).await;
         }
 
-        // 3. Cancela a tarefa de sessão
-        let mut task_lock = self.session_task.lock().await;
-        if let Some(task) = task_lock.take() {
+        // 3. Aborta e aguarda a task de sessão (join com timeout).
+        let task = {
+            let mut task_lock = self.session_task.lock().await;
+            task_lock.take()
+        };
+        if let Some(mut task) = task {
             task.abort();
+            let _ = tokio::time::timeout(remaining_budget(deadline), &mut task).await;
         }
 
-        // 4. Para a sessão no motor de áudio
-        self.audio_bridge.lock().await.stop_session().await;
+        // 4. Para as streams e encerra a thread dedicada do AudioEngine.
+        let audio = self.audio_bridge.clone();
+        let _ = tokio::time::timeout(remaining_budget(deadline), async move {
+            let bridge = audio.lock().await;
+            bridge.stop_session().await;
+            bridge.shutdown().await;
+        })
+        .await;
 
-        // 5. Transita o estado
+        // 5. Transita o estado para Disconnected.
         let _ = self.state_tx.send(VoiceSessionState::Disconnected {
             reason: "Desconectado pelo usuário".into(),
         });
-
-        Ok(())
     }
+}
+
+fn remaining_budget(deadline: tokio::time::Instant) -> Duration {
+    deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .max(Duration::from_millis(1))
 }
 
 impl Drop for VoiceSession {
     fn drop(&mut self) {
+        self.shutdown_started.store(true, Ordering::SeqCst);
         if let Ok(mut lock) = self.session_task.try_lock() {
             if let Some(task) = lock.take() {
                 task.abort();
             }
+        }
+        if let Ok(bridge) = self.audio_bridge.try_lock() {
+            let _ = bridge.command_tx.try_send(AudioBridgeCommand::StopSession);
+            let _ = bridge.command_tx.try_send(AudioBridgeCommand::Shutdown);
         }
     }
 }
@@ -1070,6 +1130,9 @@ impl<T> Drop for AbortOnDrop<T> {
 const VOICE_CREDENTIALS_TIMEOUT: Duration = Duration::from_secs(15);
 const MEDIA_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const DAVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Orçamento padrão para encerrar a sessão de voz abaixo do timeout de quit do GPUI.
+pub const VOICE_SESSION_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone)]
 struct VoiceCredentials {

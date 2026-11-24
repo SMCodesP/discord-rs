@@ -5,6 +5,7 @@
 use anyhow::Result;
 use log::{error, info, warn};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 
@@ -27,6 +28,9 @@ pub enum ConnectionMode {
     Disconnected(String),
 }
 
+/// Orçamento padrão de encerramento do ClientManager (voz + gateway).
+pub const CLIENT_MANAGER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(150);
+
 /// Thread-safe client manager coordinating REST and Gateway events
 #[derive(Clone)]
 pub struct ClientManager {
@@ -43,6 +47,14 @@ pub struct ClientManager {
     voice_event_tx: broadcast::Sender<crate::protocol::voice_session::VoiceSessionEvent>,
     voice_gateway_factory: Arc<RwLock<Option<crate::protocol::voice_session::VoiceGatewayFactory>>>,
     active_dm_calls: Arc<RwLock<std::collections::HashSet<String>>>,
+    shutdown_started: Arc<AtomicBool>,
+    background_tasks: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+fn remaining_budget(deadline: tokio::time::Instant) -> Duration {
+    deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .max(Duration::from_millis(1))
 }
 
 impl std::fmt::Debug for ClientManager {
@@ -75,6 +87,8 @@ impl ClientManager {
             voice_event_tx,
             voice_gateway_factory: Arc::new(RwLock::new(None)),
             active_dm_calls: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            background_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
 
         (manager, event_rx)
@@ -99,6 +113,8 @@ impl ClientManager {
             voice_event_tx,
             voice_gateway_factory: Arc::new(RwLock::new(None)),
             active_dm_calls: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            background_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
         };
 
         (manager, event_rx)
@@ -127,7 +143,23 @@ impl ClientManager {
 
         let active_calls_ref = active_dm_calls.clone();
         let mut transport_events = transport.subscribe_events();
-        tokio::spawn(async move {
+
+        let manager = Self {
+            transport: Arc::new(RwLock::new(transport)),
+            mode: Arc::new(RwLock::new(mode)),
+            audio_hardware_probe: has_hardware_audio,
+            event_tx,
+            real_client: Arc::new(RwLock::new(None)),
+            active_voice: Arc::new(RwLock::new(None)),
+            voice_state_tx,
+            voice_event_tx,
+            voice_gateway_factory: Arc::new(RwLock::new(None)),
+            active_dm_calls,
+            shutdown_started: Arc::new(AtomicBool::new(false)),
+            background_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+
+        manager.spawn_tracked(async move {
             while let Ok(event) = transport_events.recv().await {
                 match &event {
                     TransportEvent::CallCreate { channel_id, .. } => {
@@ -143,20 +175,26 @@ impl ClientManager {
             }
         });
 
-        let manager = Self {
-            transport: Arc::new(RwLock::new(transport)),
-            mode: Arc::new(RwLock::new(mode)),
-            audio_hardware_probe: has_hardware_audio,
-            event_tx,
-            real_client: Arc::new(RwLock::new(None)),
-            active_voice: Arc::new(RwLock::new(None)),
-            voice_state_tx,
-            voice_event_tx,
-            voice_gateway_factory: Arc::new(RwLock::new(None)),
-            active_dm_calls,
-        };
-
         (manager, event_rx)
+    }
+
+    /// Spawns a background task that is tracked so shutdown can abort and join
+    /// it instead of leaving network tasks alive after the window closes.
+    fn spawn_tracked<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        if self.shutdown_started.load(Ordering::SeqCst) {
+            return;
+        }
+        let handle = tokio::spawn(future);
+        match self.background_tasks.lock() {
+            Ok(mut tasks) => {
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(handle);
+            }
+            Err(_) => handle.abort(),
+        }
     }
 
     /// Connects to real Discord API using an AuthToken (Bot or User token).
@@ -234,7 +272,7 @@ impl ClientManager {
         let mode_ref = self.mode.clone();
         let active_calls_ref = self.active_dm_calls.clone();
 
-        tokio::spawn(async move {
+        self.spawn_tracked(async move {
             let mut authenticated = false;
             while let Ok(event) = gateway_rx.recv().await {
                 match &event {
@@ -285,7 +323,7 @@ impl ClientManager {
         let client_clone = real_client.clone();
         let event_tx_clone = self.event_tx.clone();
 
-        tokio::spawn(async move {
+        self.spawn_tracked(async move {
             info!("Buscando dados iniciais da API do Discord (servidores, canais e mensagens)...");
 
             let (mut guilds, guilds_loaded) = match client_clone.list_guilds().await {
@@ -415,6 +453,47 @@ impl ClientManager {
         let _ = self
             .event_tx
             .send(TransportEvent::Disconnected("Desconectado".to_string()));
+        Ok(())
+    }
+
+    /// Stops voice/audio, aborts tracked background tasks and disconnects the
+    /// main Gateway. Idempotent and bounded by a default shutdown budget.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown_with_timeout(CLIENT_MANAGER_SHUTDOWN_TIMEOUT)
+            .await
+    }
+
+    /// Ordered shutdown with a caller-provided budget shared across all steps.
+    pub async fn shutdown_with_timeout(&self, timeout: Duration) -> Result<()> {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        // 1. Voice + AudioEngine (including the session task and gateway).
+        let _ = tokio::time::timeout(
+            remaining_budget(deadline),
+            self.disconnect_voice_session(),
+        )
+        .await;
+
+        // 2. Network/UI bridge tasks spawned by this manager.
+        let tasks = match self.background_tasks.lock() {
+            Ok(mut tasks) => std::mem::take(&mut *tasks),
+            Err(_) => Vec::new(),
+        };
+        for task in &tasks {
+            task.abort();
+        }
+        let _ = tokio::time::timeout(
+            remaining_budget(deadline),
+            futures::future::join_all(tasks),
+        )
+        .await;
+
+        // 3. Main Discord Gateway / transport.
+        let _ = tokio::time::timeout(remaining_budget(deadline), self.disconnect()).await;
+
         Ok(())
     }
 
@@ -924,7 +1003,7 @@ impl ClientManager {
         let mut state_rx = session.subscribe_state();
         let voice_tx = self.voice_state_tx.clone();
         let session_ref = session.clone();
-        tokio::spawn(async move {
+        self.spawn_tracked(async move {
             let initial = state_rx.borrow().clone();
             let initial_ping = session_ref.ping_ms();
             let _ = voice_tx.send((initial, initial_ping));
@@ -943,20 +1022,37 @@ impl ClientManager {
             }
         });
 
-        // Subscribe to session events (speaking / SSRC mapping / latency)
+        // Subscribe to session events (speaking / SSRC mapping / latency).
+        // The task holds only a weak session reference so it cannot keep the
+        // session (and its broadcast sender) alive after shutdown.
         let mut events_rx = session.subscribe_events();
+        let mut events_state_rx = session.subscribe_state();
         let voice_evt_tx = self.voice_event_tx.clone();
         let voice_tx_ack = self.voice_state_tx.clone();
-        let session_ref2 = session.clone();
-        tokio::spawn(async move {
-            while let Ok(event) = events_rx.recv().await {
-                if let crate::protocol::voice_session::VoiceSessionEvent::HeartbeatAck { ping_ms } =
-                    event
-                {
-                    let current_st = session_ref2.state();
-                    let _ = voice_tx_ack.send((current_st, Some(ping_ms)));
+        let session_weak = Arc::downgrade(&session);
+        self.spawn_tracked(async move {
+            loop {
+                tokio::select! {
+                    event = events_rx.recv() => {
+                        let Ok(event) = event else { break };
+                        if let crate::protocol::voice_session::VoiceSessionEvent::HeartbeatAck { ping_ms } = event {
+                            if let Some(session) = session_weak.upgrade() {
+                                let current_st = session.state();
+                                let _ = voice_tx_ack.send((current_st, Some(ping_ms)));
+                            }
+                        }
+                        let _ = voice_evt_tx.send(event);
+                    }
+                    changed = events_state_rx.changed() => {
+                        if changed.is_err() { break; }
+                        if matches!(
+                            *events_state_rx.borrow(),
+                            crate::protocol::voice_session::VoiceSessionState::Disconnected { .. }
+                        ) {
+                            break;
+                        }
+                    }
                 }
-                let _ = voice_evt_tx.send(event);
             }
         });
 
@@ -979,7 +1075,7 @@ impl ClientManager {
                 let mut state_rx = session.subscribe_state();
                 let cm_ring = self.clone();
                 let session_weak = Arc::downgrade(&session);
-                tokio::spawn(async move {
+                self.spawn_tracked(async move {
                     let trigger_ring = || {
                         let cm = cm_ring.clone();
                         let ch = ch_str.clone();
