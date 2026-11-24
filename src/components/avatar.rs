@@ -52,6 +52,16 @@ impl AvatarSize {
         }
     }
 
+    /// Decoration overlay is 120% of the avatar and centered on it.
+    pub fn decoration_size(&self) -> Pixels {
+        self.pixels() * 1.2
+    }
+
+    /// Top/left offset that centers the larger decoration overlay.
+    pub fn decoration_offset(&self) -> Pixels {
+        self.pixels() * -0.1
+    }
+
     /// Font size for fallback initials
     pub fn font_size(&self) -> Pixels {
         match self {
@@ -178,9 +188,11 @@ impl RenderOnce for Avatar {
 
         // Deterministic fallback color based on text
         let fallback_bg = self.bg_color.unwrap_or_else(|| {
-            let hash = self.fallback_text.as_bytes().iter().fold(0u32, |acc, &b| {
-                acc.wrapping_add(b as u32).wrapping_mul(31)
-            });
+            let hash = self
+                .fallback_text
+                .as_bytes()
+                .iter()
+                .fold(0u32, |acc, &b| acc.wrapping_add(b as u32).wrapping_mul(31));
             match hash % 5 {
                 0 => blurple(),
                 1 => rgb(0x23a55a), // green
@@ -204,7 +216,12 @@ impl RenderOnce for Avatar {
 
         // Inner circular avatar container
         let inner_avatar = if let Some(src) = self.src {
-            if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") || src.starts_with("/") || src.starts_with("file://") {
+            if src.starts_with("http://")
+                || src.starts_with("https://")
+                || src.starts_with("data:")
+                || src.starts_with("/")
+                || src.starts_with("file://")
+            {
                 div()
                     .size_full()
                     .rounded_full()
@@ -246,12 +263,12 @@ impl RenderOnce for Avatar {
             .flex_shrink_0()
             .child(inner_avatar);
 
-        // Render avatar decoration layer if present (120% size, -10% offset, unique id per asset)
+        // Render the decoration before status so presence always paints above it.
         if let Some(ref decor) = self.decoration {
             let decor_url = SharedString::from(decor.url());
             let asset = decor.asset.clone();
-            let decor_px = avatar_dim * 1.2;
-            let offset_px = avatar_dim * (-0.1);
+            let decor_px = self.size.decoration_size();
+            let offset_px = self.size.decoration_offset();
 
             let decor_layer = div()
                 .absolute()
@@ -261,14 +278,17 @@ impl RenderOnce for Avatar {
                 .left(offset_px)
                 .child(
                     img(decor_url)
-                        .id(ElementId::from(SharedString::from(format!("avatar-decor-{}", asset))))
+                        .id(ElementId::from(SharedString::from(format!(
+                            "avatar-decor-{}",
+                            asset
+                        ))))
                         .size_full(),
                 );
 
             container = container.child(decor_layer);
         }
 
-        // Render status dot if requested
+        // Render status dot last: it must remain above the 1.2x decoration.
         if let Some(presence) = self.status {
             let dot_size = self.size.status_size();
             let border_width = self.size.cutout_border();
@@ -308,13 +328,7 @@ fn render_status_indicator(
             .flex()
             .items_center()
             .justify_center()
-            .child(
-                div()
-                    .w(bar_width)
-                    .h(bar_height)
-                    .bg(white())
-                    .rounded_xs(),
-            )
+            .child(div().w(bar_width).h(bar_height).bg(white()).rounded_xs())
             .into_any_element()
     } else if is_offline {
         let inner_hole = dot_size * 0.5;
@@ -415,5 +429,22 @@ mod tests {
         assert_eq!(AvatarSize::Px32.pixels(), px(32.0));
         assert_eq!(AvatarSize::Px40.pixels(), px(40.0));
         assert_eq!(AvatarSize::Px80.pixels(), px(80.0));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_decoration_is_centered_at_every_avatar_size() {
+        for size in [
+            AvatarSize::Px24,
+            AvatarSize::Px32,
+            AvatarSize::Px40,
+            AvatarSize::Px80,
+        ] {
+            let avatar = size.pixels().as_f32();
+            let decoration = size.decoration_size().as_f32();
+            let offset = size.decoration_offset().as_f32();
+            assert!((decoration - avatar * 1.2).abs() < 0.001);
+            assert!((offset + avatar * 0.1).abs() < 0.001);
+            assert!((offset * 2.0 + decoration - avatar).abs() < 0.001);
+        }
     }
 }

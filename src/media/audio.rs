@@ -1,18 +1,24 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
+use crate::media::AudioError;
 use crate::media::capture::{CaptureProcessor, SpeakingEvent};
-use crate::media::codec::{OPUS_CHANNELS, OPUS_SAMPLE_RATE};
+use crate::media::codec::{FRAME_DURATION_MS, OPUS_CHANNELS, OPUS_SAMPLE_RATE};
 use crate::media::devices::MediaDeviceManager;
 use crate::media::mixer::AudioMixer;
 use crate::media::resample::{
-    convert_stereo_to_channels, f32_to_i16, f32_to_u16, i16_to_f32, u16_to_f32, LinearResampler,
+    LinearResampler, convert_stereo_to_channels, f32_to_i16, f32_to_u16, i16_to_f32, u16_to_f32,
 };
-use crate::media::AudioError;
+
+const CAPTURE_RING_MS: usize = 500;
+const PLAYBACK_RING_MS: usize = 250;
+const PLAYBACK_PREBUFFER_FRAMES: usize = 3;
+const CAPTURE_WORKER_POLL: Duration = Duration::from_millis(2);
 
 /// Core audio engine that implements real hardware capture/playback via `cpal`,
 /// 48 kHz stereo VoIP encoding/decoding via Opus, multi-participant mixing,
@@ -25,16 +31,22 @@ pub struct AudioEngine {
     speaking_tx: tokio::sync::mpsc::Sender<SpeakingEvent>,
     speaking_rx: Option<tokio::sync::mpsc::Receiver<SpeakingEvent>>,
 
-    // Local user audio state
+    // Local user audio state.
     is_muted: Arc<AtomicBool>,
     is_deafened: Arc<AtomicBool>,
     audio_level_bits: Arc<AtomicU32>,
     is_speaking: Arc<AtomicBool>,
     vad_threshold_bits: Arc<AtomicU32>,
 
-    // Active streams
+    // Active streams and their non-blocking workers. cpal callbacks only touch
+    // atomic SPSC rings; resampling, Opus, and mixer locks live on worker threads.
     input_stream: Option<Stream>,
     output_stream: Option<Stream>,
+    capture_ring: Option<Arc<AudioSampleRing>>,
+    playback_ring: Option<Arc<AudioSampleRing>>,
+    capture_stop: Option<Arc<AtomicBool>>,
+    capture_worker: Option<JoinHandle<()>>,
+    playback_worker: Option<PlaybackWorker>,
     active_input_id: Option<String>,
     active_output_id: Option<String>,
     is_session_active: bool,
@@ -53,15 +65,18 @@ impl AudioEngine {
             outgoing_rx: Some(out_rx),
             speaking_tx: spk_tx,
             speaking_rx: Some(spk_rx),
-
             is_muted: Arc::new(AtomicBool::new(false)),
             is_deafened: Arc::new(AtomicBool::new(false)),
             audio_level_bits: Arc::new(AtomicU32::new(0f32.to_bits())),
             is_speaking: Arc::new(AtomicBool::new(false)),
             vad_threshold_bits: Arc::new(AtomicU32::new(0.01f32.to_bits())),
-
             input_stream: None,
             output_stream: None,
+            capture_ring: None,
+            playback_ring: None,
+            capture_stop: None,
+            capture_worker: None,
+            playback_worker: None,
             active_input_id: None,
             active_output_id: None,
             is_session_active: false,
@@ -91,8 +106,12 @@ impl AudioEngine {
     }
 
     /// Transport contract method: receives an Opus frame (`&[u8]`) identified by participant SSRC (`u32`).
+    /// Decoding happens on the audio-engine thread, never on a cpal callback.
     pub fn receive_opus_packet(&self, ssrc: u32, opus_data: &[u8]) -> Result<(), AudioError> {
-        let mut mixer = self.mixer.lock().unwrap();
+        let mut mixer = self
+            .mixer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         mixer.feed_opus_packet(ssrc, opus_data)
     }
 
@@ -102,10 +121,11 @@ impl AudioEngine {
     }
 
     /// Sets local microphone mute state.
-    pub fn set_muted(&self, muted: bool) {
+    pub fn set_muted(&mut self, muted: bool) {
         self.is_muted.store(muted, Ordering::Relaxed);
         if muted {
-            self.audio_level_bits.store(0f32.to_bits(), Ordering::Relaxed);
+            self.audio_level_bits
+                .store(0f32.to_bits(), Ordering::Relaxed);
             self.is_speaking.store(false, Ordering::Relaxed);
         }
     }
@@ -132,8 +152,17 @@ impl AudioEngine {
 
     /// Configures the Voice Activity Detection (VAD) sensitivity threshold (default 0.01).
     pub fn set_vad_threshold(&self, threshold: f32) {
-        self.vad_threshold_bits.store(threshold.max(0.0).to_bits(), Ordering::Relaxed);
-        let mut mixer = self.mixer.lock().unwrap();
+        let threshold = if threshold.is_finite() {
+            threshold.max(0.0)
+        } else {
+            0.01
+        };
+        self.vad_threshold_bits
+            .store(threshold.to_bits(), Ordering::Relaxed);
+        let mut mixer = self
+            .mixer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         mixer.set_vad_threshold(threshold);
     }
 
@@ -144,38 +173,81 @@ impl AudioEngine {
     /// Starts an active audio session with hardware capture and playback.
     /// If output or input fails, cleans up any partially opened stream and leaves state consistent.
     pub fn start_session(&mut self) -> Result<(), AudioError> {
-        let selected_input = self.device_manager.read().unwrap().selected_input_id().map(String::from);
-        let selected_output = self.device_manager.read().unwrap().selected_output_id().map(String::from);
+        if self.is_session_active {
+            return Ok(());
+        }
 
-        let (in_stream, in_id) = self.build_input_stream(selected_input.as_deref())?;
+        let (selected_input, selected_output) = {
+            let manager = self.device_manager.read().unwrap();
+            (
+                manager.selected_input_id().map(String::from),
+                manager.selected_output_id().map(String::from),
+            )
+        };
 
-        let (out_stream, out_id) = match self.build_output_stream(selected_output.as_deref()) {
-            Ok(res) => res,
+        let mut input = self.build_input_stream(selected_input.as_deref())?;
+        let mut output = match self.build_output_stream(selected_output.as_deref()) {
+            Ok(output) => output,
             Err(err) => {
-                // Rollback: drop input stream and leave state consistent
-                drop(in_stream);
+                drop(input);
                 self.stop_session();
                 return Err(err);
             }
         };
 
-        self.input_stream = Some(in_stream);
-        self.active_input_id = Some(in_id);
-        self.output_stream = Some(out_stream);
-        self.active_output_id = Some(out_id);
+        let capture_worker = match spawn_capture_worker(
+            input
+                .processor
+                .take()
+                .expect("capture processor must be present"),
+            Arc::clone(&input.ring),
+            Arc::clone(&input.stop),
+        ) {
+            Ok(worker) => worker,
+            Err(err) => {
+                output.worker.stop();
+                drop(output.stream);
+                drop(input);
+                self.stop_session();
+                return Err(AudioError::StreamError(format!(
+                    "Failed to start capture worker: {err}"
+                )));
+            }
+        };
+
+        self.input_stream = Some(input.stream);
+        self.active_input_id = Some(input.id);
+        self.capture_ring = Some(input.ring);
+        self.capture_stop = Some(input.stop);
+        self.capture_worker = Some(capture_worker);
+
+        self.output_stream = Some(output.stream);
+        self.active_output_id = Some(output.id);
+        self.playback_ring = Some(output.ring);
+        self.playback_worker = Some(output.worker);
         self.is_session_active = true;
         Ok(())
     }
 
     /// Stops the active audio session and releases hardware audio streams.
     pub fn stop_session(&mut self) {
+        // Drop streams first so callbacks stop writing to their rings.
         self.input_stream = None;
         self.output_stream = None;
+        self.stop_capture_worker();
+        self.stop_playback_worker();
+        self.capture_ring = None;
+        self.playback_ring = None;
         self.active_input_id = None;
         self.active_output_id = None;
         self.is_session_active = false;
         self.is_speaking.store(false, Ordering::Relaxed);
-        self.audio_level_bits.store(0f32.to_bits(), Ordering::Relaxed);
+        self.audio_level_bits
+            .store(0f32.to_bits(), Ordering::Relaxed);
+        self.mixer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     pub fn is_session_active(&self) -> bool {
@@ -194,14 +266,41 @@ impl AudioEngine {
     /// Builds and starts the new stream first; if it fails, the previous stream and selection remain intact.
     pub fn switch_input_device(&mut self, device_id: Option<&str>) -> Result<(), AudioError> {
         if self.is_session_active {
-            // Build and play new stream FIRST
-            let (new_stream, new_id) = self.build_input_stream(device_id)?;
-            // Only update selection and replace stream on success
-            self.device_manager.write().unwrap().select_input_device(device_id)?;
-            self.input_stream = Some(new_stream);
-            self.active_input_id = Some(new_id);
+            let mut input = self.build_input_stream(device_id)?;
+            let worker = spawn_capture_worker(
+                input
+                    .processor
+                    .take()
+                    .expect("capture processor must be present"),
+                Arc::clone(&input.ring),
+                Arc::clone(&input.stop),
+            )
+            .map_err(|err| {
+                AudioError::StreamError(format!("Failed to start capture worker: {err}"))
+            })?;
+            if let Err(err) = self
+                .device_manager
+                .write()
+                .unwrap()
+                .select_input_device(device_id)
+            {
+                input.stop.store(true, Ordering::Release);
+                let _ = worker.join();
+                return Err(err);
+            }
+
+            self.input_stream = None;
+            self.stop_capture_worker();
+            self.input_stream = Some(input.stream);
+            self.active_input_id = Some(input.id);
+            self.capture_ring = Some(input.ring);
+            self.capture_stop = Some(input.stop);
+            self.capture_worker = Some(worker);
         } else {
-            self.device_manager.write().unwrap().select_input_device(device_id)?;
+            self.device_manager
+                .write()
+                .unwrap()
+                .select_input_device(device_id)?;
         }
         Ok(())
     }
@@ -210,211 +309,693 @@ impl AudioEngine {
     /// Builds and starts the new stream first; if it fails, the previous stream and selection remain intact.
     pub fn switch_output_device(&mut self, device_id: Option<&str>) -> Result<(), AudioError> {
         if self.is_session_active {
-            // Build and play new stream FIRST
-            let (new_stream, new_id) = self.build_output_stream(device_id)?;
-            // Only update selection and replace stream on success
-            self.device_manager.write().unwrap().select_output_device(device_id)?;
-            self.output_stream = Some(new_stream);
-            self.active_output_id = Some(new_id);
+            let mut output = self.build_output_stream(device_id)?;
+            if let Err(err) = self
+                .device_manager
+                .write()
+                .unwrap()
+                .select_output_device(device_id)
+            {
+                output.worker.stop();
+                return Err(err);
+            }
+
+            self.stop_playback_worker();
+            self.output_stream = None;
+            self.output_stream = Some(output.stream);
+            self.active_output_id = Some(output.id);
+            self.playback_ring = Some(output.ring);
+            self.playback_worker = Some(output.worker);
         } else {
-            self.device_manager.write().unwrap().select_output_device(device_id)?;
+            self.device_manager
+                .write()
+                .unwrap()
+                .select_output_device(device_id)?;
         }
         Ok(())
     }
 
-    fn build_input_stream(&self, device_id: Option<&str>) -> Result<(Stream, String), AudioError> {
-        let mgr = self.device_manager.read().unwrap();
-        let dev = mgr.get_cpal_input_device(device_id)?;
-        let dev_id_or_name = device_id.map(String::from).or_else(|| dev.name().ok()).unwrap_or_default();
+    fn build_input_stream(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<InputStreamResources, AudioError> {
+        let manager = self.device_manager.read().unwrap();
+        let device = manager.get_cpal_input_device(device_id)?;
+        let device_name = device_id
+            .map(String::from)
+            .or_else(|| device.name().ok())
+            .unwrap_or_default();
 
-        let supported_config = dev
-            .default_input_config()
-            .map_err(|e| AudioError::StreamError(format!("Failed to query default input config: {e:?}")))?;
-
+        let supported_config = device.default_input_config().map_err(|err| {
+            AudioError::StreamError(format!("Failed to query default input config: {err:?}"))
+        })?;
         let sample_format = supported_config.sample_format();
         let stream_config: StreamConfig = supported_config.into();
-        let dev_channels = stream_config.channels as usize;
-        let dev_rate = stream_config.sample_rate.0;
+        validate_stream_config(stream_config.sample_rate.0, stream_config.channels)?;
+        let device_channels = stream_config.channels as usize;
+        let device_rate = stream_config.sample_rate.0;
 
-        let processor = Arc::new(Mutex::new(CaptureProcessor::new(
-            dev_rate,
-            dev_channels,
+        let ring = Arc::new(AudioSampleRing::new(ring_capacity(
+            device_rate,
+            device_channels,
+            CAPTURE_RING_MS,
+        )));
+        let stop = Arc::new(AtomicBool::new(false));
+        let processor = CaptureProcessor::new(
+            device_rate,
+            device_channels,
             self.outgoing_tx.clone(),
             Some(self.speaking_tx.clone()),
             Arc::clone(&self.is_muted),
             Arc::clone(&self.audio_level_bits),
             Arc::clone(&self.is_speaking),
             Arc::clone(&self.vad_threshold_bits),
-        )?));
+        )?;
 
-        let err_fn = |err| {
-            log::error!("Audio input stream error: {err}");
-        };
+        log::info!(
+            "[AudioEngine] Input '{}': {device_rate} Hz, {device_channels} channel(s), {sample_format:?} -> Opus 48000 Hz stereo",
+            device_name
+        );
 
+        let err_fn = |err| log::error!("Audio input stream error: {err}");
         let stream = match sample_format {
             SampleFormat::F32 => {
-                let proc = Arc::clone(&processor);
-                dev.build_input_stream(
-                    &stream_config,
-                    move |data: &[f32], _| {
-                        if let Ok(mut p) = proc.lock() {
-                            let _ = p.process_input_samples(data);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| AudioError::StreamError(format!("Failed to build f32 input stream: {e:?}")))?
+                let callback_ring = Arc::clone(&ring);
+                device
+                    .build_input_stream(
+                        &stream_config,
+                        move |data: &[f32], _| {
+                            callback_ring.push(data);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| {
+                        AudioError::StreamError(format!(
+                            "Failed to build f32 input stream: {err:?}"
+                        ))
+                    })?
             }
-
             SampleFormat::I16 => {
-                let proc = Arc::clone(&processor);
-                dev.build_input_stream(
-                    &stream_config,
-                    move |data: &[i16], _| {
-                        let f32_data: Vec<f32> = data.iter().map(|&s| i16_to_f32(s)).collect();
-                        if let Ok(mut p) = proc.lock() {
-                            let _ = p.process_input_samples(&f32_data);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| AudioError::StreamError(format!("Failed to build i16 input stream: {e:?}")))?
+                let callback_ring = Arc::clone(&ring);
+                let mut scratch = Vec::new();
+                device
+                    .build_input_stream(
+                        &stream_config,
+                        move |data: &[i16], _| {
+                            scratch.clear();
+                            scratch.extend(data.iter().copied().map(i16_to_f32));
+                            callback_ring.push(&scratch);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| {
+                        AudioError::StreamError(format!(
+                            "Failed to build i16 input stream: {err:?}"
+                        ))
+                    })?
             }
-
             SampleFormat::U16 => {
-                let proc = Arc::clone(&processor);
-                dev.build_input_stream(
-                    &stream_config,
-                    move |data: &[u16], _| {
-                        let f32_data: Vec<f32> = data.iter().map(|&s| u16_to_f32(s)).collect();
-                        if let Ok(mut p) = proc.lock() {
-                            let _ = p.process_input_samples(&f32_data);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| AudioError::StreamError(format!("Failed to build u16 input stream: {e:?}")))?
+                let callback_ring = Arc::clone(&ring);
+                let mut scratch = Vec::new();
+                device
+                    .build_input_stream(
+                        &stream_config,
+                        move |data: &[u16], _| {
+                            scratch.clear();
+                            scratch.extend(data.iter().copied().map(u16_to_f32));
+                            callback_ring.push(&scratch);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| {
+                        AudioError::StreamError(format!(
+                            "Failed to build u16 input stream: {err:?}"
+                        ))
+                    })?
             }
-
             other => {
                 return Err(AudioError::UnsupportedFormat(format!(
                     "Unsupported input sample format: {other:?}"
-                )))
+                )));
             }
         };
 
-        stream
-            .play()
-            .map_err(|e| AudioError::StreamError(format!("Failed to play input stream: {e:?}")))?;
+        stream.play().map_err(|err| {
+            AudioError::StreamError(format!("Failed to play input stream: {err:?}"))
+        })?;
 
-        Ok((stream, dev_id_or_name))
+        Ok(InputStreamResources {
+            stream,
+            id: device_name,
+            processor: Some(processor),
+            ring,
+            stop,
+        })
     }
 
-    fn build_output_stream(&self, device_id: Option<&str>) -> Result<(Stream, String), AudioError> {
-        let mgr = self.device_manager.read().unwrap();
-        let dev = mgr.get_cpal_output_device(device_id)?;
-        let dev_id_or_name = device_id.map(String::from).or_else(|| dev.name().ok()).unwrap_or_default();
+    fn build_output_stream(
+        &self,
+        device_id: Option<&str>,
+    ) -> Result<OutputStreamResources, AudioError> {
+        let manager = self.device_manager.read().unwrap();
+        let device = manager.get_cpal_output_device(device_id)?;
+        let device_name = device_id
+            .map(String::from)
+            .or_else(|| device.name().ok())
+            .unwrap_or_default();
 
-        let supported_config = dev
-            .default_output_config()
-            .map_err(|e| AudioError::StreamError(format!("Failed to query default output config: {e:?}")))?;
-
+        let supported_config = device.default_output_config().map_err(|err| {
+            AudioError::StreamError(format!("Failed to query default output config: {err:?}"))
+        })?;
         let sample_format = supported_config.sample_format();
         let stream_config: StreamConfig = supported_config.into();
-        let dev_channels = stream_config.channels as usize;
-        let dev_rate = stream_config.sample_rate.0;
+        validate_stream_config(stream_config.sample_rate.0, stream_config.channels)?;
+        let device_channels = stream_config.channels as usize;
+        let device_rate = stream_config.sample_rate.0;
 
-        let mixer = Arc::clone(&self.mixer);
+        let ring = Arc::new(AudioSampleRing::new(ring_capacity(
+            device_rate,
+            device_channels,
+            PLAYBACK_RING_MS,
+        )));
         let is_deafened = Arc::clone(&self.is_deafened);
-        let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(dev_channels * 4096);
-        let mut resampler = LinearResampler::new(OPUS_SAMPLE_RATE, dev_rate, OPUS_CHANNELS);
 
-        let mut fill_samples = move |out_samples: &mut [f32]| {
-            let deafened = is_deafened.load(Ordering::Relaxed);
+        log::info!(
+            "[AudioEngine] Output '{}': Opus 48000 Hz stereo -> {device_rate} Hz, {device_channels} channel(s), {sample_format:?}",
+            device_name
+        );
 
-            // Refill output buffer with stateful resampling to avoid phase clicks
-            while output_buffer.len() < out_samples.len() {
-                let frame_48k_stereo = {
-                    let mut m = mixer.lock().unwrap();
-                    m.pull_mixed_frame(deafened)
-                };
-
-                let resampled = resampler.resample(&frame_48k_stereo);
-                let target_channels = convert_stereo_to_channels(&resampled, dev_channels);
-                output_buffer.extend(target_channels);
-            }
-
-            for sample in out_samples.iter_mut() {
-                *sample = output_buffer.pop_front().unwrap_or(0.0);
-            }
-        };
-
-        let err_fn = |err| {
-            log::error!("Audio output stream error: {err}");
-        };
-
+        let err_fn = |err| log::error!("Audio output stream error: {err}");
         let stream = match sample_format {
-            SampleFormat::F32 => dev
-                .build_output_stream(
-                    &stream_config,
-                    move |data: &mut [f32], _| {
-                        fill_samples(data);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| AudioError::StreamError(format!("Failed to build f32 output stream: {e:?}")))?,
-
-            SampleFormat::I16 => dev
-                .build_output_stream(
-                    &stream_config,
-                    move |data: &mut [i16], _| {
-                        let mut f32_buf = vec![0.0f32; data.len()];
-                        fill_samples(&mut f32_buf);
-                        for (dest, src) in data.iter_mut().zip(f32_buf.iter()) {
-                            *dest = f32_to_i16(*src);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| AudioError::StreamError(format!("Failed to build i16 output stream: {e:?}")))?,
-
-            SampleFormat::U16 => dev
-                .build_output_stream(
-                    &stream_config,
-                    move |data: &mut [u16], _| {
-                        let mut f32_buf = vec![0.0f32; data.len()];
-                        fill_samples(&mut f32_buf);
-                        for (dest, src) in data.iter_mut().zip(f32_buf.iter()) {
-                            *dest = f32_to_u16(*src);
-                        }
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| AudioError::StreamError(format!("Failed to build u16 output stream: {e:?}")))?,
-
+            SampleFormat::F32 => {
+                let callback_ring = Arc::clone(&ring);
+                let callback_deafened = Arc::clone(&is_deafened);
+                device
+                    .build_output_stream(
+                        &stream_config,
+                        move |data: &mut [f32], _| {
+                            fill_f32_output(data, &callback_ring, &callback_deafened);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| {
+                        AudioError::StreamError(format!(
+                            "Failed to build f32 output stream: {err:?}"
+                        ))
+                    })?
+            }
+            SampleFormat::I16 => {
+                let callback_ring = Arc::clone(&ring);
+                let callback_deafened = Arc::clone(&is_deafened);
+                let mut scratch = Vec::new();
+                device
+                    .build_output_stream(
+                        &stream_config,
+                        move |data: &mut [i16], _| {
+                            scratch.resize(data.len(), 0.0);
+                            fill_f32_output(&mut scratch, &callback_ring, &callback_deafened);
+                            for (dest, src) in data.iter_mut().zip(scratch.iter()) {
+                                *dest = f32_to_i16(*src);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| {
+                        AudioError::StreamError(format!(
+                            "Failed to build i16 output stream: {err:?}"
+                        ))
+                    })?
+            }
+            SampleFormat::U16 => {
+                let callback_ring = Arc::clone(&ring);
+                let callback_deafened = Arc::clone(&is_deafened);
+                let mut scratch = Vec::new();
+                device
+                    .build_output_stream(
+                        &stream_config,
+                        move |data: &mut [u16], _| {
+                            scratch.resize(data.len(), 0.0);
+                            fill_f32_output(&mut scratch, &callback_ring, &callback_deafened);
+                            for (dest, src) in data.iter_mut().zip(scratch.iter()) {
+                                *dest = f32_to_u16(*src);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|err| {
+                        AudioError::StreamError(format!(
+                            "Failed to build u16 output stream: {err:?}"
+                        ))
+                    })?
+            }
             other => {
                 return Err(AudioError::UnsupportedFormat(format!(
                     "Unsupported output sample format: {other:?}"
-                )))
+                )));
             }
         };
 
-        stream
-            .play()
-            .map_err(|e| AudioError::StreamError(format!("Failed to play output stream: {e:?}")))?;
+        let mut worker = spawn_playback_worker(
+            Arc::clone(&self.mixer),
+            is_deafened,
+            device_rate,
+            device_channels,
+            Arc::clone(&ring),
+        )?;
+        if let Err(err) = stream.play() {
+            worker.stop();
+            return Err(AudioError::StreamError(format!(
+                "Failed to play output stream: {err:?}"
+            )));
+        }
 
-        Ok((stream, dev_id_or_name))
+        Ok(OutputStreamResources {
+            stream,
+            id: device_name,
+            ring,
+            worker,
+        })
+    }
+
+    fn stop_capture_worker(&mut self) {
+        if let Some(stop) = self.capture_stop.take() {
+            stop.store(true, Ordering::Release);
+        }
+        if let Some(worker) = self.capture_worker.take() {
+            let _ = worker.join();
+        }
+    }
+
+    fn stop_playback_worker(&mut self) {
+        if let Some(mut worker) = self.playback_worker.take() {
+            worker.stop();
+        }
     }
 }
 
 impl Default for AudioEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+struct InputStreamResources {
+    stream: Stream,
+    id: String,
+    processor: Option<CaptureProcessor>,
+    ring: Arc<AudioSampleRing>,
+    stop: Arc<AtomicBool>,
+}
+
+struct OutputStreamResources {
+    stream: Stream,
+    id: String,
+    ring: Arc<AudioSampleRing>,
+    worker: PlaybackWorker,
+}
+
+struct PlaybackWorker {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for PlaybackWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+impl PlaybackWorker {
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn spawn_capture_worker(
+    mut processor: CaptureProcessor,
+    ring: Arc<AudioSampleRing>,
+    stop: Arc<AtomicBool>,
+) -> Result<JoinHandle<()>, std::io::Error> {
+    thread::Builder::new()
+        .name("discord-audio-capture".into())
+        .spawn(move || {
+            let mut scratch = vec![0.0f32; ring.capacity().min(4096)];
+            while !stop.load(Ordering::Acquire) {
+                let count = ring.pop(&mut scratch);
+                if count == 0 {
+                    thread::sleep(CAPTURE_WORKER_POLL);
+                    continue;
+                }
+                if let Err(err) = processor.process_input_samples(&scratch[..count]) {
+                    log::error!("Audio capture processing error: {err}");
+                }
+            }
+        })
+}
+
+struct PlaybackRenderer {
+    mixer: Arc<Mutex<AudioMixer>>,
+    is_deafened: Arc<AtomicBool>,
+    resampler: LinearResampler,
+    output_channels: usize,
+    ring: Arc<AudioSampleRing>,
+}
+
+impl PlaybackRenderer {
+    fn new(
+        mixer: Arc<Mutex<AudioMixer>>,
+        is_deafened: Arc<AtomicBool>,
+        device_rate: u32,
+        output_channels: usize,
+        ring: Arc<AudioSampleRing>,
+    ) -> Self {
+        Self {
+            mixer,
+            is_deafened,
+            resampler: LinearResampler::new(OPUS_SAMPLE_RATE, device_rate, OPUS_CHANNELS),
+            output_channels,
+            ring,
+        }
+    }
+
+    fn render_frame(&mut self) {
+        let mixed = {
+            let deafened = self.is_deafened.load(Ordering::Relaxed);
+            let mut mixer = self
+                .mixer
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mixer.pull_mixed_frame(deafened)
+        };
+        let resampled = self.resampler.resample(&mixed);
+        let converted = convert_stereo_to_channels(&resampled, self.output_channels);
+
+        // Never split a device frame across callbacks. If the consumer stalled,
+        // drop this whole 20 ms frame rather than writing a partial/corrupt frame.
+        if converted.len() > self.ring.available() {
+            return;
+        }
+        let written = self.ring.push(&converted);
+        debug_assert_eq!(written, converted.len());
+    }
+
+    fn prebuffer(&mut self) {
+        for _ in 0..PLAYBACK_PREBUFFER_FRAMES {
+            self.render_frame();
+        }
+    }
+}
+
+fn spawn_playback_worker(
+    mixer: Arc<Mutex<AudioMixer>>,
+    is_deafened: Arc<AtomicBool>,
+    device_rate: u32,
+    output_channels: usize,
+    ring: Arc<AudioSampleRing>,
+) -> Result<PlaybackWorker, AudioError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    let mut renderer =
+        PlaybackRenderer::new(mixer, is_deafened, device_rate, output_channels, ring);
+    renderer.prebuffer();
+
+    let thread = thread::Builder::new()
+        .name("discord-audio-playback".into())
+        .spawn(move || {
+            let interval = Duration::from_millis(u64::from(FRAME_DURATION_MS));
+            let mut next_frame = Instant::now();
+            while !worker_stop.load(Ordering::Acquire) {
+                let now = Instant::now();
+                if now < next_frame {
+                    thread::sleep(next_frame - now);
+                    continue;
+                }
+
+                renderer.render_frame();
+                next_frame += interval;
+                // Do not burst stale frames after a scheduler stall.
+                if Instant::now().saturating_duration_since(next_frame) > interval {
+                    next_frame = Instant::now();
+                }
+            }
+        })
+        .map_err(|err| {
+            AudioError::StreamError(format!("Failed to start playback worker: {err}"))
+        })?;
+
+    Ok(PlaybackWorker {
+        stop,
+        thread: Some(thread),
+    })
+}
+
+fn validate_stream_config(sample_rate: u32, channels: u16) -> Result<(), AudioError> {
+    if sample_rate == 0 {
+        return Err(AudioError::InvalidSampleRate(sample_rate));
+    }
+    if channels == 0 {
+        return Err(AudioError::InvalidChannels(channels));
+    }
+    Ok(())
+}
+
+fn ring_capacity(sample_rate: u32, channels: usize, duration_ms: usize) -> usize {
+    let samples = sample_rate as usize * channels * duration_ms / 1000;
+    samples.max(1).next_power_of_two()
+}
+
+fn fill_f32_output(output: &mut [f32], ring: &AudioSampleRing, is_deafened: &AtomicBool) {
+    if is_deafened.load(Ordering::Relaxed) {
+        ring.clear();
+        output.fill(0.0);
+        return;
+    }
+
+    let count = ring.pop(output);
+    output[count..].fill(0.0);
+}
+
+/// Single-producer/single-consumer sample ring used to cross the cpal callback boundary.
+/// Atomic f32 bits avoid unsafe shared storage and every operation is non-blocking.
+#[derive(Debug)]
+struct AudioSampleRing {
+    slots: Vec<AtomicU32>,
+    mask: usize,
+    read: AtomicUsize,
+    write: AtomicUsize,
+}
+
+impl AudioSampleRing {
+    fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1).next_power_of_two();
+        Self {
+            slots: (0..capacity).map(|_| AtomicU32::new(0)).collect(),
+            mask: capacity - 1,
+            read: AtomicUsize::new(0),
+            write: AtomicUsize::new(0),
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn len(&self) -> usize {
+        // Snapshot the consumer cursor first. The producer can only advance
+        // `write`, so this ordering can never observe read > write concurrently.
+        let read = self.read.load(Ordering::Acquire);
+        let write = self.write.load(Ordering::Acquire);
+        write.wrapping_sub(read)
+    }
+
+    fn available(&self) -> usize {
+        self.capacity() - self.len()
+    }
+
+    fn push(&self, samples: &[f32]) -> usize {
+        let read = self.read.load(Ordering::Acquire);
+        let write = self.write.load(Ordering::Relaxed);
+        let count = samples
+            .len()
+            .min(self.capacity() - write.wrapping_sub(read));
+        for (offset, sample) in samples[..count].iter().enumerate() {
+            self.slots[(write + offset) & self.mask].store(sample.to_bits(), Ordering::Relaxed);
+        }
+        self.write.store(write + count, Ordering::Release);
+        count
+    }
+
+    fn pop(&self, output: &mut [f32]) -> usize {
+        let write = self.write.load(Ordering::Acquire);
+        let read = self.read.load(Ordering::Relaxed);
+        let count = output.len().min(write.wrapping_sub(read));
+        for (offset, slot) in output[..count].iter_mut().enumerate() {
+            *slot = f32::from_bits(self.slots[(read + offset) & self.mask].load(Ordering::Relaxed));
+        }
+        self.read.store(read + count, Ordering::Release);
+        count
+    }
+
+    /// Consumer-only reset, used to discard stale audio immediately when deafened.
+    fn clear(&self) {
+        let write = self.write.load(Ordering::Acquire);
+        self.read.store(write, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::codec::{OpusAudioEncoder, STEREO_FRAME_SAMPLES};
+
+    #[test]
+    fn sample_ring_wraps_without_overwriting_unread_samples() {
+        let ring = AudioSampleRing::new(4);
+        assert_eq!(ring.push(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), 4);
+        assert_eq!(ring.len(), 4);
+        assert_eq!(ring.available(), 0);
+
+        let mut output = [0.0; 2];
+        assert_eq!(ring.pop(&mut output), 2);
+        assert_eq!(output, [0.0, 1.0]);
+        assert_eq!(ring.push(&[4.0, 5.0]), 2);
+
+        let mut output = [0.0; 4];
+        assert_eq!(ring.pop(&mut output), 4);
+        assert_eq!(output, [2.0, 3.0, 4.0, 5.0]);
+        assert_eq!(ring.len(), 0);
+    }
+
+    #[test]
+    fn sample_ring_len_stays_consistent_during_concurrent_transfer() {
+        let ring = Arc::new(AudioSampleRing::new(1024));
+        let done = Arc::new(AtomicBool::new(false));
+        let consumed = Arc::new(AtomicUsize::new(0));
+
+        std::thread::scope(|scope| {
+            let producer_ring = Arc::clone(&ring);
+            let producer_done = Arc::clone(&done);
+            scope.spawn(move || {
+                for chunk in 0..500 {
+                    let samples = [chunk as f32; 64];
+                    producer_ring.push(&samples);
+                    thread::yield_now();
+                }
+                producer_done.store(true, Ordering::Release);
+            });
+
+            let consumer_ring = Arc::clone(&ring);
+            let consumer_done = Arc::clone(&done);
+            let consumer_count = Arc::clone(&consumed);
+            scope.spawn(move || {
+                let mut output = [0.0f32; 64];
+                while !consumer_done.load(Ordering::Acquire) || consumer_ring.len() != 0 {
+                    let count = consumer_ring.pop(&mut output);
+                    consumer_count.fetch_add(count, Ordering::Relaxed);
+                    assert!(consumer_ring.len() <= consumer_ring.capacity());
+                    thread::yield_now();
+                }
+            });
+        });
+
+        assert!(consumed.load(Ordering::Relaxed) > 0);
+        assert_eq!(ring.len(), 0);
+    }
+
+    #[test]
+    fn output_callback_fills_underrun_with_silence() {
+        let ring = AudioSampleRing::new(8);
+        ring.push(&[0.25; 4]);
+        let deafened = AtomicBool::new(false);
+        let mut output = [0.5; 6];
+        fill_f32_output(&mut output, &ring, &deafened);
+        assert_eq!(output, [0.25, 0.25, 0.25, 0.25, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn deafened_output_callback_discards_already_buffered_audio() {
+        let ring = AudioSampleRing::new(8);
+        ring.push(&[0.75; 6]);
+        let deafened = AtomicBool::new(true);
+        let mut output = [0.5; 3];
+        fill_f32_output(&mut output, &ring, &deafened);
+        assert_eq!(output, [0.0; 3]);
+        assert_eq!(ring.len(), 0);
+    }
+
+    #[test]
+    fn playback_renderer_resamples_48k_to_44100_without_drift() {
+        let mixer = Arc::new(Mutex::new(AudioMixer::new()));
+        let packet = OpusAudioEncoder::new()
+            .unwrap()
+            .encode_frame(&vec![0.3; STEREO_FRAME_SAMPLES])
+            .unwrap();
+        for _ in 0..100 {
+            mixer.lock().unwrap().feed_opus_packet(1, &packet).unwrap();
+        }
+
+        let ring = Arc::new(AudioSampleRing::new(131_072));
+        let mut renderer = PlaybackRenderer::new(
+            Arc::clone(&mixer),
+            Arc::new(AtomicBool::new(false)),
+            44_100,
+            2,
+            Arc::clone(&ring),
+        );
+        for _ in 0..50 {
+            renderer.render_frame();
+        }
+
+        let expected = 44_100 * 2; // One second of interleaved stereo at 44.1 kHz.
+        assert!(
+            (ring.len() as i64 - expected as i64).abs() <= 4,
+            "got {} samples",
+            ring.len()
+        );
+    }
+
+    #[test]
+    fn playback_renderer_converts_to_mono_device_channels() {
+        let mixer = Arc::new(Mutex::new(AudioMixer::new()));
+        let packet = OpusAudioEncoder::new()
+            .unwrap()
+            .encode_frame(&vec![0.3; STEREO_FRAME_SAMPLES])
+            .unwrap();
+        for _ in 0..10 {
+            mixer.lock().unwrap().feed_opus_packet(2, &packet).unwrap();
+        }
+
+        let ring = Arc::new(AudioSampleRing::new(16_384));
+        let mut renderer = PlaybackRenderer::new(
+            mixer,
+            Arc::new(AtomicBool::new(false)),
+            48_000,
+            1,
+            Arc::clone(&ring),
+        );
+        renderer.render_frame();
+        assert_eq!(ring.len(), 960);
+    }
+
+    #[test]
+    fn invalid_stream_configs_are_rejected() {
+        assert!(matches!(
+            validate_stream_config(0, 2),
+            Err(AudioError::InvalidSampleRate(0))
+        ));
+        assert!(matches!(
+            validate_stream_config(48_000, 0),
+            Err(AudioError::InvalidChannels(0))
+        ));
+        assert!(validate_stream_config(44_100, 1).is_ok());
     }
 }

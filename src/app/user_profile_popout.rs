@@ -12,40 +12,81 @@
 //! - Quick message input has show_paste(false) and ellipsis placeholder
 //! - Canonical Avatar component with decor & presence support throughout
 //! - Official Button and IconButton with icons
-//! - Legacy colors marked with // COR ANTIGA SEM ORIGEM per Adendo A
+//! - Shared colors come from the documented Discord token palette
 //! - Zero fake mocks (empty when real data is absent, no fake fallback names)
+
+use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Utc};
 use gpui::component::dialog::Dialog;
 use gpui::component::input::InputState;
+use gpui::component::tooltip::Tooltip;
+use gpui::prelude::*;
 use gpui::*;
 
 use crate::app::state::{AppState, ProfileModalTab};
+use crate::components::TextInput;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::button::{Button, ButtonSize};
 use crate::components::profile_effect::{
-    render_profile_effect_for_user, render_profile_effect_for_user_with_motion,
-    ProfileEffectCatalog, UserProfileEffect,
+    ProfileEffectCatalog, UserProfileEffect, render_profile_effect_for_user_with_motion,
 };
-use crate::components::TextInput;
 pub use crate::domain::profile::{
-    snowflake_to_datetime, ConnectedAccount, MutualGuild, ProfileBadge, ProfilePopoutState,
-    ProfileTab, UserProfileData,
+    ConnectedAccount, MutualGuild, ProfileBadge, ProfilePopoutState, ProfileTab, UserProfileData,
+    snowflake_to_datetime,
 };
 use crate::domain::user::{ActivityType, CustomStatus, Presence, PresenceStatus};
 use crate::i18n::t;
-use crate::tokens::colors::*;
 use crate::tokens::colors::white;
+use crate::tokens::colors::*;
 use crate::tokens::icons::*;
+use crate::tokens::spacing::{radius_sm, space_2, space_3, space_4};
 
 // ============================================================================
 // Helper Utilities
 // ============================================================================
 
-/// Parses a hex color string (e.g. "#110fbf" or "110fbf") into a `u32` RGB value
+/// Parses an official `#RRGGBB` banner color into a `u32` RGB value.
 pub fn parse_hex_color(hex_str: &str) -> Option<u32> {
-    let clean = hex_str.trim().trim_start_matches('#');
+    let clean = hex_str.trim().strip_prefix('#').unwrap_or(hex_str.trim());
+    if clean.len() != 6 || !clean.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     u32::from_str_radix(clean, 16).ok()
+}
+
+fn profile_banner_color(popout: &ProfilePopoutState) -> u32 {
+    popout
+        .data
+        .as_ref()
+        .and_then(|data| data.banner_color.as_deref().and_then(parse_hex_color))
+        .or_else(|| {
+            popout
+                .data
+                .as_ref()
+                .and_then(|data| data.accent_color)
+                .filter(|color| *color <= 0xffffff)
+        })
+        .unwrap_or(HEX_BG_FLOATING)
+}
+
+fn profile_banner_image_url(popout: &ProfilePopoutState, size: u32) -> Option<String> {
+    let data = popout.data.as_ref()?;
+    let banner = data
+        .banner
+        .as_deref()
+        .map(str::trim)
+        .filter(|banner| !banner.is_empty())?;
+    Some(
+        if banner.starts_with("http://") || banner.starts_with("https://") {
+            banner.to_string()
+        } else {
+            format!(
+                "https://cdn.discordapp.com/banners/{}/{}.png?size={size}",
+                data.user.id, banner
+            )
+        },
+    )
 }
 
 /// Formats a month name in pt-BR
@@ -69,40 +110,35 @@ fn pt_month_short(month: u32) -> &'static str {
 
 /// Formats a DateTime into canonical Discord display ("20 de out. de 2023")
 pub fn format_member_date(dt: DateTime<Utc>) -> String {
-    format!("{} de {} de {}", dt.day(), pt_month_short(dt.month()), dt.year())
+    format!(
+        "{} de {} de {}",
+        dt.day(),
+        pt_month_short(dt.month()),
+        dt.year()
+    )
 }
 
 // ============================================================================
 // Shared Content Renderers (Popout & Modal Deduplication)
 // ============================================================================
 
-/// Renders bio text splitting by paragraphs and wrapping cleanly at word boundaries
+/// Renders the profile bio with the same Discord Markdown parser as chat.
 fn render_bio_content(bio: &str) -> AnyElement {
-    let paragraphs: Vec<_> = bio.split('\n').collect();
-    let mut bio_container = div()
+    div()
         .w_full()
-        .flex()
-        .flex_col()
-        .gap(px(4.0));
-
-    for p in paragraphs {
-        if !p.trim().is_empty() {
-            bio_container = bio_container.child(
-                div()
-                    .w_full()
-                    .text_size(px(13.0))
-                    .text_color(text_primary())
-                    .line_height(px(18.0))
-                    .child(p.to_string()),
-            );
-        }
-    }
-
-    bio_container.into_any_element()
+        .min_w(px(0.0))
+        .text_size(px(14.0))
+        .line_height(px(20.0))
+        .child(crate::chat::markdown::render_markdown(bio))
+        .into_any_element()
 }
 
-/// Renders mutual guilds list shared between popout and modal tabs
-fn render_mutual_guilds_list(guilds: &[MutualGuild], is_modal: bool) -> AnyElement {
+/// Renders mutual guilds using only names/icons resolved from real guild state.
+fn render_mutual_guilds_list(
+    guilds: &[MutualGuild],
+    guild_views: &GuildProfileViews,
+    is_modal: bool,
+) -> AnyElement {
     if guilds.is_empty() {
         return div()
             .py(if is_modal { px(0.0) } else { px(8.0) })
@@ -117,42 +153,58 @@ fn render_mutual_guilds_list(guilds: &[MutualGuild], is_modal: bool) -> AnyEleme
     let text_sz = if is_modal { px(13.0) } else { px(12.0) };
 
     let mut list = div().flex().flex_col().gap(px(4.0));
-    for g in guilds {
-        // Zero dados inventados: sem nome real mostra vazio (zero fallback "Servidor {id}")
-        let display_nick = g.nick.clone().unwrap_or_default();
+    let mut rendered = 0usize;
+    for guild in guilds {
+        let view = guild_views.get(&guild.id);
+        let display_name = view
+            .map(|(name, _)| name.trim())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                guild
+                    .nick
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+            });
+        let Some(display_name) = display_name else {
+            continue;
+        };
+        rendered += 1;
+
+        let mut row = div()
+            .h(item_h)
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .bg(bg_server())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0));
+        if let Some((_, Some(icon_url))) = view {
+            row = row.child(
+                img(icon_url.clone())
+                    .size(icon_sz)
+                    .rounded_full()
+                    .object_fit(ObjectFit::Cover),
+            );
+        }
         list = list.child(
-            div()
-                .h(item_h)
-                .px(px(6.0))
-                .rounded(px(4.0))
-                .bg(bg_server())
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .size(icon_sz)
-                        .rounded(px(4.0))
-                        .bg(blurple())
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(white())
-                        .child(g.id.chars().next().unwrap_or('S').to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(text_sz)
-                        .text_color(text_primary())
-                        .child(display_nick),
-                ),
+            row.child(
+                div()
+                    .text_size(text_sz)
+                    .text_color(text_primary())
+                    .child(display_name.to_string()),
+            ),
         );
     }
 
-    list.into_any_element()
+    if rendered == 0 {
+        // The API confirmed mutual guilds, but their display data is not loaded.
+        // Show an empty list instead of inventing a name or an initial.
+        div().into_any_element()
+    } else {
+        list.into_any_element()
+    }
 }
 
 /// Renders mutual friends count summary shared between popout and modal tabs
@@ -195,7 +247,7 @@ fn render_member_dates_content(
                     div()
                         .text_size(px(11.0))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                        .text_color(text_secondary())
                         .child(t("profile.discord_member_since").to_uppercase()),
                 )
                 .child(
@@ -225,7 +277,7 @@ fn render_member_dates_content(
                     div()
                         .text_size(px(11.0))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                        .text_color(text_secondary())
                         .child(t("profile.server_member_since").to_uppercase()),
                 )
                 .child(
@@ -252,7 +304,196 @@ fn render_member_dates_content(
 // Component 1: Anchored User Profile Popout (300px)
 // ============================================================================
 
-/// Renders the 300px User Profile Popout anchored to the click position, with no backdrop
+const PROFILE_POPOUT_WIDTH: f32 = 300.0;
+const PROFILE_POPOUT_GAP: f32 = 8.0;
+const PROFILE_POPOUT_MARGIN: f32 = 8.0;
+
+type GuildProfileViews = HashMap<String, (String, Option<String>)>;
+
+fn guild_profile_views(guilds: &[crate::app::state::GuildItemState]) -> GuildProfileViews {
+    guilds
+        .iter()
+        .map(|guild| (guild.id.clone(), (guild.name.clone(), guild.icon_url())))
+        .collect()
+}
+
+/// Resolves the opening side from the actual viewport, not a hard-coded width.
+fn resolve_profile_popout_anchor(
+    anchor: Option<Point<Pixels>>,
+    viewport: Size<Pixels>,
+) -> (Point<Pixels>, Anchor) {
+    let margin = px(PROFILE_POPOUT_MARGIN);
+    let Some(clicked_at) = anchor else {
+        let right_limit = (viewport.width - margin).max(margin);
+        return (point(right_limit, px(60.0)), Anchor::TopRight);
+    };
+
+    let x = clicked_at.x.max(px(0.0)).min(viewport.width);
+    let y = clicked_at.y.max(px(0.0)).min(viewport.height);
+    let right_edge = x + px(PROFILE_POPOUT_WIDTH + PROFILE_POPOUT_GAP + PROFILE_POPOUT_MARGIN);
+    let opens_left = right_edge > viewport.width;
+    let position = if opens_left {
+        point(x - px(PROFILE_POPOUT_GAP), y)
+    } else {
+        point(x + px(PROFILE_POPOUT_GAP), y)
+    };
+    let corner = if opens_left {
+        Anchor::TopRight
+    } else {
+        Anchor::TopLeft
+    };
+    (position, corner)
+}
+
+struct ProfilePopoutFocusState {
+    focus_handle: FocusHandle,
+    initialized: bool,
+    modal_open: bool,
+}
+
+/// Element state keeps a stable focus handle for the lifetime of the popout.
+/// This makes Esc work even when the click that opened the profile left focus
+/// in the chat composer, and restores focus after the full modal closes.
+struct ProfilePopoutElement {
+    app_entity: Entity<AppState>,
+    popout: ProfilePopoutState,
+    anchor: Option<Point<Pixels>>,
+    catalog: ProfileEffectCatalog,
+    presence: Option<Presence>,
+    quick_state: Entity<InputState>,
+}
+
+impl IntoElement for ProfilePopoutElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ProfilePopoutElement {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name("profile-popout-layer".into()))
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        window.with_element_state(
+            global_id.expect("profile popout has a stable id"),
+            |state, window| {
+                let modal_open = self.app_entity.read(cx).is_profile_modal_open();
+                let reduce_motion = self
+                    .app_entity
+                    .read(cx)
+                    .accessibility_settings
+                    .reduce_motion;
+                let quick_send_in_flight = self
+                    .app_entity
+                    .read(cx)
+                    .is_profile_popout_quick_message_sending();
+                let mut focus_state: ProfilePopoutFocusState =
+                    state.unwrap_or_else(|| ProfilePopoutFocusState {
+                        focus_handle: cx.focus_handle(),
+                        initialized: false,
+                        modal_open: true,
+                    });
+                let should_focus =
+                    !modal_open && (!focus_state.initialized || focus_state.modal_open);
+                focus_state.initialized = true;
+                focus_state.modal_open = modal_open;
+                let focus_handle = focus_state.focus_handle.clone();
+
+                let (anchor_pos, anchor_corner) =
+                    resolve_profile_popout_anchor(self.anchor, window.viewport_size());
+                let guild_views = guild_profile_views(&self.app_entity.read(cx).guilds);
+                let content = render_profile_popout_content(
+                    &self.app_entity,
+                    &self.popout,
+                    &self.catalog,
+                    self.presence.as_ref(),
+                    &self.quick_state,
+                    reduce_motion,
+                    quick_send_in_flight,
+                    &guild_views,
+                    anchor_pos,
+                    anchor_corner,
+                );
+
+                let entity_key = self.app_entity.clone();
+                let layer = div()
+                    .id("profile-popout-layer")
+                    .key_context("ProfilePopout")
+                    .track_focus(&focus_handle)
+                    .on_key_down(move |event: &KeyDownEvent, _window, cx| {
+                        if event.keystroke.key == "escape" {
+                            cx.stop_propagation();
+                            entity_key.update(cx, |state, cx| {
+                                state.handle_escape();
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .absolute()
+                    .inset_0()
+                    .child(content);
+
+                if should_focus {
+                    window.focus(&focus_handle, cx);
+                }
+                let mut layer = layer.into_any_element();
+                ((layer.request_layout(window, cx), layer), focus_state)
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        gpui::Element::prepaint(element, id, inspector_id, bounds, &mut (), window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        gpui::Element::paint(
+            element,
+            id,
+            inspector_id,
+            bounds,
+            &mut (),
+            _prepaint,
+            window,
+            cx,
+        );
+    }
+}
+
+/// Renders the 300px User Profile Popout anchored to the click position, with no backdrop.
 pub fn render_user_profile_popout(
     app_entity: Entity<AppState>,
     popout: &ProfilePopoutState,
@@ -261,72 +502,67 @@ pub fn render_user_profile_popout(
     presence: Option<&Presence>,
     quick_state: &Entity<InputState>,
 ) -> impl IntoElement {
+    ProfilePopoutElement {
+        app_entity,
+        popout: popout.clone(),
+        anchor,
+        catalog: catalog.clone(),
+        presence: presence.cloned(),
+        quick_state: quick_state.clone(),
+    }
+}
+
+fn render_profile_popout_content(
+    app_entity: &Entity<AppState>,
+    popout: &ProfilePopoutState,
+    catalog: &ProfileEffectCatalog,
+    presence: Option<&Presence>,
+    quick_state: &Entity<InputState>,
+    reduce_motion: bool,
+    quick_send_in_flight: bool,
+    guild_views: &GuildProfileViews,
+    anchor_pos: Point<Pixels>,
+    anchor_corner: Anchor,
+) -> AnyElement {
     let entity_dismiss = app_entity.clone();
-    let entity_key = app_entity.clone();
-
-    // Responsive anchoring logic:
-    // If click position is near the right edge of the window (> 900px), open to the left (Anchor::TopRight).
-    // Otherwise open to the right (Anchor::TopLeft).
-    let (anchor_pos, anchor_corner) = if let Some(pt) = anchor {
-        let is_near_right = pt.x > px(900.0);
-        if is_near_right {
-            (point(pt.x - px(8.0), pt.y), Anchor::TopRight)
-        } else {
-            (point(pt.x + px(8.0), pt.y), Anchor::TopLeft)
-        }
-    } else {
-        (point(px(1040.0) - px(8.0), px(60.0)), Anchor::TopRight)
-    };
-
     div()
-        .id("profile-popout-layer")
-        .key_context("ProfilePopout")
-        .on_key_down(move |event: &KeyDownEvent, _window, cx| {
-            if event.keystroke.key == "escape" {
-                entity_key.update(cx, |s, cx| {
-                    s.handle_escape();
-                    cx.notify();
-                });
-            }
-        })
-        .absolute()
-        .inset_0()
-        // Transparent dismiss backdrop (sem backdrop escurecido, zero opacidade)
-        // Nota: O literal antigo rgba(0x00000077) foi removido pois o popout do Discord não tem backdrop escurecido
+        .size_full()
+        // Transparent dismiss backdrop: no dimming and no fabricated overlay color.
         .child(
             div()
                 .id("profile-popout-dismiss-backdrop")
                 .absolute()
                 .inset_0()
-                .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                    entity_dismiss.update(cx, |s, cx| {
-                        s.close_profile_popout();
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity_dismiss.update(cx, |state, cx| {
+                        state.close_profile_popout();
                         cx.notify();
                     });
                 }),
         )
-        // Popout card container anchored with high priority
-        .child(
-            deferred(
-                anchored()
-                    .position(anchor_pos)
-                    .anchor(anchor_corner)
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(
-                        div()
-                            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| {
-                                cx.stop_propagation();
-                            })
-                            .child(render_profile_card(
-                                app_entity,
-                                popout,
-                                catalog,
-                                presence,
-                                quick_state,
-                            )),
-                    ),
-            ),
-        )
+        .child(deferred(
+            anchored()
+                .position(anchor_pos)
+                .anchor(anchor_corner)
+                .snap_to_window_with_margin(px(PROFILE_POPOUT_MARGIN))
+                .child(
+                    div()
+                        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(render_profile_card(
+                            app_entity.clone(),
+                            popout,
+                            catalog,
+                            presence,
+                            quick_state,
+                            reduce_motion,
+                            quick_send_in_flight,
+                            guild_views,
+                        )),
+                ),
+        ))
+        .into_any_element()
 }
 
 /// Renders the 300px Popout Card container
@@ -336,6 +572,9 @@ fn render_profile_card(
     catalog: &ProfileEffectCatalog,
     presence: Option<&Presence>,
     quick_state: &Entity<InputState>,
+    reduce_motion: bool,
+    quick_send_in_flight: bool,
+    guild_views: &GuildProfileViews,
 ) -> AnyElement {
     let mut card = div()
         .id("profile-popout-card")
@@ -344,14 +583,18 @@ fn render_profile_card(
         .rounded(px(8.0))
         .bg(bg_user_bar())
         .border_1()
-        .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
+        .border_color(bg_server())
         .shadow_lg()
         .overflow_hidden()
         .flex()
         .flex_col();
 
-    card = card.child(render_popout_banner(popout, catalog));
-    card = card.child(render_popout_avatar_row(app_entity.clone(), popout, presence));
+    card = card.child(render_popout_banner(popout, catalog, reduce_motion));
+    card = card.child(render_popout_avatar_row(
+        app_entity.clone(),
+        popout,
+        presence,
+    ));
 
     if popout.is_loading && popout.data.is_none() {
         return card
@@ -402,8 +645,17 @@ fn render_profile_card(
         }
     }
 
-    card = card.child(render_popout_body(app_entity.clone(), popout, presence));
-    card = card.child(render_popout_quick_input(popout, quick_state));
+    card = card.child(render_popout_body(
+        app_entity.clone(),
+        popout,
+        presence,
+        guild_views,
+    ));
+    card = card.child(render_popout_quick_input(
+        popout,
+        quick_state,
+        quick_send_in_flight,
+    ));
 
     card.into_any_element()
 }
@@ -413,23 +665,10 @@ fn render_profile_card(
 fn render_popout_banner(
     popout: &ProfilePopoutState,
     catalog: &ProfileEffectCatalog,
+    reduce_motion: bool,
 ) -> AnyElement {
-    let banner_color_val = popout
-        .data
-        .as_ref()
-        .and_then(|d| d.banner_color.as_deref().and_then(parse_hex_color))
-        .or_else(|| popout.data.as_ref().and_then(|d| d.accent_color))
-        .unwrap_or(HEX_BG_FLOATING);
-
-    let banner_image_url = popout.data.as_ref().and_then(|d| {
-        d.banner.as_ref().map(|b| {
-            if b.starts_with("http://") || b.starts_with("https://") {
-                b.clone()
-            } else {
-                format!("https://cdn.discordapp.com/banners/{}/{}.png?size=300", d.user.id, b)
-            }
-        })
-    });
+    let banner_color_val = profile_banner_color(popout);
+    let banner_image_url = profile_banner_image_url(popout, 300);
 
     let mut banner = div()
         .relative()
@@ -452,15 +691,59 @@ fn render_popout_banner(
         .as_ref()
         .and_then(|d| d.profile_effect_id.as_deref());
     let user_effect = profile_effect_id.map(UserProfileEffect::new);
-    let effect_overlay = render_profile_effect_for_user(
+    let effect_overlay = render_profile_effect_for_user_with_motion(
         user_effect.as_ref(),
         catalog,
         px(105.0),
-        Some(px(300.0)),
+        Some(px(PROFILE_POPOUT_WIDTH)),
+        reduce_motion,
     );
     banner = banner.child(effect_overlay);
 
     banner.into_any_element()
+}
+
+fn render_profile_badges(badges: &[ProfileBadge], is_modal: bool) -> Div {
+    let badge_size = if is_modal { px(24.0) } else { px(20.0) };
+    let icon_size = if is_modal { px(18.0) } else { px(16.0) };
+    let mut container = div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(4.0))
+        .items_center();
+    if !is_modal {
+        container = container.pb(px(4.0));
+    }
+
+    for (index, badge) in badges
+        .iter()
+        .filter(|badge| !badge.icon.trim().is_empty())
+        .enumerate()
+    {
+        let description = badge.description.trim().to_string();
+        let mut element = div()
+            .id(ElementId::Name(
+                format!(
+                    "profile-badge-{}-{index}",
+                    if is_modal { "modal" } else { "popout" }
+                )
+                .into(),
+            ))
+            .size(badge_size)
+            .rounded(px(4.0))
+            .bg(opacity_white_8())
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(img(badge.icon_url()).size(icon_size));
+        if !description.is_empty() {
+            element = element
+                .tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx));
+        }
+        container = container.child(element);
+    }
+    container
 }
 
 /// Renders the overlapping avatar (clickable to open full modal) and badges container
@@ -474,8 +757,9 @@ fn render_popout_avatar_row(
     let display_name = popout
         .data
         .as_ref()
-        .map(|d| d.user.display_name().to_string())
-        .unwrap_or_else(|| popout.user_id.clone());
+        .map(|data| data.user.display_name().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
 
     let presence_status = presence
         .map(|p| p.status)
@@ -508,31 +792,14 @@ fn render_popout_avatar_row(
         })
         .child(avatar);
 
-    let badges_container = div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .gap(px(4.0))
-        .items_center()
-        .pb(px(4.0))
-        .children(
-            popout
-                .data
-                .as_ref()
-                .map(|d| d.badges.clone())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|b| {
-                    div()
-                        .size(px(20.0))
-                        .rounded(px(4.0))
-                        .bg(rgba(0xffffff11)) // COR ANTIGA SEM ORIGEM
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(img(b.icon_url()).size(px(16.0)))
-                }),
-        );
+    let badges_container = render_profile_badges(
+        popout
+            .data
+            .as_ref()
+            .map(|data| data.badges.as_slice())
+            .unwrap_or(&[]),
+        false,
+    );
 
     div()
         .px(px(16.0))
@@ -551,16 +818,17 @@ fn render_popout_body(
     app_entity: Entity<AppState>,
     popout: &ProfilePopoutState,
     presence: Option<&Presence>,
+    guild_views: &GuildProfileViews,
 ) -> AnyElement {
-    let avatar_user = popout.data.as_ref().map(|d| &d.user);
-    let display_name = popout
-        .data
-        .as_ref()
-        .map(|d| d.user.display_name().to_string())
-        .unwrap_or_else(|| popout.user_id.clone());
+    let avatar_user = popout.data.as_ref().map(|data| &data.user);
+    let display_name = avatar_user
+        .map(|user| user.display_name().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
     let username = avatar_user
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| popout.user_id.clone());
+        .map(|user| user.username.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
 
     let mut body = div()
         .id("profile-popout-body")
@@ -589,20 +857,26 @@ fn render_popout_body(
             .child(display_name),
     );
 
-    // @username and optional pronouns
+    // @username and optional pronouns; never turn a snowflake into a fake handle.
     let mut tag_row = div()
         .flex()
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .child(
+        .children((!username.is_empty()).then(|| {
             div()
                 .text_size(px(14.0))
                 .text_color(legacy_949ba4())
-                .child(format!("@{}", username)),
-        );
+                .child(format!("@{}", username))
+        }));
 
-    if let Some(pronouns) = popout.data.as_ref().and_then(|d| d.pronouns.as_deref()) {
+    if let Some(pronouns) = popout
+        .data
+        .as_ref()
+        .and_then(|data| data.pronouns.as_deref())
+        .map(str::trim)
+        .filter(|pronouns| !pronouns.is_empty())
+    {
         tag_row = tag_row.child(
             div()
                 .px(px(6.0))
@@ -643,7 +917,7 @@ fn render_popout_body(
         body = body.child(div().h_px().bg(channel_hover()).my(px(2.0)));
     }
 
-    body = body.child(render_popout_tabs(app_entity.clone(), popout));
+    body = body.child(render_popout_tabs(app_entity.clone(), popout, guild_views));
 
     // "Ver perfil completo" action button
     let entity_full = app_entity;
@@ -668,28 +942,35 @@ fn render_popout_status(
     presence: Option<&Presence>,
 ) -> Option<AnyElement> {
     let avatar_user = popout.data.as_ref().map(|d| &d.user);
-    let custom_status: Option<CustomStatus> = presence
-        .and_then(|p| p.custom_status.clone())
-        .or_else(|| {
-            avatar_user.and_then(|u| u.activity.as_ref()).and_then(|act| {
-                act.state.as_ref().map(|s| CustomStatus::from_text(s))
-            })
+    let custom_status: Option<CustomStatus> =
+        presence.and_then(|p| p.custom_status.clone()).or_else(|| {
+            avatar_user
+                .and_then(|u| u.activity.as_ref())
+                .and_then(|act| act.state.as_ref().map(|s| CustomStatus::from_text(s)))
         });
 
     if let Some(cs) = custom_status {
-        let emoji_el: Option<AnyElement> = if let Some(ref em) = cs.emoji {
-            if let Some(url) = em.image_url() {
+        let emoji_el: Option<AnyElement> = cs.emoji.as_ref().and_then(|emoji| {
+            if let Some(url) = emoji.image_url() {
                 Some(img(url).size(px(16.0)).into_any_element())
-            } else if !em.name.is_empty() {
-                Some(div().text_size(px(14.0)).child(em.name.clone()).into_any_element())
+            } else if !emoji.name.trim().is_empty() {
+                Some(
+                    div()
+                        .text_size(px(14.0))
+                        .child(emoji.name.clone())
+                        .into_any_element(),
+                )
             } else {
-                Some(div().text_size(px(14.0)).child("💬").into_any_element())
+                None
             }
-        } else {
-            Some(div().text_size(px(14.0)).child("💬").into_any_element())
-        };
+        });
+        let status_text = cs
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
 
-        if cs.text.is_some() || cs.emoji.is_some() {
+        if status_text.is_some() || emoji_el.is_some() {
             return Some(
                 div()
                     .p(px(8.0))
@@ -702,11 +983,11 @@ fn render_popout_status(
                     .items_center()
                     .gap(px(8.0))
                     .children(emoji_el)
-                    .children(cs.text.as_ref().map(|t| {
+                    .children(status_text.map(|text| {
                         div()
                             .text_size(px(13.0))
                             .text_color(text_primary())
-                            .child(t.clone())
+                            .child(text.to_string())
                     }))
                     .into_any_element(),
             );
@@ -722,9 +1003,19 @@ fn render_popout_activity(
 ) -> Option<AnyElement> {
     let avatar_user = popout.data.as_ref().map(|d| &d.user);
     let game = presence
-        .and_then(|p| p.activity.as_ref())
-        .or_else(|| avatar_user.and_then(|u| u.activity.as_ref()))
-        .filter(|a| a.activity_type == ActivityType::Playing || (!a.name.is_empty() && a.name != "Custom Status"))?;
+        .and_then(|presence| presence.activity.as_ref())
+        .or_else(|| avatar_user.and_then(|user| user.activity.as_ref()))
+        .filter(|activity| {
+            activity.activity_type != ActivityType::Custom && !activity.name.trim().is_empty()
+        })?;
+    let activity_label = match game.activity_type {
+        ActivityType::Playing => "JOGANDO",
+        ActivityType::Streaming => "TRANSMITINDO",
+        ActivityType::Listening => "OUVINDO",
+        ActivityType::Watching => "ASSISTINDO",
+        ActivityType::Competing => "COMPETINDO",
+        ActivityType::Custom => return None,
+    };
 
     Some(
         div()
@@ -741,7 +1032,7 @@ fn render_popout_activity(
                     .text_size(px(10.0))
                     .font_weight(FontWeight::BOLD)
                     .text_color(status_online())
-                    .child("JOGANDO"),
+                    .child(activity_label),
             )
             .child(
                 div()
@@ -782,7 +1073,7 @@ fn render_popout_bio(popout: &ProfilePopoutState) -> Option<AnyElement> {
                 div()
                     .text_size(px(11.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                    .text_color(text_secondary())
                     .child(t("profile.about_me").to_uppercase()),
             )
             .child(render_bio_content(bio))
@@ -791,7 +1082,11 @@ fn render_popout_bio(popout: &ProfilePopoutState) -> Option<AnyElement> {
 }
 
 /// Renders tabs and tab content in the popout
-fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState) -> AnyElement {
+fn render_popout_tabs(
+    app_entity: Entity<AppState>,
+    popout: &ProfilePopoutState,
+    guild_views: &GuildProfileViews,
+) -> AnyElement {
     let mutual_guilds = popout
         .data
         .as_ref()
@@ -820,9 +1115,17 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if is_guilds_tab { white() } else { legacy_949ba4() })
+                .text_color(if is_guilds_tab {
+                    white()
+                } else {
+                    legacy_949ba4()
+                })
                 .border_b_2()
-                .border_color(if is_guilds_tab { blurple() } else { transparent() })
+                .border_color(if is_guilds_tab {
+                    blurple()
+                } else {
+                    transparent()
+                })
                 .pb(px(4.0))
                 .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
                     entity_tab_guilds.update(cx, |s, cx| {
@@ -839,9 +1142,17 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
                 .cursor_pointer()
                 .text_size(px(12.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(if !is_guilds_tab { white() } else { legacy_949ba4() })
+                .text_color(if !is_guilds_tab {
+                    white()
+                } else {
+                    legacy_949ba4()
+                })
                 .border_b_2()
-                .border_color(if !is_guilds_tab { blurple() } else { transparent() })
+                .border_color(if !is_guilds_tab {
+                    blurple()
+                } else {
+                    transparent()
+                })
                 .pb(px(4.0))
                 .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
                     entity_tab_friends.update(cx, |s, cx| {
@@ -855,7 +1166,7 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
         );
 
     let tab_content = if is_guilds_tab {
-        render_mutual_guilds_list(mutual_guilds, false)
+        render_mutual_guilds_list(mutual_guilds, guild_views, false)
     } else {
         render_mutual_friends_content(mutual_friends_count, false)
     };
@@ -873,17 +1184,23 @@ fn render_popout_tabs(app_entity: Entity<AppState>, popout: &ProfilePopoutState)
 fn render_popout_quick_input(
     popout: &ProfilePopoutState,
     quick_state: &Entity<InputState>,
+    quick_send_in_flight: bool,
 ) -> AnyElement {
     let target_uname = popout
         .data
         .as_ref()
-        .map(|d| d.user.username.clone())
-        .unwrap_or_else(|| popout.user_id.clone());
+        .map(|data| data.user.username.trim().to_string())
+        .filter(|username| !username.is_empty());
+    let placeholder = target_uname
+        .as_ref()
+        .map(|username| t("profile.message_placeholder").replace("{username}", username))
+        .unwrap_or_else(|| "Enviar mensagem...".to_string());
+    let disabled = target_uname.is_none() || quick_send_in_flight;
 
     let mut container = div()
         .p(px(12.0))
         .border_t_1()
-        .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
+        .border_color(bg_server())
         .bg(bg_server())
         .flex()
         .flex_col()
@@ -901,8 +1218,10 @@ fn render_popout_quick_input(
     container
         .child(
             TextInput::new("profile-quick-message-input", quick_state)
-                .placeholder(format!("Conversar com @{}...", target_uname))
+                .placeholder(placeholder)
                 .show_paste(false)
+                .show_clear(false)
+                .disabled(disabled)
                 .full_width(true),
         )
         .into_any_element()
@@ -929,6 +1248,8 @@ pub fn build_user_profile_modal_dialog(
     };
 
     let catalog = state.profile_effects_catalog.clone();
+    let guild_views = guild_profile_views(&state.guilds);
+    let roles = profile_roles_for_popout(&popout);
     let presence = state.presences_by_user.get(&popout.user_id).cloned();
     let active_tab = state.profile_modal_tab;
     let reduce_motion = state.accessibility_settings.reduce_motion;
@@ -943,7 +1264,12 @@ pub fn build_user_profile_modal_dialog(
         .child(render_modal_banner(&popout, &catalog, reduce_motion))
         .child(render_modal_header(&popout, presence.as_ref()))
         .child(render_modal_tabs_bar(entity.clone(), &popout, active_tab))
-        .child(render_modal_tab_content(&popout, active_tab));
+        .child(render_modal_tab_content(
+            &popout,
+            active_tab,
+            &guild_views,
+            &roles,
+        ));
 
     dialog
         .w(px(1184.0))
@@ -953,7 +1279,7 @@ pub fn build_user_profile_modal_dialog(
         .bg(bg_user_bar())
         .rounded(px(12.0))
         .border_1()
-        .border_color(rgb(0x1f2023)) // COR ANTIGA SEM ORIGEM
+        .border_color(bg_server())
         .overflow_hidden()
         .close_button(true)
         .on_close(move |_event, _window, cx| {
@@ -971,22 +1297,8 @@ fn render_modal_banner(
     catalog: &ProfileEffectCatalog,
     reduce_motion: bool,
 ) -> AnyElement {
-    let banner_color_val = popout
-        .data
-        .as_ref()
-        .and_then(|d| d.banner_color.as_deref().and_then(parse_hex_color))
-        .or_else(|| popout.data.as_ref().and_then(|d| d.accent_color))
-        .unwrap_or(HEX_BG_FLOATING);
-
-    let banner_image_url = popout.data.as_ref().and_then(|d| {
-        d.banner.as_ref().map(|b| {
-            if b.starts_with("http://") || b.starts_with("https://") {
-                b.clone()
-            } else {
-                format!("https://cdn.discordapp.com/banners/{}/{}.png?size=600", d.user.id, b)
-            }
-        })
-    });
+    let banner_color_val = profile_banner_color(popout);
+    let banner_image_url = profile_banner_image_url(popout, 600);
 
     let mut banner = div()
         .relative()
@@ -1025,14 +1337,20 @@ fn render_modal_banner(
 fn render_modal_header(popout: &ProfilePopoutState, presence: Option<&Presence>) -> AnyElement {
     let avatar_user = popout.data.as_ref().map(|d| &d.user);
     let avatar_url = avatar_user.and_then(|u| u.avatar_url());
-    let display_name = popout
+    let display_name = avatar_user
+        .map(|user| user.display_name().trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
+    let username = avatar_user
+        .map(|user| user.username.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default();
+    let pronouns = popout
         .data
         .as_ref()
-        .map(|d| d.user.display_name().to_string())
-        .unwrap_or_else(|| popout.user_id.clone());
-    let username = avatar_user
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| popout.user_id.clone());
+        .and_then(|data| data.pronouns.as_deref())
+        .map(str::trim)
+        .filter(|pronouns| !pronouns.is_empty());
 
     let presence_status = presence
         .map(|p| p.status)
@@ -1056,8 +1374,8 @@ fn render_modal_header(popout: &ProfilePopoutState, presence: Option<&Presence>)
     let badges = popout
         .data
         .as_ref()
-        .map(|d| d.badges.clone())
-        .unwrap_or_default();
+        .map(|data| data.badges.as_slice())
+        .unwrap_or(&[]);
 
     div()
         .px(px(24.0))
@@ -1087,29 +1405,31 @@ fn render_modal_header(popout: &ProfilePopoutState, presence: Option<&Presence>)
                         )
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .text_color(legacy_949ba4())
-                                .child(format!("@{}", username)),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(8.0))
+                                .children((!username.is_empty()).then(|| {
+                                    div()
+                                        .text_size(px(14.0))
+                                        .text_color(legacy_949ba4())
+                                        .child(format!("@{}", username))
+                                }))
+                                .children(pronouns.map(|pronouns| {
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(px(4.0))
+                                        .bg(opacity_white_8())
+                                        .text_size(px(12.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(text_primary())
+                                        .child(pronouns.to_string())
+                                })),
                         ),
                 ),
         )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(6.0))
-                .items_center()
-                .children(badges.into_iter().map(|b| {
-                    div()
-                        .size(px(24.0))
-                        .rounded(px(4.0))
-                        .bg(rgba(0xffffff11)) // COR ANTIGA SEM ORIGEM
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(img(b.icon_url()).size(px(18.0)))
-                })),
-        )
+        .child(render_profile_badges(badges, true))
         .into_any_element()
 }
 
@@ -1200,10 +1520,88 @@ fn render_modal_tabs_bar(
         .into_any_element()
 }
 
+fn profile_roles_for_popout(popout: &ProfilePopoutState) -> Vec<crate::domain::guild::Role> {
+    let Some(guild_id) = popout.guild_id.as_deref() else {
+        return Vec::new();
+    };
+    let Some(role_ids) =
+        crate::protocol::cache::lazy_guilds::get_cached_author_roles(guild_id, &popout.user_id)
+    else {
+        return Vec::new();
+    };
+    let guild_roles = crate::protocol::cache::lazy_guilds::get_cached_guild_roles(guild_id);
+    let mut roles: Vec<_> = role_ids
+        .iter()
+        .filter_map(|role_id| guild_roles.iter().find(|role| role.id == *role_id))
+        .filter(|role| role.id != guild_id && !role.name.trim().is_empty())
+        .cloned()
+        .collect();
+    roles.sort_by(|left, right| {
+        right
+            .position
+            .cmp(&left.position)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    roles
+}
+
+fn render_profile_roles(roles: &[crate::domain::guild::Role]) -> Option<AnyElement> {
+    if roles.is_empty() {
+        return None;
+    }
+
+    let mut pills = div().flex().flex_row().flex_wrap().gap(space_4());
+    for role in roles {
+        let dot_color = if role.color == 0 {
+            interactive_normal()
+        } else {
+            rgb(role.color & 0xffffff)
+        };
+        pills = pills.child(
+            div()
+                .px(space_4())
+                .py(space_2())
+                .rounded(radius_sm())
+                .bg(bg_server())
+                .border_1()
+                .border_color(channel_hover())
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(space_3())
+                .child(div().size(space_4()).rounded_full().bg(dot_color))
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(text_primary())
+                        .child(role.name.clone()),
+                ),
+        );
+    }
+
+    Some(
+        div()
+            .flex()
+            .flex_col()
+            .gap(space_4())
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(text_secondary())
+                    .child("CARGOS"),
+            )
+            .child(pills)
+            .into_any_element(),
+    )
+}
+
 /// Renders the modal content corresponding to the selected tab
 fn render_modal_tab_content(
     popout: &ProfilePopoutState,
     active_tab: ProfileModalTab,
+    guild_views: &GuildProfileViews,
+    roles: &[crate::domain::guild::Role],
 ) -> AnyElement {
     let mut container = div()
         .id("modal-tab-content-container")
@@ -1213,7 +1611,7 @@ fn render_modal_tab_content(
 
     match active_tab {
         ProfileModalTab::AboutMe => {
-            container = container.child(render_modal_about_me(popout));
+            container = container.child(render_modal_about_me(popout, roles));
         }
         ProfileModalTab::MutualGuilds => {
             let guilds = popout
@@ -1221,7 +1619,7 @@ fn render_modal_tab_content(
                 .as_ref()
                 .map(|d| d.mutual_guilds.as_slice())
                 .unwrap_or(&[]);
-            container = container.child(render_mutual_guilds_list(guilds, true));
+            container = container.child(render_mutual_guilds_list(guilds, guild_views, true));
         }
         ProfileModalTab::MutualFriends => {
             let count = popout
@@ -1237,7 +1635,10 @@ fn render_modal_tab_content(
 }
 
 /// Renders "Sobre mim" tab content (Bio, Connected accounts, Member dates)
-fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
+fn render_modal_about_me(
+    popout: &ProfilePopoutState,
+    roles: &[crate::domain::guild::Role],
+) -> AnyElement {
     let mut col = div().flex().flex_col().gap(px(16.0));
 
     if let Some(ref bio) = popout.data.as_ref().and_then(|d| d.bio.as_ref()) {
@@ -1251,12 +1652,16 @@ fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
                         div()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                            .text_color(text_secondary())
                             .child("BIOGRAFIA"),
                     )
                     .child(render_bio_content(bio)),
             );
         }
+    }
+
+    if let Some(roles_el) = render_profile_roles(roles) {
+        col = col.child(roles_el);
     }
 
     let created_at = popout
@@ -1276,7 +1681,7 @@ fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
                 div()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xb5bac1)) // COR ANTIGA SEM ORIGEM
+                    .text_color(text_secondary())
                     .child("CONTAS CONECTADAS"),
             );
             let mut acc_grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
@@ -1308,4 +1713,85 @@ fn render_modal_about_me(popout: &ProfilePopoutState) -> AnyElement {
     }
 
     col.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::guild::Role;
+
+    #[::core::prelude::v1::test]
+    fn test_parse_hex_color_accepts_only_rgb() {
+        assert_eq!(parse_hex_color("#5865f2"), Some(0x5865f2));
+        assert_eq!(parse_hex_color(" 110fbf "), Some(0x110fbf));
+        assert_eq!(parse_hex_color("#fff"), None);
+        assert_eq!(parse_hex_color("#5865f288"), None);
+        assert_eq!(parse_hex_color("#gggggg"), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_popout_placement_uses_viewport_and_click_side() {
+        let (position, corner) = resolve_profile_popout_anchor(
+            Some(point(px(500.0), px(100.0))),
+            size(px(800.0), px(600.0)),
+        );
+        assert_eq!(position, point(px(492.0), px(100.0)));
+        assert_eq!(corner, Anchor::TopRight);
+
+        let (position, corner) = resolve_profile_popout_anchor(
+            Some(point(px(950.0), px(100.0))),
+            size(px(1280.0), px(800.0)),
+        );
+        assert_eq!(position, point(px(958.0), px(100.0)));
+        assert_eq!(corner, Anchor::TopLeft);
+
+        let (position, corner) = resolve_profile_popout_anchor(
+            Some(point(px(1200.0), px(100.0))),
+            size(px(1920.0), px(1080.0)),
+        );
+        assert_eq!(position, point(px(1208.0), px(100.0)));
+        assert_eq!(corner, Anchor::TopLeft);
+
+        let (position, corner) = resolve_profile_popout_anchor(None, size(px(800.0), px(600.0)));
+        assert_eq!(position, point(px(792.0), px(60.0)));
+        assert_eq!(corner, Anchor::TopRight);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_profile_roles_use_real_cache_and_position_order() {
+        let guild_id = "synth-profile-roles-guild";
+        let user_id = "synth-profile-roles-user";
+        let roles = vec![
+            Role::new(guild_id, "@everyone").with_position(100),
+            Role::new("synth-role-mod", "Moderator")
+                .with_color(0x2ecc71)
+                .with_position(5),
+            Role::new("synth-role-admin", "Admin")
+                .with_color(0xe91e63)
+                .with_position(10),
+        ];
+        crate::protocol::cache::lazy_guilds::cache_guild_roles(guild_id, roles);
+        crate::protocol::cache::lazy_guilds::cache_author_roles(
+            guild_id,
+            user_id,
+            vec![
+                guild_id.into(),
+                "synth-role-mod".into(),
+                "synth-role-admin".into(),
+            ],
+        );
+
+        let mut state = AppState::new();
+        state.open_user_profile_in_guild(user_id, Some(guild_id.into()), None);
+        let resolved = profile_roles_for_popout(state.profile_popout.as_ref().unwrap());
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|role| role.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Admin", "Moderador"]
+        );
+        assert_eq!(resolved[0].color, 0xe91e63);
+        assert_eq!(resolved[1].color, 0x2ecc71);
+    }
 }
