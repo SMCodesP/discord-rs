@@ -346,6 +346,40 @@ fn test_e2e_optimistic_message_sending_and_gateway_confirmation() {
     assert_eq!(replaced_msg.content, test_content);
 }
 
+#[test]
+fn test_e2e_network_disconnect_never_confirms_pending_message() {
+    let mut state = AppState::new();
+    state.current_user.id = "user-sintetico".to_string();
+    state.current_user.username = "usuario_sintetico".to_string();
+    state.selected_channel_id = Some("chan-offline".to_string());
+
+    state.send_message("chan-offline", "mensagem pendente sintética");
+    let pending = state
+        .messages_by_channel
+        .get("chan-offline")
+        .and_then(|messages| messages.last())
+        .expect("mensagem otimista deve existir");
+    assert!(pending.id.starts_with("temp-"));
+    assert!(pending.is_pending);
+
+    state.handle_transport_event(TransportEvent::Disconnected(
+        "Conexão de rede perdida".to_string(),
+    ));
+
+    let pending = state
+        .messages_by_channel
+        .get("chan-offline")
+        .and_then(|messages| messages.last())
+        .expect("mensagem pendente deve permanecer no histórico");
+    assert!(
+        pending.id.starts_with("temp-"),
+        "queda de rede não pode inventar Snowflake"
+    );
+    assert!(pending.is_pending, "queda de rede não pode confirmar envio");
+    assert!(!state.is_connected_to_gateway);
+    assert!(state.connection_status.contains("Conexão de rede perdida"));
+}
+
 // =========================================================================
 // 6. Reações a mensagens e respostas
 // =========================================================================
