@@ -815,3 +815,25 @@
 | **4B — QA Polimento** | `T-050`, `T-059` | `tests/log_redaction_and_auth_safety_test.rs`, `tests/i18n_and_search_advanced_test.rs` |
 
 **Regra de merge:** cada trilha trabalha em worktree/layer própria, commita apenas seus arquivos e não faz merge/push. O orquestrador integra uma trilha por vez, roda `flock /tmp/discord-rs-cargo-A.lock timeout 600 cargo check -j 4` e a suíte isolada, restaura `docs/PARITY_AUDIT.md`/`docs/VISUAL_PARITY_DIFF.md` e só então inicia a próxima trilha da mesma onda.
+
+### 4.5 Estado das Worktrees em Andamento (Prontidao de Land)
+
+**Snapshot somente leitura em 2026-11-24.** Nenhum arquivo das worktrees foi alterado e nenhum `cargo` foi executado nelas. Todas passam por `git diff --check`. Dez worktrees têm alterações não commitadas; `design-chat` está limpa, com um commit à frente da `main`. Todas estão atrás da `main` (16–17 commits) e precisam de rebase/atualização antes do land.
+
+| Worktree / branch | Estado | Já implementado | Falta para fechar/land limpo |
+|---|---|---|---|
+| `v-proto-0f8e36fd` | 5 arquivos, `+1590/-238`, não staged | Nonce/AAD RTP, extensões/padding, validação IP Discovery, DAVE fail-closed/estrito, conectividade de membros, heartbeat inválido, reconexão/sessão | Commit do delta; `cargo check` + testes de voz; validar integração com `net-gateway`; land antes de `v-audio` |
+| `v-audio-9c692f8e` | 6 arquivos, `+1297/-264`, não staged; HEAD já landado | Ganho real input/output, validação Opus, reordenação sequence/timestamp com wrap, jitter/PLC/estatísticas, ponte preservando RTP metadata | Commit apenas do delta novo; rebase na `main`; testes após `v-proto`; resolver semântica de `voice_session.rs` |
+| `v-stage-fe9a94dd` | 1 arquivo, `+1272/-78`, não staged; HEAD já landado | Preview local de câmera/tela, coalescing de frames, conversão de vídeo, spotlight, ciclo de vida/Drop | Commit do delta; rebase; testes; garantir que preview não altere flags de transmissão remotas |
+| `chat-msgs-70ebf4a1` | 4 arquivos, `+3009/-792`, não staged | Correlação nonce/temp ID, confirmação idempotente, falha/retry, merge de histórico, paginação, typing schedule, markdown e UI de erros | Commit; testes de chat; integração com APIs/Gateway do `net-gateway`; confirmar T-024/T-026/T-031/T-035 |
+| `profile-decor-7f517b32` | 4 arquivos, `+1293/-407`, não staged | Quick-send à prova de corrida, banner/roles/mutual guilds, posicionamento/foco do popout, decoração de avatar, timeline de efeitos | Commit; testes de perfil; validação visual; coordenar com `design-chat`/`design-shell` |
+| `media-gifs-a032fab2` | 3 arquivos, `+1947/-312`, não staged | Parser/cache Tenor, sticker packs, skin tones, disponibilidade, identidade de reação custom | Commit; testes; **ainda falta ligar `chat_view.rs` à API real** (T-043 não fecha só com este delta) |
+| `design-shell-8e932fe4` | 8 arquivos, `+681/-289`, não staged | Tokens medidos, Guild Rail/pastas/pill, largura da sidebar, User Panel e métricas de header | Commit; testes/visual QA; **`header_bar.rs` não foi alterado**, então T-078 continua aberto |
+| `design-chat-469a6796` | limpa; 1 commit à frente (`6fd21bc`), 3 arquivos `+764/-100` | Geometria Cozy/member, busca e render de mensagens com dados reais | Rebase na `main`; `cargo check`/testes; land; callbacks de reply/unread/hover-edit ainda dependem de `chat-msgs`/read-state |
+| `design-friends-8c8add54` | 3 arquivos, `+771/-375`, não staged | Filtro/dedupe de amigos, ações pendentes, chamada, Active Now/Spotify, cache de DMs fixados | Commit; testes; validação visual; coordenar com `chat-msgs`/`net-gateway` |
+| `design-settings-274a2692` | 17 arquivos, `+2556/-1346`, não staged | Aplicação de tema, acessibilidade/appearance, seletores de dispositivo, mic test, estados ausentes honestos | Commit; testes; persistência GET/PATCH e locale ainda dependem de `net-gateway`/T-038 |
+| `net-gateway-693cce8d` | 14 arquivos, `+4491/-1629`, não staged | Verificação REST antes do Gateway, reconnect/backoff, rate limit coordinator, cache atômico/seguro, startup hydration, settings proto e novas APIs | Commit; suíte completa; land primeiro como fundação; revisar mudanças de `RateLimitManager`→`RateLimitCoordinator` e contratos de voz |
+
+**Sobreposição direta:** somente `v-proto` ↔ `v-audio` em `src/protocol/voice_session.rs`. Os hunks são diferentes (protocolo/DAVE vs ponte de áudio), mas a integração deve ser validada em sequência. As demais worktrees não compartilham arquivos modificados entre si.
+
+**Ordem recomendada de land:** `net-gateway` → `v-proto` → `v-audio` → `v-stage` → `media-gifs` → `chat-msgs` → `profile-decor` → `design-friends` → `design-shell` → `design-chat` → `design-settings`. Antes de cada land: atualizar/rebasear a branch, commitar o delta, rodar `cargo check` e testes isolados, restaurar os relatórios gerados e só então integrar. `v-audio`/`v-stage` já têm seus commits-base na `main`; não reaplicar esses commits, apenas os deltas não commitados.
