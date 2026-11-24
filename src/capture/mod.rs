@@ -14,3 +14,7 @@ pub use screen::{
     PortalScreencastInfo, ScreenCaptureConfig, ScreenCaptureManager, ScreenCaptureMode,
     ScreenSession, ScreenSourceType, SessionType, X11ScreenInfo,
 };
+
+pub mod frame_ring;
+
+pub use frame_ring::{FrameRingBuffer, FrameRingStats, PushError};
