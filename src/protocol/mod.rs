@@ -13,6 +13,7 @@ pub mod http_client;
 pub mod idle_transport;
 pub mod image_decode;
 pub mod media_cache;
+pub mod memory_lru;
 pub mod mock_provider;
 pub mod rate_limit;
 pub mod rate_limiter;
@@ -43,6 +44,7 @@ pub use image_decode::{
     DEFAULT_CACHE_MAX_BYTES, DEFAULT_CACHE_MAX_ENTRIES, MAX_IMAGE_DIMENSION,
 };
 pub use media_cache::*;
+pub use memory_lru::{MemoryLru, MemoryLruStats};
 pub use mock_provider::MockDiscordProvider;
 pub use rate_limit::*;
 pub use rate_limiter::RateLimitManager;
