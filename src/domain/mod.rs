@@ -17,3 +17,4 @@ pub use settings::*;
 pub use user::{Activity, ActivityType, AvatarDecorationData, CustomStatus, CustomStatusEmoji, Presence, PresenceStatus, User};
 pub use voice::{VoiceParticipant, VoiceState};
 
+pub mod permissions;
