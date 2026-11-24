@@ -16,6 +16,7 @@ pub mod message_list;
 pub mod polls;
 pub mod reactions;
 pub mod search;
+pub mod system_messages;
 
 pub use chat_view::*;
 pub use editor::*;
@@ -25,5 +26,6 @@ pub use message_list::*;
 pub use polls::*;
 pub use reactions::*;
 pub use search::*;
+pub use system_messages::*;
 
 
