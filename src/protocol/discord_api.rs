@@ -2236,10 +2236,11 @@ async fn handle_dispatch(
                             if hash.starts_with("http://") || hash.starts_with("https://") {
                                 hash.to_string()
                             } else {
-                                let ext = if hash.starts_with("a_") { "gif" } else { "png" };
+                                // Use static .png?size=128 in the guild rail (matches Discord Desktop:
+                                // avoids decoding dozens of multi-frame animated GIFs at 60 FPS in RAM).
                                 format!(
-                                    "https://cdn.discordapp.com/icons/{}/{}.{}?size=128",
-                                    id, hash, ext
+                                    "https://cdn.discordapp.com/icons/{}/{}.png?size=128",
+                                    id, hash
                                 )
                             }
                         });
@@ -2490,10 +2491,9 @@ async fn handle_dispatch(
                     if hash.starts_with("http://") || hash.starts_with("https://") {
                         hash.to_string()
                     } else {
-                        let ext = if hash.starts_with("a_") { "gif" } else { "png" };
                         format!(
-                            "https://cdn.discordapp.com/icons/{}/{}.{}?size=128",
-                            id, hash, ext
+                            "https://cdn.discordapp.com/icons/{}/{}.png?size=128",
+                            id, hash
                         )
                     }
                 });
