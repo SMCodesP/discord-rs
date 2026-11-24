@@ -27,8 +27,36 @@ impl AppState {
 
     /// Applies a batch of transport events and preserves side effects that must
     /// happen at the UI dispatch boundary.
+    fn event_affects_visible_ui(&self, event: &TransportEvent) -> bool {
+        let selected_ch = self.selected_channel_id.as_deref();
+        match event {
+            TransportEvent::MessageCreate(msg) | TransportEvent::MessageUpdate(msg) => {
+                selected_ch == Some(msg.channel_id.as_str())
+                    || self.dm_channels.iter().any(|dm| dm.id == msg.channel_id)
+            }
+            TransportEvent::MessageDelete { channel_id, .. }
+            | TransportEvent::TypingStart { channel_id, .. } => {
+                selected_ch == Some(channel_id.as_str())
+            }
+            TransportEvent::ReactionAdd { channel_id, .. }
+            | TransportEvent::ReactionRemove { channel_id, .. } => {
+                selected_ch == Some(channel_id.as_str())
+            }
+            TransportEvent::PresenceUpdate { user_id, .. } => {
+                self.selected_guild_id.is_none()
+                    || self.friends.iter().any(|f| f.id == *user_id)
+                    || self.members.iter().any(|m| m.id == *user_id)
+            }
+            _ => true,
+        }
+    }
+
     pub fn apply_transport_events(&mut self, events: Vec<TransportEvent>, cx: &mut gpui::Context<Self>) {
+        let mut should_notify = false;
         for event in events {
+            if !should_notify && self.event_affects_visible_ui(&event) {
+                should_notify = true;
+            }
             let deleted_call_channel = match &event {
                 TransportEvent::CallDelete { channel_id } => Some(channel_id.clone()),
                 _ => None,
@@ -42,10 +70,13 @@ impl AppState {
                     == Some(channel_id.as_str())
                 {
                     self.disconnect_voice();
+                    should_notify = true;
                 }
             }
         }
-        cx.notify();
+        if should_notify {
+            cx.notify();
+        }
     }
 
     /// Dispatches a real-time event received from the Gateway / ClientManager
