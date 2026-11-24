@@ -54,7 +54,7 @@
 - [x] **T-001** `[Voice-Audio]` — **Diagnosticar e corrigir voz bugada na call (áudio picotado/robótico/mudo/dessincronizado)**
   - **Concluído e integrado na `main` em 2026-11-24** (layer `v-audio`, commit `e5b9d3b`): callbacks `cpal` agora usam anéis SPSC não bloqueantes; captura/playback em workers dedicados com pré-buffer de 60 ms e anel de 250 ms; resampling 44,1/48 kHz corrigido; Opus 48 kHz estéreo/20 ms; mixer com jitter adaptativo, PLC Opus por 200 ms, fades, ganho equal-power e limiter; 33 testes unitários de mídia + 6 `audio_engine_test` verdes. Próximo refinamento: `T-019` (ordenação por sequence/timestamp) + `T-039b` (RMS/ganho real).
 
-- [ ] **T-002** `[Voice-Proto]` — **Auditar e corrigir protocolo de voz ponta a ponta (Voice Gateway v8, UDP, RTP, AEAD Crypto, DAVE E2EE, VoiceSession)**
+- [x] **T-002** `[Voice-Proto]` — **Auditar e corrigir protocolo de voz ponta a ponta (Voice Gateway v8, UDP, RTP, AEAD Crypto, DAVE E2EE, VoiceSession)**
   - **Escopo**: Auditar `src/protocol/voice_gateway.rs`, `src/protocol/voice_udp.rs`, `src/protocol/voice_crypto.rs`, `src/protocol/voice_dave.rs`, `src/protocol/voice_session.rs`.
   - **Suspeitas iniciais**: Nonce/AAD do `aead_xchacha20_poly1305_rtpsize` ou `aead_aes256_gcm_rtpsize`, extensão de header RTP (RFC 5285 / one-byte header stripping), integração com `davey` (transição de epoch / encrypt & decrypt de frames Opus, passthrough de frames de silêncio `0xF8 0xFF 0xFE`), SSRC mapping para participantes, speaking op 5.
   - **Critério de pronto**: Interoperabilidade RTP + AEAD + DAVE verificada nos mínimos detalhes da spec oficial do Discord Voice v8, testes cobrindo pacotes com/sem RTP header extension e DAVE frames.
@@ -141,7 +141,7 @@
 - `/tmp/discordrs-smcodes.png`, `/tmp/discordrs-xinxyl.png`, `/tmp/discordrs-lab.png` e `/tmp/discordrs-friends.png`: instâncias nativas; a principal exibiu iniciais no trilho de servidores e as outras duas permaneceram no login.
 - `/tmp/discord-rs-logs/smcodes.log:51-64`: 14 erros consecutivos `404` do CDN para ícones de guilda. `/tmp/discord-rs-logs/*.log:15`: portal desktop indisponível no ambiente. Não havia chamada real nem eventos RTP/DAVE nos logs atuais.
 
-- [ ] **T-018** — **P0** — **Voz/Protocolo** — **Renegociar mídia após reconnect/resume do Voice Gateway**
+- [x] **T-018** — **P0** — **Voz/Protocolo** — **Renegociar mídia após reconnect/resume do Voice Gateway**
   - **Arquivos:** `src/protocol/voice_session.rs:1216-1220`, `src/protocol/voice_session.rs:1243-1247`, `src/protocol/voice_session.rs:1301-1314`, `src/protocol/voice_session.rs:1447-1472`, `src/protocol/voice_gateway.rs:1391-1394`, `src/protocol/voice_gateway.rs:1419-1421`, `src/protocol/voice_udp.rs:503-510`.
   - **Evidência:** o socket UDP, `RtpCrypto`, `local_ssrc`, sequência e timestamp são criados uma única vez. Quando o gateway emite `Ready`/`Resumed` ou decide `NewSession`, `VoiceSession` apenas volta o estado para `Connected`; não refaz IP Discovery, Select Protocol, Session Description nem atualiza SSRC/chave. Em `NewSession`, o servidor pode atribuir novo SSRC e chave, deixando o transmissor com identidade obsoleta.
   - **O que falta/corrigir:** tornar o handshake de mídia reentrante e orientado por geração de sessão; reconstruir transporte após `Ready`/`SessionDescription` novo, preservando buffers apenas quando o protocolo permitir resume.
@@ -160,7 +160,7 @@
   - **O que falta/corrigir:** tornar `VoiceSession` a única autoridade; deafen deve implicar mute local e remoto, e undeafen deve restaurar o estado anterior de mute; remover caminhos duplicados de `AppState`.
   - **Critério de pronto:** um clique gera exatamente um comando de áudio e um Opcode 4; testes cobrem deafen a partir de unmuted, undeafen e falha de sinalização sem estado divergente.
 
-- [ ] **T-021** — **P1** — **Voz/DAVE** — **Falhar fechado quando DAVE negociado não fica pronto**
+- [x] **T-021** — **P1** — **Voz/DAVE** — **Falhar fechado quando DAVE negociado não fica pronto**
   - **Arquivos:** `src/protocol/voice_session.rs:1193-1203`, `src/protocol/voice_session.rs:1246-1248`, `src/protocol/voice_dave.rs:233-263`, `src/protocol/voice_dave.rs:466-510`.
   - **Evidência:** erro de `init_session` apenas gera `warn` e a sessão continua; `encrypt_opus_frame`/`decrypt_opus_frame` retornam passthrough enquanto MLS não está pronto, sem prazo máximo. O estado vira `Connected` antes de qualquer garantia de E2EE.
   - **O que falta/corrigir:** exigir readiness DAVE quando `dave_protocol_version > 0`, limitar passthrough à janela oficial de grace e expor erro fatal/reação de recuperação quando o handshake MLS falhar.
