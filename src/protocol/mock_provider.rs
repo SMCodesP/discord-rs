@@ -21,6 +21,7 @@ struct MockState {
     recorded_member_requests: Vec<(String, Vec<String>)>,
     recorded_message_edits: Vec<(String, String, String)>,
     recorded_pins: Vec<(String, String)>,
+    recorded_typing: Vec<String>,
 }
 
 /// Deterministic mock provider simulating Discord guilds, channels, messages, and gateway events.
@@ -459,6 +460,7 @@ impl MockDiscordProvider {
             recorded_member_requests: Vec::new(),
             recorded_message_edits: Vec::new(),
             recorded_pins: Vec::new(),
+            recorded_typing: Vec::new(),
         };
 
         Self {
@@ -481,6 +483,10 @@ impl MockDiscordProvider {
 
     pub async fn recorded_pins(&self) -> Vec<(String, String)> {
         self.state.read().await.recorded_pins.clone()
+    }
+
+    pub async fn recorded_typing(&self) -> Vec<String> {
+        self.state.read().await.recorded_typing.clone()
     }
 
     /// Simulates receiving an external message from another user in real time.
@@ -525,6 +531,10 @@ impl MockDiscordProvider {
 
     pub async fn get_recorded_pins(&self) -> Vec<(String, String)> {
         self.state.read().await.recorded_pins.clone()
+    }
+
+    pub async fn get_recorded_typing(&self) -> Vec<String> {
+        self.state.read().await.recorded_typing.clone()
     }
 }
 

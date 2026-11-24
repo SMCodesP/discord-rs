@@ -1532,6 +1532,26 @@ impl DiscordTransport for DiscordApiClient {
         self.send_sticker_message(channel_id, sticker_id).await
     }
 
+    async fn send_typing(&self, channel_id: &str) -> Result<()> {
+        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM para typing: {}", e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let path = format!("/channels/{}/typing", resolved_id);
+        let req = self.auth_request(reqwest::Method::POST, &path);
+        self.send_request(&path, req).await?;
+        Ok(())
+    }
+
     async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");
