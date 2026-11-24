@@ -243,7 +243,13 @@ pub async fn prompt_user_captcha(challenge: &CaptchaChallenge) -> Result<Captcha
     let html = build_captcha_html(challenge);
     let html_b64 = base64::engine::general_purpose::STANDARD.encode(html.as_bytes());
 
-    let mut child = Command::new("python3")
+    let python_bin = if std::path::Path::new("/usr/bin/python3").exists() {
+        "/usr/bin/python3"
+    } else {
+        "python3"
+    };
+
+    let mut child = Command::new(python_bin)
         .arg("-c")
         .arg(WEBKIT_HELPER_PY)
         .stdin(Stdio::piped())
@@ -261,6 +267,7 @@ pub async fn prompt_user_captcha(challenge: &CaptchaChallenge) -> Result<Captcha
         .stdout
         .take()
         .ok_or_else(|| anyhow!("Falha ao capturar saída da janela de verificação"))?;
+    let stderr = child.stderr.take();
     let mut reader = BufReader::new(stdout).lines();
 
     let mut solved_token: Option<String> = None;
@@ -276,7 +283,22 @@ pub async fn prompt_user_captcha(challenge: &CaptchaChallenge) -> Result<Captcha
         }
     }
 
-    let _ = child.wait().await;
+    let status = child.wait().await;
+    if solved_token.is_none() {
+        if let Some(mut err_pipe) = stderr {
+            use tokio::io::AsyncReadExt;
+            let mut err_buf = String::new();
+            let _ = err_pipe.read_to_string(&mut err_buf).await;
+            if !err_buf.trim().is_empty() {
+                log::warn!(
+                    "[CaptchaWebView] helper ({}) terminou ({:?}): {}",
+                    python_bin,
+                    status,
+                    err_buf.trim()
+                );
+            }
+        }
+    }
 
     match solved_token {
         Some(captcha_key) => Ok(CaptchaSolution {
