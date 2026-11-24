@@ -13,5 +13,6 @@ mod settings;
 mod voice;
 
 pub use app_state::*;
+pub use connection::bot_token_login_enabled;
 pub use disk_cache::*;
 pub use models::*;

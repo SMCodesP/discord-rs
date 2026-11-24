@@ -3,8 +3,23 @@ use crate::protocol::AuthToken;
 use crate::protocol::ConnectionMode;
 use std::collections::HashMap;
 
+/// Whether raw bot-token login is explicitly enabled for development.
+///
+/// The official login path is OAuth2 Authorization Code + PKCE. Bot tokens are
+/// only accepted when `DISCORD_RS_DEV_BOT_TOKEN=1` (or `true`) is set, so a
+/// production build cannot silently fall back to a bot/self-bot credential.
+pub fn bot_token_login_enabled() -> bool {
+    std::env::var("DISCORD_RS_DEV_BOT_TOKEN")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 impl AppState {
-    /// Authenticates with a Discord token and updates connection status
+    /// Authenticates with a Discord token and updates connection status.
+    ///
+    /// Bot tokens require explicit development mode. The credential is not
+    /// written to disk here: `gateway_events` persists it only after a real
+    /// READY from the Gateway.
     pub fn authenticate(&mut self, token: String, is_user: bool) {
         let trimmed = token.trim().to_string();
         if trimmed.is_empty() {
@@ -13,7 +28,23 @@ impl AppState {
             return;
         }
 
+        if !is_user && !bot_token_login_enabled() {
+            self.is_connecting = false;
+            self.is_connected_to_gateway = false;
+            self.auth_error = Some(
+                "Login por token de bot está disponível apenas em modo explícito de desenvolvimento (DISCORD_RS_DEV_BOT_TOKEN=1). Use o login OAuth2."
+                    .to_string(),
+            );
+            self.connection_status = "Desconectado".to_string();
+            return;
+        }
+
         self.auth_token = Some(trimmed.clone());
+        self.auth_token_type = Some(if is_user {
+            crate::protocol::TokenType::User
+        } else {
+            crate::protocol::TokenType::Bot
+        });
         self.token_input = trimmed.clone();
         self.is_user_token = is_user;
         self.auth_error = None;
@@ -43,10 +74,88 @@ impl AppState {
         }
     }
 
+    /// Authenticates with a successfully exchanged OAuth2 access token.
+    ///
+    /// Persistence remains deferred to the Gateway READY handler, which only
+    /// writes a valid credential after Discord confirms it.
+    pub fn authenticate_oauth(&mut self, access_token: String) {
+        let trimmed = access_token.trim().to_string();
+        if trimmed.is_empty() {
+            self.auth_error = Some("O token OAuth2 não pode estar vazio.".to_string());
+            self.is_connecting = false;
+            return;
+        }
+
+        self.auth_token = Some(trimmed.clone());
+        self.auth_token_type = Some(crate::protocol::TokenType::OAuth);
+        self.token_input = trimmed.clone();
+        self.is_user_token = true;
+        self.auth_error = None;
+        self.is_connecting = true;
+        self.is_connected_to_gateway = false;
+        self.connection_status = "Conectando ao Gateway v10...".to_string();
+
+        if let Some(ref cm) = self.client_manager {
+            let cm = cm.clone();
+            let auth = AuthToken::oauth(trimmed);
+            tokio::spawn(async move {
+                if let Err(e) = cm.connect_with_token(auth).await {
+                    log::error!("Falha ao conectar via ClientManager: {:#}", e);
+                }
+            });
+        } else {
+            self.is_connecting = false;
+            self.auth_error = Some("Gerenciador de conexão não inicializado.".to_string());
+            self.connection_status = "Desconectado".to_string();
+        }
+    }
+
+    /// Performs a real logout: disconnects the Gateway and removes the saved
+    /// credential from disk. The UI only leaves the connected state after the
+    /// local session is actually torn down.
+    pub fn logout(&mut self) {
+        self.disconnect_gateway();
+
+        self.auth_token = None;
+        self.auth_token_type = None;
+        self.token_input.clear();
+        self.auth_error = None;
+        self.is_connecting = false;
+        self.is_connected_to_gateway = false;
+        self.connection_mode = ConnectionMode::Disconnected("Desconectado".to_string());
+        self.connection_status = "Desconectado".to_string();
+        self.current_user = crate::app::state::CurrentUserProfile {
+            id: String::new(),
+            username: String::new(),
+            display_name: String::new(),
+            discriminator: None,
+            avatar_text: String::new(),
+            avatar_url: None,
+            custom_status: None,
+            presence: crate::app::state::PresenceStatus::Offline,
+            is_muted: false,
+            is_deafened: false,
+            avatar_decoration_data: None,
+        };
+        self.guilds.clear();
+        self.members.clear();
+        self.friends.clear();
+        self.dm_channels.clear();
+        self.messages_by_channel.clear();
+
+        if let Err(error) = crate::protocol::TokenStorage::default().clear() {
+            log::warn!("Falha ao remover credenciais salvas no logout: {:#}", error);
+            self.auth_error = Some("Não foi possível remover as credenciais salvas.".to_string());
+        }
+
+        self.close_modal();
+    }
+
     /// Disconnects from live gateway
     pub fn disconnect_gateway(&mut self) {
         self.is_connected_to_gateway = false;
         self.auth_token = None;
+        self.auth_token_type = None;
         self.connection_mode = ConnectionMode::Disconnected("Desconectado".to_string());
         self.connection_status = "Desconectado".to_string();
         self.messages_by_channel = HashMap::new();

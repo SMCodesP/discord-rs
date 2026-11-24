@@ -6,7 +6,7 @@ use super::channel_sidebar::ChannelSidebar;
 use super::guild_rail::GuildRail;
 use super::header_bar::HeaderBar;
 use super::member_sidebar::MemberSidebar;
-use super::state::{ActiveModal, AppState, ChannelKind};
+use super::state::{bot_token_login_enabled, ActiveModal, AppState, ChannelKind};
 use super::user_settings::UserSettingsModal;
 use super::voice_call_panel::VoiceCallPanel;
 use crate::chat::ChatView;
@@ -64,10 +64,14 @@ impl RootView {
             s.client_manager = Some(client_manager.clone());
             if let Some(ref token) = s.auth_token {
                 let cm = cm_auto_login;
-                let auth = if s.is_user_token {
-                    crate::protocol::AuthToken::user(token.clone())
-                } else {
-                    crate::protocol::AuthToken::bot(token.clone())
+                let auth = match s.auth_token_type {
+                    Some(crate::protocol::TokenType::OAuth) => {
+                        crate::protocol::AuthToken::oauth(token.clone())
+                    }
+                    Some(crate::protocol::TokenType::User) => {
+                        crate::protocol::AuthToken::user(token.clone())
+                    }
+                    _ => crate::protocol::AuthToken::bot(token.clone()),
                 };
                 tokio::spawn(async move {
                     if let Err(e) = cm.connect_with_token(auth).await {
@@ -846,8 +850,66 @@ impl Render for RootView {
     }
 }
 
+/// Starts the official OAuth2 Authorization Code + PKCE login in the browser
+/// and waits for the loopback redirect before touching the saved credential.
+fn start_oauth_login(entity: Entity<AppState>, cx: &mut App) {
+    let config = match crate::protocol::auth::OAuthConfig::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            entity.update(cx, |state, cx| {
+                state.is_connecting = false;
+                state.auth_error = Some(error.to_string());
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    let flow = match crate::protocol::auth::OAuthPkceFlow::new(config) {
+        Ok(flow) => flow,
+        Err(error) => {
+            entity.update(cx, |state, cx| {
+                state.is_connecting = false;
+                state.auth_error = Some(error.to_string());
+                cx.notify();
+            });
+            return;
+        }
+    };
+
+    cx.open_url(&flow.authorization_url());
+    entity.update(cx, |state, cx| {
+        state.is_connecting = true;
+        state.is_connected_to_gateway = false;
+        state.auth_error = None;
+        state.connection_status = "Aguardando autorização OAuth2 no navegador...".to_string();
+        cx.notify();
+    });
+
+    cx.spawn(|cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let result = flow.wait_for_loopback_callback().await;
+            let _ = cx.update(|cx| {
+                entity.update(cx, |state, cx| {
+                    match result {
+                        Ok(tokens) => state.authenticate_oauth(tokens.access_token),
+                        Err(error) => {
+                            state.is_connecting = false;
+                            state.auth_error = Some(error.to_string());
+                            state.connection_status = "Desconectado".to_string();
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 /// Renders the mandatory full-screen initial login view when not connected to Discord Gateway.
-/// Focuses the token input automatically, provides smooth connecting state, and removes demo mode.
+/// Mirrors the official login geometry: 480px card, 416x40 primary action and 16px body text.
 fn render_login_screen(
     entity: Entity<AppState>,
     state: &AppState,
@@ -856,9 +918,11 @@ fn render_login_screen(
     let entity_connect = entity.clone();
     let entity_bot_toggle = entity.clone();
     let entity_user_toggle = entity.clone();
+    let entity_oauth = entity.clone();
 
     let is_user = state.is_user_token;
     let is_connecting = state.is_connecting;
+    let dev_tokens = bot_token_login_enabled();
 
     // Status banner
     let banner = if let Some(ref err) = state.auth_error {
@@ -870,12 +934,50 @@ fn render_login_screen(
             "Conectando ao Gateway WebSocket v10 e sincronizando dados da conta...",
         )
         .title("Autenticando")
+    } else if dev_tokens {
+        Banner::info(
+            "login-info",
+            "Modo de desenvolvimento: token de bot/usuário habilitado explicitamente.",
+        )
+        .title("Autenticação de Desenvolvimento")
     } else {
         Banner::info(
             "login-info",
-            "Insira seu Bot Token do Discord Developer Portal ou Token de Usuário para acessar o Discord RS.",
+            "Entre com sua conta do Discord pelo fluxo oficial OAuth2 Authorization Code + PKCE.",
         )
         .title("Autenticação Necessária")
+    };
+
+    let oauth_section: AnyElement = match crate::protocol::auth::OAuthConfig::from_env() {
+        Ok(_) => div()
+            .flex()
+            .flex_col()
+            .gap(space_2())
+            .child(
+                Button::blurple("login-oauth-action-btn", "Entrar com Discord")
+                    .size(ButtonSize::Md)
+                    .full_width()
+                    .disabled(is_connecting)
+                    .on_click(move |_event, _window, cx| {
+                        start_oauth_login(entity_oauth.clone(), cx);
+                    }),
+            )
+            .child(
+                div()
+                    .text_color(text_muted())
+                    .text_size(font_size_xs())
+                    .text_center()
+                    .child("Autorização oficial no navegador, com state, nonce e PKCE S256."),
+            )
+            .into_any_element(),
+        Err(error) => Banner::info(
+            "login-oauth-unconfigured",
+            format!(
+                "{error}. Defina DISCORD_CLIENT_ID e DISCORD_OAUTH_REDIRECT_URI para habilitar o login oficial."
+            ),
+        )
+        .title("Login OAuth2 indisponível")
+        .into_any_element(),
     };
 
     let text_input = TextInput::new("discord-token-input", token_state)
@@ -889,6 +991,198 @@ fn render_login_screen(
         .full_width(true)
         .disabled(is_connecting);
 
+    let mode_toggle = div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_xs())
+                .font_weight(FontWeight::BOLD)
+                .child("TIPO DE CONTA (DESENVOLVIMENTO)"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap(space_3())
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(40.0))
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(if !is_user { blurple() } else { borders() })
+                        .bg(if !is_user {
+                            with_alpha(HEX_BLURPLE, 0.15)
+                        } else {
+                            bg_chat()
+                        })
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(space_2())
+                        .hover(|s| s.opacity(0.85))
+                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                            entity_bot_toggle.update(cx, |s, cx| {
+                                s.is_user_token = false;
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_bot(
+                            px(18.0),
+                            if !is_user { text_titles() } else { text_muted() },
+                        ))
+                        .child(
+                            div()
+                                .text_color(if !is_user { text_titles() } else { text_muted() })
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(font_size_base())
+                                .child("Bot Token"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .h(px(40.0))
+                        .rounded(radius_sm())
+                        .border_1()
+                        .border_color(if is_user { blurple() } else { borders() })
+                        .bg(if is_user {
+                            with_alpha(HEX_BLURPLE, 0.15)
+                        } else {
+                            bg_chat()
+                        })
+                        .cursor_pointer()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(space_2())
+                        .hover(|s| s.opacity(0.85))
+                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                            entity_user_toggle.update(cx, |s, cx| {
+                                s.is_user_token = true;
+                                cx.notify();
+                            });
+                        })
+                        .child(icon_user(
+                            px(18.0),
+                            if is_user { text_titles() } else { text_muted() },
+                        ))
+                        .child(
+                            div()
+                                .text_color(if is_user { text_titles() } else { text_muted() })
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(font_size_base())
+                                .child("Conta de Usuário"),
+                        ),
+                ),
+        );
+
+    let actions = div()
+        .flex()
+        .flex_col()
+        .gap(space_2())
+        .pt(space_2())
+        .child(if is_connecting {
+            div()
+                .w_full()
+                .h(px(40.0))
+                .rounded(radius_sm())
+                .bg(blurple_hover())
+                .opacity(0.85)
+                .cursor_not_allowed()
+                .text_color(crate::tokens::colors::white())
+                .font_weight(FontWeight::BOLD)
+                .text_size(font_size_base())
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(space_2())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(crate::tokens::colors::white()),
+                        )
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(crate::tokens::colors::white())
+                                .opacity(0.7),
+                        )
+                        .child(
+                            div()
+                                .size(px(6.0))
+                                .rounded_full()
+                                .bg(crate::tokens::colors::white())
+                                .opacity(0.4),
+                        ),
+                )
+                .child("Conectando ao Discord...")
+        } else {
+            div()
+                .w_full()
+                .h(px(40.0))
+                .rounded(radius_sm())
+                .bg(blurple())
+                .text_color(crate::tokens::colors::white())
+                .font_weight(FontWeight::BOLD)
+                .text_size(font_size_base())
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.bg(blurple_hover()))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity_connect.update(cx, |s, cx| {
+                        let token = s.token_input.clone();
+                        let is_u = s.is_user_token;
+                        s.authenticate(token, is_u);
+                        cx.notify();
+                    });
+                })
+                .child("Conectar ao Discord")
+        })
+        .child(
+            div()
+                .pt(space_2())
+                .w_full()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .text_color(text_muted())
+                .text_size(px(12.0))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(icon_lock(px(14.0), text_muted())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_center()
+                        .child(if dev_tokens {
+                            "Credenciais só são gravadas após confirmação do Gateway (0600)."
+                        } else {
+                            "Credenciais OAuth2 só são gravadas após confirmação do Gateway (0600)."
+                        }),
+                ),
+        );
+
     div()
         .size_full()
         .bg(rgb(HEX_BG_SERVER))
@@ -899,7 +1193,7 @@ fn render_login_screen(
         .p(space_6())
         .child(
             div()
-                .w(px(520.0))
+                .w(px(480.0))
                 .p(px(32.0))
                 .rounded(radius_md())
                 .bg(bg_channels())
@@ -924,7 +1218,10 @@ fn render_login_screen(
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child(icon_gamepad(px(28.0), crate::tokens::colors::white())),
+                                .child(icon_gamepad(
+                                    px(28.0),
+                                    crate::tokens::colors::white(),
+                                )),
                         )
                         .child(
                             div()
@@ -936,180 +1233,18 @@ fn render_login_screen(
                         .child(
                             div()
                                 .text_color(text_muted())
-                                .text_size(font_size_sm())
+                                .text_size(font_size_base())
                                 .child("Cliente nativo desktop construído em Rust + GPUI"),
                         ),
                 )
                 // Status Banner
                 .child(banner)
-                // Mode Toggle: Bot vs User
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space_2())
-                        .child(
-                            div()
-                                .text_color(text_muted())
-                                .text_size(font_size_xs())
-                                .font_weight(FontWeight::BOLD)
-                                .child("TIPO DE CONTA"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(space_3())
-                                .w_full()
-                                // Bot Token button
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .h(px(40.0))
-                                        .rounded(radius_sm())
-                                        .border_1()
-                                        .border_color(if !is_user { blurple() } else { borders() })
-                                        .bg(if !is_user { with_alpha(HEX_BLURPLE, 0.15) } else { bg_chat() })
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(space_2())
-                                        .hover(|s| s.opacity(0.85))
-                                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                            entity_bot_toggle.update(cx, |s, cx| {
-                                                s.is_user_token = false;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_bot(px(18.0), if !is_user { text_titles() } else { text_muted() }))
-                                        .child(
-                                            div()
-                                                .text_color(if !is_user { text_titles() } else { text_muted() })
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_size(font_size_sm())
-                                                .child("Bot Token"),
-                                        ),
-                                )
-                                // User Token button
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .h(px(40.0))
-                                        .rounded(radius_sm())
-                                        .border_1()
-                                        .border_color(if is_user { blurple() } else { borders() })
-                                        .bg(if is_user { with_alpha(HEX_BLURPLE, 0.15) } else { bg_chat() })
-                                        .cursor_pointer()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(space_2())
-                                        .hover(|s| s.opacity(0.85))
-                                        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
-                                            entity_user_toggle.update(cx, |s, cx| {
-                                                s.is_user_token = true;
-                                                cx.notify();
-                                            });
-                                        })
-                                        .child(icon_user(px(18.0), if is_user { text_titles() } else { text_muted() }))
-                                        .child(
-                                            div()
-                                                .text_color(if is_user { text_titles() } else { text_muted() })
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_size(font_size_sm())
-                                                .child("Conta de Usuário"),
-                                        ),
-                                ),
-                        ),
-                )
-                // Token TextInput
-                .child(text_input)
-                // Action Buttons
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(space_2())
-                        .pt(space_2())
-                        // Connect button with loading feedback
-                        .child(if is_connecting {
-                            div()
-                                .w_full()
-                                .h(px(44.0))
-                                .rounded(radius_sm())
-                                .bg(blurple_hover())
-                                .opacity(0.85)
-                                .cursor_not_allowed()
-                                .text_color(crate::tokens::colors::white())
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(font_size_md())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .gap(space_2())
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap(px(4.0))
-                                        .child(div().size(px(6.0)).rounded_full().bg(crate::tokens::colors::white()))
-                                        .child(div().size(px(6.0)).rounded_full().bg(crate::tokens::colors::white()).opacity(0.7))
-                                        .child(div().size(px(6.0)).rounded_full().bg(crate::tokens::colors::white()).opacity(0.4)),
-                                )
-                                .child("Conectando ao Discord...")
-                        } else {
-                            div()
-                                .w_full()
-                                .h(px(44.0))
-                                .rounded(radius_sm())
-                                .bg(blurple())
-                                .text_color(crate::tokens::colors::white())
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(font_size_md())
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(blurple_hover()))
-                                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                                    entity_connect.update(cx, |s, cx| {
-                                        let token = s.token_input.clone();
-                                        let is_u = s.is_user_token;
-                                        s.authenticate(token, is_u);
-                                        cx.notify();
-                                    });
-                                })
-                                .child("Conectar ao Discord")
-                        })
-                        // Security notice footer
-                        .child(
-                            div()
-                                .pt(space_2())
-                                .w_full()
-                                .max_w(px(456.0))
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_center()
-                                .gap(px(6.0))
-                                .text_color(text_muted())
-                                .text_size(px(12.0))
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .child(icon_lock(px(14.0), text_muted())),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.0))
-                                        .text_center()
-                                        .child("Armazenamento seguro de token com permissões restritas (0600) em ~/.config/discord-rs/auth.json"),
-                                ),
-                        ),
-                ),
+                // Official OAuth2 primary action
+                .child(oauth_section)
+                // Development-only raw token form
+                .children(dev_tokens.then_some(mode_toggle))
+                .children(dev_tokens.then(|| text_input.into_any_element()))
+                .children(dev_tokens.then_some(actions)),
         )
 }
 

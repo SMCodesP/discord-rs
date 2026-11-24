@@ -69,6 +69,8 @@ pub struct AppState {
     // Real-Time Discord Gateway & Chat State
     pub is_connected_to_gateway: bool,
     pub auth_token: Option<String>,
+    /// Credential kind backing `auth_token` (Bot/User/OAuth).
+    pub auth_token_type: Option<crate::protocol::TokenType>,
     pub connection_status: String,
     pub connection_mode: ConnectionMode,
     pub client_manager: Option<ClientManager>,
@@ -158,11 +160,15 @@ impl AppState {
     /// e preferências do usuário.
     pub fn new() -> Self {
         let token_storage = crate::protocol::TokenStorage::default();
-        let (stored_token, is_user) = match token_storage.load() {
-            Ok(Some(t)) => (t.secret().to_string(), t.token_type == crate::protocol::TokenType::User),
-            _ => (String::new(), false),
+        let (stored_token, token_type) = match token_storage.load() {
+            Ok(Some(t)) => (t.secret().to_string(), Some(t.token_type)),
+            _ => (String::new(), None),
         };
         let has_token = !stored_token.is_empty();
+        let is_user = matches!(
+            token_type,
+            Some(crate::protocol::TokenType::User | crate::protocol::TokenType::OAuth)
+        );
 
         let cached_cache = load_guilds_from_disk();
         let (mut guilds, guild_folders) = if let Some(cache) = cached_cache {
@@ -241,6 +247,7 @@ impl AppState {
             event_batcher: crate::protocol::EventBatcher::new(),
             is_connected_to_gateway: false,
             auth_token: if has_token { Some(stored_token.clone()) } else { None },
+            auth_token_type: if has_token { token_type } else { None },
             connection_status,
             connection_mode,
             client_manager: None,

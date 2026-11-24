@@ -563,11 +563,15 @@ impl AppState {
         ];
 
         let token_storage = TokenStorage::default();
-        let (stored_token, is_user) = match token_storage.load() {
-            Ok(Some(t)) => (t.secret().to_string(), t.token_type == crate::protocol::TokenType::User),
-            _ => (String::new(), false),
+        let (stored_token, token_type) = match token_storage.load() {
+            Ok(Some(t)) => (t.secret().to_string(), Some(t.token_type)),
+            _ => (String::new(), None),
         };
         let has_token = !stored_token.is_empty();
+        let is_user = matches!(
+            token_type,
+            Some(crate::protocol::TokenType::User | crate::protocol::TokenType::OAuth)
+        );
 
         let cached_cache = load_guilds_from_disk();
         let (mut guilds, guild_folders) = if let Some(cache) = cached_cache {
@@ -648,6 +652,7 @@ impl AppState {
             typing_tracker: HashMap::new(),
             is_connected_to_gateway: false,
             auth_token: if has_token { Some(stored_token.clone()) } else { None },
+            auth_token_type: if has_token { token_type } else { None },
             connection_status,
             connection_mode: ConnectionMode::Mock,
             client_manager: None,

@@ -83,10 +83,14 @@ impl AppState {
 
                 // Persiste apenas depois de uma confirmação real do Discord.
                 if let Some(token) = self.auth_token.as_ref() {
-                    let auth = if self.is_user_token {
-                        crate::protocol::AuthToken::user(token.clone())
-                    } else {
-                        crate::protocol::AuthToken::bot(token.clone())
+                    let auth = match self.auth_token_type {
+                        Some(crate::protocol::TokenType::OAuth) => {
+                            crate::protocol::AuthToken::oauth(token.clone())
+                        }
+                        Some(crate::protocol::TokenType::User) => {
+                            crate::protocol::AuthToken::user(token.clone())
+                        }
+                        _ => crate::protocol::AuthToken::bot(token.clone()),
                     };
                     let storage = crate::protocol::TokenStorage::default();
                     let result = if self.save_token_to_disk {

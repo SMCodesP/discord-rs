@@ -84,17 +84,13 @@ impl ProtocolBridge {
 
     /// Connects using an existing or user-provided `AuthToken`.
     ///
-    /// If `persist` is true, the token is saved to `auth.json`.
+    /// The credential is persisted only after the Gateway confirms the
+    /// handshake (READY/RESUMED). If `persist` is true and the handshake fails,
+    /// any previously saved credential is left untouched.
     /// Starts the Gateway WebSocket (v10) event loop in the background via `tokio::spawn`.
     pub async fn connect_with_token(&self, token: AuthToken, persist: bool) -> Result<()> {
         if !token.is_valid_format() {
             bail!("Invalid Discord authentication token format");
-        }
-
-        if persist {
-            if let Err(e) = self.save_token(&token) {
-                log::warn!("Failed to persist token to storage: {:#}", e);
-            }
         }
 
         // Disconnect any previous active connection
@@ -103,11 +99,19 @@ impl ProtocolBridge {
         let client = DiscordApiClient::new(token.clone());
         let mut client_events = client.subscribe_events();
 
-        // Connect Gateway WebSocket v10
+        // Connect Gateway WebSocket v10. `connect` only resolves after the
+        // Gateway handshake is accepted, so no credential is written before
+        // Discord confirms authentication.
         client
             .connect()
             .await
             .context("Failed to connect DiscordApiClient gateway")?;
+
+        if persist {
+            if let Err(e) = self.save_token(&token) {
+                log::warn!("Failed to persist token to storage: {:#}", e);
+            }
+        }
 
         self.is_connected.store(true, Ordering::SeqCst);
 
@@ -245,6 +249,7 @@ impl ProtocolBridge {
         let token = match token_type {
             TokenType::Bot => AuthToken::bot(raw_token),
             TokenType::User => AuthToken::user(raw_token),
+            TokenType::OAuth => AuthToken::oauth(raw_token),
         };
         self.connect_with_token(token, persist).await
     }

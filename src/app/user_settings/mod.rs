@@ -311,7 +311,7 @@ impl Render for UserSettingsModal {
                                     .hover(move |s| s.bg(hover_bg))
                                     .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                                         entity.update(cx, |state, cx| {
-                                            state.close_modal();
+                                            state.logout();
                                             cx.notify();
                                         });
                                     })
