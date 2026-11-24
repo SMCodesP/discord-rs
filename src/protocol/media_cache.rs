@@ -16,7 +16,12 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
+
+use crate::protocol::image_decode::{
+    DecodedImage, ImageDecodeCache, DEFAULT_CACHE_MAX_BYTES, DEFAULT_CACHE_MAX_ENTRIES,
+    MAX_IMAGE_DIMENSION,
+};
 
 // ============================================================================
 // Modelos de Dados de Emojis do Discord
@@ -450,7 +455,7 @@ pub struct MediaCacheMetadata {
 // ============================================================================
 
 /// Gerenciador unificado de Cache de Mídia e Provedor de Conteúdo de Emojis/Stickers/GIFs
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MediaCacheManager {
     root_path: PathBuf,
     memory_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
@@ -458,6 +463,16 @@ pub struct MediaCacheManager {
     favorite_stickers: Arc<RwLock<Vec<DiscordSticker>>>,
     tenor_cache: Arc<RwLock<HashMap<String, (Vec<TenorGif>, DateTime<Utc>)>>>,
     gif_categories: Arc<RwLock<Option<(Vec<DiscordGifCategory>, DateTime<Utc>)>>>,
+    decoded_image_cache: Arc<ImageDecodeCache>,
+    decode_semaphore: Arc<Semaphore>,
+}
+
+impl std::fmt::Debug for MediaCacheManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaCacheManager")
+            .field("root_path", &self.root_path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MediaCacheManager {
@@ -473,6 +488,21 @@ impl MediaCacheManager {
 
     /// Inicializa com diretório raiz customizado (ideal para testes isolados)
     pub fn with_root(root_path: impl Into<PathBuf>) -> Self {
+        Self::with_root_and_decode_limits(
+            root_path,
+            DEFAULT_CACHE_MAX_ENTRIES,
+            DEFAULT_CACHE_MAX_BYTES,
+            2,
+        )
+    }
+
+    /// Inicializa com limites explícitos para cache de imagens decodificadas e concorrência de decode.
+    pub fn with_root_and_decode_limits(
+        root_path: impl Into<PathBuf>,
+        decoded_cache_max_entries: usize,
+        decoded_cache_max_bytes: usize,
+        decode_concurrency: usize,
+    ) -> Self {
         let root = root_path.into();
         let mgr = Self {
             root_path: root,
@@ -481,6 +511,11 @@ impl MediaCacheManager {
             favorite_stickers: Arc::new(RwLock::new(Vec::new())),
             tenor_cache: Arc::new(RwLock::new(HashMap::new())),
             gif_categories: Arc::new(RwLock::new(None)),
+            decoded_image_cache: Arc::new(ImageDecodeCache::new(
+                decoded_cache_max_entries,
+                decoded_cache_max_bytes,
+            )),
+            decode_semaphore: Arc::new(Semaphore::new(decode_concurrency.max(1))),
         };
         // Inicializa carregar recentes do disco
         let loaded = mgr.load_recent_emojis_from_disk();
@@ -710,6 +745,76 @@ impl MediaCacheManager {
 
         self.store_media_for_url(url, &bytes, &content_type)?;
         Ok(bytes)
+    }
+
+    /// Cache de imagens decodificadas (RGBA) com LRU por entradas/bytes.
+    pub fn decoded_image_cache(&self) -> &Arc<ImageDecodeCache> {
+        &self.decoded_image_cache
+    }
+
+    /// Decodifica bytes de imagem fora da UI thread com concorrência limitada.
+    /// O resultado é armazenado no cache decodificado quando `cache_key` é fornecido.
+    pub async fn decode_image_bytes(
+        &self,
+        cache_key: impl Into<String>,
+        bytes: Vec<u8>,
+        target: Option<(u32, u32)>,
+    ) -> Result<Arc<DecodedImage>> {
+        let key = cache_key.into();
+        if let Some(cached) = self.decoded_image_cache.get(&key).await {
+            return Ok(cached);
+        }
+
+        let _permit = self
+            .decode_semaphore
+            .acquire()
+            .await
+            .context("image decode semaphore closed")?;
+
+        if let Some(cached) = self.decoded_image_cache.get(&key).await {
+            return Ok(cached);
+        }
+
+        let decode_key = key.clone();
+        let max_dimension = MAX_IMAGE_DIMENSION;
+        let decoded = tokio::task::spawn_blocking(move || {
+            crate::protocol::image_decode::decode_and_resize(&bytes, target, max_dimension)
+                .map(|img| (decode_key, img))
+        })
+        .await
+        .context("image decode worker panicked or was cancelled")??;
+
+        let (decoded_key, decoded_img) = decoded;
+        let image = Arc::new(decoded_img);
+        self.decoded_image_cache
+            .put(decoded_key, Arc::clone(&image))
+            .await;
+        Ok(image)
+    }
+
+    /// Busca mídia (cache CAS em disco/RAM) e decodifica fora da UI thread com
+    /// concorrência limitada, armazenando o frame RGBA no cache decodificado.
+    pub async fn fetch_and_decode_image(
+        &self,
+        url: &str,
+        target: Option<(u32, u32)>,
+    ) -> Result<Arc<DecodedImage>> {
+        let key = Self::decoded_image_cache_key(url, target);
+        if let Some(cached) = self.decoded_image_cache.get(&key).await {
+            return Ok(cached);
+        }
+
+        let bytes = self.fetch_or_load_media(url).await?;
+        self.decode_image_bytes(key, bytes, target).await
+    }
+
+    /// Chave canônica do cache decodificado para uma URL e tamanho alvo.
+    pub fn decoded_image_cache_key(url: &str, target: Option<(u32, u32)>) -> String {
+        let hash = Self::compute_url_hash(url);
+        match target {
+            Some((w, h)) => format!("img:{hash}:{}x{}", w.max(1), h.max(1)),
+            None => format!("img:{hash}:orig"),
+        }
     }
 
     // --- Persistência de Frequentemente Usados (Recent Emojis) ---
