@@ -3,11 +3,12 @@
 //! Provides raw SVG paths, full SVG markup, IconAssetSource for in-memory GPUI rendering,
 //! and reusable `render_icon` & `icon_*` helper functions returning `Div`.
 
-use std::borrow::Cow;
 use gpui::*;
+use std::borrow::Cow;
 
 // ============================================================================
-// Raw SVG Path Data (24x24 standard grid, fill="currentColor")
+// Raw SVG Path Data (24x24 standard grid, fill="currentColor"; the official
+// Discord Clyde asset retains its native 64x48 viewBox)
 // ============================================================================
 
 /// Hash icon (#) - Text channel
@@ -53,7 +54,8 @@ pub const PATH_STICKER: &str = "M18.5 2h-13C3.57 2 2 3.57 2 5.5v13C2 20.43 3.57 
 pub const PATH_EMOJI: &str = "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm3.5-9c.83 0 1.5-.67 1.5-1.5S16.33 8 15.5 8 14 8.67 14 9.5s.67 1.5 1.5 1.5zm-7 0c.83 0 1.5-.67 1.5-1.5S9.33 8 8.5 8 7 8.67 7 9.5 7.67 11 8.5 11zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z";
 
 /// Plus icon - Add server / upload file
-pub const PATH_PLUS: &str = "M19 11h-6V5a1 1 0 0 0-2 0v6H5a1 1 0 0 0 0 2h6v6a1 1 0 0 0 2 0v-6h6a1 1 0 0 0 0-2z";
+pub const PATH_PLUS: &str =
+    "M19 11h-6V5a1 1 0 0 0-2 0v6H5a1 1 0 0 0 0 2h6v6a1 1 0 0 0 2 0v-6h6a1 1 0 0 0 0-2z";
 
 /// Compass icon - Explore / discover public servers
 pub const PATH_COMPASS: &str = "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm2.19-12.19l-5.66 2.47a.5.5 0 0 0-.26.26l-2.47 5.66a.5.5 0 0 0 .65.65l5.66-2.47a.5.5 0 0 0 .26-.26l2.47-5.66a.5.5 0 0 0-.65-.65zm-2.19 5.19a1 1 0 1 1 0-2 1 1 0 0 1 0 2z";
@@ -116,7 +118,8 @@ pub const PATH_CHAT: &str = "M4.798 3h14.404C20.198 3 21 3.794 21 4.767v10.466C2
 pub const PATH_FRIENDS: &str = "M14 8a4 4 0 1 0-8 0 4 4 0 0 0 8 0zm-2 9c-4.42 0-8 1.79-8 4v1h16v-1c0-2.21-3.58-4-8-4zm8-6a3 3 0 1 0-6 0 3 3 0 0 0 6 0zm0 7c-1.63 0-3.13.39-4.38 1.07.64.88 1.05 1.94 1.12 3.08L22 20.15v-.15c0-1.66-2.69-3-6-3z";
 
 /// Folder icon (Server category / folder)
-pub const PATH_FOLDER: &str = "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z";
+pub const PATH_FOLDER: &str =
+    "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z";
 
 /// Sparkles / Boost / Nitro icon
 pub const PATH_SPARKLES: &str = "M12 1L9 9l-8 3 8 3 3 8 3-8 8-3-8-3-3-8z";
@@ -127,8 +130,13 @@ pub const PATH_SHIELD: &str = "M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.
 /// Gamepad / Game activity icon
 pub const PATH_GAMEPAD: &str = "M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-3c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z";
 
+/// Discord Clyde logo. Source: official Discord branding symbol asset
+/// (https://discord.com/branding, `Symbol.svg`, viewBox 0 0 64 48).
+pub const PATH_DISCORD_LOGO: &str = "M40.575 0C39.9562 1.09866 39.4006 2.2352 38.8954 3.397C34.0967 2.67719 29.2096 2.67719 24.3982 3.397C23.9057 2.2352 23.3374 1.09866 22.7186 0C18.2104 0.770324 13.8157 2.12155 9.64839 4.02841C1.38951 16.2652 -0.845688 28.1863 0.265599 39.9432C5.10222 43.517 10.5197 46.2447 16.2909 47.9874C17.5916 46.2447 18.7407 44.3883 19.7257 42.4562C17.8568 41.7616 16.0509 40.8903 14.3208 39.88C14.7755 39.5517 15.2175 39.2107 15.6468 38.8824C25.7873 43.6559 37.5316 43.6559 47.6847 38.8824C48.1141 39.236 48.5561 39.577 49.0107 39.88C47.2806 40.9029 45.4748 41.7616 43.5931 42.4688C44.5781 44.4009 45.7273 46.2573 47.028 48C52.7991 46.2573 58.2167 43.5422 63.0533 39.9684C64.3666 26.3299 60.8055 14.5099 53.6452 4.04104C49.4905 2.13418 45.0959 0.782952 40.5876 0.0252565L40.575 0ZM21.1401 32.7072C18.0209 32.7072 15.4321 29.8785 15.4321 26.3804C15.4321 22.8824 17.9199 20.041 21.1275 20.041C24.3351 20.041 26.886 22.895 26.8354 26.3804C26.7849 29.8658 24.3224 32.7072 21.1401 32.7072ZM42.1788 32.7072C39.047 32.7072 36.4834 29.8785 36.4834 26.3804C36.4834 22.8824 38.9712 20.041 42.1788 20.041C45.3864 20.041 47.9246 22.895 47.8741 26.3804C47.8236 29.8658 45.3611 32.7072 42.1788 32.7072Z";
+
 /// Music / Spotify icon
-pub const PATH_MUSIC: &str = "M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z";
+pub const PATH_MUSIC: &str =
+    "M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z";
 
 /// Phone / Voice Call start icon
 pub const PATH_PHONE: &str = "M6.62 10.79a15.053 15.053 0 0 0 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z";
@@ -207,6 +215,7 @@ pub const SVG_FOLDER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox=
 pub const SVG_SPARKLES: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 1L9 9l-8 3 8 3 3 8 3-8 8-3-8-3-3-8z"/></svg>"#;
 pub const SVG_SHIELD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>"#;
 pub const SVG_GAMEPAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm3-3c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>"#;
+pub const SVG_DISCORD_LOGO: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 48" fill="currentColor"><path d="M40.575 0C39.9562 1.09866 39.4006 2.2352 38.8954 3.397C34.0967 2.67719 29.2096 2.67719 24.3982 3.397C23.9057 2.2352 23.3374 1.09866 22.7186 0C18.2104 0.770324 13.8157 2.12155 9.64839 4.02841C1.38951 16.2652 -0.845688 28.1863 0.265599 39.9432C5.10222 43.517 10.5197 46.2447 16.2909 47.9874C17.5916 46.2447 18.7407 44.3883 19.7257 42.4562C17.8568 41.7616 16.0509 40.8903 14.3208 39.88C14.7755 39.5517 15.2175 39.2107 15.6468 38.8824C25.7873 43.6559 37.5316 43.6559 47.6847 38.8824C48.1141 39.236 48.5561 39.577 49.0107 39.88C47.2806 40.9029 45.4748 41.7616 43.5931 42.4688C44.5781 44.4009 45.7273 46.2573 47.028 48C52.7991 46.2573 58.2167 43.5422 63.0533 39.9684C64.3666 26.3299 60.8055 14.5099 53.6452 4.04104C49.4905 2.13418 45.0959 0.782952 40.5876 0.0252565L40.575 0ZM21.1401 32.7072C18.0209 32.7072 15.4321 29.8785 15.4321 26.3804C15.4321 22.8824 17.9199 20.041 21.1275 20.041C24.3351 20.041 26.886 22.895 26.8354 26.3804C26.7849 29.8658 24.3224 32.7072 21.1401 32.7072ZM42.1788 32.7072C39.047 32.7072 36.4834 29.8785 36.4834 26.3804C36.4834 22.8824 38.9712 20.041 42.1788 20.041C45.3864 20.041 47.9246 22.895 47.8741 26.3804C47.8236 29.8658 45.3611 32.7072 42.1788 32.7072Z"/></svg>"#;
 pub const SVG_MUSIC: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>"#;
 pub const SVG_PHONE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6.62 10.79a15.053 15.053 0 0 0 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>"#;
 pub const SVG_PHONE_HANGUP: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.99.99 0 0 1 0-1.41C3.28 8.91 7.42 7.25 12 7.25s8.72 1.66 11.71 4.42c.39.39.39 1.02 0 1.41l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>"#;
@@ -305,6 +314,8 @@ pub enum DiscordIcon {
     Shield,
     /// Gamepad / Game activity
     Gamepad,
+    /// Discord Clyde logo used by the Home / Direct Messages rail item
+    DiscordLogo,
     /// Music / Spotify
     Music,
     /// Phone / Voice Call
@@ -374,6 +385,7 @@ impl DiscordIcon {
             Self::Sparkles => "sparkles",
             Self::Shield => "shield",
             Self::Gamepad => "gamepad",
+            Self::DiscordLogo => "discord_logo",
             Self::Music => "music",
             Self::Phone => "phone",
             Self::PhoneHangup => "phone_hangup",
@@ -431,6 +443,7 @@ impl DiscordIcon {
             Self::Sparkles => PATH_SPARKLES,
             Self::Shield => PATH_SHIELD,
             Self::Gamepad => PATH_GAMEPAD,
+            Self::DiscordLogo => PATH_DISCORD_LOGO,
             Self::Music => PATH_MUSIC,
             Self::Phone => PATH_PHONE,
             Self::PhoneHangup => PATH_PHONE_HANGUP,
@@ -488,6 +501,7 @@ impl DiscordIcon {
             Self::Sparkles => SVG_SPARKLES,
             Self::Shield => SVG_SHIELD,
             Self::Gamepad => SVG_GAMEPAD,
+            Self::DiscordLogo => SVG_DISCORD_LOGO,
             Self::Music => SVG_MUSIC,
             Self::Phone => SVG_PHONE,
             Self::PhoneHangup => SVG_PHONE_HANGUP,
@@ -508,14 +522,18 @@ impl DiscordIcon {
         SharedString::from(format!("icons/{}.svg", self.name()))
     }
 
-    /// Standard viewBox attribute
+    /// Standard viewBox attribute. The official Clyde asset keeps its native
+    /// 64x48 viewBox so its aspect ratio is not distorted.
     pub const fn view_box(&self) -> &'static str {
-        "0 0 24 24"
+        match self {
+            Self::DiscordLogo => "0 0 64 48",
+            _ => "0 0 24 24",
+        }
     }
 }
 
 /// All canonical Discord icons
-pub const ALL_ICONS: [DiscordIcon; 51] = [
+pub const ALL_ICONS: [DiscordIcon; 52] = [
     DiscordIcon::Hash,
     DiscordIcon::Speaker,
     DiscordIcon::Megaphone,
@@ -555,6 +573,7 @@ pub const ALL_ICONS: [DiscordIcon; 51] = [
     DiscordIcon::Sparkles,
     DiscordIcon::Shield,
     DiscordIcon::Gamepad,
+    DiscordIcon::DiscordLogo,
     DiscordIcon::Music,
     DiscordIcon::Phone,
     DiscordIcon::PhoneHangup,
@@ -591,10 +610,7 @@ impl AssetSource for IconAssetSource {
     }
 
     fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(ALL_ICONS
-            .iter()
-            .map(|icon| icon.asset_path())
-            .collect())
+        Ok(ALL_ICONS.iter().map(|icon| icon.asset_path()).collect())
     }
 }
 
@@ -644,12 +660,7 @@ pub fn render_icon(icon: DiscordIcon, size: Pixels, color: impl Into<Hsla>) -> D
         .justify_center()
         .size(size)
         .flex_shrink_0()
-        .child(
-            svg()
-                .path(icon.asset_path())
-                .size(size)
-                .text_color(color),
-        )
+        .child(svg().path(icon.asset_path()).size(size).text_color(color))
 }
 
 /// Helper for rendering Bot tag / robot icon
@@ -827,6 +838,11 @@ pub fn icon_gamepad(size: Pixels, color: impl Into<Hsla>) -> Div {
     render_icon(DiscordIcon::Gamepad, size, color)
 }
 
+/// Helper for rendering the official Discord Clyde logo
+pub fn icon_discord_logo(size: Pixels, color: impl Into<Hsla>) -> Div {
+    render_icon(DiscordIcon::DiscordLogo, size, color)
+}
+
 /// Helper for rendering Music / Spotify
 pub fn icon_music(size: Pixels, color: impl Into<Hsla>) -> Div {
     render_icon(DiscordIcon::Music, size, color)
@@ -925,7 +941,10 @@ mod tests {
         let unknown = source
             .load("icons/nao-existe-xyz.svg")
             .expect("unknown path must not error");
-        assert!(unknown.is_none(), "unknown path must not resolve to an icon");
+        assert!(
+            unknown.is_none(),
+            "unknown path must not resolve to an icon"
+        );
 
         // list() covers both catalogs without duplicates.
         let listed = source.list("icons/").expect("asset listing works");

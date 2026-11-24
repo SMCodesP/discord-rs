@@ -1,14 +1,15 @@
 //! Discord RS - Typography Tokens
 //! Font families, sizes, weights, and line heights aligned with Discord UI specifications.
 
-use gpui::{px, FontWeight, Pixels};
+use gpui::{FontWeight, Pixels, px};
 
 // ============================================================================
 // Font Family Stacks
 // ============================================================================
 
 /// Primary font stack used by Discord ("gg sans", with system fallbacks)
-pub const FONT_FAMILY_PRIMARY: &str = "gg sans, Noto Sans, Helvetica Neue, Helvetica, Arial, sans-serif";
+pub const FONT_FAMILY_PRIMARY: &str =
+    "gg sans, Noto Sans, Helvetica Neue, Helvetica, Arial, sans-serif";
 
 /// Monospace font stack used for code blocks and inline code
 pub const FONT_FAMILY_CODE: &str = "Consolas, Andale Mono WT, Andale Mono, Lucida Console, Lucida Sans Typewriter, DejaVu Sans Mono, Bitstream Vera Sans Mono, Liberation Mono, Monaco, Courier New, Courier, monospace";
@@ -213,10 +214,11 @@ pub fn typo_username() -> TypographyPreset {
     TypographyPreset::new(font_size_base(), WEIGHT_MEDIUM, line_height_base())
 }
 
-/// Channel item in channel list (16px / 500 / 20px)
+/// Channel item in channel list (16px / 500 / 24px).
+/// Source: measured Discord Desktop shell.
 #[inline]
 pub fn typo_channel_item() -> TypographyPreset {
-    TypographyPreset::new(font_size_base(), WEIGHT_MEDIUM, px(20.0))
+    TypographyPreset::new(font_size_base(), WEIGHT_MEDIUM, px(24.0))
 }
 
 /// Category header in channel list (12px / 700 / 16px uppercase)
@@ -231,10 +233,11 @@ pub fn typo_timestamp() -> TypographyPreset {
     TypographyPreset::new(font_size_xs(), WEIGHT_MEDIUM, line_height_xs())
 }
 
-/// Server header title (16px / 700 / 20px)
+/// Server header title (16px / 600 / 20px).
+/// Source: measured Discord Desktop shell.
 #[inline]
 pub fn typo_server_header() -> TypographyPreset {
-    TypographyPreset::new(font_size_base(), WEIGHT_BOLD, px(20.0))
+    TypographyPreset::new(font_size_base(), WEIGHT_SEMIBOLD, px(20.0))
 }
 
 /// Modal / Dialog title (20px / 600 / 26px)
@@ -243,10 +246,11 @@ pub fn typo_modal_title() -> TypographyPreset {
     TypographyPreset::new(font_size_xl(), WEIGHT_SEMIBOLD, line_height_xl())
 }
 
-/// User bar name (14px / 600 / 18px)
+/// User bar name (14px / 500 / 14px).
+/// Source: measured Discord Desktop shell.
 #[inline]
 pub fn typo_user_bar_name() -> TypographyPreset {
-    TypographyPreset::new(font_size_sm(), WEIGHT_SEMIBOLD, line_height_sm())
+    TypographyPreset::new(font_size_sm(), WEIGHT_MEDIUM, px(14.0))
 }
 
 /// User bar discriminator / status (12px / 400 / 14px)
