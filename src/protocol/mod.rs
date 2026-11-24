@@ -4,6 +4,7 @@ pub mod auth_login;
 pub mod bridge;
 pub mod cache;
 pub mod cache_engine;
+pub mod captcha_webview;
 pub mod cdn;
 pub mod client_manager;
 pub mod discord_api;

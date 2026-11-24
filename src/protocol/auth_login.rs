@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::protocol::captcha_webview::{CaptchaChallenge, prompt_user_captcha};
 use crate::protocol::discord_api::{DISCORD_DESKTOP_USER_AGENT, build_super_properties_b64};
 
 const AUTH_LOGIN_URL: &str = "https://discord.com/api/v9/auth/login";
@@ -25,6 +26,7 @@ pub enum LoginOutcome {
 fn build_auth_http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .cookie_store(true)
         .user_agent(DISCORD_DESKTOP_USER_AGENT)
         .build()
         .map_err(|e| format!("Falha ao inicializar cliente HTTP: {}", e))
@@ -117,10 +119,28 @@ pub async fn login_with_password(login: &str, password: &str) -> LoginOutcome {
         Err(e) => return LoginOutcome::Error(e),
     };
 
-    let resp = match client
+    let super_props = build_super_properties_b64();
+    let fingerprint = match client
+        .get("https://discord.com/api/v9/experiments")
+        .header("X-Super-Properties", &super_props)
+        .header("X-Discord-Locale", "pt-BR")
+        .header("Origin", "https://discord.com")
+        .header("Referer", "https://discord.com/login")
+        .send()
+        .await
+    {
+        Ok(exp) => exp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("fingerprint").and_then(|f| f.as_str()).map(|s| s.to_string())),
+        Err(_) => None,
+    };
+
+    let mut req = client
         .post(AUTH_LOGIN_URL)
         .header("Content-Type", "application/json")
-        .header("X-Super-Properties", build_super_properties_b64())
+        .header("X-Super-Properties", &super_props)
         .header("X-Discord-Locale", "pt-BR")
         .header("X-Discord-Timezone", "America/Sao_Paulo")
         .header("Origin", "https://discord.com")
@@ -131,10 +151,12 @@ pub async fn login_with_password(login: &str, password: &str) -> LoginOutcome {
             "undelete": false,
             "login_source": Value::Null,
             "gift_code_sku_id": Value::Null
-        }))
-        .send()
-        .await
-    {
+        }));
+    if let Some(ref fp) = fingerprint {
+        req = req.header("X-Fingerprint", fp);
+    }
+
+    let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
             return LoginOutcome::Error(format!(
@@ -144,8 +166,56 @@ pub async fn login_with_password(login: &str, password: &str) -> LoginOutcome {
         }
     };
 
-    let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    let mut status = resp.status().as_u16();
+    let mut body: Value = resp.json().await.unwrap_or(Value::Null);
+
+    if status == 400 {
+        if let Some(challenge) = CaptchaChallenge::from_discord_json(&body) {
+            match prompt_user_captcha(&challenge).await {
+                Ok(sol) => {
+                    let mut retry_req = client
+                        .post(AUTH_LOGIN_URL)
+                        .header("Content-Type", "application/json")
+                        .header("X-Super-Properties", &super_props)
+                        .header("X-Discord-Locale", "pt-BR")
+                        .header("X-Discord-Timezone", "America/Sao_Paulo")
+                        .header("Origin", "https://discord.com")
+                        .header("Referer", "https://discord.com/login")
+                        .header("X-Captcha-Key", &sol.captcha_key)
+                        .json(&json!({
+                            "login": login,
+                            "password": password,
+                            "undelete": false,
+                            "login_source": Value::Null,
+                            "gift_code_sku_id": Value::Null
+                        }));
+                    if let Some(ref fp) = fingerprint {
+                        retry_req = retry_req.header("X-Fingerprint", fp);
+                    }
+                    if let Some(ref rqtoken) = sol.rqtoken {
+                        retry_req = retry_req.header("X-Captcha-Rqtoken", rqtoken);
+                    }
+                    if let Some(ref sid) = sol.session_id {
+                        retry_req = retry_req.header("X-Captcha-Session-Id", sid);
+                    }
+                    match retry_req.send().await {
+                        Ok(r) => {
+                            status = r.status().as_u16();
+                            body = r.json().await.unwrap_or(Value::Null);
+                        }
+                        Err(e) => {
+                            return LoginOutcome::Error(format!(
+                                "Erro de rede após verificação de segurança: {}",
+                                e
+                            ));
+                        }
+                    }
+                }
+                Err(e) => return LoginOutcome::Error(e.to_string()),
+            }
+        }
+    }
+
     parse_login_response(status, &body)
 }
 

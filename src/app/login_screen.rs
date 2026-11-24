@@ -34,6 +34,7 @@ enum QrUiState {
         username: String,
         avatar_url: Option<String>,
     },
+    AwaitingCaptcha,
     Expired,
     Cancelled,
     Error(String),
@@ -170,6 +171,9 @@ impl LoginScreen {
                                         username,
                                         avatar_url,
                                     };
+                                }
+                                RemoteAuthEvent::CaptchaRequired => {
+                                    screen.qr_state = QrUiState::AwaitingCaptcha;
                                 }
                                 RemoteAuthEvent::Authenticated { token } => {
                                     screen.local_error = None;
@@ -1009,6 +1013,32 @@ fn render_qr_column(cx: &mut Context<LoginScreen>, qr_state: &QrUiState) -> AnyE
                 )
                 .into_any_element()
         }
+        QrUiState::AwaitingCaptcha => div()
+            .size(px(176.0))
+            .rounded(px(8.0))
+            .bg(rgb(0x1e1f22))
+            .p(px(12.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .text_center()
+            .gap(px(10.0))
+            .child(icon_gamepad(px(32.0), rgb(0x5865f2)))
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xf2f3f5))
+                    .child("Verificação aberta"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(0xb5bac1))
+                    .child("Resolva o hCaptcha na janela aberta"),
+            )
+            .into_any_element(),
         QrUiState::Expired | QrUiState::Cancelled | QrUiState::Error(_) => {
             let msg = match qr_state {
                 QrUiState::Expired => "Código QR expirado",

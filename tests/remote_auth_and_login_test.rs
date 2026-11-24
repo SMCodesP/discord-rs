@@ -1,8 +1,33 @@
 use discord_rs::protocol::auth_login::{LoginOutcome, parse_login_response};
+use discord_rs::protocol::captcha_webview::{CaptchaChallenge, build_captcha_html};
 use discord_rs::protocol::remote_auth::{
     QrMatrix, compute_nonce_proof, parse_remote_auth_user_payload,
 };
 use serde_json::json;
+
+#[test]
+fn test_captcha_challenge_parsing_and_html_generation() {
+    let body = json!({
+        "captcha_key": ["captcha-required"],
+        "captcha_sitekey": "b2b02ab5-7dae-4d6f-830e-7b55634c888b",
+        "captcha_service": "hcaptcha",
+        "captcha_session_id": "sess-123",
+        "captcha_rqdata": "rqdata-abc",
+        "captcha_rqtoken": "rqtoken-xyz"
+    });
+    let ch = CaptchaChallenge::from_discord_json(&body).unwrap();
+    assert_eq!(ch.sitekey, "b2b02ab5-7dae-4d6f-830e-7b55634c888b");
+    assert_eq!(ch.service, "hcaptcha");
+    assert_eq!(ch.rqdata.as_deref(), Some("rqdata-abc"));
+    assert_eq!(ch.rqtoken.as_deref(), Some("rqtoken-xyz"));
+    assert_eq!(ch.session_id.as_deref(), Some("sess-123"));
+
+    let html = build_captcha_html(&ch);
+    assert!(html.contains("js.hcaptcha.com/1/api.js"));
+    assert!(html.contains("b2b02ab5-7dae-4d6f-830e-7b55634c888b"));
+    assert!(html.contains("rqdata-abc"));
+    assert!(html.contains("discordCaptcha"));
+}
 
 #[test]
 fn test_qr_matrix_generates_valid_square_for_remote_auth_url() {

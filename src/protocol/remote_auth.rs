@@ -23,6 +23,7 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+use crate::protocol::captcha_webview::{CaptchaChallenge, CaptchaSolution, prompt_user_captcha};
 use crate::protocol::discord_api::{DISCORD_DESKTOP_USER_AGENT, build_super_properties_b64};
 
 const REMOTE_AUTH_WS_URL: &str = "wss://remote-auth-gateway.discord.gg/?v=2";
@@ -67,6 +68,7 @@ pub enum RemoteAuthEvent {
         username: String,
         avatar_url: Option<String>,
     },
+    CaptchaRequired,
     Authenticated {
         token: String,
     },
@@ -263,7 +265,7 @@ async fn run_remote_auth_loop(tx: &mpsc::UnboundedSender<RemoteAuthEvent>) -> Re
                     .get("ticket")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow!("pending_login sem ticket"))?;
-                let token = exchange_remote_auth_ticket(ticket, &private_key).await?;
+                let token = exchange_remote_auth_ticket(ticket, &private_key, tx).await?;
                 let _ = tx.send(RemoteAuthEvent::Authenticated { token });
                 break;
             }
@@ -283,7 +285,51 @@ async fn run_remote_auth_loop(tx: &mpsc::UnboundedSender<RemoteAuthEvent>) -> Re
     Ok(())
 }
 
-async fn exchange_remote_auth_ticket(ticket: &str, private_key: &RsaPrivateKey) -> Result<String> {
+async fn post_remote_auth_login(
+    client: &reqwest::Client,
+    super_props: &str,
+    fingerprint: Option<&str>,
+    ticket: &str,
+    captcha: Option<&CaptchaSolution>,
+) -> Result<(u16, Value)> {
+    let mut req = client
+        .post(REMOTE_AUTH_LOGIN_URL)
+        .header("Content-Type", "application/json")
+        .header("X-Super-Properties", super_props)
+        .header("X-Discord-Locale", "pt-BR")
+        .header("X-Discord-Timezone", "America/Sao_Paulo")
+        .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+        .header("Origin", "https://discord.com")
+        .header("Referer", "https://discord.com/login")
+        .json(&json!({ "ticket": ticket }));
+
+    if let Some(fp) = fingerprint {
+        req = req.header("X-Fingerprint", fp);
+    }
+    if let Some(sol) = captcha {
+        req = req.header("X-Captcha-Key", &sol.captcha_key);
+        if let Some(ref rqtoken) = sol.rqtoken {
+            req = req.header("X-Captcha-Rqtoken", rqtoken);
+        }
+        if let Some(ref sid) = sol.session_id {
+            req = req.header("X-Captcha-Session-Id", sid);
+        }
+    }
+
+    let resp = req
+        .send()
+        .await
+        .context("Falha ao trocar ticket de Remote Auth")?;
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
+async fn exchange_remote_auth_ticket(
+    ticket: &str,
+    private_key: &RsaPrivateKey,
+    tx: &mpsc::UnboundedSender<RemoteAuthEvent>,
+) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .cookie_store(true)
@@ -312,44 +358,40 @@ async fn exchange_remote_auth_ticket(ticket: &str, private_key: &RsaPrivateKey) 
         Err(_) => None,
     };
 
-    let mut req = client
-        .post(REMOTE_AUTH_LOGIN_URL)
-        .header("Content-Type", "application/json")
-        .header("X-Super-Properties", &super_props)
-        .header("X-Discord-Locale", "pt-BR")
-        .header("X-Discord-Timezone", "America/Sao_Paulo")
-        .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
-        .header("Origin", "https://discord.com")
-        .header("Referer", "https://discord.com/login")
-        .json(&json!({ "ticket": ticket }));
+    let (mut status, mut body) =
+        post_remote_auth_login(&client, &super_props, fingerprint.as_deref(), ticket, None).await?;
 
-    if let Some(ref fp) = fingerprint {
-        req = req.header("X-Fingerprint", fp);
+    // If Discord requests interactive hCaptcha verification, open our native WebView for the user
+    if status == 400 {
+        if let Some(challenge) = CaptchaChallenge::from_discord_json(&body) {
+            log::info!("[RemoteAuth] Discord solicitou hCaptcha; abrindo janela nativa de verificação para o usuário...");
+            let _ = tx.send(RemoteAuthEvent::CaptchaRequired);
+            let solution = prompt_user_captcha(&challenge).await?;
+            let retry = post_remote_auth_login(
+                &client,
+                &super_props,
+                fingerprint.as_deref(),
+                ticket,
+                Some(&solution),
+            )
+            .await?;
+            status = retry.0;
+            body = retry.1;
+        }
     }
 
-    let resp = req
-        .send()
-        .await
-        .context("Falha ao trocar ticket de Remote Auth")?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
         log::warn!(
             "[RemoteAuth] POST /users/@me/remote-auth/login retornou HTTP {}: {}",
-            status.as_u16(),
-            err_body
+            status,
+            body
         );
         return Err(anyhow!(
             "Discord recusou a troca do ticket QR (HTTP {}). Tente gerar um novo QR Code.",
-            status.as_u16()
+            status
         ));
     }
 
-    let body: Value = resp
-        .json()
-        .await
-        .context("Resposta JSON inválida no remote-auth/login")?;
     let encrypted_token = body
         .get("encrypted_token")
         .and_then(|v| v.as_str())
