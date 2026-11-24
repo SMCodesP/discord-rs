@@ -15,6 +15,7 @@ use gpui::prelude::*;
 use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// Reference to an equipped profile effect on a user profile (`user_profile.profile_effect`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -131,7 +132,9 @@ impl ProfileEffectCatalog {
                         if let Some(items) = prod.get("items").and_then(|i| i.as_array()) {
                             for item in items {
                                 if item.get("type").and_then(|t| t.as_u64()) == Some(1) {
-                                    if let Ok(config) = serde_json::from_value::<ProfileEffectConfig>(item.clone()) {
+                                    if let Ok(config) =
+                                        serde_json::from_value::<ProfileEffectConfig>(item.clone())
+                                    {
                                         catalog.insert(config);
                                     }
                                 }
@@ -190,16 +193,256 @@ pub fn visible_layers_at<'a>(
     visible
 }
 
+/// Returns the real image source for a layer. Randomized catalog entries are
+/// all valid official assets; choosing the first one keeps the source stable
+/// for the lifetime of the mounted effect instead of changing every frame.
+fn effect_layer_source(layer: &ProfileEffectLayer) -> &str {
+    layer
+        .randomized_sources
+        .first()
+        .map(|source| source.src.as_str())
+        .filter(|src| !src.is_empty())
+        .unwrap_or(layer.src.as_str())
+}
+
+/// Next timestamp at which this layer can change visibility.
+///
+/// The renderer schedules one executor timer for this boundary instead of
+/// requesting an animation frame on every display refresh. The image itself
+/// remains a native APNG and plays smoothly without re-rendering the app.
+fn effect_next_boundary_at(layer: &ProfileEffectLayer, t_ms: u64) -> Option<u64> {
+    if layer.duration == 0 {
+        return None;
+    }
+    if t_ms < layer.start {
+        return Some(layer.start);
+    }
+
+    let elapsed = t_ms - layer.start;
+    if !layer.is_looping {
+        let end = layer.start.saturating_add(layer.duration);
+        return (t_ms < end).then_some(end);
+    }
+
+    let period = layer.duration.saturating_add(layer.loop_delay);
+    if period == 0 {
+        return None;
+    }
+    let phase = elapsed % period;
+    let remaining = if phase < layer.duration {
+        layer.duration - phase
+    } else {
+        period - phase
+    };
+    t_ms.checked_add(remaining)
+}
+
+fn effect_root(banner_height: Pixels, banner_width: Option<Pixels>) -> Div {
+    let mut root = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .h(banner_height)
+        .overflow_hidden();
+    if let Some(width) = banner_width {
+        root = root.w(width);
+    } else {
+        root = root.w_full();
+    }
+    root
+}
+
+/// Renders one catalog layer on its own timeline. GPUI owns the animation
+/// lifecycle, so unmounting the profile stops it without a background thread.
+struct ProfileEffectLayerElement {
+    id: ElementId,
+    layer: ProfileEffectLayer,
+    source: String,
+    banner_height: Pixels,
+    banner_width: Option<Pixels>,
+}
+
+struct ProfileEffectTimelineState {
+    layer: ProfileEffectLayer,
+    started_at: Instant,
+    scheduled_boundary: Option<u64>,
+    timer_pending: bool,
+    // Dropping the element state cancels a still-pending boundary wake-up.
+    timer_task: Option<Task<()>>,
+}
+
+impl IntoElement for ProfileEffectLayerElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ProfileEffectLayerElement {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        window.with_element_state(
+            global_id.expect("profile effect layer has a stable id"),
+            |state, window| {
+                let now = Instant::now();
+                let mut timeline: ProfileEffectTimelineState =
+                    state.unwrap_or_else(|| ProfileEffectTimelineState {
+                        layer: self.layer.clone(),
+                        started_at: now,
+                        scheduled_boundary: None,
+                        timer_pending: false,
+                        timer_task: None,
+                    });
+                if timeline.layer != self.layer {
+                    timeline.layer = self.layer.clone();
+                    timeline.started_at = now;
+                    timeline.scheduled_boundary = None;
+                    timeline.timer_pending = false;
+                    timeline.timer_task = None;
+                }
+
+                let elapsed = timeline
+                    .started_at
+                    .elapsed()
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                if timeline.timer_pending
+                    && timeline
+                        .scheduled_boundary
+                        .is_some_and(|boundary| elapsed >= boundary)
+                {
+                    timeline.timer_pending = false;
+                    timeline.scheduled_boundary = None;
+                    timeline.timer_task = None;
+                }
+
+                let mut root = effect_root(self.banner_height, self.banner_width);
+                if is_layer_visible_at(&self.layer, elapsed) {
+                    root = root.child(
+                        img(self.source.clone())
+                            .size_full()
+                            .object_fit(ObjectFit::Cover),
+                    );
+                }
+
+                if let Some(boundary) = effect_next_boundary_at(&self.layer, elapsed) {
+                    if !timeline.timer_pending || timeline.scheduled_boundary != Some(boundary) {
+                        timeline.timer_pending = true;
+                        timeline.scheduled_boundary = Some(boundary);
+                        // Wake just after the boundary so millisecond truncation and
+                        // executor scheduling cannot leave the layer stuck hidden.
+                        let delay = Duration::from_millis(
+                            boundary.saturating_sub(elapsed).saturating_add(2),
+                        );
+                        let view = window.current_view();
+                        timeline.timer_task = Some(window.spawn(cx, async move |cx| {
+                            cx.background_executor().timer(delay).await;
+                            cx.update(move |_, cx| cx.notify(view)).ok();
+                        }));
+                    }
+                }
+
+                let mut root = root.into_any_element();
+                ((root.request_layout(window, cx), root), timeline)
+            },
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        gpui::Element::prepaint(element, id, inspector_id, bounds, &mut (), window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        element: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        gpui::Element::paint(
+            element,
+            id,
+            inspector_id,
+            bounds,
+            &mut (),
+            _prepaint,
+            window,
+            cx,
+        );
+    }
+}
+
+fn render_effect_layer(
+    layer: &ProfileEffectLayer,
+    layer_index: usize,
+    sku_id: &str,
+    banner_height: Pixels,
+    banner_width: Option<Pixels>,
+) -> AnyElement {
+    let source = effect_layer_source(layer);
+    if layer.duration == 0 || source.is_empty() {
+        return div().into_any_element();
+    }
+
+    ProfileEffectLayerElement {
+        id: ElementId::Name(format!("profile-effect-{sku_id}-{layer_index}").into()),
+        layer: layer.clone(),
+        source: source.to_string(),
+        banner_height,
+        banner_width,
+    }
+    .into_any_element()
+}
+
+fn effect_static_source(config: &ProfileEffectConfig) -> Option<&str> {
+    config
+        .reduced_motion_src
+        .as_deref()
+        .filter(|src| !src.is_empty())
+        .or_else(|| {
+            config
+                .thumbnail_preview_src
+                .as_deref()
+                .filter(|src| !src.is_empty())
+        })
+}
+
 /// Renders a real Discord profile effect from its catalog configuration,
 /// animating visible layers over time or respecting reduced motion.
 ///
-/// Parity rules:
-/// - When `reduce_motion` is enabled: displays static `reduced_motion_src` if available,
-///   otherwise thumbnail preview or empty div. Does NOT animate.
-/// - When animated: uses GPUI's native `AnimationExt::with_animation` with an element ID
-///   scoped to the sku_id. When the popout closes or unmounts, animation automatically terminates;
-///   no background thread or external timer runs.
-/// - If the configuration is None or has no valid layers, returns empty Div or thumbnail fallback.
+/// Each layer keeps its own `start`, `duration`, `loop` and `loopDelay`
+/// timeline. Intro layers never repeat just because another layer loops, and
+/// looping layers never restart on a shared hourly budget. Layers are mounted
+/// in ascending `z_index` order and native APNG assets provide smooth motion
+/// without a timer that re-renders the whole application at a fixed FPS.
 pub fn render_profile_effect_animated(
     config: Option<&ProfileEffectConfig>,
     banner_height: Pixels,
@@ -210,119 +453,45 @@ pub fn render_profile_effect_animated(
         return div();
     };
 
-    // Reduced motion handling
     if reduce_motion {
-        if let Some(ref static_src) = config.reduced_motion_src {
-            let mut root = div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .h(banner_height)
-                .overflow_hidden()
-                .child(img(static_src.clone()).size_full());
-            if let Some(w) = banner_width {
-                root = root.w(w);
-            } else {
-                root = root.w_full();
-            }
-            return root;
-        } else if let Some(ref thumb) = config.thumbnail_preview_src {
-            let mut root = div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .h(banner_height)
-                .overflow_hidden()
-                .child(img(thumb.clone()).size_full());
-            if let Some(w) = banner_width {
-                root = root.w(w);
-            } else {
-                root = root.w_full();
-            }
-            return root;
-        }
-        return div();
+        return match effect_static_source(config) {
+            Some(src) => effect_root(banner_height, banner_width).child(
+                img(src.to_string())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            ),
+            None => div(),
+        };
     }
 
     if config.effects.is_empty() {
-        if let Some(ref thumb) = config.thumbnail_preview_src {
-            let mut root = div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .h(banner_height)
-                .overflow_hidden()
-                .child(img(thumb.clone()).size_full());
-            if let Some(w) = banner_width {
-                root = root.w(w);
-            } else {
-                root = root.w_full();
-            }
-            return root;
-        }
-        return div();
+        return match config
+            .thumbnail_preview_src
+            .as_deref()
+            .filter(|src| !src.is_empty())
+        {
+            Some(src) => effect_root(banner_height, banner_width).child(
+                img(src.to_string())
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            ),
+            None => div(),
+        };
     }
 
-    let mut root = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .h(banner_height)
-        .overflow_hidden();
-
-    if let Some(w) = banner_width {
-        root = root.w(w);
-    } else {
-        root = root.w_full();
+    let mut root = effect_root(banner_height, banner_width);
+    let mut layers: Vec<_> = config.effects.iter().enumerate().collect();
+    layers.sort_by_key(|(_, layer)| layer.z_index);
+    for (layer_index, layer) in layers {
+        root = root.child(render_effect_layer(
+            layer,
+            layer_index,
+            &config.sku_id,
+            banner_height,
+            banner_width,
+        ));
     }
-
-    let is_any_looping = config.effects.iter().any(|layer| layer.is_looping);
-    let max_timeline_ms = if is_any_looping {
-        3_600_000u64 // 1 hour persistent loop duration budget
-    } else {
-        config
-            .effects
-            .iter()
-            .map(|l| l.start.saturating_add(l.duration))
-            .max()
-            .unwrap_or(0)
-            .max(100)
-    };
-
-    let mut anim = Animation::new(std::time::Duration::from_millis(max_timeline_ms))
-        .with_max_fps(30.0);
-    if is_any_looping {
-        anim = anim.repeat();
-    }
-
-    let cfg_clone = config.clone();
-    let anim_layer = div()
-        .size_full()
-        .relative()
-        .with_animation(
-            ElementId::Name(format!("profile-effect-anim-{}", config.sku_id).into()),
-            anim,
-            move |container, delta| {
-                let t_ms = (delta * max_timeline_ms as f32).round() as u64;
-                let visible = visible_layers_at(&cfg_clone, t_ms);
-                let mut layer_root = container;
-                for layer in visible {
-                    if !layer.src.is_empty() {
-                        layer_root = layer_root.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .size_full()
-                                .child(img(layer.src.clone()).size_full()),
-                        );
-                    }
-                }
-                layer_root
-            },
-        );
-
-    root.child(anim_layer)
+    root
 }
 
 /// Renders a real Discord profile effect from its catalog configuration.
@@ -341,7 +510,13 @@ pub fn render_profile_effect_for_user(
     banner_height: Pixels,
     banner_width: Option<Pixels>,
 ) -> Div {
-    render_profile_effect_for_user_with_motion(user_effect, catalog, banner_height, banner_width, false)
+    render_profile_effect_for_user_with_motion(
+        user_effect,
+        catalog,
+        banner_height,
+        banner_width,
+        false,
+    )
 }
 
 /// Helper that looks up the effect in the catalog and renders it with reduced motion support.
@@ -580,5 +755,95 @@ mod tests {
         // Reduced motion render
         let rendered_reduced = render_profile_effect_animated(Some(&config), px(100.0), None, true);
         let _ = rendered_reduced;
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_effect_timer_only_targets_visibility_boundaries() {
+        let intro = ProfileEffectLayer {
+            src: "intro.png".into(),
+            is_looping: false,
+            duration: 2_000,
+            start: 500,
+            loop_delay: 0,
+            z_index: 0,
+            randomized_sources: vec![],
+        };
+        assert_eq!(effect_next_boundary_at(&intro, 0), Some(500));
+        assert_eq!(effect_next_boundary_at(&intro, 1_000), Some(2_500));
+        assert_eq!(effect_next_boundary_at(&intro, 2_500), None);
+
+        let delayed_loop = ProfileEffectLayer {
+            src: "loop.png".into(),
+            is_looping: true,
+            duration: 3_000,
+            start: 2_000,
+            loop_delay: 1_000,
+            z_index: 1,
+            randomized_sources: vec![],
+        };
+        assert_eq!(effect_next_boundary_at(&delayed_loop, 0), Some(2_000));
+        assert_eq!(effect_next_boundary_at(&delayed_loop, 2_500), Some(5_000));
+        assert_eq!(effect_next_boundary_at(&delayed_loop, 5_500), Some(6_000));
+        assert_eq!(effect_next_boundary_at(&delayed_loop, 6_500), Some(9_000));
+
+        let zero_duration = ProfileEffectLayer {
+            duration: 0,
+            ..delayed_loop
+        };
+        assert_eq!(effect_next_boundary_at(&zero_duration, 0), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_randomized_layer_source_is_real_and_stable() {
+        let layer = ProfileEffectLayer {
+            src: "fallback.png".into(),
+            is_looping: false,
+            duration: 1_000,
+            start: 0,
+            loop_delay: 0,
+            z_index: 0,
+            randomized_sources: vec![ProfileEffectLayerSource {
+                src: "https://cdn.discordapp.com/catalog-variant.png".into(),
+            }],
+        };
+        assert_eq!(
+            effect_layer_source(&layer),
+            "https://cdn.discordapp.com/catalog-variant.png"
+        );
+        assert_eq!(effect_layer_source(&layer), effect_layer_source(&layer));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_reduced_motion_source_precedence_and_empty_fallback() {
+        let mut config = ProfileEffectConfig {
+            sku_id: "synth-reduced-source".into(),
+            title: None,
+            description: None,
+            accessibility_label: None,
+            reduced_motion_src: Some("https://cdn.discordapp.com/static.png".into()),
+            thumbnail_preview_src: Some("https://cdn.discordapp.com/thumb.png".into()),
+            effects: vec![ProfileEffectLayer {
+                src: "animated.png".into(),
+                is_looping: true,
+                duration: 1_000,
+                start: 0,
+                loop_delay: 0,
+                z_index: 0,
+                randomized_sources: vec![],
+            }],
+            animation_type: None,
+            effect_type: Some(1),
+        };
+        assert_eq!(
+            effect_static_source(&config),
+            Some("https://cdn.discordapp.com/static.png")
+        );
+        config.reduced_motion_src = None;
+        assert_eq!(
+            effect_static_source(&config),
+            Some("https://cdn.discordapp.com/thumb.png")
+        );
+        config.thumbnail_preview_src = None;
+        assert_eq!(effect_static_source(&config), None);
     }
 }

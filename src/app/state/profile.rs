@@ -1,38 +1,53 @@
-use std::collections::HashSet;
-use std::sync::Mutex;
-use gpui_kit::{Pixels, Point};
 use super::*;
+use gpui_kit::{Pixels, Point};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
-static QUICK_SEND_IN_FLIGHT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+static QUICK_SEND_IN_FLIGHT: LazyLock<Mutex<HashMap<String, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NEXT_QUICK_SEND_ID: AtomicU64 = AtomicU64::new(1);
 
-fn is_quick_send_in_flight(user_id: &str) -> bool {
-    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
-        let set = lock.get_or_insert_with(HashSet::new);
-        if set.contains(user_id) {
-            true
-        } else {
-            set.insert(user_id.to_string());
-            false
-        }
-    } else {
-        false
+/// Registers a send only when no newer request owns this user's quick-send slot.
+/// The returned token prevents a late response from mutating a reopened popout.
+fn begin_quick_send_in_flight(user_id: &str) -> Option<u64> {
+    let mut in_flight = QUICK_SEND_IN_FLIGHT.lock().ok()?;
+    if in_flight.contains_key(user_id) {
+        return None;
     }
+    let request_id = NEXT_QUICK_SEND_ID.fetch_add(1, Ordering::Relaxed);
+    in_flight.insert(user_id.to_string(), request_id);
+    Some(request_id)
+}
+
+fn finish_quick_send_in_flight(user_id: &str, request_id: u64) -> bool {
+    let Ok(mut in_flight) = QUICK_SEND_IN_FLIGHT.lock() else {
+        return false;
+    };
+    if in_flight.get(user_id).copied() != Some(request_id) {
+        return false;
+    }
+    in_flight.remove(user_id);
+    true
 }
 
 pub fn clear_quick_send_in_flight(user_id: &str) {
-    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
-        if let Some(ref mut set) = *lock {
-            set.remove(user_id);
-        }
+    if let Ok(mut in_flight) = QUICK_SEND_IN_FLIGHT.lock() {
+        in_flight.remove(user_id);
     }
+}
+
+pub fn profile_quick_send_in_flight(user_id: &str) -> bool {
+    QUICK_SEND_IN_FLIGHT
+        .lock()
+        .map(|in_flight| in_flight.contains_key(user_id))
+        .unwrap_or(false)
 }
 
 #[allow(dead_code)]
 pub fn clear_all_quick_send_in_flight() {
-    if let Ok(mut lock) = QUICK_SEND_IN_FLIGHT.lock() {
-        if let Some(ref mut set) = *lock {
-            set.clear();
-        }
+    if let Ok(mut in_flight) = QUICK_SEND_IN_FLIGHT.lock() {
+        in_flight.clear();
     }
 }
 
@@ -46,7 +61,9 @@ impl AppState {
                 },
                 ActiveModal::AddServer => crate::telemetry::ScreenKind::AddServerModal,
                 ActiveModal::ExploreServers => crate::telemetry::ScreenKind::ExploreServersModal,
-                ActiveModal::Login | ActiveModal::LoginDiscord => crate::telemetry::ScreenKind::LoginModal,
+                ActiveModal::Login | ActiveModal::LoginDiscord => {
+                    crate::telemetry::ScreenKind::LoginModal
+                }
                 ActiveModal::AddFriendToGroup(_) | ActiveModal::CreateGroupDm => {
                     crate::telemetry::ScreenKind::FriendsHub
                 }
@@ -91,6 +108,13 @@ impl AppState {
             }
         }
 
+        // Every replacement starts a new popout session. Invalidate both the
+        // previous target and a stale token for a target reopened via A -> B -> A.
+        if let Some(ref previous) = self.profile_popout {
+            clear_quick_send_in_flight(&previous.user_id);
+        }
+        clear_quick_send_in_flight(&uid);
+
         self.profile_anchor = anchor;
         self.profile_modal_open = false;
         self.profile_modal_tab = ProfileModalTab::AboutMe;
@@ -112,18 +136,25 @@ impl AppState {
             let gid = guild_id.clone();
             let target_uid = uid.clone();
             tokio::spawn(async move {
-                match cm.get_user_profile_with_guild(&target_uid, gid.as_deref()).await {
+                match cm
+                    .get_user_profile_with_guild(&target_uid, gid.as_deref())
+                    .await
+                {
                     Ok(profile) => {
-                        cm.emit_event(crate::protocol::transport::TransportEvent::UserProfileLoaded {
-                            user_id: target_uid,
-                            profile: Box::new(profile),
-                        });
+                        cm.emit_event(
+                            crate::protocol::transport::TransportEvent::UserProfileLoaded {
+                                user_id: target_uid,
+                                profile: Box::new(profile),
+                            },
+                        );
                     }
                     Err(err) => {
-                        cm.emit_event(crate::protocol::transport::TransportEvent::UserProfileError {
-                            user_id: target_uid,
-                            error: err.to_string(),
-                        });
+                        cm.emit_event(
+                            crate::protocol::transport::TransportEvent::UserProfileError {
+                                user_id: target_uid,
+                                error: err.to_string(),
+                            },
+                        );
                     }
                 }
             });
@@ -180,7 +211,11 @@ impl AppState {
     }
 
     /// Updates the profile popout with loaded data
-    pub fn set_profile_popout_data(&mut self, user_id: &str, data: crate::domain::profile::UserProfileData) {
+    pub fn set_profile_popout_data(
+        &mut self,
+        user_id: &str,
+        data: crate::domain::profile::UserProfileData,
+    ) {
         if let Some(ref mut popout) = self.profile_popout {
             if popout.user_id == user_id {
                 popout.data = Some(data);
@@ -212,6 +247,8 @@ pub struct ProfileQuickSend {
     pub channel_id: String,
     pub content: String,
     pub user_id: String,
+    /// Identifies this send across close/reopen cycles of the same profile.
+    pub request_id: u64,
 }
 
 impl ProfileQuickSend {
@@ -225,17 +262,50 @@ impl ProfileQuickSend {
 }
 
 impl AppState {
+    /// Opens the local DM slot used by quick-send. When identity data is not
+    /// loaded, the slot stays nameless rather than fabricating a handle/topic.
+    fn open_profile_quick_send_dm(&mut self, user_id: &str, username: &str) -> String {
+        if !username.is_empty() {
+            return self.open_dm_with_user(user_id, username);
+        }
+        if let Some(existing) = self.dm_channels.iter().find(|channel| {
+            !channel.is_group_dm && channel.recipient_ids.iter().any(|id| id == user_id)
+        }) {
+            let id = existing.id.clone();
+            self.select_channel(id.clone());
+            return id;
+        }
+
+        let id = format!("dm-{user_id}");
+        self.dm_channels.insert(
+            0,
+            ChannelItemState {
+                id: id.clone(),
+                name: String::new(),
+                kind: ChannelKind::Text,
+                topic: None,
+                unread: false,
+                mention_count: 0,
+                icon_url: None,
+                is_pinned: false,
+                last_message_id: None,
+                is_group_dm: false,
+                recipient_ids: vec![user_id.to_string()],
+                recipient_names: Vec::new(),
+                user_limit: None,
+                avatar_decoration_data: None,
+            },
+        );
+        self.select_channel(id.clone());
+        id
+    }
 
     /// Returns whether a quick message send is currently in-flight for the open popout
     pub fn is_profile_popout_quick_message_sending(&self) -> bool {
-        if let Some(ref popout) = self.profile_popout {
-            if let Ok(lock) = QUICK_SEND_IN_FLIGHT.lock() {
-                if let Some(ref set) = *lock {
-                    return set.contains(&popout.user_id);
-                }
-            }
-        }
-        false
+        self.profile_popout
+            .as_ref()
+            .map(|popout| profile_quick_send_in_flight(&popout.user_id))
+            .unwrap_or(false)
     }
 
     /// First phase of popout quick direct message send.
@@ -243,7 +313,7 @@ impl AppState {
     /// - If ClientManager is absent: records "Não conectado ao Discord." on popout.error, preserves field and returns None (ZERO MOCKS).
     /// - If ClientManager is present: registers in-flight send, resolves DM channel, and returns ProfileQuickSend.
     pub fn begin_profile_popout_quick_message(&mut self) -> Option<ProfileQuickSend> {
-        let (user_id, username, content) = {
+        let (user_id, username, content, request_id) = {
             let Some(ref mut popout) = self.profile_popout else {
                 return None;
             };
@@ -252,11 +322,16 @@ impl AppState {
                 return None;
             }
             let user_id = popout.user_id.clone();
+            // The UI disables quick-send until a real username is loaded. Keep
+            // the state transition usable for synthetic/test IDs without ever
+            // turning a snowflake into a fabricated @handle; the transport
+            // always addresses the real recipient by user_id.
             let username = popout
                 .data
                 .as_ref()
-                .map(|d| d.user.username.clone())
-                .unwrap_or_else(|| user_id.clone());
+                .map(|data| data.user.username.trim().to_string())
+                .filter(|username| !username.is_empty())
+                .unwrap_or_default();
 
             if self.client_manager.is_none() {
                 // ZERO MOCKS: Sem client_manager não inventa sucesso nem mensagem offline
@@ -264,20 +339,20 @@ impl AppState {
                 return None;
             }
 
-            if is_quick_send_in_flight(&user_id) {
-                // Blocks duplicate sends while an existing request for this user is in-flight
+            let Some(request_id) = begin_quick_send_in_flight(&user_id) else {
+                // Blocks duplicate Enter while an existing request is in-flight.
                 return None;
-            }
+            };
 
             popout.error = None;
-            (user_id, username, content)
+            (user_id, username, content, request_id)
         };
 
-        let channel_id = self.open_dm_with_user(&user_id, &username);
+        let channel_id = self.open_profile_quick_send_dm(&user_id, &username);
         let cm = match self.client_manager.as_ref().cloned() {
             Some(cm) => cm,
             None => {
-                clear_quick_send_in_flight(&user_id);
+                finish_quick_send_in_flight(&user_id, request_id);
                 return None;
             }
         };
@@ -287,49 +362,98 @@ impl AppState {
             channel_id,
             content,
             user_id,
+            request_id,
         })
     }
 
     /// Second phase of popout quick direct message send.
     /// - Consumes result from ProfileQuickSend::execute.
-    /// - On success: injects confirmed message into chat, clears quick_message, resets error and closes popout.
-    /// - On error: records error in popout.error, preserves quick_message, popout remains open.
-    /// - Resets in-flight sending state in all cases.
+    /// - On success: injects the API-confirmed message once, clears the draft and closes only the popout that owns this request.
+    /// - On error: records the error only on the owning popout and preserves its draft.
+    /// - A response from a closed/reopened profile can still confirm a real message, but cannot mutate the newer popout.
     pub fn finish_profile_popout_quick_message(
         &mut self,
         request: &ProfileQuickSend,
         result: Result<crate::domain::message::Message, String>,
     ) {
-        clear_quick_send_in_flight(&request.user_id);
+        let owns_current_popout = finish_quick_send_in_flight(&request.user_id, request.request_id)
+            && self
+                .profile_popout
+                .as_ref()
+                .map(|popout| popout.user_id == request.user_id)
+                .unwrap_or(false);
 
         match result {
             Ok(msg) => {
-                let target_cid = if !msg.channel_id.is_empty() {
-                    &msg.channel_id
+                let target_cid = if msg.channel_id.is_empty() {
+                    request.channel_id.clone()
                 } else {
-                    &request.channel_id
+                    msg.channel_id.clone()
                 };
-                self.inject_message(target_cid, msg.clone());
+
+                // The gateway may confirm the same message before this async
+                // completion runs. Keep the real API snowflake as the single
+                // source of truth and never inject a duplicate.
+                if request.channel_id != target_cid {
+                    if let Some(dm) = self
+                        .dm_channels
+                        .iter_mut()
+                        .find(|channel| channel.id == request.channel_id)
+                    {
+                        dm.id = target_cid.clone();
+                    }
+                    if self.selected_channel_id.as_deref() == Some(&request.channel_id) {
+                        self.selected_channel_id = Some(target_cid.clone());
+                    }
+                    if let Some(mut pending) = self.messages_by_channel.remove(&request.channel_id)
+                    {
+                        for message in &mut pending {
+                            message.channel_id = target_cid.clone();
+                        }
+                        let target = self
+                            .messages_by_channel
+                            .entry(target_cid.clone())
+                            .or_default();
+                        for message in pending {
+                            if !target.iter().any(|existing| existing.id == message.id) {
+                                target.push(message);
+                            }
+                        }
+                    }
+                }
+
+                let already_confirmed = !msg.id.is_empty()
+                    && self
+                        .messages_by_channel
+                        .get(&target_cid)
+                        .map(|messages| messages.iter().any(|message| message.id == msg.id))
+                        .unwrap_or(false);
+                if !already_confirmed {
+                    self.inject_message(&target_cid, msg.clone());
+                }
+
                 if let Some(dm) = self
                     .dm_channels
                     .iter_mut()
-                    .find(|c| c.id == request.channel_id || c.id == *target_cid)
+                    .find(|channel| channel.id == target_cid || channel.id == request.channel_id)
                 {
-                    dm.last_message_id =
-                        Some(format!("{}", chrono::Utc::now().timestamp_millis()));
+                    if !msg.id.is_empty() {
+                        dm.last_message_id = Some(msg.id.clone());
+                    }
                     self.sort_dm_channels();
                 }
-                if let Some(ref mut popout) = self.profile_popout {
-                    if popout.user_id == request.user_id {
+
+                if owns_current_popout {
+                    if let Some(ref mut popout) = self.profile_popout {
                         popout.quick_message.clear();
                         popout.error = None;
                     }
+                    self.close_profile_popout();
                 }
-                self.close_profile_popout();
             }
             Err(err_msg) => {
-                if let Some(ref mut popout) = self.profile_popout {
-                    if popout.user_id == request.user_id {
+                if owns_current_popout {
+                    if let Some(ref mut popout) = self.profile_popout {
                         popout.error = Some(err_msg);
                     }
                 }
@@ -337,9 +461,12 @@ impl AppState {
         }
     }
 
-
     /// Builds fallback profile data from local friends, members, or current_user
-    pub fn build_fallback_profile_data(&self, user_id: &str, _guild_id: Option<&str>) -> Option<crate::domain::profile::UserProfileData> {
+    pub fn build_fallback_profile_data(
+        &self,
+        user_id: &str,
+        _guild_id: Option<&str>,
+    ) -> Option<crate::domain::profile::UserProfileData> {
         let to_domain_presence = |p: PresenceStatus| match p {
             PresenceStatus::Online => crate::domain::user::PresenceStatus::Online,
             PresenceStatus::Idle => crate::domain::user::PresenceStatus::Idle,
@@ -350,7 +477,8 @@ impl AppState {
         let uid = user_id.to_string();
         // Check current_user
         if self.current_user.id == uid || uid == "me" || uid == "@me" {
-            let mut user = crate::domain::user::User::new(&self.current_user.id, &self.current_user.username);
+            let mut user =
+                crate::domain::user::User::new(&self.current_user.id, &self.current_user.username);
             user.global_name = Some(self.current_user.display_name.clone());
             user.avatar = self.current_user.avatar_url.clone();
             user.discriminator = self.current_user.discriminator.clone();
@@ -430,7 +558,11 @@ impl AppState {
                 || dm.recipient_ids.contains(&uid)
                 || dm.id.trim_start_matches("dm-") == uid
         }) {
-            let recipient_id = dm.recipient_ids.first().cloned().unwrap_or_else(|| uid.clone());
+            let recipient_id = dm
+                .recipient_ids
+                .first()
+                .cloned()
+                .unwrap_or_else(|| uid.clone());
             let mut user = crate::domain::user::User::new(&recipient_id, &dm.name);
             user.global_name = Some(dm.name.clone());
             user.avatar = dm.icon_url.clone();
@@ -454,5 +586,177 @@ impl AppState {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::message::{Author, Message};
+    use crate::domain::profile::UserProfileData;
+    use crate::domain::user::User;
+    use crate::protocol::transport::TransportEvent;
+
+    fn load_test_profile(state: &mut AppState, user_id: &str, username: &str, draft: &str) {
+        state.set_profile_popout_data(
+            user_id,
+            UserProfileData {
+                user: User::new(user_id, username),
+                bio: None,
+                pronouns: None,
+                banner: None,
+                banner_color: None,
+                accent_color: None,
+                profile_effect_id: None,
+                badges: Vec::new(),
+                connected_accounts: Vec::new(),
+                mutual_guilds: Vec::new(),
+                mutual_friends_count: 0,
+                created_at: None,
+                joined_server_at: None,
+            },
+        );
+        state.profile_popout.as_mut().unwrap().quick_message = draft.to_string();
+    }
+
+    fn set_test_profile(state: &mut AppState, user_id: &str, username: &str, draft: &str) {
+        state.open_user_profile(user_id, None);
+        load_test_profile(state, user_id, username, draft);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_late_quick_send_cannot_mutate_reopened_profile() {
+        let mut state = AppState::new();
+        let (client_manager, _events) = crate::protocol::ClientManager::new_mock();
+        state.client_manager = Some(client_manager);
+
+        set_test_profile(&mut state, "synth-quick-user", "synth_quick", "old draft");
+        let old_request = state.begin_profile_popout_quick_message().unwrap();
+        state.close_profile_popout();
+
+        set_test_profile(&mut state, "synth-quick-user", "synth_quick", "new draft");
+        let new_request = state.begin_profile_popout_quick_message().unwrap();
+        assert_ne!(old_request.request_id, new_request.request_id);
+
+        state.finish_profile_popout_quick_message(&old_request, Err("late failure".into()));
+        let popout = state.profile_popout.as_ref().unwrap();
+        assert_eq!(popout.quick_message, "new draft");
+        assert_eq!(popout.error, None);
+        assert!(state.is_profile_popout_quick_message_sending());
+
+        state.finish_profile_popout_quick_message(&new_request, Err("current failure".into()));
+        let popout = state.profile_popout.as_ref().unwrap();
+        assert_eq!(popout.error.as_deref(), Some("current failure"));
+        assert!(!state.is_profile_popout_quick_message_sending());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_quick_send_a_b_a_switch_cannot_close_reopened_target() {
+        let mut state = AppState::new();
+        let (client_manager, _events) = crate::protocol::ClientManager::new_mock();
+        state.client_manager = Some(client_manager);
+
+        set_test_profile(&mut state, "synth-session-a", "synth_a", "first draft");
+        let first = state.begin_profile_popout_quick_message().unwrap();
+        state.open_user_profile("synth-session-b", None);
+        state.open_user_profile("synth-session-a", None);
+        load_test_profile(&mut state, "synth-session-a", "synth_a", "reopened draft");
+
+        let confirmed = Message::new(
+            "synth-session-confirmed",
+            &first.channel_id,
+            Author::new("synth-current-user", "synth_current"),
+            "first draft",
+        );
+        state.finish_profile_popout_quick_message(&first, Ok(confirmed));
+        let popout = state.profile_popout.as_ref().unwrap();
+        assert_eq!(popout.user_id, "synth-session-a");
+        assert_eq!(popout.quick_message, "reopened draft");
+        assert_eq!(popout.error, None);
+        assert_eq!(
+            state
+                .messages_by_channel
+                .get(&first.channel_id)
+                .unwrap()
+                .iter()
+                .filter(|message| message.id == "synth-session-confirmed")
+                .count(),
+            1
+        );
+
+        let second = state.begin_profile_popout_quick_message().unwrap();
+        state.open_user_profile("synth-session-b", None);
+        state.open_user_profile("synth-session-a", None);
+        load_test_profile(&mut state, "synth-session-a", "synth_a", "newest draft");
+        state.finish_profile_popout_quick_message(&second, Err("stale error".into()));
+        let popout = state.profile_popout.as_ref().unwrap();
+        assert_eq!(popout.user_id, "synth-session-a");
+        assert_eq!(popout.quick_message, "newest draft");
+        assert_eq!(popout.error, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_quick_send_confirmation_is_injected_once_with_real_message_id() {
+        let mut state = AppState::new();
+        let (client_manager, _events) = crate::protocol::ClientManager::new_mock();
+        state.client_manager = Some(client_manager);
+
+        set_test_profile(
+            &mut state,
+            "synth-confirm-user",
+            "synth_confirm",
+            "confirmed once",
+        );
+        let request = state.begin_profile_popout_quick_message().unwrap();
+        let message = Message::new(
+            "synth-confirmed-message",
+            &request.channel_id,
+            Author::new("synth-current-user", "synth_current"),
+            "confirmed once",
+        );
+
+        // Simulate the gateway/API event winning the race against completion.
+        state.handle_transport_event(TransportEvent::MessageCreate(message.clone()));
+        state.finish_profile_popout_quick_message(&request, Ok(message));
+
+        let messages = state.messages_by_channel.get(&request.channel_id).unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.id == "synth-confirmed-message")
+                .count(),
+            1
+        );
+        let dm = state
+            .dm_channels
+            .iter()
+            .find(|channel| channel.id == request.channel_id)
+            .unwrap();
+        assert_eq!(
+            dm.last_message_id.as_deref(),
+            Some("synth-confirmed-message")
+        );
+        assert!(state.profile_popout.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_quick_send_does_not_invent_username_before_profile_data() {
+        let mut state = AppState::new();
+        let (client_manager, _events) = crate::protocol::ClientManager::new_mock();
+        state.client_manager = Some(client_manager);
+
+        state.open_user_profile("synth-unloaded-user", None);
+        state.profile_popout.as_mut().unwrap().quick_message = "draft".into();
+        let request = state.begin_profile_popout_quick_message().unwrap();
+        let dm = state
+            .dm_channels
+            .iter()
+            .find(|channel| channel.id == request.channel_id)
+            .unwrap();
+        assert_eq!(dm.name, "");
+        assert_eq!(dm.recipient_ids, vec!["synth-unloaded-user"]);
+        assert!(state.messages_by_channel.is_empty());
+        assert!(state.is_profile_popout_quick_message_sending());
+        state.finish_profile_popout_quick_message(&request, Err("stopped before send".into()));
     }
 }
