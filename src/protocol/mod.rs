@@ -18,6 +18,7 @@ pub mod mock_provider;
 pub mod rate_limit;
 pub mod rate_limiter;
 pub mod pinned_dms;
+pub mod read_states;
 pub mod user_settings_proto;
 pub mod transport;
 pub mod voice_crypto;
@@ -49,6 +50,10 @@ pub use mock_provider::MockDiscordProvider;
 pub use rate_limit::*;
 pub use rate_limiter::RateLimitManager;
 pub use pinned_dms::{load_pinned_dms_from_disk, pinned_dms_cache_path, save_pinned_dms_to_disk};
+pub use read_states::{
+    compare_snowflakes, is_message_unread, is_newer_snowflake, normalize_snowflake, AckPayload,
+    ChannelReadState, PendingAck, ReadAckDebouncer, ReadState, ReadStateEntry, ReadStateStore,
+};
 pub use user_settings_proto::{PreloadedUserSettings, Theme};
 pub use transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent};
 pub use voice_crypto::*;
