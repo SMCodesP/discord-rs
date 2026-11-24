@@ -13,6 +13,7 @@ use crate::domain::settings::Subscription;
 use crate::domain::settings::ThemeChoice;
 use crate::protocol::ClientManager;
 use crate::protocol::ConnectionMode;
+use crate::protocol::voice_session::VoiceControlState;
 
 /// Main Application State
 #[derive(Debug, Clone)]
@@ -23,6 +24,8 @@ pub struct AppState {
     pub selected_channel_id: Option<String>,
     /// Connected voice call session
     pub active_voice_call: Option<ActiveVoiceCall>,
+    /// Estado único de mute/deafen local (invariantes T-098).
+    pub voice_control: VoiceControlState,
     /// Whether the member sidebar (right column) is visible
     pub show_members: bool,
     /// Currently opened modal dialog
@@ -206,6 +209,7 @@ impl AppState {
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
+            voice_control: VoiceControlState::new(false, false),
             show_members: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
