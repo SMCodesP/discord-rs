@@ -27,9 +27,11 @@ use crate::tokens::typography::*;
 // Callback Type Aliases
 // ============================================================================
 
-pub type EditorSendCallback = Arc<dyn Fn(&str, Option<&str>, &mut Window, &mut App) + Send + Sync + 'static>;
+pub type EditorSendCallback =
+    Arc<dyn Fn(&str, Option<&str>, &mut Window, &mut App) + Send + Sync + 'static>;
 pub type EditorActionCallback = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>;
-pub type EditorTextChangeCallback = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
+pub type EditorTextChangeCallback =
+    Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
 
 // ============================================================================
 // Subcomponent Helpers (Small Functions Returning AnyElement)
@@ -82,9 +84,7 @@ fn render_reply_mention_button(
 }
 
 /// Dismiss button on the reply banner using SVG icon and kit tooltip.
-fn render_reply_close_button(
-    on_cancel_reply: Option<EditorActionCallback>,
-) -> AnyElement {
+fn render_reply_close_button(on_cancel_reply: Option<EditorActionCallback>) -> AnyElement {
     let mut btn = IconButton::with_icon("reply-banner-close", |size, color| {
         icon_close(size, color).into_any_element()
     })
@@ -244,6 +244,24 @@ fn render_typing_dot(id: &'static str, phase_offset: f32) -> AnyElement {
 // Active Reply Banner Component
 // ============================================================================
 
+/// Builds a single-line preview from the actual replied-to message payload.
+fn reply_preview_text(message: &Message) -> String {
+    let content = if !message.content.trim().is_empty() {
+        message
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else if let Some(attachment) = message.attachments.first() {
+        attachment.filename.clone()
+    } else if let Some(sticker) = message.sticker_items.first() {
+        sticker.name.clone()
+    } else {
+        String::new()
+    };
+    content.chars().take(160).collect()
+}
+
 /// Renders the active reply banner above the text input when replying to a message.
 pub fn render_active_reply_banner(
     replying_to: &Message,
@@ -251,7 +269,59 @@ pub fn render_active_reply_banner(
     on_toggle_mention: Option<EditorActionCallback>,
     on_cancel_reply: Option<EditorActionCallback>,
 ) -> Div {
+    render_active_reply_banner_with_jump(
+        replying_to,
+        mention_author,
+        on_toggle_mention,
+        on_cancel_reply,
+        None,
+    )
+}
+
+/// Reply banner with an optional jump back to the original message.
+pub fn render_active_reply_banner_with_jump(
+    replying_to: &Message,
+    mention_author: bool,
+    on_toggle_mention: Option<EditorActionCallback>,
+    on_cancel_reply: Option<EditorActionCallback>,
+    on_jump_to_reply: Option<EditorActionCallback>,
+) -> Div {
     let author_name = replying_to.author.display_name().to_string();
+    let preview = reply_preview_text(replying_to);
+
+    let mut reply_details = div().flex().flex_col().min_w(px(0.0)).child(
+        div()
+            .flex()
+            .flex_row()
+            .gap(space_1())
+            .text_size(font_size_sm())
+            .child(div().text_color(text_muted()).child("Respondendo a"))
+            .child(
+                div()
+                    .font_weight(WEIGHT_SEMIBOLD)
+                    .text_color(blurple())
+                    .child(author_name),
+            ),
+    );
+    if !preview.is_empty() {
+        reply_details = reply_details.child(
+            div()
+                .text_size(font_size_xs())
+                .text_color(text_muted())
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(preview),
+        );
+    }
+    if let Some(handler) = on_jump_to_reply {
+        reply_details = reply_details.cursor_pointer().on_mouse_down(
+            MouseButton::Left,
+            move |_event, window, cx| {
+                cx.stop_propagation();
+                handler(window, cx);
+            },
+        );
+    }
 
     div()
         .flex()
@@ -270,30 +340,14 @@ pub fn render_active_reply_banner(
                 .flex_row()
                 .items_center()
                 .gap(space_2())
+                .min_w(px(0.0))
                 .child(
                     div()
                         .text_color(text_muted())
                         .text_size(font_size_sm())
                         .child("↩"),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .gap(space_1())
-                        .text_size(font_size_sm())
-                        .child(
-                            div()
-                                .text_color(text_muted())
-                                .child("Respondendo a"),
-                        )
-                        .child(
-                            div()
-                                .font_weight(WEIGHT_SEMIBOLD)
-                                .text_color(blurple())
-                                .child(author_name),
-                        ),
-                ),
+                .child(reply_details),
         )
         .child(
             div()
@@ -301,15 +355,16 @@ pub fn render_active_reply_banner(
                 .flex_row()
                 .items_center()
                 .gap(space_3())
-                .child(render_reply_mention_button(mention_author, on_toggle_mention))
+                .child(render_reply_mention_button(
+                    mention_author,
+                    on_toggle_mention,
+                ))
                 .child(render_reply_close_button(on_cancel_reply)),
         )
 }
 
 /// Renders the active edit banner above the text input when editing a message.
-pub fn render_active_edit_banner(
-    on_cancel_edit: Option<EditorActionCallback>,
-) -> Div {
+pub fn render_active_edit_banner(on_cancel_edit: Option<EditorActionCallback>) -> Div {
     div()
         .flex()
         .flex_row()
@@ -340,9 +395,9 @@ pub fn render_active_edit_banner(
                         .gap(space_1())
                         .text_size(font_size_sm())
                         .child(
-                            div()
-                                .text_color(text_muted())
-                                .child("Editando mensagem • escape para cancelar • enter para salvar"),
+                            div().text_color(text_muted()).child(
+                                "Editando mensagem • escape para cancelar • enter para salvar",
+                            ),
                         ),
                 ),
         )
@@ -367,8 +422,14 @@ pub fn render_typing_indicator(typing_users: &[String]) -> Div {
 
     let typing_text = match typing_users.len() {
         1 => format!("{} está digitando...", typing_users[0]),
-        2 => format!("{} e {} estão digitando...", typing_users[0], typing_users[1]),
-        3 => format!("{}, {} e {} estão digitando...", typing_users[0], typing_users[1], typing_users[2]),
+        2 => format!(
+            "{} e {} estão digitando...",
+            typing_users[0], typing_users[1]
+        ),
+        3 => format!(
+            "{}, {} e {} estão digitando...",
+            typing_users[0], typing_users[1], typing_users[2]
+        ),
         _ => "Várias pessoas estão digitando...".to_string(),
     };
 
@@ -419,6 +480,7 @@ pub struct ChatComposer {
     disabled: bool,
     on_toggle_mention: Option<EditorActionCallback>,
     on_cancel_reply: Option<EditorActionCallback>,
+    on_jump_to_reply: Option<EditorActionCallback>,
     editing_message: Option<Message>,
     on_cancel_edit: Option<EditorActionCallback>,
     on_attachment: Option<EditorActionCallback>,
@@ -443,6 +505,7 @@ impl ChatComposer {
             disabled: false,
             on_toggle_mention: None,
             on_cancel_reply: None,
+            on_jump_to_reply: None,
             editing_message: None,
             on_cancel_edit: None,
             on_attachment: None,
@@ -523,6 +586,11 @@ impl ChatComposer {
         self
     }
 
+    pub fn on_jump_to_reply(mut self, handler: Option<EditorActionCallback>) -> Self {
+        self.on_jump_to_reply = handler;
+        self
+    }
+
     pub fn editing_message(mut self, message: Option<Message>) -> Self {
         self.editing_message = message;
         self
@@ -560,11 +628,12 @@ impl RenderOnce for ChatComposer {
         let top_banner = if has_edit {
             Some(render_active_edit_banner(self.on_cancel_edit.clone()))
         } else if let Some(ref msg) = self.replying_to {
-            Some(render_active_reply_banner(
+            Some(render_active_reply_banner_with_jump(
                 msg,
                 self.mention_author,
                 self.on_toggle_mention.clone(),
                 self.on_cancel_reply.clone(),
+                self.on_jump_to_reply.clone(),
             ))
         } else {
             None
@@ -650,7 +719,11 @@ mod tests {
     fn test_typing_indicator_text() {
         let users1 = vec!["Alice".to_string()];
         let users2 = vec!["Alice".to_string(), "Bob".to_string()];
-        let users3 = vec!["Alice".to_string(), "Bob".to_string(), "Charlie".to_string()];
+        let users3 = vec![
+            "Alice".to_string(),
+            "Bob".to_string(),
+            "Charlie".to_string(),
+        ];
 
         assert_eq!(users1.len(), 1);
         assert_eq!(users2.len(), 2);
@@ -661,6 +734,34 @@ mod tests {
         let div3 = render_typing_indicator(&users3);
         let div_empty = render_typing_indicator(&[]);
         let _ = (div1, div2, div3, div_empty);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_reply_preview_uses_real_message_payload() {
+        use crate::domain::message::Author;
+
+        let message = Message::new(
+            "m1",
+            "c1",
+            Author::new("u1", "autor"),
+            "Primeira linha\nSegunda linha",
+        );
+        assert_eq!(reply_preview_text(&message), "Primeira linha Segunda linha");
+
+        let mut attachment_only = Message::new("m2", "c1", Author::new("u1", "autor"), "");
+        attachment_only
+            .attachments
+            .push(crate::domain::message::Attachment {
+                id: "a1".into(),
+                filename: "arquivo-real.png".into(),
+                size: 1024,
+                url: "https://cdn.discordapp.com/attachments/synthetic/file.png".into(),
+                proxy_url: None,
+                content_type: Some("image/png".into()),
+                width: Some(800),
+                height: Some(600),
+            });
+        assert_eq!(reply_preview_text(&attachment_only), "arquivo-real.png");
     }
 
     #[::core::prelude::v1::test]

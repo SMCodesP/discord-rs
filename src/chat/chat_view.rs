@@ -7,14 +7,12 @@ use gpui::*;
 use std::sync::Arc;
 
 use crate::app::state::AppState;
-use crate::chat::editor::{
-    ChatComposer, EditorActionCallback, EditorSendCallback,
-};
+use crate::chat::editor::{ChatComposer, EditorActionCallback, EditorSendCallback};
 use crate::chat::media_picker::{
     MediaPickerConfig, MediaPickerGuildSection, MediaPickerModal, MediaPickerTab,
-    OnCloseMediaPickerCallback, OnPlaySoundCallback, OnSearchQueryCallback,
-    OnSelectEmojiCallback, OnSelectGifCallback, OnSelectGifCategoryCallback,
-    OnSelectGuildCallback, OnSelectStickerCallback, OnTabChangeCallback,
+    OnCloseMediaPickerCallback, OnPlaySoundCallback, OnSearchQueryCallback, OnSelectEmojiCallback,
+    OnSelectGifCallback, OnSelectGifCategoryCallback, OnSelectGuildCallback,
+    OnSelectStickerCallback, OnTabChangeCallback,
 };
 use crate::chat::message_list::{
     build_chat_list_items, render_date_separator_element, render_message_context_menu,
@@ -24,10 +22,10 @@ use crate::chat::message_list::{
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
 use crate::protocol::media_cache::MediaCacheManager;
-use crate::tokens::colors::*;
 use crate::tokens::colors::white;
-use crate::tokens::spacing::{radius_md, radius_sm};
-use crate::tokens::typography::{font_size_sm, font_size_xs};
+use crate::tokens::colors::*;
+use crate::tokens::spacing::*;
+use crate::tokens::typography::*;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingPinAction {
@@ -35,10 +33,69 @@ pub struct PendingPinAction {
     pub is_unpin: bool,
 }
 
+fn render_chat_error_toast(
+    message: String,
+    retry_label: Option<&'static str>,
+    on_retry: Option<EditorActionCallback>,
+    on_dismiss: Option<EditorActionCallback>,
+) -> Option<AnyElement> {
+    let mut actions = div().flex().flex_row().items_center().gap(space_2());
+    if let (Some(label), Some(handler)) = (retry_label, on_retry) {
+        actions = actions.child(
+            div()
+                .cursor_pointer()
+                .text_size(font_size_xs())
+                .font_weight(WEIGHT_BOLD)
+                .text_color(blurple())
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    handler(window, cx);
+                })
+                .child(label),
+        );
+    }
+    if let Some(handler) = on_dismiss {
+        actions = actions.child(
+            div()
+                .cursor_pointer()
+                .text_size(font_size_xs())
+                .text_color(status_danger())
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    handler(window, cx);
+                })
+                .child("✕"),
+        );
+    }
+
+    Some(
+        div()
+            .mx(space_4())
+            .mb(space_2())
+            .p(space_2())
+            .rounded(radius_sm())
+            .bg(with_alpha(HEX_STATUS_DANGER, 0.15))
+            .border_1()
+            .border_color(status_danger())
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap(space_2())
+            .child(
+                div()
+                    .text_size(font_size_xs())
+                    .text_color(status_danger())
+                    .child(message),
+            )
+            .child(actions)
+            .into_any_element(),
+    )
+}
+
 /// Reactive Chat View managing real messages and input state for the active channel.
 pub struct ChatView {
     pub state: Entity<AppState>,
     pub replying_to: Option<Message>,
+    pub reply_mention_author: bool,
     pub typed_text: String,
     pub typing_users: Vec<String>,
     pub focus_handle: FocusHandle,
@@ -61,7 +118,17 @@ pub struct ChatView {
     pub pending_pin_action: Option<PendingPinAction>,
     pub editing_message: Option<Message>,
     pub edit_error: Option<String>,
+    pub is_saving_edit: bool,
+    pub edit_request_sequence: u64,
     pub pin_error: Option<String>,
+    pub send_error: Option<String>,
+    pub retry_send: Option<(String, String)>,
+    pub is_sending_message: bool,
+    pub history_loading: bool,
+    pub history_error: Option<String>,
+    pub last_history_limit: usize,
+    pub scroll_handler_installed: bool,
+    pub typing_refresh_task: Option<Task<()>>,
     pub composer_state: Option<Entity<TextareaState>>,
     pub composer_sub: Option<Subscription>,
 }
@@ -74,6 +141,7 @@ impl ChatView {
         let scroll_handle = ScrollHandle::new();
         // Virtual ListState configured with bottom alignment (canonical chat stream)
         let list_state = ListState::new(0, ListAlignment::Bottom, px(250.0));
+        list_state.set_follow_mode(FollowMode::Tail);
         // Top-aligned ListState for rich media picker popup with 150px overdraw windowing
         let media_picker_list_state = ListState::new(0, ListAlignment::Top, px(150.0));
         cx.observe(&state, |_this, _state, cx| {
@@ -84,6 +152,7 @@ impl ChatView {
         Self {
             state,
             replying_to: None,
+            reply_mention_author: true,
             typed_text: String::new(),
             typing_users: Vec::new(),
             focus_handle,
@@ -106,7 +175,17 @@ impl ChatView {
             pending_pin_action: None,
             editing_message: None,
             edit_error: None,
+            is_saving_edit: false,
+            edit_request_sequence: 0,
             pin_error: None,
+            send_error: None,
+            retry_send: None,
+            is_sending_message: false,
+            history_loading: false,
+            history_error: None,
+            last_history_limit: 0,
+            scroll_handler_installed: false,
+            typing_refresh_task: None,
             composer_state: None,
             composer_sub: None,
         }
@@ -118,6 +197,9 @@ impl ChatView {
 
     pub fn set_replying_to(&mut self, message: Option<Message>) {
         self.replying_to = message;
+        if self.replying_to.is_some() {
+            self.reply_mention_author = true;
+        }
     }
 
     pub fn set_typing_users(&mut self, users: Vec<String>) {
@@ -133,29 +215,49 @@ impl ChatView {
         let content = message.content.clone();
         self.editing_message = Some(message);
         self.edit_error = None;
+        self.is_saving_edit = false;
+        self.edit_request_sequence = self.edit_request_sequence.wrapping_add(1);
         self.replying_to = None;
         self.typed_text = content.clone();
-        if let (Some(w), Some(st)) = (window, &self.composer_state) {
-            st.update(cx, |s, cx| {
-                s.set_value(content, w, cx);
+        if let (Some(window), Some(state)) = (window, &self.composer_state) {
+            state.update(cx, |state, cx| {
+                state.set_value(content, window, cx);
+                let line_count = state.value().lines().count().max(1) as u32;
+                let last_line = state
+                    .value()
+                    .lines()
+                    .last()
+                    .unwrap_or_default()
+                    .chars()
+                    .count() as u32;
+                state.set_cursor_position(
+                    gpui::component::input::Position {
+                        line: line_count - 1,
+                        character: last_line,
+                    },
+                    window,
+                    cx,
+                );
             });
         }
         cx.notify();
     }
 
     pub fn cancel_editing(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.edit_request_sequence = self.edit_request_sequence.wrapping_add(1);
         self.editing_message = None;
         self.edit_error = None;
+        self.is_saving_edit = false;
         self.typed_text.clear();
-        if let (Some(w), Some(st)) = (window, &self.composer_state) {
-            st.update(cx, |s, cx| {
-                s.set_value("", w, cx);
+        if let (Some(window), Some(state)) = (window, &self.composer_state) {
+            state.update(cx, |state, cx| {
+                state.set_value("", window, cx);
             });
         }
         cx.notify();
     }
 
-    /// Envia a edição de uma mensagem via ClientManager sem mutação otimista
+    /// Envia a edição de uma mensagem via ClientManager sem mutação otimista.
     pub fn submit_edit_message(
         &mut self,
         channel_id: String,
@@ -164,39 +266,293 @@ impl ChatView {
         cm: Option<crate::protocol::ClientManager>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(cm) = cm {
-            self.edit_error = None;
+        if self.is_saving_edit {
+            return;
+        }
+        let Some(cm) = cm else {
+            self.edit_error =
+                Some("Não conectado ao Discord: cliente não inicializado".to_string());
             cx.notify();
-            let this_entity = cx.entity().clone();
-            cx.spawn(move |_view, cx: &mut AsyncApp| {
-                let cx = cx.clone();
-                async move {
-                    match cm.edit_message(&channel_id, &message_id, &text).await {
-                        Ok(updated_msg) => {
-                            let _ = cx.update(|cx| {
-                                let _ = this_entity.update(cx, |chat, cx| {
+            return;
+        };
+
+        self.edit_error = None;
+        self.is_saving_edit = true;
+        let request_sequence = self.edit_request_sequence;
+        let expected_message_id = message_id.clone();
+        let this_entity = cx.entity().clone();
+        cx.notify();
+        cx.spawn(move |_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                match cm.edit_message(&channel_id, &message_id, &text).await {
+                    Ok(updated_message) => {
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                if chat.edit_request_sequence == request_sequence
+                                    && chat
+                                        .editing_message
+                                        .as_ref()
+                                        .map(|message| message.id.as_str())
+                                        == Some(expected_message_id.as_str())
+                                {
                                     chat.cancel_editing(None, cx);
-                                });
+                                }
                             });
-                            cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(updated_msg));
-                        }
-                        Err(e) => {
-                            let err_msg = e.to_string();
-                            let _ = cx.update(|cx| {
-                                let _ = this_entity.update(cx, |chat, cx| {
-                                    chat.edit_error = Some(err_msg.clone());
+                        });
+                        cm.emit_event(crate::protocol::TransportEvent::MessageUpdate(
+                            updated_message,
+                        ));
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                if chat.edit_request_sequence == request_sequence
+                                    && chat
+                                        .editing_message
+                                        .as_ref()
+                                        .map(|message| message.id.as_str())
+                                        == Some(expected_message_id.as_str())
+                                {
+                                    chat.is_saving_edit = false;
+                                    chat.edit_error = Some(error);
                                     cx.notify();
-                                });
+                                }
                             });
-                        }
+                        });
                     }
                 }
-            })
-            .detach();
-        } else {
-            self.edit_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
-            cx.notify();
+            }
+        })
+        .detach();
+    }
+
+    fn submit_composer_message(
+        &mut self,
+        channel_id: String,
+        text: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_sending_message {
+            return;
         }
+        let Some(client_manager) = self.state.read(cx).client_manager.clone() else {
+            self.send_error =
+                Some("Não conectado ao Discord: cliente não inicializado".to_string());
+            cx.notify();
+            return;
+        };
+        let temp_id = match self.state.update(cx, |state, _cx| {
+            state.begin_message_send(&channel_id, &text)
+        }) {
+            Ok(temp_id) => temp_id,
+            Err(error) => {
+                self.send_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+
+        self.send_error = None;
+        self.history_error = None;
+        self.retry_send = None;
+        self.is_sending_message = true;
+        cx.notify();
+
+        let this_entity = cx.entity().clone();
+        let target_channel = channel_id.clone();
+        let content = text.clone();
+        cx.spawn(move |_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let request = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    client_manager.send_message(&target_channel, &content),
+                )
+                .await;
+                let result = match request {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Tempo limite de 15s excedido ao confirmar o envio"
+                    )),
+                };
+                match result {
+                    Ok(confirmed) => {
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                chat.state.update(cx, |state, _cx| {
+                                    state.confirm_message_send(&temp_id, confirmed);
+                                    state.replying_to_message = None;
+                                    state.active_draft.clear();
+                                });
+                                chat.is_sending_message = false;
+                                if chat.last_channel_id.as_deref() == Some(target_channel.as_str())
+                                {
+                                    chat.typed_text.clear();
+                                    chat.set_replying_to(None);
+                                    chat.list_state.scroll_to_end();
+                                    chat.scroll_handle.scroll_to_bottom();
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                let retry = chat
+                                    .state
+                                    .update(cx, |state, _cx| state.fail_message_send(&temp_id));
+                                chat.is_sending_message = false;
+                                if let Some(retry) = retry {
+                                    chat.send_error =
+                                        Some(format!("Falha ao enviar mensagem: {}", error));
+                                    chat.retry_send = Some(retry);
+                                } else {
+                                    // Gateway confirmation may have arrived while
+                                    // the REST request was failing or timing out.
+                                    // Do not report a false failure or keep the
+                                    // composer in a sending state.
+                                    chat.send_error = None;
+                                    chat.retry_send = None;
+                                    chat.state.update(cx, |state, _cx| {
+                                        state.replying_to_message = None;
+                                        state.active_draft.clear();
+                                    });
+                                    if chat.last_channel_id.as_deref()
+                                        == Some(target_channel.as_str())
+                                    {
+                                        chat.typed_text.clear();
+                                        chat.set_replying_to(None);
+                                        chat.list_state.scroll_to_end();
+                                        chat.scroll_handle.scroll_to_bottom();
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn retry_failed_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((channel_id, content)) = self.retry_send.clone() else {
+            return;
+        };
+        self.retry_send = None;
+        self.submit_composer_message(channel_id, content, window, cx);
+    }
+
+    fn load_more_history(&mut self, cx: &mut Context<Self>) {
+        if self.history_loading {
+            return;
+        }
+        let Some(client_manager) = self.state.read(cx).client_manager.clone() else {
+            self.history_error =
+                Some("Não conectado ao Discord: cliente não inicializado".to_string());
+            cx.notify();
+            return;
+        };
+        let Some(channel_id) = self.state.read(cx).selected_channel_id.clone() else {
+            return;
+        };
+        let (message_count, anchor_message_id) = {
+            let state = self.state.read(cx);
+            let messages = state.get_active_messages();
+            (
+                messages.len(),
+                messages.first().map(|message| message.id.clone()),
+            )
+        };
+        if message_count == 0 {
+            return;
+        }
+
+        // The current transport only exposes `get_messages(limit)`. Grow the
+        // latest-page window once, up to Discord's maximum of 100. A true
+        // `before` cursor requires a protocol/transport change outside this task.
+        let requested_limit = (message_count + 50).min(100);
+        if requested_limit <= self.last_history_limit {
+            self.history_error = Some("Histórico mais antigo indisponível: o transporte atual não oferece cursor `before`.".to_string());
+            cx.notify();
+            return;
+        }
+        self.last_history_limit = requested_limit;
+        self.history_loading = true;
+        self.history_error = None;
+        cx.notify();
+
+        let this_entity = cx.entity().clone();
+        cx.spawn(move |_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                match client_manager
+                    .get_messages(&channel_id, requested_limit)
+                    .await
+                {
+                    Ok(older) => {
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                chat.state.update(cx, |state, _cx| {
+                                    state.merge_older_messages(&channel_id, older);
+                                });
+                                chat.history_loading = false;
+                                if let Some(anchor_id) = anchor_message_id {
+                                    let target_index = {
+                                        let state = chat.state.read(cx);
+                                        let items =
+                                            build_chat_list_items(state.get_active_messages());
+                                        items.iter().position(|item| match item {
+                                            ChatListItem::Message { message_idx, .. } => state
+                                                .get_active_messages()
+                                                .get(*message_idx)
+                                                .map(|message| message.id == anchor_id)
+                                                .unwrap_or(false),
+                                            _ => false,
+                                        })
+                                    };
+                                    if let Some(index) = target_index {
+                                        chat.list_state.scroll_to_reveal_item(index);
+                                    }
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
+                    Err(error) => {
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                chat.history_loading = false;
+                                chat.history_error =
+                                    Some(format!("Falha ao carregar mensagens antigas: {}", error));
+                                cx.notify();
+                            });
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn ensure_scroll_handler(&mut self, cx: &mut Context<Self>) {
+        if self.scroll_handler_installed {
+            return;
+        }
+        let this_entity = cx.entity().clone();
+        self.list_state
+            .set_scroll_handler(move |event, _window, cx| {
+                if event.is_scrolled && event.visible_range.start <= 1 {
+                    this_entity.update(cx, |chat, cx| chat.load_more_history(cx));
+                }
+            });
+        self.scroll_handler_installed = true;
     }
 
     pub fn ensure_composer_state(
@@ -227,12 +583,17 @@ impl ChatView {
             window,
             move |this, _textarea, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, .. } => {
+                    if this.is_sending_message {
+                        return;
+                    }
                     let content = st_for_sub.read(cx).value().to_string();
                     let trimmed = content.trim();
                     if !trimmed.is_empty() {
                         let text = trimmed.to_string();
                         if let Some(editing_msg) = this.editing_message.clone() {
-                            let cid = if let Some((_, ch)) = this.state.read(cx).get_selected_channel() {
+                            let cid = if let Some((_, ch)) =
+                                this.state.read(cx).get_selected_channel()
+                            {
                                 ch.id.clone()
                             } else if let Some(ref cid) = this.state.read(cx).selected_channel_id {
                                 cid.clone()
@@ -245,32 +606,19 @@ impl ChatView {
                             return;
                         }
 
-                        let app_state = this.state.read(cx);
-                        let cid = if let Some((_, ch)) = app_state.get_selected_channel() {
-                            ch.id.clone()
-                        } else if let Some(ref cid) = app_state.selected_channel_id {
-                            cid.clone()
-                        } else {
-                            "chan-general".to_string()
+                        let channel_id = {
+                            let state = this.state.read(cx);
+                            state
+                                .get_selected_channel()
+                                .map(|(_, channel)| channel.id.clone())
+                                .or_else(|| state.selected_channel_id.clone())
                         };
-
-                        this.state.update(cx, |state, cx| {
-                            state.send_message(&cid, &text);
+                        let Some(channel_id) = channel_id else {
+                            this.send_error = Some("Nenhum canal selecionado".to_string());
                             cx.notify();
-                        });
-
-                        st_for_sub.update(cx, |s, cx| {
-                            s.set_value("", window, cx);
-                        });
-
-                        this.typed_text.clear();
-                        this.replying_to = None;
-                        this.scroll_handle.scroll_to_bottom();
-                        let cnt = this.list_state.item_count();
-                        if cnt > 0 {
-                            this.list_state.scroll_to_reveal_item(cnt.saturating_sub(1));
-                        }
-                        cx.notify();
+                            return;
+                        };
+                        this.submit_composer_message(channel_id, text, window, cx);
                     }
                 }
                 InputEvent::Change => {
@@ -289,12 +637,20 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_scroll_handler(cx);
         let composer_state = self.ensure_composer_state(window, cx);
         if composer_state.read(cx).value() != self.typed_text.as_str() {
             let t = self.typed_text.clone();
             composer_state.update(cx, |s, cx| {
                 s.set_value(t, window, cx);
             });
+        }
+        let failed_sends = self
+            .state
+            .update(cx, |state, _cx| state.take_failed_message_sends());
+        if let Some((channel_id, content, error)) = failed_sends.into_iter().last() {
+            self.send_error = Some(format!("Falha ao enviar mensagem: {}", error));
+            self.retry_send = Some((channel_id, content));
         }
         let app_state = self.state.read(cx);
         let selected_channel_opt = if let Some((_, ch)) = app_state.get_selected_channel() {
@@ -306,26 +662,23 @@ impl Render for ChatView {
         };
         let channel_name = selected_channel_opt
             .as_ref()
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| {
-                if let Some(ref cid) = app_state.selected_channel_id {
-                    cid.clone()
-                } else {
-                    "geral".to_string()
-                }
-            });
+            .map(|channel| channel.name.clone())
+            .or_else(|| app_state.selected_channel_id.clone())
+            .unwrap_or_default();
         let channel_id = selected_channel_opt
             .as_ref()
-            .map(|c| c.id.clone())
+            .map(|channel| channel.id.clone())
             .or_else(|| app_state.selected_channel_id.clone())
-            .unwrap_or_else(|| "chan-general".to_string());
+            .unwrap_or_default();
         let is_dm = app_state.selected_guild_id.is_none()
             || app_state.dm_channels.iter().any(|d| d.id == channel_id);
         let channel_topic = selected_channel_opt
             .as_ref()
             .and_then(|c| c.topic.clone())
             .unwrap_or_else(|| {
-                if is_dm {
+                if channel_name.is_empty() {
+                    String::new()
+                } else if is_dm {
                     format!(
                         "Este é o início do seu histórico de mensagens diretas com {}.",
                         channel_name
@@ -342,15 +695,18 @@ impl Render for ChatView {
             None
         };
         let recipient_friend = if let Some(dm) = dm_channel_state {
-            dm.recipient_ids.first().and_then(|rid| {
-                app_state.friends.iter().find(|f| &f.id == rid)
-            })
+            dm.recipient_ids
+                .first()
+                .and_then(|rid| app_state.friends.iter().find(|f| &f.id == rid))
         } else {
             None
         };
         let all_messages = app_state.get_active_messages();
         let recipient_msg_author = if is_dm {
-            all_messages.iter().find(|m| m.author.id != app_state.current_user.id).map(|m| &m.author)
+            all_messages
+                .iter()
+                .find(|m| m.author.id != app_state.current_user.id)
+                .map(|m| &m.author)
         } else {
             None
         };
@@ -379,16 +735,66 @@ impl Render for ChatView {
         let chat_items = build_chat_list_items(all_messages);
         let total_items = chat_items.len();
 
-        // Synchronize scroll state when channel switches or message count changes
+        // Synchronize scroll state when channel switches or message count changes.
+        // Preserve the visible anchor while the user is reading older messages.
         let channel_changed = self.last_channel_id.as_deref() != Some(&channel_id);
+        let switched_from_channel = self.last_channel_id.is_some();
         let count_changed = message_count != self.last_message_count;
-        if channel_changed || count_changed {
+        if channel_changed {
             self.last_channel_id = Some(channel_id.clone());
+            self.last_history_limit = 0;
+            self.history_loading = false;
+            self.history_error = None;
+            self.send_error = None;
+            self.retry_send = None;
+            if switched_from_channel {
+                self.replying_to = None;
+                self.editing_message = None;
+                self.is_saving_edit = false;
+                self.edit_request_sequence = self.edit_request_sequence.wrapping_add(1);
+                self.typed_text.clear();
+            }
+            self.list_state.set_follow_mode(FollowMode::Tail);
+        }
+        if channel_changed || count_changed || self.list_state.item_count() != total_items {
+            let at_bottom = channel_changed
+                || self.list_state.is_following_tail()
+                || self.list_state.is_scrolled_to_end() != Some(false)
+                || self.list_state.logical_scroll_top().item_ix
+                    >= self.list_state.item_count().saturating_sub(1);
+            let anchor_id = if at_bottom {
+                None
+            } else {
+                let top_index = self.list_state.logical_scroll_top().item_ix;
+                chat_items.get(top_index).and_then(|item| match item {
+                    ChatListItem::Message { message_idx, .. } => all_messages
+                        .get(*message_idx)
+                        .map(|message| message.id.clone()),
+                    _ => None,
+                })
+            };
             self.last_message_count = message_count;
             self.list_state.reset(total_items);
-            self.scroll_handle.scroll_to_bottom();
-        } else if self.list_state.item_count() != total_items {
-            self.list_state.reset(total_items);
+            if at_bottom {
+                self.list_state.scroll_to_end();
+                self.scroll_handle.scroll_to_bottom();
+            } else if let Some(anchor_id) = anchor_id {
+                if let Some(index) = chat_items.iter().position(|item| match item {
+                    ChatListItem::Message { message_idx, .. } => all_messages
+                        .get(*message_idx)
+                        .map(|message| message.id == anchor_id)
+                        .unwrap_or(false),
+                    _ => false,
+                }) {
+                    self.list_state.scroll_to_reveal_item(index);
+                }
+            }
+        }
+
+        if switched_from_channel && channel_changed {
+            composer_state.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
         }
 
         let app_entity = self.state.clone();
@@ -397,135 +803,165 @@ impl Render for ChatView {
         // 1. Message Action: React -> opens emoji picker for that specific message
         let self_for_react = self_entity.clone();
         let app_for_react = app_entity.clone();
-        let on_react: Option<MessageActionCallback> = Some(Arc::new(move |message_id: &str, window: &mut Window, cx: &mut App| {
-            let msg_id = message_id.to_string();
-            app_for_react.update(cx, |state, _cx| {
-                state.sync_guild_media();
-            });
-            self_for_react.update(cx, |this, cx| {
-                this.media_picker_open = true;
-                this.media_picker_tab = MediaPickerTab::Emojis;
-                this.media_picker_react_message_id = Some(msg_id);
-                this.media_picker_list_state.reset(0);
-                this.active_context_menu = None;
-                window.focus(&this.media_picker_focus_handle, cx);
-                cx.notify();
-            });
-        }));
+        let on_react: Option<MessageActionCallback> = Some(Arc::new(
+            move |message_id: &str, window: &mut Window, cx: &mut App| {
+                let msg_id = message_id.to_string();
+                app_for_react.update(cx, |state, _cx| {
+                    state.sync_guild_media();
+                });
+                self_for_react.update(cx, |this, cx| {
+                    this.media_picker_open = true;
+                    this.media_picker_tab = MediaPickerTab::Emojis;
+                    this.media_picker_react_message_id = Some(msg_id);
+                    this.media_picker_list_state.reset(0);
+                    this.active_context_menu = None;
+                    window.focus(&this.media_picker_focus_handle, cx);
+                    cx.notify();
+                });
+            },
+        ));
 
         // 2. Message Action: Reply
         let cid_for_reply = channel_id.clone();
         let app_for_reply = app_entity.clone();
         let self_for_reply = self_entity.clone();
-        let on_reply: Option<MessageActionCallback> = Some(Arc::new(move |message_id: &str, _window: &mut Window, cx: &mut App| {
-            let msg_id = message_id.to_string();
-            let target_msg = app_for_reply.read(cx)
-                .messages_by_channel
-                .get(&cid_for_reply)
-                .and_then(|msgs| msgs.iter().find(|m| m.id == msg_id).cloned());
-            if let Some(msg) = target_msg {
-                self_for_reply.update(cx, |this, cx| {
-                    this.replying_to = Some(msg);
-                    cx.notify();
-                });
-            }
-        }));
+        let on_reply: Option<MessageActionCallback> = Some(Arc::new(
+            move |message_id: &str, _window: &mut Window, cx: &mut App| {
+                let msg_id = message_id.to_string();
+                let target_msg = app_for_reply
+                    .read(cx)
+                    .messages_by_channel
+                    .get(&cid_for_reply)
+                    .and_then(|msgs| msgs.iter().find(|m| m.id == msg_id).cloned());
+                if let Some(msg) = target_msg {
+                    self_for_reply.update(cx, |this, cx| {
+                        this.set_replying_to(Some(msg));
+                        cx.notify();
+                    });
+                }
+            },
+        ));
 
         // 3. Reaction Click: toggle/add specific emoji
         let cid_for_rx_click = channel_id.clone();
         let app_for_rx_click = app_entity.clone();
-        let on_reaction_click: Option<ReactionActionCallback> = Some(Arc::new(move |message_id: &str, emoji: &str, _window: &mut Window, cx: &mut App| {
-            let msg_id = message_id.to_string();
-            let em = emoji.to_string();
-            let cid = cid_for_rx_click.clone();
-            app_for_rx_click.update(cx, |state, cx| {
-                state.add_reaction_to_message(&cid, &msg_id, &em);
-                cx.notify();
-            });
-        }));
+        let on_reaction_click: Option<ReactionActionCallback> = Some(Arc::new(
+            move |message_id: &str, emoji: &str, _window: &mut Window, cx: &mut App| {
+                let msg_id = message_id.to_string();
+                let em = emoji.to_string();
+                let cid = cid_for_rx_click.clone();
+                app_for_rx_click.update(cx, |state, cx| {
+                    state.add_reaction_to_message(&cid, &msg_id, &em);
+                    cx.notify();
+                });
+            },
+        ));
 
         // 4. Add Reaction (+) button -> opens emoji picker for that specific message
         let self_for_add_rx = self_entity.clone();
         let app_for_add_rx = app_entity.clone();
-        let on_add_reaction: Option<AddReactionCallback> = Some(Arc::new(move |message_id: &str, window: &mut Window, cx: &mut App| {
-            let msg_id = message_id.to_string();
-            app_for_add_rx.update(cx, |state, _cx| {
-                state.sync_guild_media();
-            });
-            self_for_add_rx.update(cx, |this, cx| {
-                this.media_picker_open = true;
-                this.media_picker_tab = MediaPickerTab::Emojis;
-                this.media_picker_react_message_id = Some(msg_id);
-                this.media_picker_list_state.reset(0);
-                this.active_context_menu = None;
-                window.focus(&this.media_picker_focus_handle, cx);
-                cx.notify();
-            });
-        }));
+        let on_add_reaction: Option<AddReactionCallback> = Some(Arc::new(
+            move |message_id: &str, window: &mut Window, cx: &mut App| {
+                let msg_id = message_id.to_string();
+                app_for_add_rx.update(cx, |state, _cx| {
+                    state.sync_guild_media();
+                });
+                self_for_add_rx.update(cx, |this, cx| {
+                    this.media_picker_open = true;
+                    this.media_picker_tab = MediaPickerTab::Emojis;
+                    this.media_picker_react_message_id = Some(msg_id);
+                    this.media_picker_list_state.reset(0);
+                    this.active_context_menu = None;
+                    window.focus(&this.media_picker_focus_handle, cx);
+                    cx.notify();
+                });
+            },
+        ));
 
         // 5. More Action: (•••) button -> opens message context menu
         let self_for_more = self_entity.clone();
-        let on_more: Option<MessageActionPosCallback> = Some(Arc::new(move |message_id: &str, pos: Point<Pixels>, _window: &mut Window, cx: &mut App| {
-            let msg_id = message_id.to_string();
-            self_for_more.update(cx, |this, cx| {
-                this.active_context_menu = Some((msg_id, pos));
-                cx.notify();
-            });
-        }));
+        let on_more: Option<MessageActionPosCallback> = Some(Arc::new(
+            move |message_id: &str, pos: Point<Pixels>, _window: &mut Window, cx: &mut App| {
+                let msg_id = message_id.to_string();
+                self_for_more.update(cx, |this, cx| {
+                    this.active_context_menu = Some((msg_id, pos));
+                    cx.notify();
+                });
+            },
+        ));
 
         // 6. Send message
         let cid_for_send = channel_id.clone();
         let app_for_send = app_entity.clone();
         let self_for_send = self_entity.clone();
-        let st_for_send = composer_state.clone();
 
-        let on_send: Option<EditorSendCallback> = Some(Arc::new(move |content: &str, _reply_id: Option<&str>, window: &mut Window, cx: &mut App| {
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                return;
-            }
-
-            let text = trimmed.to_string();
-            let editing_msg_opt = self_for_send.read(cx).editing_message.clone();
-            if let Some(editing_msg) = editing_msg_opt {
-                let cid = cid_for_send.clone();
-                let mid = editing_msg.id.clone();
-                let cm = app_for_send.read(cx).client_manager.clone();
-                self_for_send.update(cx, |this, cx| {
-                    this.submit_edit_message(cid, mid, text, cm, cx);
-                });
-                return;
-            }
-
-            let cid = cid_for_send.clone();
-            app_for_send.update(cx, |state, cx| {
-                state.send_message(&cid, &text);
-                cx.notify();
-            });
-
-            st_for_send.update(cx, |s, cx| {
-                s.set_value("", window, cx);
-            });
-
-            self_for_send.update(cx, |this, cx| {
-                this.typed_text.clear();
-                this.replying_to = None;
-                this.scroll_handle.scroll_to_bottom();
-                let cnt = this.list_state.item_count();
-                if cnt > 0 {
-                    this.list_state.scroll_to_reveal_item(cnt.saturating_sub(1));
+        let on_send: Option<EditorSendCallback> = Some(Arc::new(
+            move |content: &str, _reply_id: Option<&str>, window: &mut Window, cx: &mut App| {
+                if self_for_send.read(cx).is_sending_message {
+                    return;
                 }
+                let trimmed = content.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+
+                let text = trimmed.to_string();
+                let editing_msg_opt = self_for_send.read(cx).editing_message.clone();
+                if let Some(editing_msg) = editing_msg_opt {
+                    let cid = cid_for_send.clone();
+                    let mid = editing_msg.id.clone();
+                    let cm = app_for_send.read(cx).client_manager.clone();
+                    self_for_send.update(cx, |this, cx| {
+                        this.submit_edit_message(cid, mid, text, cm, cx);
+                    });
+                    return;
+                }
+
+                if cid_for_send.is_empty() {
+                    self_for_send.update(cx, |this, cx| {
+                        this.send_error = Some("Nenhum canal selecionado".to_string());
+                        cx.notify();
+                    });
+                    return;
+                }
+                self_for_send.update(cx, |this, cx| {
+                    this.submit_composer_message(cid_for_send.clone(), text, window, cx);
+                });
+            },
+        ));
+
+        // 7. Dismiss / Cancel Reply
+        let self_for_cancel = self_entity.clone();
+        let on_cancel_reply: Option<EditorActionCallback> =
+            Some(Arc::new(move |_window: &mut Window, cx: &mut App| {
+                self_for_cancel.update(cx, |this, cx| {
+                    this.set_replying_to(None);
+                    cx.notify();
+                });
+            }));
+
+        let self_for_toggle_mention = self_entity.clone();
+        let on_toggle_mention: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+            self_for_toggle_mention.update(cx, |this, cx| {
+                this.reply_mention_author = !this.reply_mention_author;
                 cx.notify();
             });
         }));
 
-        // 7. Dismiss / Cancel Reply
-        let self_for_cancel = self_entity.clone();
-        let on_cancel_reply: Option<EditorActionCallback> = Some(Arc::new(move |_window: &mut Window, cx: &mut App| {
-            self_for_cancel.update(cx, |this, cx| {
-                this.replying_to = None;
-                cx.notify();
-            });
+        let self_for_jump_reply = self_entity.clone();
+        let app_for_jump_reply = app_entity.clone();
+        let on_jump_to_reply: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+            let target = self_for_jump_reply
+                .read(cx)
+                .replying_to
+                .as_ref()
+                .map(|message| (message.channel_id.clone(), message.id.clone()));
+            if let Some((channel_id, message_id)) = target {
+                app_for_jump_reply.update(cx, |state, cx| {
+                    state.jump_to_message(&channel_id, &message_id);
+                    cx.notify();
+                });
+            }
         }));
 
         // Virtualized list items rendering via GPUI list
@@ -575,10 +1011,14 @@ impl Render for ChatView {
                                 })
                             });
 
-                        render_message_row(
-                            msg,
+                        let is_grouped = *is_grouped && msg.edited_timestamp.is_none();
+                        let mut display_message = msg.clone();
+                        let attachments = std::mem::take(&mut display_message.attachments);
+                        let embeds = std::mem::take(&mut display_message.embeds);
+                        let row = render_message_row(
+                            &display_message,
                             MessageRowConfig {
-                                is_grouped: *is_grouped,
+                                is_grouped,
                                 role_color: author_role_color,
                                 on_react: on_react_item.clone(),
                                 on_reply: on_reply_item.clone(),
@@ -586,8 +1026,28 @@ impl Render for ChatView {
                                 on_reaction_click: on_rx_click_item.clone(),
                                 on_add_reaction: on_add_rx_item.clone(),
                             },
-                        )
-                        .into_any_element()
+                        );
+                        if attachments.is_empty() && embeds.is_empty() {
+                            row.into_any_element()
+                        } else {
+                            // Align rich media with the message content column:
+                            // 16px row padding + 40px avatar + 8px gutter.
+                            div()
+                                .flex()
+                                .flex_col()
+                                .w_full()
+                                .child(row)
+                                .child(
+                                    div()
+                                        .pl(px(64.0))
+                                        .pr(space_8())
+                                        .flex()
+                                        .flex_col()
+                                        .child(crate::chat::markdown::render_rich_attachments(&attachments))
+                                        .child(crate::chat::markdown::render_rich_embeds(&embeds)),
+                                )
+                                .into_any_element()
+                        }
                     } else {
                         div().into_any_element()
                     }
@@ -599,33 +1059,64 @@ impl Render for ChatView {
         })
         .size_full();
 
-        // Handle target message scroll/focus from Search results
-        if let Some(ref target_id) = app_state.target_message_id {
-            if let Some(target_idx) = chat_items.iter().position(|item| {
-                if let ChatListItem::Message { message_idx, .. } = item {
-                    all_messages.get(*message_idx).map_or(false, |m| &m.id == target_id)
-                } else {
-                    false
-                }
-            }) {
+        // Handle target message scroll/focus from Search results or reply jump.
+        let target_message_id = self.state.read(cx).target_message_id.clone();
+        if let Some(ref target_id) = target_message_id {
+            let target_idx = {
+                let state = self.state.read(cx);
+                let messages = state.get_active_messages();
+                chat_items.iter().position(|item| match item {
+                    ChatListItem::Message { message_idx, .. } => messages
+                        .get(*message_idx)
+                        .map(|message| message.id == *target_id)
+                        .unwrap_or(false),
+                    _ => false,
+                })
+            };
+            if let Some(target_idx) = target_idx {
                 self.list_state.scroll_to_reveal_item(target_idx);
+                self.state.update(cx, |state, _cx| {
+                    state.target_message_id = None;
+                });
             }
         }
 
-        // Query active typing users directly from AppState's coalescing tracker
-        let active_typing = app_state.get_active_typing_users(&channel_id);
-        let typing_users = if !active_typing.is_empty() {
-            active_typing
-        } else {
-            self.typing_users.clone()
+        // Query active typing users directly from AppState's coalescing tracker.
+        let (typing_users, typing_delay, is_search_open) = {
+            let state = self.state.read(cx);
+            let active_typing = state.get_active_typing_users(&channel_id);
+            (
+                if active_typing.is_empty() {
+                    self.typing_users.clone()
+                } else {
+                    active_typing
+                },
+                state.typing_refresh_delay(&channel_id),
+                state.is_search_open,
+            )
         };
+        if self.typing_refresh_task.is_none() {
+            if let Some(delay) = typing_delay {
+                let typing_entity = self_entity.clone();
+                self.typing_refresh_task = Some(cx.spawn(move |_view, async_cx: &mut AsyncApp| {
+                    let mut async_cx = async_cx.clone();
+                    async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = typing_entity.update(&mut async_cx, |chat, cx| {
+                            chat.typing_refresh_task = None;
+                            cx.notify();
+                        });
+                    }
+                }));
+            }
+        }
 
-        // Render search flyout if open
-        let is_search_open = app_state.is_search_open;
+        // Render search flyout if open.
         let search_panel = if is_search_open {
+            let state = self.state.read(cx);
             Some(crate::chat::search::render_search_flyout(
                 app_entity.clone(),
-                app_state,
+                &state,
                 &self.search_focus_handle,
             ))
         } else {
@@ -633,6 +1124,15 @@ impl Render for ChatView {
         };
 
         // 8. Rich Media Picker Callbacks & Popover
+        let self_for_attachment = self_entity.clone();
+        let on_attachment: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+            self_for_attachment.update(cx, |this, cx| {
+                this.send_error = Some("Envio de anexos indisponível: o transporte atual aceita apenas texto e figurinhas.".to_string());
+                this.retry_send = None;
+                cx.notify();
+            });
+        }));
+
         let self_for_gif = self_entity.clone();
         let app_for_gif = app_entity.clone();
         let on_gif: Option<EditorActionCallback> = Some(Arc::new(move |window, cx| {
@@ -703,156 +1203,165 @@ impl Render for ChatView {
             }));
 
             let self_tab = self_entity.clone();
-            let on_tab_change: Option<OnTabChangeCallback> = Some(Arc::new(move |tab, _win, cx| {
-                self_tab.update(cx, |this, cx| {
-                    this.media_picker_tab = tab;
-                    this.media_picker_list_state.reset(0);
-                    cx.notify();
-                });
-            }));
+            let on_tab_change: Option<OnTabChangeCallback> =
+                Some(Arc::new(move |tab, _win, cx| {
+                    self_tab.update(cx, |this, cx| {
+                        this.media_picker_tab = tab;
+                        this.media_picker_list_state.reset(0);
+                        cx.notify();
+                    });
+                }));
 
             let self_emoji = self_entity.clone();
             let app_emoji = app_entity.clone();
             let cid_emoji = channel_id.clone();
-            let on_select_emoji: Option<OnSelectEmojiCallback> = Some(Arc::new(move |emoji, _win, cx| {
-                let em = emoji.to_string();
-                let _cid = cid_emoji.clone();
-                self_emoji.update(cx, |this, cx| {
-                    if let Some(target_msg_id) = this.media_picker_react_message_id.take() {
-                        let target_id = target_msg_id.clone();
-                        let em_clone = em.clone();
-                        app_emoji.update(cx, |state, cx| {
-                            state.add_reaction(&target_id, &em_clone);
-                            state.record_emoji_usage(&em_clone);
-                            cx.notify();
-                        });
-                        this.media_picker_open = false;
-                    } else {
-                        this.typed_text.push_str(&em);
-                        if let Some(ref st) = this.composer_state {
-                            let new_val = format!("{}{}", st.read(cx).value(), em);
-                            st.update(cx, |s, cx| {
-                                s.set_value(new_val, _win, cx);
+            let on_select_emoji: Option<OnSelectEmojiCallback> =
+                Some(Arc::new(move |emoji, _win, cx| {
+                    let em = emoji.to_string();
+                    let _cid = cid_emoji.clone();
+                    self_emoji.update(cx, |this, cx| {
+                        if let Some(target_msg_id) = this.media_picker_react_message_id.take() {
+                            let target_id = target_msg_id.clone();
+                            let em_clone = em.clone();
+                            app_emoji.update(cx, |state, cx| {
+                                state.add_reaction(&target_id, &em_clone);
+                                state.record_emoji_usage(&em_clone);
+                                cx.notify();
+                            });
+                            this.media_picker_open = false;
+                        } else {
+                            this.typed_text.push_str(&em);
+                            if let Some(ref st) = this.composer_state {
+                                let new_val = format!("{}{}", st.read(cx).value(), em);
+                                st.update(cx, |s, cx| {
+                                    s.set_value(new_val, _win, cx);
+                                });
+                            }
+                            let em_clone = em.clone();
+                            app_emoji.update(cx, |state, _cx| {
+                                state.record_emoji_usage(&em_clone);
                             });
                         }
-                        let em_clone = em.clone();
-                        app_emoji.update(cx, |state, _cx| {
-                            state.record_emoji_usage(&em_clone);
-                        });
-                    }
-                    cx.notify();
-                });
-            }));
+                        cx.notify();
+                    });
+                }));
 
             let self_sticker = self_entity.clone();
             let app_sticker = app_entity.clone();
             let cid_sticker = channel_id.clone();
-            let on_select_sticker: Option<OnSelectStickerCallback> = Some(Arc::new(move |sticker, _win, cx| {
-                let st = sticker.clone();
-                let cid = cid_sticker.clone();
-                app_sticker.update(cx, |state, cx| {
-                    state.send_sticker(&cid, &st);
-                    cx.notify();
-                });
-                self_sticker.update(cx, |this, cx| {
-                    this.media_picker_open = false;
-                    cx.notify();
-                });
-            }));
+            let on_select_sticker: Option<OnSelectStickerCallback> =
+                Some(Arc::new(move |sticker, _win, cx| {
+                    let st = sticker.clone();
+                    let cid = cid_sticker.clone();
+                    app_sticker.update(cx, |state, cx| {
+                        state.send_sticker(&cid, &st);
+                        cx.notify();
+                    });
+                    self_sticker.update(cx, |this, cx| {
+                        this.media_picker_open = false;
+                        cx.notify();
+                    });
+                }));
 
             let self_gif = self_entity.clone();
-            let app_gif = app_entity.clone();
             let cid_gif = channel_id.clone();
-            let on_select_gif: Option<OnSelectGifCallback> = Some(Arc::new(move |gif_url, _win, cx| {
-                let url = gif_url.to_string();
-                let cid = cid_gif.clone();
-                app_gif.update(cx, |state, cx| {
-                    state.send_message(&cid, &url);
-                    cx.notify();
-                });
-                self_gif.update(cx, |this, cx| {
-                    this.media_picker_open = false;
-                    cx.notify();
-                });
-            }));
+            let on_select_gif: Option<OnSelectGifCallback> =
+                Some(Arc::new(move |gif_url, window, cx| {
+                    let url = gif_url.to_string();
+                    let cid = cid_gif.clone();
+                    self_gif.update(cx, |this, cx| {
+                        this.media_picker_open = false;
+                        this.submit_composer_message(cid, url, window, cx);
+                    });
+                }));
 
-            let on_play_sound: Option<OnPlaySoundCallback> = Some(Arc::new(move |sound, _win, _cx| {
-                log::info!("Soundboard sound preview: {}", sound.name);
-            }));
+            let on_play_sound: Option<OnPlaySoundCallback> =
+                Some(Arc::new(move |sound, _win, _cx| {
+                    log::info!("Soundboard sound preview: {}", sound.name);
+                }));
 
             let self_sound = self_entity.clone();
-            let app_sound = app_entity.clone();
             let cid_sound = channel_id.clone();
-            let on_send_sound: Option<OnPlaySoundCallback> = Some(Arc::new(move |sound, _win, cx| {
-                let s_name = sound.name.clone();
-                let sound_text = if let Some(ref em) = sound.emoji_name {
-                    format!("[Som da Soundboard: {} {}]", em, s_name)
-                } else {
-                    format!("[Som da Soundboard: {}]", s_name)
-                };
-                let cid = cid_sound.clone();
-                app_sound.update(cx, |state, cx| {
-                    state.send_message(&cid, &sound_text);
-                    cx.notify();
-                });
-                self_sound.update(cx, |this, cx| {
-                    this.media_picker_open = false;
-                    cx.notify();
-                });
-            }));
+            let on_send_sound: Option<OnPlaySoundCallback> =
+                Some(Arc::new(move |sound, window, cx| {
+                    let sound_text = if let Some(ref emoji_name) = sound.emoji_name {
+                        format!("[Som da Soundboard: {} {}]", emoji_name, sound.name)
+                    } else {
+                        format!("[Som da Soundboard: {}]", sound.name)
+                    };
+                    let cid = cid_sound.clone();
+                    self_sound.update(cx, |this, cx| {
+                        this.media_picker_open = false;
+                        this.submit_composer_message(cid, sound_text, window, cx);
+                    });
+                }));
 
             let self_search = self_entity.clone();
-            let on_search_query: Option<OnSearchQueryCallback> = Some(Arc::new(move |query, _win, cx| {
-                let q = query.to_string();
-                self_search.update(cx, |this, cx| {
-                    this.media_picker_search = q;
-                    this.media_picker_list_state.reset(0);
-                    cx.notify();
-                });
-            }));
+            let on_search_query: Option<OnSearchQueryCallback> =
+                Some(Arc::new(move |query, _win, cx| {
+                    let q = query.to_string();
+                    self_search.update(cx, |this, cx| {
+                        this.media_picker_search = q;
+                        this.media_picker_list_state.reset(0);
+                        cx.notify();
+                    });
+                }));
 
             let self_cat = self_entity.clone();
-            let on_select_gif_category: Option<OnSelectGifCategoryCallback> = Some(Arc::new(move |cat, _win, cx| {
-                let c = cat.to_string();
-                self_cat.update(cx, |this, cx| {
-                    this.media_picker_search = c;
-                    this.media_picker_list_state.reset(0);
-                    cx.notify();
-                });
-            }));
+            let on_select_gif_category: Option<OnSelectGifCategoryCallback> =
+                Some(Arc::new(move |cat, _win, cx| {
+                    let c = cat.to_string();
+                    self_cat.update(cx, |this, cx| {
+                        this.media_picker_search = c;
+                        this.media_picker_list_state.reset(0);
+                        cx.notify();
+                    });
+                }));
 
             let self_guild = self_entity.clone();
-            let on_select_guild: Option<OnSelectGuildCallback> = Some(Arc::new(move |gid_opt, _win, cx| {
-                let next_gid = gid_opt.map(|s| s.to_string());
-                self_guild.update(cx, |this, cx| {
-                    this.media_picker_selected_guild_id = next_gid;
-                    this.media_picker_list_state.reset(0);
-                    cx.notify();
-                });
-            }));
+            let on_select_guild: Option<OnSelectGuildCallback> =
+                Some(Arc::new(move |gid_opt, _win, cx| {
+                    let next_gid = gid_opt.map(|s| s.to_string());
+                    self_guild.update(cx, |this, cx| {
+                        this.media_picker_selected_guild_id = next_gid;
+                        this.media_picker_list_state.reset(0);
+                        cx.notify();
+                    });
+                }));
 
-            let guild_sections: Vec<MediaPickerGuildSection> = app_state
-                .guilds
-                .iter()
-                .map(|g| MediaPickerGuildSection {
-                    guild_id: g.id.clone(),
-                    guild_name: g.name.clone(),
-                    icon_url: g.icon_url(),
-                    acronym: g.acronym.clone(),
-                    emojis: g.emojis.clone(),
-                    stickers: g.stickers.clone(),
-                })
-                .collect();
+            let (guild_sections, recent_emojis, custom_emojis, stickers) = {
+                let state = self.state.read(cx);
+                let guild_sections = state
+                    .guilds
+                    .iter()
+                    .map(|guild| MediaPickerGuildSection {
+                        guild_id: guild.id.clone(),
+                        guild_name: guild.name.clone(),
+                        icon_url: guild.icon_url(),
+                        acronym: guild.acronym.clone(),
+                        emojis: guild.emojis.clone(),
+                        stickers: guild.stickers.clone(),
+                    })
+                    .collect();
+                (
+                    guild_sections,
+                    state.media_cache.get_recent_emojis_sync(),
+                    state.get_current_custom_emojis(),
+                    state.get_current_stickers(),
+                )
+            };
 
             let is_picker_focused = self.media_picker_focus_handle.is_focused(window);
 
             let modal_content = MediaPickerModal::render(MediaPickerConfig {
                 active_tab: self.media_picker_tab,
                 search_query: self.media_picker_search.clone(),
-                recent_emojis: app_state.media_cache.get_recent_emojis_sync(),
-                custom_emojis: app_state.get_current_custom_emojis(),
-                stickers: app_state.get_current_stickers(),
-                gifs: MediaCacheManager::get_curated_tenor_gifs_for_category(&self.media_picker_search),
+                recent_emojis,
+                custom_emojis,
+                stickers,
+                gifs: MediaCacheManager::get_curated_tenor_gifs_for_category(
+                    &self.media_picker_search,
+                ),
                 sounds: Vec::new(),
                 hovered_info: None,
                 guild_sections,
@@ -905,123 +1414,152 @@ impl Render for ChatView {
             None
         };
 
-        let context_menu_overlay = if let Some((ref target_id, click_pos)) = self.active_context_menu {
-            let target_msg = all_messages.iter().find(|m| &m.id == target_id).cloned();
+        let context_menu_overlay = if let Some((ref target_id, click_pos)) =
+            self.active_context_menu
+        {
+            let (target_msg, current_user_id, guild_part) = {
+                let state = self.state.read(cx);
+                (
+                    state
+                        .get_active_messages()
+                        .iter()
+                        .find(|message| &message.id == target_id)
+                        .cloned(),
+                    state.current_user.id.clone(),
+                    state
+                        .selected_guild_id
+                        .clone()
+                        .unwrap_or_else(|| "@me".to_string()),
+                )
+            };
             if let Some(msg) = target_msg {
                 let msg_id = msg.id.clone();
                 let msg_content = msg.content.clone();
                 let is_pinned = msg.pinned;
-                let is_own = msg.author.id == app_state.current_user.id;
+                let is_own = msg.author.id == current_user_id;
 
                 let self_close = self_entity.clone();
-                let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static> = Arc::new(move |_win, cx| {
-                    self_close.update(cx, |this, cx| {
-                        this.active_context_menu = None;
-                        cx.notify();
+                let on_close: Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static> =
+                    Arc::new(move |_win, cx| {
+                        self_close.update(cx, |this, cx| {
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
                     });
-                });
 
                 let self_add_rx = self_entity.clone();
-                let on_cm_add_rx: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
-                    let id = m_id.to_string();
-                    self_add_rx.update(cx, |this, cx| {
-                        this.media_picker_open = true;
-                        this.media_picker_tab = MediaPickerTab::Emojis;
-                        this.media_picker_react_message_id = Some(id);
-                        this.media_picker_list_state.reset(0);
-                        this.active_context_menu = None;
-                        _win.focus(&this.media_picker_focus_handle, cx);
-                        cx.notify();
-                    });
-                }));
+                let on_cm_add_rx: Option<MessageActionCallback> =
+                    Some(Arc::new(move |m_id: &str, _win, cx| {
+                        let id = m_id.to_string();
+                        self_add_rx.update(cx, |this, cx| {
+                            this.media_picker_open = true;
+                            this.media_picker_tab = MediaPickerTab::Emojis;
+                            this.media_picker_react_message_id = Some(id);
+                            this.media_picker_list_state.reset(0);
+                            this.active_context_menu = None;
+                            _win.focus(&this.media_picker_focus_handle, cx);
+                            cx.notify();
+                        });
+                    }));
 
                 let self_cm_reply = self_entity.clone();
                 let msg_clone = msg.clone();
-                let on_cm_reply: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
-                    let m = msg_clone.clone();
-                    self_cm_reply.update(cx, |this, cx| {
-                        this.replying_to = Some(m);
-                        this.active_context_menu = None;
-                        cx.notify();
-                    });
-                }));
+                let on_cm_reply: Option<MessageActionCallback> =
+                    Some(Arc::new(move |_m_id: &str, _win, cx| {
+                        let m = msg_clone.clone();
+                        self_cm_reply.update(cx, |this, cx| {
+                            this.set_replying_to(Some(m));
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
+                    }));
 
                 let content_for_copy = msg_content.clone();
-                let on_cm_copy_text: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(content_for_copy.clone()));
-                }));
+                let on_cm_copy_text: Option<MessageActionCallback> =
+                    Some(Arc::new(move |_m_id: &str, _win, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(content_for_copy.clone()));
+                    }));
 
-                let guild_part = app_state.selected_guild_id.as_deref().unwrap_or("@me");
-                let link_target = format!("https://discord.com/channels/{}/{}/{}", guild_part, channel_id, msg.id);
-                let on_cm_copy_link: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(link_target.clone()));
-                }));
+                let link_target = format!(
+                    "https://discord.com/channels/{}/{}/{}",
+                    guild_part, channel_id, msg.id
+                );
+                let on_cm_copy_link: Option<MessageActionCallback> =
+                    Some(Arc::new(move |_m_id: &str, _win, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(link_target.clone()));
+                    }));
 
                 let id_for_copy = msg_id.clone();
-                let on_cm_copy_id: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(id_for_copy.clone()));
-                }));
+                let on_cm_copy_id: Option<MessageActionCallback> =
+                    Some(Arc::new(move |_m_id: &str, _win, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(id_for_copy.clone()));
+                    }));
 
                 let self_cm_edit = self_entity.clone();
                 let msg_for_edit = msg.clone();
                 let on_cm_edit: Option<MessageActionCallback> = if is_own {
-                    Some(Arc::new(move |_m_id: &str, window: &mut Window, cx: &mut App| {
-                        let m = msg_for_edit.clone();
-                        self_cm_edit.update(cx, |this, cx| {
-                            this.start_editing_message(m, Some(window), cx);
-                            this.active_context_menu = None;
-                        });
-                    }))
+                    Some(Arc::new(
+                        move |_m_id: &str, window: &mut Window, cx: &mut App| {
+                            let m = msg_for_edit.clone();
+                            self_cm_edit.update(cx, |this, cx| {
+                                this.start_editing_message(m, Some(window), cx);
+                                this.active_context_menu = None;
+                            });
+                        },
+                    ))
                 } else {
                     None
                 };
 
                 let self_cm_pin = self_entity.clone();
                 let msg_pin = msg.clone();
-                let on_cm_pin: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
-                    let m = msg_pin.clone();
-                    let is_currently_pinned = m.pinned;
-                    self_cm_pin.update(cx, |this, cx| {
-                        this.pending_pin_action = Some(PendingPinAction {
-                            message: m,
-                            is_unpin: is_currently_pinned,
+                let on_cm_pin: Option<MessageActionCallback> =
+                    Some(Arc::new(move |_m_id: &str, _win, cx| {
+                        let m = msg_pin.clone();
+                        let is_currently_pinned = m.pinned;
+                        self_cm_pin.update(cx, |this, cx| {
+                            this.pending_pin_action = Some(PendingPinAction {
+                                message: m,
+                                is_unpin: is_currently_pinned,
+                            });
+                            this.pin_error = None;
+                            this.active_context_menu = None;
+                            cx.notify();
                         });
-                        this.pin_error = None;
-                        this.active_context_menu = None;
-                        cx.notify();
-                    });
-                }));
+                    }));
 
                 // Normal click: abre o modal canônico de confirmação de exclusão
                 let self_cm_del = self_entity.clone();
                 let msg_for_del = msg.clone();
-                let on_cm_delete: Option<MessageActionCallback> = Some(Arc::new(move |_m_id: &str, _win, cx| {
-                    let m = msg_for_del.clone();
-                    self_cm_del.update(cx, |this, cx| {
-                        this.pending_delete_message = Some(m);
-                        this.is_deleting = false;
-                        this.delete_error = None;
-                        this.active_context_menu = None;
-                        cx.notify();
-                    });
-                }));
+                let on_cm_delete: Option<MessageActionCallback> =
+                    Some(Arc::new(move |_m_id: &str, _win, cx| {
+                        let m = msg_for_del.clone();
+                        self_cm_del.update(cx, |this, cx| {
+                            this.pending_delete_message = Some(m);
+                            this.is_deleting = false;
+                            this.delete_error = None;
+                            this.active_context_menu = None;
+                            cx.notify();
+                        });
+                    }));
 
                 // Shift+click: apaga direto chamando a API sem exibir confirmação
                 let app_cm_del_shift = app_entity.clone();
                 let cid_del_shift = channel_id.clone();
                 let self_cm_del_shift = self_entity.clone();
-                let on_cm_delete_shift: Option<MessageActionCallback> = Some(Arc::new(move |m_id: &str, _win, cx| {
-                    let mid = m_id.to_string();
-                    let cid = cid_del_shift.clone();
-                    let cm = app_cm_del_shift.read(cx).client_manager.clone();
-                    if let Some(cm) = cm {
-                        self_cm_del_shift.update(cx, |this, cx| {
-                            this.delete_error = None;
-                            this.active_context_menu = None;
-                            cx.notify();
-                        });
-                        let self_async = self_cm_del_shift.clone();
-                        cx.spawn(|cx: &mut AsyncApp| {
+                let on_cm_delete_shift: Option<MessageActionCallback> = Some(Arc::new(
+                    move |m_id: &str, _win, cx| {
+                        let mid = m_id.to_string();
+                        let cid = cid_del_shift.clone();
+                        let cm = app_cm_del_shift.read(cx).client_manager.clone();
+                        if let Some(cm) = cm {
+                            self_cm_del_shift.update(cx, |this, cx| {
+                                this.delete_error = None;
+                                this.active_context_menu = None;
+                                cx.notify();
+                            });
+                            let self_async = self_cm_del_shift.clone();
+                            cx.spawn(|cx: &mut AsyncApp| {
                             let cx = cx.clone();
                             async move {
                                 match cm.delete_message(&cid, &mid).await {
@@ -1048,15 +1586,17 @@ impl Render for ChatView {
                                 }
                             }
                         }).detach();
-                    } else {
-                        let err_msg = "Não conectado ao Discord: cliente não inicializado".to_string();
-                        self_cm_del_shift.update(cx, |this, cx| {
-                            this.delete_error = Some(err_msg);
-                            this.active_context_menu = None;
-                            cx.notify();
-                        });
-                    }
-                }));
+                        } else {
+                            let err_msg =
+                                "Não conectado ao Discord: cliente não inicializado".to_string();
+                            self_cm_del_shift.update(cx, |this, cx| {
+                                this.delete_error = Some(err_msg);
+                                this.active_context_menu = None;
+                                cx.notify();
+                            });
+                        }
+                    },
+                ));
 
                 let self_dismiss = self_entity.clone();
                 let self_dismiss_r = self_entity.clone();
@@ -1094,20 +1634,20 @@ impl Render for ChatView {
                                     });
                                 }),
                         )
-                        .child(
-                            deferred(
-                                anchored()
-                                    .position(click_pos)
-                                    .snap_to_window_with_margin(px(8.0))
-                                    .child(
-                                        div()
-                                            .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
-                                                cx.stop_propagation();
-                                            })
-                                            .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
-                                                cx.stop_propagation();
-                                            })
-                                            .child(render_message_context_menu(MessageContextMenuConfig {
+                        .child(deferred(
+                            anchored()
+                                .position(click_pos)
+                                .snap_to_window_with_margin(px(8.0))
+                                .child(
+                                    div()
+                                        .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .on_mouse_down(MouseButton::Right, |_ev, _win, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .child(render_message_context_menu(
+                                            MessageContextMenuConfig {
                                                 message_id: msg_id,
                                                 message_content: msg_content,
                                                 is_pinned,
@@ -1123,10 +1663,10 @@ impl Render for ChatView {
                                                 on_delete: on_cm_delete,
                                                 on_delete_shift: on_cm_delete_shift,
                                                 on_close: Some(on_close),
-                                            })),
-                                    ),
-                            ),
-                        ),
+                                            },
+                                        )),
+                                ),
+                        )),
                 )
             } else {
                 None
@@ -1407,7 +1947,10 @@ impl Render for ChatView {
             } else if is_dm {
                 "Você tem certeza de que deseja fixar esta mensagem para a posteridade?".to_string()
             } else {
-                format!("Você tem certeza de que deseja fixar esta mensagem em #{} para a posteridade?", channel_name)
+                format!(
+                    "Você tem certeza de que deseja fixar esta mensagem em #{} para a posteridade?",
+                    channel_name
+                )
             };
 
             let confirm_label = if is_unpin {
@@ -1416,11 +1959,7 @@ impl Render for ChatView {
                 "Sim, fixar"
             };
 
-            let confirm_color = if is_unpin {
-                status_danger()
-            } else {
-                blurple()
-            };
+            let confirm_color = if is_unpin { status_danger() } else { blurple() };
 
             Some(
                 div()
@@ -1596,25 +2135,39 @@ impl Render for ChatView {
                                                         });
                                                         if let Some(cm) = cm {
                                                             let self_async = self_confirm.clone();
+                                                            let app_async = app_confirm.clone();
                                                             cx.spawn(move |cx: &mut AsyncApp| {
-                                                                let cx = cx.clone();
+                                                                let mut cx = cx.clone();
                                                                 async move {
                                                                     let res = if is_unpin {
                                                                         cm.unpin_message(&cid, &mid).await
                                                                     } else {
                                                                         cm.pin_message(&cid, &mid).await
                                                                     };
-                                                                    if let Err(e) = res {
-                                                                        let err_msg = e.to_string();
-                                                                        let _ = cx.update(|cx| {
-                                                                            let _ = self_async.update(cx, |chat, cx| {
-                                                                                chat.pin_error = Some(err_msg.clone());
+                                                                    match res {
+                                                                        Ok(()) => {
+                                                                            let _ = app_async.update(&mut cx, |state, cx| {
+                                                                                state.set_message_pinned(&cid, &mid, !is_unpin);
                                                                                 cx.notify();
                                                                             });
-                                                                        });
+                                                                        }
+                                                                        Err(error) => {
+                                                                            let error = error.to_string();
+                                                                            let _ = cx.update(|cx| {
+                                                                                let _ = self_async.update(cx, |chat, cx| {
+                                                                                    chat.pin_error = Some(error);
+                                                                                    cx.notify();
+                                                                                });
+                                                                            });
+                                                                        }
                                                                     }
                                                                 }
                                                             }).detach();
+                                                        } else {
+                                                            self_confirm.update(cx, |this, cx| {
+                                                                this.pin_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+                                                                cx.notify();
+                                                            });
                                                         }
                                                     })
                                                     .child(confirm_label),
@@ -1748,14 +2301,58 @@ impl Render for ChatView {
             None
         };
 
-        let self_for_cancel_edit = self_entity.clone();
-        let on_cancel_edit: Option<EditorActionCallback> = Some(Arc::new(move |window: &mut Window, cx: &mut App| {
-            self_for_cancel_edit.update(cx, |this, cx| {
-                this.cancel_editing(Some(window), cx);
+        let send_retry = if self.retry_send.is_some() {
+            let self_retry = self_entity.clone();
+            Some(Arc::new(move |window: &mut Window, cx: &mut App| {
+                self_retry.update(cx, |this, cx| this.retry_failed_send(window, cx));
+            }) as EditorActionCallback)
+        } else {
+            None
+        };
+        let self_dismiss_send = self_entity.clone();
+        let dismiss_send: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+            self_dismiss_send.update(cx, |this, cx| {
+                this.send_error = None;
+                this.retry_send = None;
+                cx.notify();
             });
         }));
+        let send_error_toast = self.send_error.clone().and_then(|message| {
+            render_chat_error_toast(
+                message,
+                if self.retry_send.is_some() {
+                    Some("Tentar novamente")
+                } else {
+                    None
+                },
+                send_retry.clone(),
+                dismiss_send.clone(),
+            )
+        });
 
-        let composer_channel_name = if is_dm {
+        let self_dismiss_history = self_entity.clone();
+        let dismiss_history: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
+            self_dismiss_history.update(cx, |this, cx| {
+                this.history_error = None;
+                cx.notify();
+            });
+        }));
+        let history_error_toast = self
+            .history_error
+            .clone()
+            .and_then(|message| render_chat_error_toast(message, None, None, dismiss_history));
+
+        let self_for_cancel_edit = self_entity.clone();
+        let on_cancel_edit: Option<EditorActionCallback> =
+            Some(Arc::new(move |window: &mut Window, cx: &mut App| {
+                self_for_cancel_edit.update(cx, |this, cx| {
+                    this.cancel_editing(Some(window), cx);
+                });
+            }));
+
+        let composer_channel_name = if channel_name.is_empty() {
+            String::new()
+        } else if is_dm {
             if channel_name.starts_with('@') {
                 channel_name.clone()
             } else {
@@ -1791,20 +2388,30 @@ impl Render for ChatView {
             .children(delete_error_toast)
             .children(edit_error_toast)
             .children(pin_error_toast)
+            .children(send_error_toast)
+            .children(history_error_toast)
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)
                     .channel_name(composer_channel_name)
                     .replying_to(self.replying_to.clone())
                     .editing_message(self.editing_message.clone())
+                    .disabled(self.is_saving_edit || self.is_sending_message)
                     .on_cancel_edit(on_cancel_edit)
-                    .mention_author(true)
+                    .on_attachment(on_attachment)
+                    .mention_author(self.reply_mention_author)
+                    .on_toggle_mention(on_toggle_mention)
                     .typing_users(typing_users)
-                    .active_media_tab(if self.media_picker_open { Some(self.media_picker_tab) } else { None })
+                    .active_media_tab(if self.media_picker_open {
+                        Some(self.media_picker_tab)
+                    } else {
+                        None
+                    })
                     .on_gif(on_gif)
                     .on_sticker(on_sticker)
                     .on_emoji(on_emoji)
                     .on_cancel_reply(on_cancel_reply)
+                    .on_jump_to_reply(on_jump_to_reply)
                     .on_send(on_send),
             )
             .children(media_picker_overlay);
@@ -1834,7 +2441,11 @@ impl Render for ChatView {
 
                 if key == "escape" || key == "Escape" {
                     self_keys.update(cx, |this, cx| {
-                        if this.pending_pin_action.is_some() {
+                        if this.media_picker_open {
+                            this.media_picker_open = false;
+                            this.media_picker_react_message_id = None;
+                            cx.notify();
+                        } else if this.pending_pin_action.is_some() {
                             this.pending_pin_action = None;
                             cx.notify();
                         } else if this.pending_delete_message.is_some() {
@@ -1843,7 +2454,7 @@ impl Render for ChatView {
                         } else if this.editing_message.is_some() {
                             this.cancel_editing(Some(window), cx);
                         } else if this.replying_to.is_some() {
-                            this.replying_to = None;
+                            this.set_replying_to(None);
                             cx.notify();
                         } else if this.active_context_menu.is_some() {
                             this.active_context_menu = None;
@@ -1858,7 +2469,16 @@ impl Render for ChatView {
                         if this.editing_message.is_none() && this.typed_text.trim().is_empty() {
                             let state = app_keys.read(cx);
                             let msgs = state.get_active_messages();
-                            if let Some(last_own) = msgs.iter().rev().find(|m| m.author.id == state.current_user.id).cloned() {
+                            if let Some(last_own) = msgs
+                                .iter()
+                                .rev()
+                                .find(|message| {
+                                    !message.is_pending
+                                        && message.author.id == state.current_user.id
+                                        && !message.content.trim().is_empty()
+                                })
+                                .cloned()
+                            {
                                 this.start_editing_message(last_own, Some(window), cx);
                             }
                         }
