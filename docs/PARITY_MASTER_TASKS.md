@@ -117,8 +117,8 @@
   - **Escopo**: `src/protocol/discord_api.rs`, `src/protocol/client_manager.rs`, `src/protocol/rate_limit/*`, `src/protocol/cache/*`, `src/protocol/user_settings_proto.rs`, `src/app/state/gateway_events.rs`, `src/app/state/connection.rs`.
   - **Foco**: Reconexão robusta (RESUME vs IDENTIFY), tratamento de 429/rate-limit buckets, evitar race conditions, zero vazamentos de memória, logs estruturados sem segredos.
 
-- [ ] **T-017** `[QA-Net]` — **Suíte dedicada de testes de Rede, Cache, Rate Limit, Auth e E2E**
-  - **Escopo**: `tests/protocol_tests.rs`, `tests/protocol_bridge_test.rs`, `tests/cache_and_ratelimit_test.rs`, `tests/login_authentication_test.rs`, `tests/e2e_full_flow.rs`, `tests/purger_hygiene_test.rs`, `tests/user_settings_proto_test.rs`.
+- [x] **T-017** `[QA-Net]` — **Suíte dedicada de testes de Rede, Cache, Rate Limit, Auth e E2E**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `qa-net`, commit `6414b3f`): baseline 50/50 + endurecimento offline de `tests/cache_and_ratelimit_test.rs` (diretórios isolados, bucket normalizado, 429 `Retry-After`, limite global, cache corrompido) e `tests/protocol_tests.rs` (servidor HTTP real em loopback para queda de conexão e 429). Seam de Gateway fica para `T-050` após land de `Net-Gateway`.
 
 ---
 
@@ -308,10 +308,20 @@
   - **Arquivos:** `tests/notifications_badges_and_presence_test.rs` (novo).
   - **Status:** Em execução por `QA-Media`.
 
-- [ ] **T-045** `[QA-Voice]` — **P0** — **QA/Áudio** — **Testes de regressão para PCM/resampling 44.1↔48kHz, jitter/underrun, Opus PLC, mixer multi-speaker e transições mute/deafen/speaking**
-  - **Arquivos:** `tests/audio_engine_regression_test.rs` (novo).
+- [x] **T-045** `[QA-Voice]` — **P0** — **QA/Áudio** — **Testes de regressão para PCM/resampling 44.1↔48kHz, jitter/underrun, Opus PLC, mixer multi-speaker e transições mute/deafen/speaking**
+  - **Concluído em 2026-11-24** (layer `qa-voice`, commit `0e4062a`): `tests/audio_engine_regression_test.rs` com 13 testes (10 passaram, **3 falharam expondo bugs reais na voz**: PLC ausente no mixer, soft clip distorcendo mistura de baixo nível e SSRC fantasma após Opus inválido).
+
+- [x] **T-046** `[QA-Msgs]` — **P1** — **QA/UX & Menus** — **Testes de regressão para botões/menus inertes (`T-033`, `T-034`), atalhos anunciados (`T-035`) e layout Friends Hub**
+  - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `900a512`): `tests/ux_menus_keybinds_regression_test.rs` com 30 testes (17 passaram, **13 falharam reproduzindo `T-033`/`T-034`/`T-035`**).
+
+- [ ] **T-050** `[QA-Net]` — **P1** — **QA/Privacidade & Auth** — **Testes de redação de logs (`T-042`) e não-persistência prematura de token (`T-040`)**
+  - **Arquivos:** `tests/log_redaction_and_auth_safety_test.rs` (novo).
+  - **Status:** Em execução por `QA-Net`.
+
+- [ ] **T-051** `[QA-Voice]` — **P0** — **QA/Voz DAVE & Reconexão** — **Testes determinísticos de DAVE fail-closed (`T-021`) e renegociação de mídia após `4006`/`4009` (`T-018`)**
+  - **Arquivos:** `tests/voice_dave_and_reconnect_regression_test.rs` (novo).
   - **Status:** Em execução por `QA-Voice`.
 
-- [ ] **T-046** `[QA-Msgs]` — **P1** — **QA/UX & Menus** — **Testes de regressão para botões/menus inertes (`T-033`, `T-034`), atalhos anunciados (`T-035`) e layout Friends Hub**
-  - **Arquivos:** `tests/ux_menus_keybinds_regression_test.rs` (novo).
+- [ ] **T-052** `[QA-Msgs]` — **P1** — **QA/Histórico & Paginação** — **Testes de paginação infinita `before` (`T-031`), `jump_to_message` `around` (`T-032`) e replies `message_reference` (`T-024`)**
+  - **Arquivos:** `tests/chat_pagination_reply_regression_test.rs` (novo).
   - **Status:** Em execução por `QA-Msgs`.
