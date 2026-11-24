@@ -51,10 +51,8 @@
 ## 2. Tarefas Iniciais Prioritárias
 
 ### P0 — Voz na Call (Bug Crítico Reportado pelo Usuário)
-- [ ] **T-001** `[Voice-Audio]` — **Diagnosticar e corrigir voz bugada na call (áudio picotado/robótico/mudo/dessincronizado)**
-  - **Escopo**: Auditar `src/media/audio.rs`, `src/media/capture.rs`, `src/media/codec.rs`, `src/media/mixer.rs`, `src/media/resample.rs`, `src/media/devices.rs`.
-  - **Suspeitas iniciais**: Taxa de amostragem do dispositivo `cpal` != 48kHz (resampling incorreto ou faltando), frame size Opus (960 samples @ 48kHz = 20ms) desalinhado, canais mono vs stereo, jitter buffer ausente/estourando, bloqueio na thread de áudio, silêncio/DTX ou sequência RTP/timestamp.
-  - **Critério de pronto**: Causa raiz documentada, correção implementada, testes cobrindo 44.1kHz/48kHz mono/stereo e framing 20ms passando.
+- [x] **T-001** `[Voice-Audio]` — **Diagnosticar e corrigir voz bugada na call (áudio picotado/robótico/mudo/dessincronizado)**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `v-audio`, commit `e5b9d3b`): callbacks `cpal` agora usam anéis SPSC não bloqueantes; captura/playback em workers dedicados com pré-buffer de 60 ms e anel de 250 ms; resampling 44,1/48 kHz corrigido; Opus 48 kHz estéreo/20 ms; mixer com jitter adaptativo, PLC Opus por 200 ms, fades, ganho equal-power e limiter; 33 testes unitários de mídia + 6 `audio_engine_test` verdes. Próximo refinamento: `T-019` (ordenação por sequence/timestamp) + `T-039b` (RMS/ganho real).
 
 - [ ] **T-002** `[Voice-Proto]` — **Auditar e corrigir protocolo de voz ponta a ponta (Voice Gateway v8, UDP, RTP, AEAD Crypto, DAVE E2EE, VoiceSession)**
   - **Escopo**: Auditar `src/protocol/voice_gateway.rs`, `src/protocol/voice_udp.rs`, `src/protocol/voice_crypto.rs`, `src/protocol/voice_dave.rs`, `src/protocol/voice_session.rs`.
