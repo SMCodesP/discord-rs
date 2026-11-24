@@ -89,9 +89,8 @@
   - **Concluído em 2026-11-24** (layer `qa-media`, commit `555b2c6`): adicionou `tests/media_picker_and_reactions_test.rs` (1066 linhas, 34 testes). `media_cache_test`: 5/5 passaram; nova suíte: 23 passaram e **11 falharam expondo regressões reais** (parsing GIF/Tenor, URLs de stickers, recentes customizados, disponibilidade, cache HTTP/refresh e reações add/remove). Mantido na layer `qa-media` até correção em `T-009`/`T-018` para manter `main` verde.
 
 ### P1 — Design & Paridade Visual Pixel-a-Pixel
-- [ ] **T-011** `[Design-Shell]` — **Paridade visual: Guild Rail, Channel Sidebar, Header Bar, User Panel**
-  - **Escopo**: `src/app/guild_rail.rs`, `src/components/guild_item.rs`, `src/app/channel_sidebar.rs`, `src/app/header_bar.rs`, `src/tokens/*`.
-  - **Foco**: Comparar lado a lado com `Discord-Oficial` (DOM/CSS/screenshots): raios de ícones de servidor, pastas, badges de unread/menção, espaçamentos, fontes, cores exatas do tema escuro/claro do Discord, painel de usuário inferior.
+- [x] **T-011** `[Design-Shell]` — **Paridade visual: Guild Rail, Channel Sidebar, Header Bar, User Panel**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `design-shell`, commits `dbbb37f` + `7439fbd`, merge `b627aff3`): +977/-383 linhas alinhando Guild Rail, Channel Sidebar (`272px`), canais (`32px` raio `8px`), User Panel (`328×58px`), tokens e motion com as medições reais do `Discord-Desktop` (`cargo check` 10.65s limpo).
 
 - [x] **T-012** `[Design-Chat]` — **Paridade visual: Message List, Editor, Member Sidebar, Search**
   - **Concluído e integrado na `main` em 2026-11-24** (layer `design-chat`, commit `6fd21bc`, merge `220cece7`): +764/-100 em `src/app/member_sidebar.rs`, `src/chat/message_list.rs` e `src/chat/search.rs` usando as medições reais do `Discord-Desktop` (Cozy/member geometry 264px, hover bar, busca real). Validado na `main`: `cargo check` limpo, `message_parity_and_member_list_test` **24/24** e `search_state_and_filter_test` **14/14** verdes.
