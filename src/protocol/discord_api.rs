@@ -2523,6 +2523,12 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
         }
     }
 
+    if let Some(poll_val) = val.get("poll") {
+        if !poll_val.is_null() {
+            message.poll = crate::chat::polls::parse_poll_from_json(poll_val);
+        }
+    }
+
     Some(message)
 }
 
