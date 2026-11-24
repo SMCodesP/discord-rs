@@ -94,9 +94,8 @@
   - **Escopo**: `src/app/guild_rail.rs`, `src/components/guild_item.rs`, `src/app/channel_sidebar.rs`, `src/app/header_bar.rs`, `src/tokens/*`.
   - **Foco**: Comparar lado a lado com `Discord-Oficial` (DOM/CSS/screenshots): raios de ícones de servidor, pastas, badges de unread/menção, espaçamentos, fontes, cores exatas do tema escuro/claro do Discord, painel de usuário inferior.
 
-- [ ] **T-012** `[Design-Chat]` — **Paridade visual: Message List, Editor, Member Sidebar, Search**
-  - **Escopo**: `src/chat/message_list.rs`, `src/chat/editor.rs`, `src/app/member_sidebar.rs`, `src/chat/search.rs`.
-  - **Foco**: Agrupamento de mensagens consecutivas, hover actions bar (reagir/responder/editar/mais), cores de cargos, timestamps, divisores de data/não lidas, sidebar de membros agrupada por cargo + offline, painel de busca.
+- [x] **T-012** `[Design-Chat]` — **Paridade visual: Message List, Editor, Member Sidebar, Search**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `design-chat`, commit `6fd21bc`, merge `220cece7`): +764/-100 em `src/app/member_sidebar.rs`, `src/chat/message_list.rs` e `src/chat/search.rs` usando as medições reais do `Discord-Desktop` (Cozy/member geometry 264px, hover bar, busca real). Validado na `main`: `cargo check` limpo, `message_parity_and_member_list_test` **24/24** e `search_state_and_filter_test` **14/14** verdes.
   - **Evidência CDP do Ciclo 2:** `/tmp/opencode/discord-composer-friends-measurements.md` mediu composer **658.5×58/r8**, textarea 56px (máx. 50vh), editor 16px/400/22px com padding `17px 0 17px 10px`, botão `+` efetivo 32×32/r8/ícone 20px e ações mínimas 32×32. O RS usa `+` 24×24/r16/ícone 16px (`src/chat/editor.rs:105-122`) e input sem o gradiente/altura medidos (`src/chat/editor.rs:589-612`).
 
 - [ ] **T-013** `[Design-Friends]` — **Paridade visual & funcional: Friends Hub, Active Now, DMs Fixadas, Presença**
