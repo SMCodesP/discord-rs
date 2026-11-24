@@ -5,6 +5,7 @@ pub mod hierarchy;
 pub mod message;
 pub mod profile;
 pub mod settings;
+pub mod snowflake;
 pub mod user;
 pub mod voice;
 
@@ -21,6 +22,7 @@ pub use profile::{
     ProfileTab, UserProfileData,
 };
 pub use settings::*;
+pub use snowflake::{Snowflake, DISCORD_EPOCH_MS};
 pub use user::{Activity, ActivityType, AvatarDecorationData, CustomStatus, CustomStatusEmoji, Presence, PresenceStatus, User};
 pub use voice::{VoiceParticipant, VoiceState};
 pub use events::{
