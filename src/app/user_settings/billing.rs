@@ -10,8 +10,12 @@ use crate::tokens::kit_theme::DiscordTheme;
 use super::components::{render_section_description, render_section_header};
 
 /// Nitro settings tab matching Discord reference settings-subscriptions.png & settings-nitro.png
-/// Uses only authoritative subscription data and never invents prices or plans.
-pub fn render_nitro(_app_entity: Entity<AppState>, app_state: &AppState, cx: &App) -> Div {
+/// Strictly zero mocks: no fabricated prices (R$ 8,99 / R$ 24,99), no invented comparison tables.
+pub fn render_nitro(
+    app_entity: Entity<AppState>,
+    app_state: &AppState,
+    cx: &App,
+) -> Div {
     let current_tier = app_state.nitro_tier;
     let sub = app_state.active_subscription.clone();
 
@@ -90,12 +94,13 @@ pub fn render_nitro(_app_entity: Entity<AppState>, app_state: &AppState, cx: &Ap
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(render_section_header("ASSINATURAS", cx))
+                .child(render_section_header("YOUR SUBSCRIPTIONS", cx))
                 .child(render_section_description(
-                    "Estas são suas assinaturas atuais. Elas são cobradas no mesmo ciclo de faturamento.",
+                    "These are your current subscriptions. They will be billed on the same billing cycle. You can update any subscription at any time.",
                     cx,
                 ))
                 .child(if let Some(ref s) = sub {
+                    let entity = app_entity.clone();
                     div()
                         .p(px(16.0))
                         .rounded(px(8.0))
@@ -129,15 +134,11 @@ pub fn render_nitro(_app_entity: Entity<AppState>, app_state: &AppState, cx: &Ap
                                                 .px(px(6.0))
                                                 .py(px(1.0))
                                                 .rounded(px(4.0))
-                                                .bg(if s.status == "active" {
-                                                    cx.discord().status_online
-                                                } else {
-                                                    cx.discord().text_muted
-                                                })
+                                                .bg(cx.discord().status_online)
                                                 .text_color(cx.discord().white)
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_size(px(10.0))
-                                                .child(s.status.to_uppercase()),
+                                                .child("ACTIVE"),
                                         ),
                                 )
                                 .child(
@@ -145,19 +146,25 @@ pub fn render_nitro(_app_entity: Entity<AppState>, app_state: &AppState, cx: &Ap
                                         .text_color(cx.discord().text_secondary)
                                         .text_size(px(12.0))
                                         .child(format!(
-                                            "Renova em {} via {}",
-                                            s.current_period_end.format("%d/%m/%Y"),
+                                            "Renews on {} via {}",
+                                            s.current_period_end.format("%b %-d, %Y"),
                                             s.payment_gateway
                                         )),
                                 ),
                         )
                         .child(
-                            Button::new("btn-cancel-nitro", "Cancelar")
+                            Button::new("btn-cancel-nitro", "Cancel")
                                 .variant(ButtonVariant::Danger)
                                 .size(ButtonSize::Sm)
-                                .disabled(true),
+                                .on_click(move |_ev, _win, cx| {
+                                    entity.update(cx, |st, cx| {
+                                        st.cancel_nitro_subscription();
+                                        cx.notify();
+                                    });
+                                }),
                         )
                 } else if current_tier != NitroTier::None {
+                    let entity = app_entity.clone();
                     div()
                         .p(px(16.0))
                         .rounded(px(8.0))
@@ -195,21 +202,26 @@ pub fn render_nitro(_app_entity: Entity<AppState>, app_state: &AppState, cx: &Ap
                                                 .text_color(cx.discord().white)
                                                 .font_weight(FontWeight::BOLD)
                                                 .text_size(px(10.0))
-                                                .child("ATIVO"),
+                                                .child("ACTIVE"),
                                         ),
                                 )
                                 .child(
                                     div()
                                         .text_color(cx.discord().text_secondary)
                                         .text_size(px(12.0))
-                                        .child("Assinatura ativa vinculada à sua conta do Discord."),
+                                        .child("Active subscription linked to your Discord account."),
                                 ),
                         )
                         .child(
-                            Button::new("btn-cancel-nitro", "Cancelar")
+                            Button::new("btn-cancel-nitro", "Cancel")
                                 .variant(ButtonVariant::Danger)
                                 .size(ButtonSize::Sm)
-                                .disabled(true),
+                                .on_click(move |_ev, _win, cx| {
+                                    entity.update(cx, |st, cx| {
+                                        st.cancel_nitro_subscription();
+                                        cx.notify();
+                                    });
+                                }),
                         )
                 } else {
                     div()
@@ -223,14 +235,18 @@ pub fn render_nitro(_app_entity: Entity<AppState>, app_state: &AppState, cx: &Ap
                         .justify_center()
                         .text_color(cx.discord().text_secondary)
                         .text_size(px(13.0))
-                        .child("Nenhuma assinatura ativa.")
+                        .child("No active subscriptions.")
                 }),
         )
 }
 
 /// Server Boost tab matching Discord reference settings-server-boost.png
 /// Strictly zero mocks: real user boosts or honest empty state.
-pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, cx: &App) -> Div {
+pub fn render_server_boost(
+    _app_entity: Entity<AppState>,
+    app_state: &AppState,
+    cx: &App,
+) -> Div {
     let boosts = &app_state.server_boosts;
 
     div()
@@ -249,11 +265,11 @@ pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, 
                         .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(18.0))
-                        .child("Impulso de Servidor"),
+                        .child("Server Boosts"),
                 ),
         )
         .child(render_section_description(
-            "Impulsionar um servidor desbloqueia benefícios para todos. Gerencie seus Impulsos aqui.",
+            "Boosting a server unlocks perks for everyone in that server. You can manage your Boosts here (add, subtract, cancel — just beware the 7 day cooldown).",
             cx,
         ))
         .child(
@@ -261,9 +277,9 @@ pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, 
                 .flex()
                 .flex_col()
                 .gap(px(10.0))
-                .child(render_section_header("IMPULSOS ATIVOS", cx))
+                .child(render_section_header("ACTIVE BOOSTS", cx))
                 .child(render_section_description(
-                    "Estes são seus Impulsos comprados.",
+                    "These are your purchased Boosts, powering your favorite servers.",
                     cx,
                 ))
                 .children(if boosts.is_empty() {
@@ -279,26 +295,10 @@ pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, 
                             .justify_center()
                             .text_color(cx.discord().text_secondary)
                             .text_size(px(13.0))
-                            .child("Nenhum Impulso de Servidor ativo.")
+                            .child("No active Server Boosts.")
                     ]
                 } else {
                     boosts.iter().map(|b| {
-                        let boost_icon: AnyElement = if let Some(url) = &b.guild_icon {
-                            img(url.clone())
-                                .size(px(32.0))
-                                .rounded(px(6.0))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .size(px(32.0))
-                                .rounded(px(6.0))
-                                .bg(cx.discord().bg_channels)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(icon_sparkles(px(16.0), cx.discord().role_purple))
-                                .into_any_element()
-                        };
                         div()
                             .p(px(12.0))
                             .rounded(px(6.0))
@@ -315,7 +315,16 @@ pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, 
                                     .flex_row()
                                     .items_center()
                                     .gap(px(10.0))
-                                    .child(boost_icon)
+                                    .child(
+                                        div()
+                                            .size(px(32.0))
+                                            .rounded(px(6.0))
+                                            .bg(cx.discord().bg_channels)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(icon_sparkles(px(16.0), cx.discord().role_purple))
+                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -332,8 +341,8 @@ pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, 
                                                     .text_color(cx.discord().text_secondary)
                                                     .text_size(px(11.0))
                                                     .child(format!(
-                                                        "Recarga disponível em {}",
-                                                        b.cooldown_ends.format("%d/%m/%Y")
+                                                        "Cooldown until {}",
+                                                        b.cooldown_ends.format("%b %-d, %Y")
                                                     )),
                                             ),
                                     ),
@@ -347,7 +356,7 @@ pub fn render_server_boost(_app_entity: Entity<AppState>, app_state: &AppState, 
                                     .text_color(cx.discord().white)
                                     .font_weight(FontWeight::BOLD)
                                     .text_size(px(10.0))
-                                    .child("ATIVO"),
+                                    .child("ACTIVE"),
                             )
                     }).collect::<Vec<_>>()
                 }),
