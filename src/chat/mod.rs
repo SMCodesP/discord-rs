@@ -14,6 +14,7 @@ pub mod media_picker;
 pub mod message_list;
 pub mod reactions;
 pub mod search;
+pub mod system_messages;
 
 pub use chat_view::*;
 pub use editor::*;
@@ -22,5 +23,6 @@ pub use media_picker::*;
 pub use message_list::*;
 pub use reactions::*;
 pub use search::*;
+pub use system_messages::*;
 
 
