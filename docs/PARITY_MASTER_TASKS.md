@@ -739,3 +739,79 @@
   - **Evidência:** itens de guilda/pasta só têm clique/toggle; não há handlers de arraste, drop, reorder ou PATCH de `guild_folders`. O CDP oficial usa indicadores de alvo (linha 4px/círculo 16px), preview de pasta e estados `dragging`/`dragOver`; o bundle persiste `guildFolders` nas settings.
   - **O que falta/corrigir:** arraste de guilda para posição/pasta, criação/expansão de pasta por drop, preview e indicadores, persistência em `/users/@me/settings` e rollback em falha.
   - **Critério de pronto:** teste sintético move guilda entre posições/pastas, cria pasta e persiste após reinício; cancelar/falhar restaura a ordem anterior e nenhum ID real vai para log.
+
+### Ciclo 7 — Robustez, shutdown, clipboard e integração Linux de 2026-11-24
+
+**Metodologia e limites:** auditoria somente leitura de `src/` e dos logs `/tmp/discord-rs-logs/smcodes.log` e `xinxyl.log`; nenhum arquivo Rust foi editado. Os logs atuais não contêm `panic`, stack overflow ou falha fatal, mas a análise estática encontrou caminhos que ainda podem derrubar o processo ou deixar tasks/streams vivos.
+
+- [ ] **T-120** — **P0** — **Robustez/Panics** — **Eliminar `unwrap`/`expect` em caminhos de voz, payload e UI que podem derrubar o processo**
+  - **Arquivos:** `src/protocol/voice_session.rs:445`, `src/protocol/voice_session.rs:705`, `src/protocol/voice_session.rs:1107-1108`, `src/protocol/voice_session.rs:1194-1201`, `src/protocol/voice_session.rs:1370-1442`, `src/app/root_view.rs:580`, `src/app/root_view.rs:614`, `src/app/root_view.rs:742-804`, `src/media/audio.rs:181-463`.
+  - **Evidência:** DAVE usa `std::sync::Mutex::lock().unwrap()` em oito pontos; um pânico anterior pode envenenar o mutex e derrubar a task de voz. A sessão também usa `captured_session_id.unwrap()`/`captured_token.unwrap()` após um timeout e serializa payloads com `unwrap`. `RootView` usa `expect` para estados de input que podem faltar em montagem/teardown. Os logs atuais não registraram pânico, mas esses caminhos não têm teste de payload adverso.
+  - **O que falta/corrigir:** recuperar mutex envenenado com fail-closed, substituir unwraps por erros de domínio, validar invariantes de handshake e transformar expects de UI em fallback/erro explícito; limitar mensagens antes de parsear.
+  - **Critério de pronto:** fuzz/fixtures com JSON/binário truncado, campos ausentes, heartbeat inválido e mutex envenenado não causam pânico; a sessão termina com erro visível e o app continua respondendo.
+
+- [ ] **T-121** — **P1** — **Rede/Timeouts & Limites** — **Aplicar timeout e bound de tamanho a HTTP, assets e WebSockets**
+  - **Arquivos:** `src/protocol/http_client.rs:14-31`, `src/protocol/http_client.rs:68-110`, `src/protocol/discord_api.rs:1198-1223`, `src/protocol/discord_api.rs:1301-1325`, `src/protocol/voice_gateway.rs:701-704`, `src/protocol/voice_gateway.rs:1301-1335`.
+  - **Evidência:** o client HTTP do GPUI não define timeout e faz `response.bytes()` sem limite; os WebSockets removem `max_message_size/max_frame_size`, `connect_async` não tem timeout e o Hello é aguardado com `next().await` sem prazo. `heartbeat_interval_ms` vem do servidor sem validação; zero faria `tokio::time::interval(0)` pânico.
+  - **O que falta/corrigir:** timeouts de connect/read/write/Hello, limites de frame/mensagem/asset, validação de intervalo mínimo e cancelamento rápido no shutdown; erros devem virar estado de reconexão, não travamento.
+  - **Critério de pronto:** servidor sintético que aceita TCP e não responde, envia frame gigante ou Hello inválido expira dentro do orçamento documentado sem OOM/pânico; reconexão continua funcionando.
+
+- [ ] **T-122** — **P0** — **Ciclo de Vida/Shutdown** — **Encerrar Gateway, VoiceSession, AudioEngine e flush de cache ao fechar a janela**
+  - **Arquivos:** `src/main.rs:26-69`, `src/app/root_view.rs:155-216`, `src/protocol/voice_session.rs:906-948`, `src/protocol/voice_gateway.rs:967-980`, `src/protocol/client_manager.rs:328-350`, `src/app/state/disk_cache.rs:19-31`.
+  - **Evidência:** não há hook de fechamento da janela nem orquestrador de shutdown. `VoiceSession::Drop` só aborta `session_task`; `VoiceGateway` guarda um `JoinHandle` sem `Drop` que chame `stop_signal`, permitindo loop reconectável continuar após o drop. `save_guilds_to_disk` escreve direto no arquivo final, sem rename atômico, podendo corromper o cache se o processo morrer durante a gravação.
+  - **O que falta/corrigir:** shutdown idempotente e ordenado (parar UI/timers → voz/áudio → gateway → flush), `Drop`/AbortOnDrop para tasks de rede, join com timeout e escrita atômica (`tmp` + `rename` + fsync quando aplicável).
+  - **Critério de pronto:** teste fecha a janela durante conexão, chamada e gravação; nenhuma task/thread permanece viva, o cache abre íntegro no próximo start e o encerramento termina dentro do timeout configurado.
+
+- [ ] **T-123** — **P1** — **Linux/Clipboard** — **Soportar cópia/colagem de imagem no Wayland e X11**
+  - **Arquivos:** `src/chat/editor.rs:405-408`, `src/chat/media_picker.rs:372-399`, `src/chat/chat_view.rs:1795-1808`, `Cargo.toml`, `src/platform/*` (novo, se necessário).
+  - **Evidência:** o clipboard só é lido via `clipboard.text()` em dois pontos e só há escrita de `ClipboardItem::new_string`; não há leitura/escrita de bitmap ou MIME `image/png`. `T-027` já prevê paste de imagem, mas sem backend/teste específico Wayland/X11.
+  - **O que falta/corrigir:** abstração de clipboard com texto e bitmap, fallback X11/Wayland, limites de tamanho, preview/anexo e teste sem exibir diálogo do sistema.
+  - **Critério de pronto:** testes injetados e teste manual em X11/Wayland copiam imagem para o composer e copiam imagem do chat; PNG transparente é preservado, falha de backend é explícita e nenhum dado real vai para fixture.
+
+- [ ] **T-124** — **P1** — **Linux/HiDPI** — **Corrigir cálculo de janela, ícones e layout para escala fractional do display**
+  - **Arquivos:** `src/main.rs:35-47`, `src/app/root_view.rs:691-768`, `src/tokens/spacing.rs`, `src/components/avatar.rs`, `src/app/voice_call_panel.rs:35-80`.
+  - **Evidência:** `main` usa `display.bounds().size / px(1.0)` e não consulta `scale_factor`; não há uso de `device_pixel_ratio`/`scale_factor` no código. Em HiDPI fractional, o tamanho inicial e conversões de pixels podem ficar incorretos.
+  - **O que falta/corrigir:** obter escala do display, converter bounds físicos→lógicos, validar 1×/1.25×/1.5×/2× e garantir que ícones/mídia não estiquem ou cortem.
+  - **Critério de pronto:** matriz de displays sintéticos com escalas 1/1.25/1.5/2 mantém janela dentro da área útil e medidas lógicas corretas; captura não mostra blur/corte de ícones.
+
+- [ ] **T-125** — **P2** — **Linux/Window Title** — **Atualizar título dinâmico e indicador de unread da janela**
+  - **Arquivos:** `src/main.rs:49-55`, `src/app/root_view.rs:472-583`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/models.rs:147-170`.
+  - **Evidência:** o título é fixo `"Discord"` e não há `set_title`, contagem de unread no título ou flash de taskbar. `unread_badge`/`flash_taskbar` existem apenas como campos locais de Settings.
+  - **O que falta/corrigir:** título `#canal | Servidor - Discord`, variantes DM/Friends/Settings, prefixo/sufixo de unread e flash/badge da taskbar; limpar ao focar/ler.
+  - **Critério de pronto:** teste de estado cobre canal, DM, Friends, Settings e unread/mention; título muda sem vazar nome/ID real em log e o indicador limpa após leitura/foco.
+
+## 4. Mapa de Ondas de Execucao (Zero Conflito de Merge)
+
+**Cobertura:** as **107 tarefas abertas** estão atribuídas exatamente uma vez. Cada trilha é dona exclusiva dos caminhos listados; tarefas que atravessam várias trilhas foram concentradas na Onda 4 para evitar edição concorrente. Comece a onda seguinte somente após a anterior entrar na `main` e passar por `cargo check`/testes isolados.
+
+### Onda 1 — P0 Voz (estabilidade de chamada primeiro)
+
+| Trilha | Tarefas (em ordem) | Arquivos exclusivos |
+|---|---|---|
+| **1A — Voz Core/Áudio/UI** | `T-002`, `T-018`, `T-019`, `T-021`, `T-022`, `T-023`, `T-039`, `T-098`, `T-099`, `T-107`, `T-113`, `T-116`, `T-120`, `T-121`, `T-122` | `src/protocol/voice_*.rs`, `src/media/**`, `src/capture/**`, `src/app/state/voice.rs`, `src/app/voice_call_panel.rs`, `src/app/header_bar.rs`, `src/app/channel_sidebar.rs`, `src/app/user_settings/voice_video.rs`, `src/app/user_settings/notifications.rs`, `src/app/user_settings/mod.rs`, `src/app/state/gateway_events.rs`, `src/app/state/models.rs`, `src/domain/channel.rs`, `src/protocol/client_manager.rs`, `src/protocol/discord_api.rs`, `src/protocol/http_client.rs`, `src/main.rs`, `src/app/root_view.rs`, `src/app/state/disk_cache.rs`, `Cargo.toml` |
+| **1B — QA Voz** | `T-054` | `tests/voice_video_and_dm_call_regression_test.rs` e demais `tests/voice_*`/`tests/audio_*` novos |
+
+### Onda 2 — Chat, Mídia e Perfil
+
+| Trilha | Tarefas (em ordem) | Arquivos exclusivos |
+|---|---|---|
+| **2A — Chat Core/Composer/API** | `T-005`, `T-009`, `T-024`, `T-025`, `T-026`, `T-027`, `T-028`, `T-029`, `T-030`, `T-043`, `T-048`, `T-062`, `T-083`, `T-087`, `T-091`, `T-101`, `T-102`, `T-103`, `T-104`, `T-123` | `src/chat/**`, `src/domain/message.rs`, `src/protocol/discord_api.rs`, `src/protocol/transport.rs`, `src/protocol/client_manager.rs`, `src/protocol/media_cache.rs`, `src/app/state/messages.rs`, `src/app/state/gateway_events.rs`, `src/protocol/rate_limit/coalescing.rs`, `src/media/audio.rs`, `src/platform/**`, `Cargo.toml` |
+| **2B — Perfil/Settings Base** | `T-007`, `T-014` | `src/app/user_profile_popout.rs`, `src/app/state/profile.rs`, `src/components/avatar.rs`, `src/components/profile_effect.rs`, `src/app/user_settings/**`, `src/app/state/settings.rs`, `src/app/state/seed.rs` |
+| **2C — Navegação/Friends** | `T-013`, `T-034`, `T-037`, `T-061` | `src/app/friends_hub.rs`, `src/app/state/friends_dms.rs`, `src/protocol/pinned_dms.rs`, `src/app/channel_sidebar.rs`, `src/app/member_sidebar.rs`, `src/app/guild_rail.rs`, `src/components/guild_item.rs`, `src/app/root_view.rs`, `src/app/state/guilds_channels.rs`, `src/domain/guild.rs`, `src/domain/channel.rs`, `src/app/state/models.rs`, `src/app/state/disk_cache.rs`, `tests/guild_folders_and_member_ranges_test.rs` |
+
+### Onda 3 — Visual/Design
+
+| Trilha | Tarefas (em ordem) | Arquivos exclusivos |
+|---|---|---|
+| **3A — Guild/Shell/Member** | `T-011`, `T-036`, `T-071`, `T-072`, `T-078`, `T-079`, `T-088`, `T-096`, `T-110`, `T-111` | `src/app/guild_rail.rs`, `src/components/guild_item.rs`, `src/app/channel_sidebar.rs`, `src/app/header_bar.rs`, `src/app/member_sidebar.rs`, `src/components/button.rs`, `src/tokens/spacing.rs`, `src/tokens/motion.rs`, `src/protocol/discord_api.rs`, `src/protocol/cache/lazy_guilds.rs`, `src/app/state/models.rs`, `src/app/state/guilds_channels.rs`, `src/app/voice_call_panel.rs` |
+| **3B — Chat/Profile/Tipografia** | `T-041`, `T-057`, `T-066`, `T-073`, `T-074`, `T-075` | `src/main.rs`, `src/chat/message_list.rs`, `src/chat/markdown.rs`, `src/app/user_profile_popout.rs`, `src/app/user_settings/mod.rs`, `src/app/user_settings/appearance.rs`, `src/app/state/settings.rs`, `src/tokens/colors.rs`, `src/tokens/kit_theme.rs`, `src/tokens/typography.rs`, `src/telemetry/comparator.rs` |
+| **3C — QA Visual** | `T-058`, `T-070` | `tests/visual_themes_and_fixtures_test.rs`, `tests/fixtures/ui_shot/**`, `examples/ui_shot.rs`, `scripts/ui-shot.sh`, `scripts/ui-compare.sh` |
+
+### Onda 4 — Avançado/Polimento (integração serializada)
+
+| Trilha | Tarefas (em ordem) | Arquivos exclusivos |
+|---|---|---|
+| **4A — Integração Cross-Cutting** | `T-012`, `T-016`, `T-031`, `T-032`, `T-033`, `T-035`, `T-038`, `T-040`, `T-042`, `T-055`, `T-060`, `T-063`, `T-064`, `T-065`, `T-067`, `T-068`, `T-069`, `T-076`, `T-077`, `T-080`, `T-081`, `T-082`, `T-084`, `T-085`, `T-086`, `T-089`, `T-090`, `T-092`, `T-093`, `T-094`, `T-095`, `T-097`, `T-100`, `T-105`, `T-106`, `T-108`, `T-109`, `T-112`, `T-114`, `T-115`, `T-117`, `T-118`, `T-119`, `T-124`, `T-125` | Todos os arquivos de `src/` tocados por essas tarefas, incluindo `protocol/**`, `app/state/**`, `app/root_view.rs`, `app/header_bar.rs`, `app/channel_sidebar.rs`, `app/friends_hub.rs`, `chat/**`, `domain/**`, `telemetry/**`, `main.rs`, `Cargo.toml` e scripts/caches necessários. **Uma trilha só:** estas tarefas compartilham `discord_api.rs`, `gateway_events.rs`, `root_view.rs` ou `chat_view.rs`. |
+| **4B — QA Polimento** | `T-050`, `T-059` | `tests/log_redaction_and_auth_safety_test.rs`, `tests/i18n_and_search_advanced_test.rs` |
+
+**Regra de merge:** cada trilha trabalha em worktree/layer própria, commita apenas seus arquivos e não faz merge/push. O orquestrador integra uma trilha por vez, roda `flock /tmp/discord-rs-cargo-A.lock timeout 600 cargo check -j 4` e a suíte isolada, restaura `docs/PARITY_AUDIT.md`/`docs/VISUAL_PARITY_DIFF.md` e só então inicia a próxima trilha da mesma onda.
