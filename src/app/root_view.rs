@@ -83,26 +83,61 @@ impl RootView {
         cx.spawn(|_view, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
-                while let Ok(evt) = event_rx.recv().await {
-                    let _ = cx.update(|cx| {
-                        let _ = state_weak.update(cx, |state, cx| {
-                            let deleted_call_channel = match &evt {
-                                crate::protocol::TransportEvent::CallDelete { channel_id } => {
-                                    Some(channel_id.clone())
-                                }
-                                _ => None,
-                            };
-                            state.handle_transport_event(evt);
-                            if let Some(channel_id) = deleted_call_channel {
-                                if state.active_voice_call.as_ref().map(|call| call.channel_id.as_str())
-                                    == Some(channel_id.as_str())
-                                {
-                                    state.disconnect_voice();
-                                }
-                            }
-                            cx.notify();
+                use tokio::sync::broadcast::error::RecvError;
+
+                loop {
+                    let deadline = {
+                        let mut next = None;
+                        let _ = cx.update(|cx| {
+                            let _ = state_weak.update(cx, |state, _cx| {
+                                next = state.next_transport_batch_deadline();
+                            });
                         });
-                    });
+                        next
+                    };
+
+                    let sleep = async {
+                        if let Some(deadline) = deadline {
+                            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))
+                                .await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    };
+
+                    tokio::select! {
+                        recv = event_rx.recv() => {
+                            match recv {
+                                Ok(evt) => {
+                                    let _ = cx.update(|cx| {
+                                        let _ = state_weak.update(cx, |state, cx| {
+                                            let now = std::time::Instant::now();
+                                            let mut ready = Vec::new();
+                                            if let Some(immediate) = state.push_transport_event(evt, now) {
+                                                ready.push(immediate);
+                                            }
+                                            ready.extend(state.flush_due_transport_events(now));
+                                            if !ready.is_empty() {
+                                                state.apply_transport_events(ready, cx);
+                                            }
+                                        });
+                                    });
+                                }
+                                Err(RecvError::Lagged(_)) => continue,
+                                Err(RecvError::Closed) => break,
+                            }
+                        }
+                        _ = sleep => {
+                            let _ = cx.update(|cx| {
+                                let _ = state_weak.update(cx, |state, cx| {
+                                    let due = state.flush_due_transport_events(std::time::Instant::now());
+                                    if !due.is_empty() {
+                                        state.apply_transport_events(due, cx);
+                                    }
+                                });
+                            });
+                        }
+                    }
                 }
             }
         })

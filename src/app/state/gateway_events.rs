@@ -5,6 +5,49 @@ use crate::protocol::TransportEvent;
 use std::collections::HashMap;
 
 impl AppState {
+    /// Enqueues a transport event for coalescing. Returns it immediately when it
+    /// should not be batched.
+    pub fn push_transport_event(
+        &mut self,
+        event: TransportEvent,
+        now: std::time::Instant,
+    ) -> Option<TransportEvent> {
+        self.event_batcher.push(event, now)
+    }
+
+    /// Flushes coalesced transport events whose deadline has elapsed.
+    pub fn flush_due_transport_events(&mut self, now: std::time::Instant) -> Vec<TransportEvent> {
+        self.event_batcher.flush(now)
+    }
+
+    /// Next deadline for pending coalesced transport events.
+    pub fn next_transport_batch_deadline(&self) -> Option<std::time::Instant> {
+        self.event_batcher.next_deadline()
+    }
+
+    /// Applies a batch of transport events and preserves side effects that must
+    /// happen at the UI dispatch boundary.
+    pub fn apply_transport_events(&mut self, events: Vec<TransportEvent>, cx: &mut gpui::Context<Self>) {
+        for event in events {
+            let deleted_call_channel = match &event {
+                TransportEvent::CallDelete { channel_id } => Some(channel_id.clone()),
+                _ => None,
+            };
+            self.handle_transport_event(event);
+            if let Some(channel_id) = deleted_call_channel {
+                if self
+                    .active_voice_call
+                    .as_ref()
+                    .map(|call| call.channel_id.as_str())
+                    == Some(channel_id.as_str())
+                {
+                    self.disconnect_voice();
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Dispatches a real-time event received from the Gateway / ClientManager
     pub fn handle_transport_event(&mut self, event: TransportEvent) {
         match event {

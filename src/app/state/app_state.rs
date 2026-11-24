@@ -63,6 +63,8 @@ pub struct AppState {
     pub target_message_id: Option<String>,
     /// Real-time coalesced typing tracker: channel_id -> user_id -> (username, timestamp)
     pub typing_tracker: HashMap<String, HashMap<String, (String, std::time::Instant)>>,
+    /// Coalesces burst gateway events (presence/typing) into single UI updates.
+    pub event_batcher: crate::protocol::EventBatcher,
 
     // Real-Time Discord Gateway & Chat State
     pub is_connected_to_gateway: bool,
@@ -236,6 +238,7 @@ impl AppState {
             search_generation: 0,
             target_message_id: None,
             typing_tracker: HashMap::new(),
+            event_batcher: crate::protocol::EventBatcher::new(),
             is_connected_to_gateway: false,
             auth_token: if has_token { Some(stored_token.clone()) } else { None },
             connection_status,
