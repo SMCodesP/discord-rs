@@ -833,3 +833,13 @@
 **Sobreposição direta:** somente `v-proto` ↔ `v-audio` em `src/protocol/voice_session.rs`. Os hunks são diferentes (protocolo/DAVE vs ponte de áudio), mas a integração deve ser validada em sequência. As demais worktrees não compartilham arquivos modificados entre si.
 
 **Ordem recomendada de land:** `net-gateway` → `v-proto` → `v-audio` → `v-stage` → `media-gifs` → `chat-msgs` → `profile-decor` → `design-friends` → `design-shell` → `design-chat` → `design-settings`. Antes de cada land: atualizar/rebasear a branch, commitar o delta, rodar `cargo check` e testes isolados, restaurar os relatórios gerados e só então integrar. `v-audio`/`v-stage` já têm seus commits-base na `main`; não reaplicar esses commits, apenas os deltas não commitados.
+
+---
+
+## 5. Frente de Otimização Extrema (Renderização 120 FPS & Algoritmos — Cloud Swarm)
+
+- [ ] **T-126** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização Chat** — **Cache LRU O(1) de Markdown parseado por `(message_id, content_hash)`** (`src/chat/markdown_cache.rs` + `tests/markdown_cache_perf_test.rs`) — elimina re-parsing de Markdown a 120 FPS.
+- [ ] **T-127** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Áudio DSP** — **Fast-path 48 kHz zero-copy, conversor `i16↔f32` auto-SIMD sem alocação e soft-limiter transparente** (`src/media/dsp_fast.rs` + `tests/dsp_perf_test.rs`).
+- [ ] **T-128** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Algoritmo Gateway** — **Deserialização tipada direta sem `serde_json::Value` intermediário (`RawValue`)** (`src/protocol/fast_parse.rs` + `tests/gateway_fast_parse_test.rs`).
+- [ ] **T-129** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/I/O Disco** — **Batch/debounced async disk writer atômico para `CacheEngine`** (`src/protocol/cache/batch_writer.rs` + `tests/cache_batch_writer_test.rs`) — elimina `fs::write` a cada mensagem recebida.
+- [ ] **T-130** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização UI** — **Memoização por `generation counter` de ordenação de canais e agrupamento de membros por cargo** (`src/app/view_memo.rs` + `tests/view_memo_perf_test.rs`).
