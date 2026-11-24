@@ -29,3 +29,9 @@ pub use media_viewer::{
     MediaViewerCallbacks, MediaViewerItem, MediaViewerKind, MediaViewerState,
     MEDIA_VIEWER_MAX_ZOOM, MEDIA_VIEWER_MIN_ZOOM, MEDIA_VIEWER_ZOOM_STEP,
 };
+
+pub mod context_menus;
+pub use context_menus::{
+    apply_entries_to_popup_menu, build_menu_entries, build_popup_menu, ContextMenuContext,
+    MenuAction, MenuCallbacks, MenuEntry, MenuPermissions, MenuTargetKind,
+};
