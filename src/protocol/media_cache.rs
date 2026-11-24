@@ -4,7 +4,7 @@
 //! 1. Gerenciamento do cache local em `~/.config/discord-rs/cache/media/` particionado por SHA-256 (00..ff).
 //! 2. Persistência contínua de "Frequentemente Usados" (Recent Emojis) em `recent_emojis.json`.
 //! 3. Modelos de dados para Emojis Discord, Stickers, StickerPacks e Soundboard.
-//! 4. Buscador e trending de GIFs com Tenor v2 e fallback local inteligente.
+//! 4. Parsers e cache de GIFs reais do Discord/Tenor, sem fallback fictício.
 //! 5. Provider de categorias canônicas do Discord (8 categorias Unicode + Servidores).
 
 use anyhow::{Context, Result};
@@ -108,11 +108,34 @@ impl DiscordEmoji {
     pub fn cdn_url(&self) -> Option<String> {
         self.id.as_ref().map(|id| {
             if self.animated {
-                format!("https://cdn.discordapp.com/emojis/{}.gif?size=64&quality=lossless", id)
+                format!(
+                    "https://cdn.discordapp.com/emojis/{}.gif?size=64&quality=lossless",
+                    id
+                )
             } else {
-                format!("https://cdn.discordapp.com/emojis/{}.png?size=64&quality=lossless", id)
+                format!(
+                    "https://cdn.discordapp.com/emojis/{}.png?size=64&quality=lossless",
+                    id
+                )
             }
         })
+    }
+
+    /// Converte uma tag canônica `<:name:id>` ou `<a:name:id>` em um emoji customizado.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        let (animated, inner) = if let Some(inner) = tag.strip_prefix("<a:") {
+            (true, inner)
+        } else if let Some(inner) = tag.strip_prefix("<:") {
+            (false, inner)
+        } else {
+            return None;
+        };
+        let inner = inner.strip_suffix('>')?;
+        let (name, id) = inner.rsplit_once(':')?;
+        if name.is_empty() || id.is_empty() {
+            return None;
+        }
+        Some(Self::new_custom(id, name, animated, None))
     }
 
     /// Indica se é um emoji unicode nativo
@@ -172,7 +195,7 @@ impl<'de> Deserialize<'de> for StickerFormatType {
                     2 => Ok(StickerFormatType::Apng),
                     3 => Ok(StickerFormatType::Lottie),
                     4 => Ok(StickerFormatType::Gif),
-                    _ => Ok(StickerFormatType::Png),
+                    _ => Err(E::custom(format!("unknown sticker format type: {}", v))),
                 }
             }
 
@@ -180,7 +203,11 @@ impl<'de> Deserialize<'de> for StickerFormatType {
             where
                 E: serde::de::Error,
             {
-                self.visit_u64(v as u64)
+                if v < 0 {
+                    Err(E::custom(format!("unknown sticker format type: {}", v)))
+                } else {
+                    self.visit_u64(v as u64)
+                }
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -192,7 +219,7 @@ impl<'de> Deserialize<'de> for StickerFormatType {
                     "apng" | "2" => Ok(StickerFormatType::Apng),
                     "lottie" | "3" => Ok(StickerFormatType::Lottie),
                     "gif" | "4" => Ok(StickerFormatType::Gif),
-                    _ => Ok(StickerFormatType::Png),
+                    _ => Err(E::custom(format!("unknown sticker format type: {}", v))),
                 }
             }
         }
@@ -218,10 +245,18 @@ impl DiscordSticker {
     /// URL no CDN oficial do Discord
     pub fn cdn_url(&self) -> String {
         match self.format_type {
-            StickerFormatType::Apng | StickerFormatType::Gif => {
-                format!("https://media.discordapp.net/stickers/{}.gif?size=160", self.id)
+            StickerFormatType::Png | StickerFormatType::Apng => {
+                format!("https://cdn.discordapp.com/stickers/{}.png", self.id)
             }
-            _ => format!("https://media.discordapp.net/stickers/{}.webp?size=160&quality=lossless", self.id),
+            StickerFormatType::Lottie => {
+                format!("https://cdn.discordapp.com/stickers/{}.json", self.id)
+            }
+            StickerFormatType::Gif => {
+                format!(
+                    "https://media.discordapp.net/stickers/{}.gif?size=160",
+                    self.id
+                )
+            }
         }
     }
 }
@@ -257,27 +292,39 @@ pub struct SoundboardSound {
 impl SoundboardSound {
     /// URL de streaming de áudio
     pub fn sound_url(&self) -> String {
-        format!("https://cdn.discordapp.com/soundboard-sounds/{}", self.sound_id)
+        format!(
+            "https://cdn.discordapp.com/soundboard-sounds/{}",
+            self.sound_id
+        )
     }
 }
 
 // ============================================================================
-// Modelos de Dados de GIFs (Tenor v2)
+// Modelos de Dados de GIFs (Discord / Tenor v2)
 // ============================================================================
 
 fn default_gif_dims() -> (u32, u32) {
     (220, 180)
 }
 
-/// Item retornado pela busca ou trending de GIFs do Tenor ou Discord
+/// Item retornado pela busca ou trending de GIFs do Tenor ou Discord.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenorGif {
     pub id: String,
     pub title: String,
+    /// Poster derivado de `gif_src`; o vídeo bruto fica em `preview`.
     pub preview_url: String,
+    /// Página do provedor no Discord; mídia direta no Tenor v2.
     pub url: String,
     #[serde(default = "default_gif_dims")]
     pub dims: (u32, u32),
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub preview: String,
+    /// Contexto local de navegação; não é um campo do objeto Gif.
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
@@ -295,17 +342,51 @@ impl TenorGif {
         dims: (u32, u32),
         category: Option<String>,
     ) -> Self {
-        let p_url = preview_url.into();
+        let preview_url = preview_url.into();
         Self {
             id: id.into(),
             title: title.into(),
-            preview_url: p_url.clone(),
+            preview_url: preview_url.clone(),
             url: url.into(),
             dims,
+            width: dims.0,
+            height: dims.1,
+            preview: preview_url.clone(),
             category,
-            src: Some(p_url.clone()),
-            gif_src: Some(p_url),
+            src: Some(preview_url.clone()),
+            gif_src: Some(preview_url),
         }
+    }
+
+    /// Mídia confirmada para envio. A página do provedor nunca é usada como fallback.
+    pub fn send_url(&self) -> Option<&str> {
+        self.gif_src
+            .as_deref()
+            .filter(|url| !url.is_empty() && Self::is_http_url(url))
+    }
+
+    fn is_http_url(url: &str) -> bool {
+        reqwest::Url::parse(url)
+            .map(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+            .unwrap_or(false)
+    }
+
+    fn is_image_url(url: &str) -> bool {
+        let path = reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| {
+                let path = parsed.path().to_ascii_lowercase();
+                (!path.is_empty()).then_some(path)
+            })
+            .unwrap_or_else(|| {
+                url.split(['?', '#'])
+                    .next()
+                    .unwrap_or(url)
+                    .to_ascii_lowercase()
+            });
+        [".gif", ".png", ".jpg", ".jpeg", ".webp", ".avif"]
+            .iter()
+            .any(|extension| path.ends_with(extension))
     }
 }
 
@@ -313,8 +394,7 @@ impl TenorGif {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscordGifCategory {
     pub name: String,
-    #[serde(default)]
-    pub src: Option<String>,
+    pub src: String,
 }
 
 // ============================================================================
@@ -330,6 +410,23 @@ pub struct RecentEmojiItem {
     pub custom_id: Option<String>,
     pub use_count: u32,
     pub last_used_timestamp: i64,
+}
+
+impl RecentEmojiItem {
+    /// Reconstrói o emoji para o seletor, inclusive registros antigos que só guardaram a tag.
+    pub fn to_discord_emoji(&self) -> Option<DiscordEmoji> {
+        if let Some(emoji) = DiscordEmoji::from_tag(&self.emoji) {
+            Some(emoji)
+        } else if let Some(id) = self.custom_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(DiscordEmoji::new_custom(id, self.name.clone(), false, None))
+        } else if self.is_custom {
+            None
+        } else if self.emoji.is_empty() {
+            None
+        } else {
+            Some(DiscordEmoji::new_unicode(self.emoji.clone()))
+        }
+    }
 }
 
 // ============================================================================
@@ -360,6 +457,7 @@ pub struct MediaCacheManager {
     recent_emojis: Arc<RwLock<Vec<RecentEmojiItem>>>,
     favorite_stickers: Arc<RwLock<Vec<DiscordSticker>>>,
     tenor_cache: Arc<RwLock<HashMap<String, (Vec<TenorGif>, DateTime<Utc>)>>>,
+    gif_categories: Arc<RwLock<Option<(Vec<DiscordGifCategory>, DateTime<Utc>)>>>,
 }
 
 impl MediaCacheManager {
@@ -382,6 +480,7 @@ impl MediaCacheManager {
             recent_emojis: Arc::new(RwLock::new(Vec::new())),
             favorite_stickers: Arc::new(RwLock::new(Vec::new())),
             tenor_cache: Arc::new(RwLock::new(HashMap::new())),
+            gif_categories: Arc::new(RwLock::new(None)),
         };
         // Inicializa carregar recentes do disco
         let loaded = mgr.load_recent_emojis_from_disk();
@@ -444,7 +543,11 @@ impl MediaCacheManager {
 
         // Grava atomicamente se não existir
         if !bin_path.exists() {
-            let temp_name = format!(".tmp_{}_{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0));
+            let temp_name = format!(
+                ".tmp_{}_{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            );
             let temp_path = bin_path.parent().unwrap().join(temp_name);
             {
                 let mut f = File::create(&temp_path)?;
@@ -466,7 +569,11 @@ impl MediaCacheManager {
         };
 
         let meta_bytes = serde_json::to_vec_pretty(&meta)?;
-        let temp_meta = format!(".tmp_meta_{}_{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_meta = format!(
+            ".tmp_meta_{}_{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let temp_meta_path = meta_path.parent().unwrap().join(temp_meta);
         {
             let mut f = File::create(&temp_meta_path)?;
@@ -529,16 +636,19 @@ impl MediaCacheManager {
             fs::create_dir_all(parent)?;
         }
 
-        if !bin_path.exists() {
-            let temp_name = format!(".tmp_{}_{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0));
-            let temp_path = bin_path.parent().unwrap().join(temp_name);
-            {
-                let mut f = File::create(&temp_path)?;
-                f.write_all(bytes)?;
-                f.sync_data()?;
-            }
-            fs::rename(&temp_path, &bin_path)?;
+        // A mesma URL pode ser atualizada; sempre substitui o binário atomicamente.
+        let temp_name = format!(
+            ".tmp_{}_{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let temp_path = bin_path.parent().unwrap().join(temp_name);
+        {
+            let mut f = File::create(&temp_path)?;
+            f.write_all(bytes)?;
+            f.sync_data()?;
         }
+        fs::rename(&temp_path, &bin_path)?;
 
         let now = Utc::now();
         let meta = MediaCacheMetadata {
@@ -552,7 +662,11 @@ impl MediaCacheManager {
         };
 
         let meta_bytes = serde_json::to_vec_pretty(&meta)?;
-        let temp_meta = format!(".tmp_meta_{}_{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_meta = format!(
+            ".tmp_meta_{}_{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let temp_meta_path = meta_path.parent().unwrap().join(temp_meta);
         {
             let mut f = File::create(&temp_meta_path)?;
@@ -574,14 +688,25 @@ impl MediaCacheManager {
             return Ok(cached);
         }
 
-        let resp = reqwest::get(url).await.context("Failed to fetch media from URL")?;
+        let resp = reqwest::get(url)
+            .await
+            .context("Failed to fetch media from URL")?
+            .error_for_status()
+            .context("Media URL returned an error status")?;
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("application/octet-stream")
             .to_string();
-        let bytes = resp.bytes().await.context("Failed to read response body")?.to_vec();
+        let bytes = resp
+            .bytes()
+            .await
+            .context("Failed to read response body")?
+            .to_vec();
+        if bytes.is_empty() {
+            anyhow::bail!("Media URL returned an empty body");
+        }
 
         self.store_media_for_url(url, &bytes, &content_type)?;
         Ok(bytes)
@@ -632,25 +757,53 @@ impl MediaCacheManager {
         is_custom: bool,
         custom_id: Option<&str>,
     ) {
+        let parsed = DiscordEmoji::from_tag(emoji);
+        let valid_custom_id = custom_id.filter(|id| !id.is_empty());
+        if parsed.is_none() && is_custom && valid_custom_id.is_none() {
+            return;
+        }
         let mut list = self.recent_emojis.write().await;
+        let canonical_emoji = parsed
+            .as_ref()
+            .map(DiscordEmoji::to_tag)
+            .or_else(|| {
+                valid_custom_id.map(|id| DiscordEmoji::new_custom(id, name, false, None).to_tag())
+            })
+            .unwrap_or_else(|| emoji.to_string());
+        let canonical_name = parsed
+            .as_ref()
+            .map(|emoji| emoji.name.clone())
+            .unwrap_or_else(|| name.to_string());
+        let canonical_custom = parsed.is_some() || valid_custom_id.is_some();
+        let canonical_id = parsed
+            .as_ref()
+            .and_then(|emoji| emoji.id.clone())
+            .or_else(|| valid_custom_id.map(ToString::to_string));
 
         let now = Utc::now().timestamp();
-        if let Some(item) = list.iter_mut().find(|i| i.emoji == emoji) {
+        if let Some(item) = list.iter_mut().find(|i| i.emoji == canonical_emoji) {
             item.use_count += 1;
             item.last_used_timestamp = now;
+            item.name = canonical_name;
+            item.is_custom = canonical_custom;
+            item.custom_id = canonical_id;
         } else {
             list.push(RecentEmojiItem {
-                emoji: emoji.to_string(),
-                name: name.to_string(),
-                is_custom,
-                custom_id: custom_id.map(ToString::to_string),
+                emoji: canonical_emoji,
+                name: canonical_name,
+                is_custom: canonical_custom,
+                custom_id: canonical_id,
                 use_count: 1,
                 last_used_timestamp: now,
             });
         }
 
-        // Ordena por score (frequência + recência)
-        list.sort_by(|a, b| b.use_count.cmp(&a.use_count));
+        // Ordena por frequência e, em empate, pelo uso mais recente.
+        list.sort_by(|a, b| {
+            b.use_count
+                .cmp(&a.use_count)
+                .then_with(|| b.last_used_timestamp.cmp(&a.last_used_timestamp))
+        });
         if list.len() > 32 {
             list.truncate(32);
         }
@@ -663,7 +816,10 @@ impl MediaCacheManager {
         let path = self.recent_emojis_path();
         let json_bytes = serde_json::to_vec_pretty(items)?;
 
-        let temp_name = format!(".tmp_recents_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_name = format!(
+            ".tmp_recents_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let temp_path = self.root_path.join(temp_name);
         {
             let mut f = File::create(&temp_path)?;
@@ -696,7 +852,10 @@ impl MediaCacheManager {
         let path = self.favorite_stickers_path();
         let json_bytes = serde_json::to_vec_pretty(items)?;
 
-        let temp_name = format!(".tmp_fav_stickers_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_name = format!(
+            ".tmp_fav_stickers_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let temp_path = self.root_path.join(temp_name);
         {
             let mut f = File::create(&temp_path)?;
@@ -743,14 +902,53 @@ impl MediaCacheManager {
         Ok(())
     }
 
+    // --- Cache de pacotes oficiais de figurinhas ---
+
+    pub fn sticker_packs_path(&self) -> PathBuf {
+        self.root_path.join("sticker_packs.json")
+    }
+
+    pub fn load_sticker_packs_from_disk(&self) -> Vec<StickerPack> {
+        let path = self.sticker_packs_path();
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_sticker_packs_to_disk(&self, packs: &[StickerPack]) -> Result<()> {
+        self.ensure_dirs()?;
+        let path = self.sticker_packs_path();
+        let bytes = serde_json::to_vec_pretty(packs)?;
+        let temp_path = self.root_path.join(format!(
+            ".tmp_sticker_packs_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        {
+            let mut file = File::create(&temp_path)?;
+            file.write_all(&bytes)?;
+            file.sync_data()?;
+        }
+        fs::rename(temp_path, path)?;
+        Ok(())
+    }
+
+    pub fn get_sticker_packs_cached(&self) -> Vec<StickerPack> {
+        self.load_sticker_packs_from_disk()
+    }
+
     // --- Persistência de Emojis e Figurinhas de Guildas (Guild Media Cache) ---
 
     pub fn guild_emojis_path(&self, guild_id: &str) -> PathBuf {
-        self.root_path.join("guilds").join(format!("{}_emojis.json", guild_id))
+        self.root_path
+            .join("guilds")
+            .join(format!("{}_emojis.json", guild_id))
     }
 
     pub fn guild_stickers_path(&self, guild_id: &str) -> PathBuf {
-        self.root_path.join("guilds").join(format!("{}_stickers.json", guild_id))
+        self.root_path
+            .join("guilds")
+            .join(format!("{}_stickers.json", guild_id))
     }
 
     pub fn load_guild_emojis_from_disk(&self, guild_id: &str) -> Option<Vec<DiscordEmoji>> {
@@ -768,7 +966,11 @@ impl MediaCacheManager {
         let _ = fs::create_dir_all(&dir);
         let path = self.guild_emojis_path(guild_id);
         let json_bytes = serde_json::to_vec_pretty(items)?;
-        let temp_name = format!(".tmp_emojis_{}_{}", guild_id, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_name = format!(
+            ".tmp_emojis_{}_{}",
+            guild_id,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let temp_path = dir.join(temp_name);
         {
             let mut f = File::create(&temp_path)?;
@@ -789,12 +991,20 @@ impl MediaCacheManager {
             .and_then(|c| serde_json::from_str(&c).ok())
     }
 
-    pub fn save_guild_stickers_to_disk(&self, guild_id: &str, items: &[DiscordSticker]) -> Result<()> {
+    pub fn save_guild_stickers_to_disk(
+        &self,
+        guild_id: &str,
+        items: &[DiscordSticker],
+    ) -> Result<()> {
         let dir = self.root_path.join("guilds");
         let _ = fs::create_dir_all(&dir);
         let path = self.guild_stickers_path(guild_id);
         let json_bytes = serde_json::to_vec_pretty(items)?;
-        let temp_name = format!(".tmp_stickers_{}_{}", guild_id, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let temp_name = format!(
+            ".tmp_stickers_{}_{}",
+            guild_id,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let temp_path = dir.join(temp_name);
         {
             let mut f = File::create(&temp_path)?;
@@ -807,33 +1017,9 @@ impl MediaCacheManager {
 
     /// Agrega figurinhas favoritas, figurinhas de servidores (guild stickers) e pacotes padrão oficiais do Discord
     pub async fn get_all_stickers(&self, guild_stickers: &[DiscordSticker]) -> Vec<DiscordSticker> {
-        let mut result = Vec::new();
-        let mut seen_ids = std::collections::HashSet::new();
-
-        // 1. Figurinhas favoritas persistidas
-        for sticker in self.get_favorite_stickers().await {
-            if seen_ids.insert(sticker.id.clone()) {
-                result.push(sticker);
-            }
-        }
-
-        // 2. Figurinhas de servidores (guild stickers)
-        for sticker in guild_stickers {
-            if seen_ids.insert(sticker.id.clone()) {
-                result.push(sticker.clone());
-            }
-        }
-
-        // 3. Figurinhas de pacotes padrão oficiais do Discord
-        for pack in Self::get_default_sticker_packs() {
-            for sticker in pack.stickers {
-                if seen_ids.insert(sticker.id.clone()) {
-                    result.push(sticker);
-                }
-            }
-        }
-
-        result
+        let favorites = self.get_favorite_stickers().await;
+        let packs = self.get_sticker_packs_cached();
+        Self::aggregate_stickers(&favorites, guild_stickers, &packs)
     }
 
     /// Função utilitária estática para agregar figurinhas a partir de coleções existentes
@@ -845,108 +1031,134 @@ impl MediaCacheManager {
         let mut result = Vec::new();
         let mut seen_ids = std::collections::HashSet::new();
 
+        // Fontes frescas têm prioridade sobre o snapshot de favoritos. Um item
+        // frescamente indisponível também precisa bloquear o favorito antigo.
+        for s in guild_stickers
+            .iter()
+            .chain(packs.iter().flat_map(|pack| pack.stickers.iter()))
+        {
+            if seen_ids.insert(s.id.clone()) && s.available {
+                result.push(s.clone());
+            }
+        }
         for s in favorite_stickers {
-            if seen_ids.insert(s.id.clone()) {
+            if seen_ids.insert(s.id.clone()) && s.available {
                 result.push(s.clone());
-            }
-        }
-
-        for s in guild_stickers {
-            if seen_ids.insert(s.id.clone()) {
-                result.push(s.clone());
-            }
-        }
-
-        for pack in packs {
-            for s in &pack.stickers {
-                if seen_ids.insert(s.id.clone()) {
-                    result.push(s.clone());
-                }
             }
         }
 
         result
     }
 
-    // --- Parser Universal de GIFs (Discord API v9 / Tenor v2 / Klipy / Giphy) ---
+    // --- Parsers de mídia real (Discord API / Tenor / Klipy / Giphy) ---
 
-    /// Converte um objeto JSON individual retornado pelo Discord/Tenor/Klipy em TenorGif
-    pub fn parse_gif_from_json(val: &serde_json::Value, default_category: Option<&str>) -> Option<TenorGif> {
-        let id = val.get("id").and_then(|v| v.as_str())?.to_string();
-        let title = val.get("title")
-            .or_else(|| val.get("content_description"))
-            .or_else(|| val.get("description"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("GIF")
-            .to_string();
-
-        let src = val.get("src").and_then(|v| v.as_str()).map(ToString::to_string);
-        let gif_src = val.get("gif_src").and_then(|v| v.as_str()).map(ToString::to_string);
-
-        // Extrai URL principal (suporta Discord, Tenor v2, Klipy, Giphy)
-        let url = val.get("url")
-            .and_then(|v| v.as_str())
-            .or_else(|| gif_src.as_deref())
-            .or_else(|| src.as_deref())
-            .or_else(|| {
-                val.get("media_formats")
-                    .and_then(|mf| mf.get("gif").or_else(|| mf.get("mp4")).or_else(|| mf.get("webm")))
-                    .and_then(|f| f.get("url"))
-                    .and_then(|u| u.as_str())
-            })
-            .or_else(|| {
-                val.get("images")
-                    .and_then(|img| img.get("original"))
-                    .and_then(|o| o.get("url"))
-                    .and_then(|u| u.as_str())
-            })
+    /// Converte um objeto JSON individual do Discord ou Tenor v2.
+    /// A página do provedor nunca é confundida com mídia e entradas inválidas são descartadas.
+    pub fn parse_gif_from_json(
+        val: &serde_json::Value,
+        default_category: Option<&str>,
+    ) -> Option<TenorGif> {
+        let string = |key: &str| {
+            val.get(key)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+        };
+        let http_string = |key: &str| string(key).filter(|url| TenorGif::is_http_url(url));
+        let id = string("id")?.to_string();
+        let title = string("title")
+            .or_else(|| string("content_description"))
+            .or_else(|| string("description"))
             .unwrap_or_default()
             .to_string();
-
-        // Extrai URL de preview
-        let preview_url = val.get("preview")
-            .and_then(|v| v.as_str())
-            .or_else(|| src.as_deref())
-            .or_else(|| gif_src.as_deref())
-            .or_else(|| {
-                val.get("media_formats")
-                    .and_then(|mf| mf.get("tinygif").or_else(|| mf.get("gif")))
-                    .and_then(|f| f.get("url"))
-                    .and_then(|u| u.as_str())
+        let media_formats = val
+            .get("media_formats")
+            .filter(|formats| formats.is_object());
+        let media_url = |keys: &[&str]| {
+            keys.iter().find_map(|key| {
+                media_formats
+                    .and_then(|formats| formats.get(*key))
+                    .and_then(|format| format.get("url"))
+                    .and_then(|url| url.as_str())
+                    .filter(|url| TenorGif::is_http_url(url))
             })
-            .or_else(|| {
-                val.get("images")
-                    .and_then(|img| img.get("preview_gif").or_else(|| img.get("fixed_height_small")))
-                    .and_then(|o| o.get("url"))
-                    .and_then(|u| u.as_str())
-            })
-            .unwrap_or(&url)
-            .to_string();
-
-        let dims = if let Some(arr) = val.get("dims").and_then(|v| v.as_array()) {
-            if arr.len() >= 2 {
-                let w = arr[0].as_u64().unwrap_or(220) as u32;
-                let h = arr[1].as_u64().unwrap_or(180) as u32;
-                (w, h)
-            } else {
-                (220, 180)
-            }
-        } else if let Some(dims_val) = val.get("media_formats").and_then(|mf| mf.get("gif")).and_then(|g| g.get("dims")).and_then(|d| d.as_array()) {
-            if dims_val.len() >= 2 {
-                let w = dims_val[0].as_u64().unwrap_or(220) as u32;
-                let h = dims_val[1].as_u64().unwrap_or(180) as u32;
-                (w, h)
-            } else {
-                (220, 180)
-            }
-        } else {
-            (220, 180)
         };
 
-        let category = val.get("category")
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-            .or_else(|| default_category.map(ToString::to_string));
+        let (url, src, gif_src, preview) = if media_formats.is_some() {
+            let media = media_url(&["gif"])?;
+            (
+                media.to_string(),
+                http_string("src")
+                    .or_else(|| media_url(&["mp4", "webm"]))
+                    .unwrap_or(media)
+                    .to_string(),
+                http_string("gif_src").unwrap_or(media).to_string(),
+                http_string("preview")
+                    .or_else(|| media_url(&["preview"]))
+                    .or_else(|| media_url(&["tinygif", "nanogif"]))
+                    .unwrap_or(media)
+                    .to_string(),
+            )
+        } else {
+            (
+                http_string("url")?.to_string(),
+                http_string("src")?.to_string(),
+                http_string("gif_src")?.to_string(),
+                http_string("preview").unwrap_or_default().to_string(),
+            )
+        };
+
+        let top_width = val
+            .get("width")
+            .and_then(|value| value.as_u64())
+            .filter(|value| *value > 0);
+        let top_height = val
+            .get("height")
+            .and_then(|value| value.as_u64())
+            .filter(|value| *value > 0);
+        let valid_dims = |dims: &serde_json::Value| {
+            dims.as_array()
+                .filter(|dims| {
+                    dims.len() >= 2
+                        && dims[0].as_u64().is_some_and(|value| value > 0)
+                        && dims[1].as_u64().is_some_and(|value| value > 0)
+                })
+                .map(|dims| {
+                    (
+                        dims[0].as_u64().unwrap_or_default() as u32,
+                        dims[1].as_u64().unwrap_or_default() as u32,
+                    )
+                })
+        };
+        let legacy_dims = val.get("dims").and_then(valid_dims).or_else(|| {
+            media_formats
+                .and_then(|formats| formats.get("gif"))
+                .and_then(|format| format.get("dims"))
+                .and_then(valid_dims)
+        });
+        let dims = match (top_width, top_height) {
+            (Some(width), Some(height)) => (width as u32, height as u32),
+            _ => legacy_dims.unwrap_or_else(default_gif_dims),
+        };
+        let width = top_width.map(|value| value as u32).unwrap_or(dims.0);
+        let height = top_height.map(|value| value as u32).unwrap_or(dims.1);
+
+        let preview_url = if TenorGif::is_image_url(&gif_src) {
+            gif_src.clone()
+        } else if media_formats.is_some() {
+            media_url(&["tinygif", "nanogif"])
+                .filter(|url| TenorGif::is_image_url(url))
+                .unwrap_or_default()
+                .to_string()
+        } else if TenorGif::is_image_url(&preview) {
+            preview.clone()
+        } else {
+            String::new()
+        };
+        let category = string("category").map(ToString::to_string).or_else(|| {
+            default_category
+                .filter(|category| !category.is_empty())
+                .map(ToString::to_string)
+        });
 
         Some(TenorGif {
             id,
@@ -954,122 +1166,374 @@ impl MediaCacheManager {
             preview_url,
             url,
             dims,
+            width,
+            height,
+            preview,
             category,
-            src,
-            gif_src,
+            src: Some(src),
+            gif_src: Some(gif_src),
         })
     }
 
-    /// Processa resposta com GIFs retornando lista de TenorGif
-    pub fn parse_gifs_response(val: &serde_json::Value, default_category: Option<&str>) -> Vec<TenorGif> {
+    /// Processa respostas de busca/trending sem duplicar IDs.
+    pub fn parse_gifs_response(
+        val: &serde_json::Value,
+        default_category: Option<&str>,
+    ) -> Vec<TenorGif> {
+        let items = val
+            .as_array()
+            .or_else(|| val.get("gifs").and_then(|value| value.as_array()))
+            .or_else(|| val.get("results").and_then(|value| value.as_array()))
+            .or_else(|| val.get("data").and_then(|value| value.as_array()));
         let mut gifs = Vec::new();
-
-        if let Some(arr) = val.as_array() {
-            for item in arr {
+        let mut seen = std::collections::HashSet::new();
+        if let Some(items) = items {
+            for item in items {
                 if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
-                    gifs.push(gif);
-                }
-            }
-        } else if let Some(arr) = val.get("gifs").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
-                    gifs.push(gif);
-                }
-            }
-        } else if let Some(arr) = val.get("results").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
-                    gifs.push(gif);
-                }
-            }
-        } else if let Some(arr) = val.get("data").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(gif) = Self::parse_gif_from_json(item, default_category) {
-                    gifs.push(gif);
+                    if seen.insert(gif.id.clone()) {
+                        gifs.push(gif);
+                    }
                 }
             }
         }
-
         gifs
     }
 
-    /// Processa categorias de GIFs do Discord
+    /// Parser estrito de `GET /gifs/trending`: categories e gifs são obrigatórios.
+    pub fn parse_trending_gifs_response(
+        val: &serde_json::Value,
+    ) -> Result<(Vec<DiscordGifCategory>, Vec<TenorGif>)> {
+        let raw_categories = val
+            .get("categories")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| anyhow::anyhow!("trending response is missing categories array"))?;
+        let raw_gifs = val
+            .get("gifs")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| anyhow::anyhow!("trending response is missing gifs array"))?;
+        let mut categories = Vec::new();
+        let mut seen_categories = std::collections::HashSet::new();
+        for item in raw_categories {
+            let category = Self::parse_gif_category_from_json(item)
+                .ok_or_else(|| anyhow::anyhow!("invalid GIF category in trending response"))?;
+            if seen_categories.insert(category.name.clone()) {
+                categories.push(category);
+            }
+        }
+        let mut gifs = Vec::new();
+        let mut seen_gifs = std::collections::HashSet::new();
+        for item in raw_gifs {
+            if item.get("media_formats").is_none() && !Self::has_complete_discord_gif_contract(item)
+            {
+                anyhow::bail!("incomplete Discord GIF in trending response");
+            }
+            let gif = Self::parse_gif_from_json(item, None)
+                .ok_or_else(|| anyhow::anyhow!("invalid GIF in trending response"))?;
+            if seen_gifs.insert(gif.id.clone()) {
+                gifs.push(gif);
+            }
+        }
+        Ok((categories, gifs))
+    }
+
+    /// Parser estrito de `GET /gifs/search`: somente array na raiz é aceito.
+    pub fn parse_search_gifs_response(val: &serde_json::Value) -> Result<Vec<TenorGif>> {
+        let items = val
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("GIF search response must be a root array"))?;
+        let mut gifs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for item in items {
+            if item.get("media_formats").is_none() && !Self::has_complete_discord_gif_contract(item)
+            {
+                anyhow::bail!("incomplete Discord GIF in search response");
+            }
+            let gif = Self::parse_gif_from_json(item, None)
+                .ok_or_else(|| anyhow::anyhow!("invalid GIF in search response"))?;
+            if seen.insert(gif.id.clone()) {
+                gifs.push(gif);
+            }
+        }
+        Ok(gifs)
+    }
+
+    fn has_complete_discord_gif_contract(val: &serde_json::Value) -> bool {
+        ["url", "src", "gif_src", "preview"].iter().all(|key| {
+            val.get(*key)
+                .and_then(|value| value.as_str())
+                .is_some_and(|url| TenorGif::is_http_url(url))
+        }) && val
+            .get("width")
+            .and_then(|value| value.as_u64())
+            .is_some_and(|value| value > 0)
+            && val
+                .get("height")
+                .and_then(|value| value.as_u64())
+                .is_some_and(|value| value > 0)
+    }
+
+    fn parse_gif_category_from_json(val: &serde_json::Value) -> Option<DiscordGifCategory> {
+        let name = val
+            .get("name")
+            .and_then(|value| value.as_str())
+            .filter(|name| !name.is_empty())?;
+        let src = val
+            .get("src")
+            .and_then(|value| value.as_str())
+            .filter(|src| TenorGif::is_http_url(src))?;
+        Some(DiscordGifCategory {
+            name: name.to_string(),
+            src: src.to_string(),
+        })
+    }
+
+    /// Processa categorias retornadas junto ao trending ou por um array dedicado.
     pub fn parse_gif_categories_response(val: &serde_json::Value) -> Vec<DiscordGifCategory> {
-        let mut cats = Vec::new();
-        if let Some(arr) = val.get("categories").and_then(|v| v.as_array()) {
-            for item in arr {
-                if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                    let src = item.get("src").and_then(|v| v.as_str()).map(ToString::to_string);
-                    cats.push(DiscordGifCategory {
-                        name: name.to_string(),
-                        src,
-                    });
+        let items = val
+            .as_array()
+            .or_else(|| val.get("categories").and_then(|value| value.as_array()));
+        let mut categories = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if let Some(items) = items {
+            for item in items {
+                if let Some(category) = Self::parse_gif_category_from_json(item) {
+                    if seen.insert(category.name.clone()) {
+                        categories.push(category);
+                    }
                 }
             }
         }
-        cats
+        categories
     }
 
-    // --- Tenor GIF Search & Trending Provider ---
-
-    /// Busca GIFs no Tenor ou retorna resultados rápidos do cache/fallback
-    pub async fn search_tenor_gifs(&self, query: &str, limit: usize) -> Vec<TenorGif> {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return self.trending_tenor_gifs(limit).await;
+    /// Converte um sticker da API. Campos ausentes continuam vazios, sem nomes ou IDs fictícios.
+    pub fn parse_sticker_from_json(
+        val: &serde_json::Value,
+        guild_id: Option<&str>,
+    ) -> Option<DiscordSticker> {
+        let id = val
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty())?;
+        let name = val
+            .get("name")
+            .and_then(|value| value.as_str())
+            .filter(|name| !name.is_empty())?;
+        let tags = val.get("tags").and_then(|value| value.as_str())?;
+        if !matches!(
+            val.get("type").and_then(|value| value.as_u64()),
+            Some(1 | 2)
+        ) {
+            return None;
         }
+        let format_type = serde_json::from_value(val.get("format_type")?.clone()).ok()?;
+        Some(DiscordSticker {
+            id: id.to_string(),
+            pack_id: val
+                .get("pack_id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string),
+            name: name.to_string(),
+            description: val
+                .get("description")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string),
+            tags: tags.to_string(),
+            format_type,
+            available: val
+                .get("available")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true),
+            guild_id: val
+                .get("guild_id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| guild_id.map(ToString::to_string)),
+        })
+    }
 
-        // Checa cache de buscas (TTL 15 min)
-        {
-            let cache = self.tenor_cache.read().await;
-            if let Some((results, cached_time)) = cache.get(&q) {
-                if Utc::now() - *cached_time < chrono::Duration::minutes(15) {
-                    return results.iter().take(limit).cloned().collect();
+    /// Converte um pacote de stickers da API.
+    pub fn parse_sticker_pack_from_json(val: &serde_json::Value) -> Option<StickerPack> {
+        let id = val
+            .get("id")
+            .and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty())?;
+        let name = val
+            .get("name")
+            .and_then(|value| value.as_str())
+            .filter(|name| !name.is_empty())?;
+        let sku_id = val
+            .get("sku_id")
+            .and_then(|value| value.as_str())
+            .filter(|sku| !sku.is_empty())?;
+        let description = val.get("description").and_then(|value| value.as_str())?;
+        let stickers = val
+            .get("stickers")
+            .and_then(|value| value.as_array())?
+            .iter()
+            .map(|sticker| Self::parse_sticker_from_json(sticker, None))
+            .collect::<Option<Vec<_>>>()?;
+        Some(StickerPack {
+            id: id.to_string(),
+            name: name.to_string(),
+            sku_id: sku_id.to_string(),
+            description: description.to_string(),
+            stickers,
+            banner_asset_id: val
+                .get("banner_asset_id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string),
+        })
+    }
+
+    /// Processa `GET /sticker-packs`.
+    pub fn parse_sticker_packs_response(val: &serde_json::Value) -> Vec<StickerPack> {
+        let items = val
+            .as_array()
+            .or_else(|| val.get("sticker_packs").and_then(|value| value.as_array()));
+        let mut packs = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        if let Some(items) = items {
+            for item in items {
+                if let Some(pack) = Self::parse_sticker_pack_from_json(item) {
+                    if seen.insert(pack.id.clone()) {
+                        packs.push(pack);
+                    }
                 }
             }
         }
+        packs
+    }
 
-        // Gera resultados adaptáveis de demonstração de alta paridade com o Discord
-        let fallback_gifs = Self::curated_tenor_gifs();
-        let filtered: Vec<TenorGif> = fallback_gifs
-            .into_iter()
-            .filter(|g| {
-                g.title.to_lowercase().contains(&q)
-                    || q.contains(&g.title.to_lowercase())
-                    || g.category.as_deref().map(|c| c.to_lowercase() == q).unwrap_or(false)
+    // --- Cache de respostas reais de GIF ---
+
+    /// Chave canônica: locale e media_format fazem parte da identidade da resposta.
+    pub fn gif_cache_key(locale: &str, media_format: &str, query: Option<&str>) -> String {
+        let locale = locale.trim().to_lowercase();
+        let media_format = media_format.trim().to_lowercase();
+        match query.map(str::trim).filter(|query| !query.is_empty()) {
+            Some(query) => format!(
+                "gifs|{}|{}|search|{}",
+                locale,
+                media_format,
+                query.to_lowercase()
+            ),
+            None => format!("gifs|{}|{}|trending", locale, media_format),
+        }
+    }
+
+    /// Registra uma resposta real da API, inclusive um hit vazio.
+    pub async fn cache_gifs(
+        &self,
+        locale: &str,
+        media_format: &str,
+        query: Option<&str>,
+        gifs: &[TenorGif],
+    ) {
+        let key = Self::gif_cache_key(locale, media_format, query);
+        self.tenor_cache
+            .write()
+            .await
+            .insert(key, (gifs.to_vec(), Utc::now()));
+    }
+
+    pub async fn get_cached_gifs(
+        &self,
+        locale: &str,
+        media_format: &str,
+        query: Option<&str>,
+    ) -> Vec<TenorGif> {
+        let key = Self::gif_cache_key(locale, media_format, query);
+        let cache = self.tenor_cache.read().await;
+        cache
+            .get(&key)
+            .filter(|(_, cached_at)| Utc::now() - *cached_at < chrono::Duration::minutes(15))
+            .map(|(gifs, _)| gifs.clone())
+            .unwrap_or_default()
+    }
+
+    /// Distingue um hit vazio de um miss para a UI não refazer a requisição.
+    pub async fn has_cached_gifs(
+        &self,
+        locale: &str,
+        media_format: &str,
+        query: Option<&str>,
+    ) -> bool {
+        let key = Self::gif_cache_key(locale, media_format, query);
+        self.tenor_cache
+            .read()
+            .await
+            .get(&key)
+            .is_some_and(|(_, cached_at)| Utc::now() - *cached_at < chrono::Duration::minutes(15))
+    }
+
+    pub fn get_cached_gifs_sync(
+        &self,
+        locale: &str,
+        media_format: &str,
+        query: Option<&str>,
+    ) -> Vec<TenorGif> {
+        let key = Self::gif_cache_key(locale, media_format, query);
+        self.tenor_cache
+            .try_read()
+            .ok()
+            .and_then(|cache| {
+                cache.get(&key).and_then(|(gifs, cached_at)| {
+                    (Utc::now() - *cached_at < chrono::Duration::minutes(15)).then(|| gifs.clone())
+                })
             })
+            .unwrap_or_default()
+    }
+
+    pub async fn cache_gif_categories(&self, categories: &[DiscordGifCategory]) {
+        *self.gif_categories.write().await = Some((categories.to_vec(), Utc::now()));
+    }
+
+    pub fn get_gif_categories_sync(&self) -> Vec<DiscordGifCategory> {
+        self.gif_categories
+            .try_read()
+            .ok()
+            .and_then(|cache| {
+                cache.as_ref().and_then(|(categories, cached_at)| {
+                    (Utc::now() - *cached_at < chrono::Duration::minutes(15))
+                        .then(|| categories.clone())
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Compatibilidade: retorna somente resultados reais previamente registrados no cache.
+    pub async fn search_tenor_gifs(&self, query: &str, limit: usize) -> Vec<TenorGif> {
+        self.get_cached_gifs("pt-BR", "mp4", Some(query))
+            .await
+            .into_iter()
             .take(limit)
-            .collect();
-
-        let final_results = if filtered.is_empty() {
-            Self::curated_tenor_gifs().into_iter().take(limit).collect()
-        } else {
-            filtered
-        };
-
-        // Salva no cache
-        let mut cache = self.tenor_cache.write().await;
-        cache.insert(q, (final_results.clone(), Utc::now()));
-
-        final_results
+            .collect()
     }
 
-    /// Retorna os GIFs em alta (Trending)
+    /// Compatibilidade: retorna somente o trending real previamente registrado no cache.
     pub async fn trending_tenor_gifs(&self, limit: usize) -> Vec<TenorGif> {
-        Self::get_curated_tenor_gifs_for_category("trending").into_iter().take(limit).collect()
+        self.get_cached_gifs("pt-BR", "mp4", None)
+            .await
+            .into_iter()
+            .take(limit)
+            .collect()
     }
 
-    /// Retorna a lista de GIFs curados
+    /// Mantido para compatibilidade; não existe biblioteca curada em produção.
     pub fn get_curated_tenor_gifs() -> Vec<TenorGif> {
-        Self::curated_tenor_gifs()
+        Vec::new()
     }
 
-    /// Retorna GIFs filtrados por categoria em alta: vazio sem resposta real da API (ZERO MOCKS)
+    /// Mantido para compatibilidade; não existe biblioteca curada em produção.
     pub fn get_curated_tenor_gifs_for_category(_category: &str) -> Vec<TenorGif> {
         Vec::new()
     }
 
-    /// Biblioteca de GIFs virais curados: vazio para obedecer à regra de ZERO MOCKS sem rede
+    /// Mantido para compatibilidade; não existe biblioteca curada em produção.
     pub fn curated_tenor_gifs() -> Vec<TenorGif> {
         Vec::new()
     }
@@ -1097,132 +1561,1251 @@ impl MediaCacheManager {
                 "people",
                 "PESSOAS & EXPRESSÕES",
                 &[
-                    "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "🥲", "🥹",
-                    "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰", "😘", "😗",
-                    "😙", "😚", "😋", "😛", "😝", "😜", "🤪", "🤨", "🧐", "🤓",
-                    "😎", "🥸", "🤩", "🥳", "😏", "😒", "😞", "😔", "😟", "😕",
-                    "🙁", "☹️", "😣", "😖", "😫", "😩", "🥺", "😢", "😭", "😮‍💨",
-                    "😤", "😠", "😡", "🤬", "🤯", "😳", "🥵", "🥶", "😱", "😨",
-                    "😰", "😥", "😓", "🤗", "🤔", "🫣", "🤭", "🫢", "🫡", "🤫",
-                    "🫠", "🤥", "😶", "🫥", "😐", "🫤", "😑", "🫨", "😬", "🙄",
-                    "😯", "😦", "😧", "😮", "😲", "🥱", "😴", "🤤", "😪", "😵",
-                    "🤐", "🥴", "🤢", "🤮", "🤧", "😷", "🤒", "🤕", "🤑", "🤠",
-                    "😈", "👿", "👹", "👺", "🤡", "💩", "👻", "💀", "☠️", "👽",
-                    "👾", "🤖", "🎃", "😺", "😸", "😹", "😻", "😼", "😽", "🙀",
-                    "👋", "🤚", "🖐️", "✋", "🖖", "👌", "🤌", "🤏", "✌️", "🤞",
-                    "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "👍", "👎", "✊",
-                    "👊", "👏", "🙌", "🫶", "👐", "🤲", "🤝", "🙏", "✍️", "💪",
+                    "😀",
+                    "😃",
+                    "😄",
+                    "😁",
+                    "😆",
+                    "😅",
+                    "😂",
+                    "🤣",
+                    "🥲",
+                    "🥹",
+                    "😊",
+                    "😇",
+                    "🙂",
+                    "🙃",
+                    "😉",
+                    "😌",
+                    "😍",
+                    "🥰",
+                    "😘",
+                    "😗",
+                    "😙",
+                    "😚",
+                    "😋",
+                    "😛",
+                    "😝",
+                    "😜",
+                    "🤪",
+                    "🤨",
+                    "🧐",
+                    "🤓",
+                    "😎",
+                    "🥸",
+                    "🤩",
+                    "🥳",
+                    "😏",
+                    "😒",
+                    "😞",
+                    "😔",
+                    "😟",
+                    "😕",
+                    "🙁",
+                    "☹️",
+                    "😣",
+                    "😖",
+                    "😫",
+                    "😩",
+                    "🥺",
+                    "😢",
+                    "😭",
+                    "😮‍💨",
+                    "😤",
+                    "😠",
+                    "😡",
+                    "🤬",
+                    "🤯",
+                    "😳",
+                    "🥵",
+                    "🥶",
+                    "😱",
+                    "😨",
+                    "😰",
+                    "😥",
+                    "😓",
+                    "🤗",
+                    "🤔",
+                    "🫣",
+                    "🤭",
+                    "🫢",
+                    "🫡",
+                    "🤫",
+                    "🫠",
+                    "🤥",
+                    "😶",
+                    "🫥",
+                    "😐",
+                    "🫤",
+                    "😑",
+                    "🫨",
+                    "😬",
+                    "🙄",
+                    "😯",
+                    "😦",
+                    "😧",
+                    "😮",
+                    "😲",
+                    "🥱",
+                    "😴",
+                    "🤤",
+                    "😪",
+                    "😵",
+                    "🤐",
+                    "🥴",
+                    "🤢",
+                    "🤮",
+                    "🤧",
+                    "😷",
+                    "🤒",
+                    "🤕",
+                    "🤑",
+                    "🤠",
+                    "😈",
+                    "👿",
+                    "👹",
+                    "👺",
+                    "🤡",
+                    "💩",
+                    "👻",
+                    "💀",
+                    "☠️",
+                    "👽",
+                    "👾",
+                    "🤖",
+                    "🎃",
+                    "😺",
+                    "😸",
+                    "😹",
+                    "😻",
+                    "😼",
+                    "😽",
+                    "🙀",
+                    "👋",
+                    "🤚",
+                    "🖐️",
+                    "✋",
+                    "🖖",
+                    "👌",
+                    "🤌",
+                    "🤏",
+                    "✌️",
+                    "🤞",
+                    "🤟",
+                    "🤘",
+                    "🤙",
+                    "👈",
+                    "👉",
+                    "👆",
+                    "👇",
+                    "👍",
+                    "👎",
+                    "✊",
+                    "👊",
+                    "👏",
+                    "🙌",
+                    "🫶",
+                    "👐",
+                    "🤲",
+                    "🤝",
+                    "🙏",
+                    "✍️",
+                    "💪",
                 ],
             ),
             (
                 "nature",
                 "ANIMAIS & NATUREZA",
                 &[
-                    "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐻‍❄️", "🐨",
-                    "🐯", "🦁", "🐮", "🐷", "🐽", "🐸", "🐵", "🙈", "🙉", "🙊",
-                    "🐒", "🐔", "🐧", "🐦", "🐤", "🐣", "🐥", "🦆", "🦅", "🦉",
-                    "🦇", "🐺", "🐗", "🐴", "🦄", "🐝", "🐛", "🦋", "🐌", "🐞",
-                    "🐜", "🪰", "🪲", "🪳", "🦟", "🦗", "🕷️", "🕸️", "🦂", "🐢",
-                    "🐍", "🦎", "🦖", "🦕", "🐙", "🦑", "🦐", "🦞", "🦀", "🐡",
-                    "🐠", "🐟", "🐬", "🐳", "🐋", "🦈", "🦭", "🐊", "🐅", "🐆",
-                    "🌵", "🎄", "🌲", "🌳", "🌴", "🌱", "🌿", "☘️", "🍀", "🎍",
-                    "🪴", "🎋", "🍃", "🍂", "🍁", "🍄", "🐚", "🌾", "💐", "🌷",
-                    "🌹", "🥀", "🌺", "🌸", "🌼", "🌻", "🌞", "🌝", "⭐", "🌟",
-                    "✨", "⚡", "☄️", "💥", "🔥", "🌪️", "🌈", "☀️", "🌤️", "⛅",
-                    "☁️", "🌧️", "⛈️", "🌩️", "🌨️", "❄️", "⛄", "💨", "💧", "🌊",
+                    "🐶",
+                    "🐱",
+                    "🐭",
+                    "🐹",
+                    "🐰",
+                    "🦊",
+                    "🐻",
+                    "🐼",
+                    "🐻‍❄️",
+                    "🐨",
+                    "🐯",
+                    "🦁",
+                    "🐮",
+                    "🐷",
+                    "🐽",
+                    "🐸",
+                    "🐵",
+                    "🙈",
+                    "🙉",
+                    "🙊",
+                    "🐒",
+                    "🐔",
+                    "🐧",
+                    "🐦",
+                    "🐤",
+                    "🐣",
+                    "🐥",
+                    "🦆",
+                    "🦅",
+                    "🦉",
+                    "🦇",
+                    "🐺",
+                    "🐗",
+                    "🐴",
+                    "🦄",
+                    "🐝",
+                    "🐛",
+                    "🦋",
+                    "🐌",
+                    "🐞",
+                    "🐜",
+                    "🪰",
+                    "🪲",
+                    "🪳",
+                    "🦟",
+                    "🦗",
+                    "🕷️",
+                    "🕸️",
+                    "🦂",
+                    "🐢",
+                    "🐍",
+                    "🦎",
+                    "🦖",
+                    "🦕",
+                    "🐙",
+                    "🦑",
+                    "🦐",
+                    "🦞",
+                    "🦀",
+                    "🐡",
+                    "🐠",
+                    "🐟",
+                    "🐬",
+                    "🐳",
+                    "🐋",
+                    "🦈",
+                    "🦭",
+                    "🐊",
+                    "🐅",
+                    "🐆",
+                    "🌵",
+                    "🎄",
+                    "🌲",
+                    "🌳",
+                    "🌴",
+                    "🌱",
+                    "🌿",
+                    "☘️",
+                    "🍀",
+                    "🎍",
+                    "🪴",
+                    "🎋",
+                    "🍃",
+                    "🍂",
+                    "🍁",
+                    "🍄",
+                    "🐚",
+                    "🌾",
+                    "💐",
+                    "🌷",
+                    "🌹",
+                    "🥀",
+                    "🌺",
+                    "🌸",
+                    "🌼",
+                    "🌻",
+                    "🌞",
+                    "🌝",
+                    "⭐",
+                    "🌟",
+                    "✨",
+                    "⚡",
+                    "☄️",
+                    "💥",
+                    "🔥",
+                    "🌪️",
+                    "🌈",
+                    "☀️",
+                    "🌤️",
+                    "⛅",
+                    "☁️",
+                    "🌧️",
+                    "⛈️",
+                    "🌩️",
+                    "🌨️",
+                    "❄️",
+                    "⛄",
+                    "💨",
+                    "💧",
+                    "🌊",
                 ],
             ),
             (
                 "food",
                 "COMIDA & BEBIDA",
                 &[
-                    "🍏", "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐",
-                    "🍈", "🍒", "🍑", "🥭", "🍍", "🥥", "🥝", "🍅", "🥑", "🥦",
-                    "🥬", "🥒", "🌶️", "🫑", "🌽", "🥕", "🧄", "🧅", "🥔", "🍠",
-                    "🥐", "🥯", "🍞", "🥖", "🥨", "🧀", "🥚", "🍳", "🧈", "🥞",
-                    "🧇", "🥓", "🥩", "🍗", "🍖", "🌭", "🍔", "🍟", "🍕", "🥪",
-                    "🥙", "🌮", "🌯", "🥗", "🥘", "🍝", "🍜", "🍲", "🍛", "🍣",
-                    "🍱", "🥟", "🍤", "🍙", "🍚", "🍘", "🍦", "🍧", "🍨", "🍩",
-                    "🍪", "🎂", "🍰", "🧁", "🥧", "🍫", "🍬", "🍭", "🍮", "🍯",
-                    "🍼", "🥛", "☕", "🫖", "🍵", "🧃", "🥤", "🧋", "🍶", "🍺",
-                    "🍻", "🥂", "🍷", "🥃", "🍸", "🍹", "🧉", "🍾", "🧊", "🍽️",
+                    "🍏", "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍈", "🍒", "🍑",
+                    "🥭", "🍍", "🥥", "🥝", "🍅", "🥑", "🥦", "🥬", "🥒", "🌶️", "🫑", "🌽", "🥕",
+                    "🧄", "🧅", "🥔", "🍠", "🥐", "🥯", "🍞", "🥖", "🥨", "🧀", "🥚", "🍳", "🧈",
+                    "🥞", "🧇", "🥓", "🥩", "🍗", "🍖", "🌭", "🍔", "🍟", "🍕", "🥪", "🥙", "🌮",
+                    "🌯", "🥗", "🥘", "🍝", "🍜", "🍲", "🍛", "🍣", "🍱", "🥟", "🍤", "🍙", "🍚",
+                    "🍘", "🍦", "🍧", "🍨", "🍩", "🍪", "🎂", "🍰", "🧁", "🥧", "🍫", "🍬", "🍭",
+                    "🍮", "🍯", "🍼", "🥛", "☕", "🫖", "🍵", "🧃", "🥤", "🧋", "🍶", "🍺", "🍻",
+                    "🥂", "🍷", "🥃", "🍸", "🍹", "🧉", "🍾", "🧊", "🍽️",
                 ],
             ),
             (
                 "activity",
                 "ATIVIDADES & ESPORTES",
                 &[
-                    "⚽", "🏀", "🏈", "⚾", "🥎", "🎾", "🏐", "🏉", "🥏", "🎱",
-                    "🏓", "🏸", "🏒", "🏑", "🏏", "⛳", "🏹", "🎣", "🤿", "🥊",
-                    "🥋", "🎽", "🛹", "🛼", "🎿", "🏂", "🏋️", "🤺", "🏇", "🏄",
-                    "🏊", "🚣", "🧗", "🚵", "🚴", "🏆", "🥇", "🥈", "🥉", "🏅",
-                    "🎖️", "🎫", "🎟️", "🎪", "🎭", "🎨", "🎬", "🎤", "🎧", "🎼",
-                    "🎹", "🥁", "🎷", "🎺", "🎸", "🪕", "🎻", "🎲", "♟️", "🎯",
-                    "🎳", "🎮", "🎰", "🧩",
+                    "⚽", "🏀", "🏈", "⚾", "🥎", "🎾", "🏐", "🏉", "🥏", "🎱", "🏓", "🏸", "🏒",
+                    "🏑", "🏏", "⛳", "🏹", "🎣", "🤿", "🥊", "🥋", "🎽", "🛹", "🛼", "🎿", "🏂",
+                    "🏋️", "🤺", "🏇", "🏄", "🏊", "🚣", "🧗", "🚵", "🚴", "🏆", "🥇", "🥈", "🥉",
+                    "🏅", "🎖️", "🎫", "🎟️", "🎪", "🎭", "🎨", "🎬", "🎤", "🎧", "🎼", "🎹", "🥁",
+                    "🎷", "🎺", "🎸", "🪕", "🎻", "🎲", "♟️", "🎯", "🎳", "🎮", "🎰", "🧩",
                 ],
             ),
             (
                 "travel",
                 "VIAGENS & LUGARES",
                 &[
-                    "🚗", "🚙", "🚕", "🚌", "🏎️", "🚓", "🚑", "🚒", "🚐", "🚚",
-                    "🚛", "🚜", "🏍️", "🛵", "🚲", "🛴", "🚨", "🚔", "🚡", "🚠",
-                    "🚃", "🚋", "🚄", "🚅", "🚈", "🚂", "🚆", "🚇", "🚊", "🚉",
-                    "🚁", "🛩️", "✈️", "🛫", "🛬", "🛰️", "🚀", "🛸", "⛵", "🚤",
-                    "🛥️", "🛳️", "⛴️", "🚢", "⚓", "⛽", "🚧", "🚦", "🚥", "🗺️",
-                    "🗿", "🗽", "🗼", "🏰", "🏯", "🏟️", "🎡", "🎢", "🎠", "🏖️",
-                    "🏝️", "🏜️", "🌋", "⛰️", "🏔️", "🏕️", "⛺", "🏠", "🏡", "🏢",
+                    "🚗", "🚙", "🚕", "🚌", "🏎️", "🚓", "🚑", "🚒", "🚐", "🚚", "🚛", "🚜", "🏍️",
+                    "🛵", "🚲", "🛴", "🚨", "🚔", "🚡", "🚠", "🚃", "🚋", "🚄", "🚅", "🚈", "🚂",
+                    "🚆", "🚇", "🚊", "🚉", "🚁", "🛩️", "✈️", "🛫", "🛬", "🛰️", "🚀", "🛸", "⛵",
+                    "🚤", "🛥️", "🛳️", "⛴️", "🚢", "⚓", "⛽", "🚧", "🚦", "🚥", "🗺️", "🗿", "🗽",
+                    "🗼", "🏰", "🏯", "🏟️", "🎡", "🎢", "🎠", "🏖️", "🏝️", "🏜️", "🌋", "⛰️", "🏔️",
+                    "🏕️", "⛺", "🏠", "🏡", "🏢",
                 ],
             ),
             (
                 "objects",
                 "OBJETOS",
                 &[
-                    "⌚", "📱", "📲", "💻", "⌨️", "🖥️", "🖨️", "🖱️", "🕹️", "💾",
-                    "💿", "📀", "📷", "📸", "📹", "🎥", "📽️", "🎞️", "📞", "☎️",
-                    "📟", "📠", "📺", "📻", "🎙️", "⏱️", "⏲️", "⏰", "🕰️", "⌛",
-                    "⏳", "📡", "🔋", "🔌", "💡", "🔦", "🕯️", "🧯", "🗑️", "💸",
-                    "💵", "🪙", "💰", "💳", "💎", "⚖️", "🧰", "🔧", "🔨", "⚒️",
-                    "🛠️", "⛏️", "🔩", "⚙️", "🧱", "⛓️", "🧲", "🔫", "💣", "🧨",
-                    "🔪", "🗡️", "⚔️", "🛡️", "⚰️", "🔮", "💈", "🔭", "🔬", "💊",
-                    "💉", "🧬", "🧹", "🧺", "🧻", "🚽", "🚿", "🛁", "🧼", "🔑",
-                    "🗝️", "🚪", "🪑", "🛋️", "🛍️", "🛒", "🎁", "🎈", "🎉", "🎊",
-                    "✉️", "📩", "📦", "🏷️", "📁", "📂", "📅", "📆", "📊", "📋",
-                    "📌", "📍", "📎", "📏", "📐", "✂️", "🔒", "🔓", "🔏", "🔐",
+                    "⌚", "📱", "📲", "💻", "⌨️", "🖥️", "🖨️", "🖱️", "🕹️", "💾", "💿", "📀", "📷",
+                    "📸", "📹", "🎥", "📽️", "🎞️", "📞", "☎️", "📟", "📠", "📺", "📻", "🎙️", "⏱️",
+                    "⏲️", "⏰", "🕰️", "⌛", "⏳", "📡", "🔋", "🔌", "💡", "🔦", "🕯️", "🧯", "🗑️",
+                    "💸", "💵", "🪙", "💰", "💳", "💎", "⚖️", "🧰", "🔧", "🔨", "⚒️", "🛠️", "⛏️",
+                    "🔩", "⚙️", "🧱", "⛓️", "🧲", "🔫", "💣", "🧨", "🔪", "🗡️", "⚔️", "🛡️", "⚰️",
+                    "🔮", "💈", "🔭", "🔬", "💊", "💉", "🧬", "🧹", "🧺", "🧻", "🚽", "🚿", "🛁",
+                    "🧼", "🔑", "🗝️", "🚪", "🪑", "🛋️", "🛍️", "🛒", "🎁", "🎈", "🎉", "🎊", "✉️",
+                    "📩", "📦", "🏷️", "📁", "📂", "📅", "📆", "📊", "📋", "📌", "📍", "📎", "📏",
+                    "📐", "✂️", "🔒", "🔓", "🔏", "🔐",
                 ],
             ),
             (
                 "symbols",
                 "SÍMBOLOS",
                 &[
-                    "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔",
-                    "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "☮️", "✝️",
-                    "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎", "☯️", "☦️", "🛐", "⛎",
-                    "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑",
-                    "♒", "♓", "🆔", "⚛️", "☢️", "☣️", "📴", "📳", "✴️", "🆚",
-                    "🅰️", "🅱️", "🆎", "🅾️", "🆘", "❌", "⭕", "🛑", "⛔", "📛",
-                    "🚫", "💯", "💢", "♨️", "❗", "❕", "❓", "❔", "‼️", "⁉️",
-                    "⚠️", "🔱", "⚜️", "🔰", "♻️", "✅", "❇️", "✳️", "❎", "🌐",
-                    "🌀", "💤", "🏧", "♿", "🅿️", "🚹", "🚺", "🚼", "🚻", "🎦",
-                    "📶", "🆗", "🆙", "🆒", "🆕", "🆓", "0️⃣", "1️⃣", "2️⃣", "3️⃣",
-                    "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "▶️", "⏸️", "⏹️",
-                    "⏩", "⏪", "⏫", "⏬", "➡️", "⬅️", "⬆️", "⬇️", "🎵", "🎶",
-                    "➕", "➖", "➗", "✖️", "💲", "💱", "™️", "©️", "®️", "✔️",
-                    "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "⚫", "⚪", "🟤", "🔺",
-                    "🔻", "🔸", "🔹", "🔶", "🔷", "▪️", "▫️", "🔔", "🔕", "📢",
+                    "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️", "💕", "💞",
+                    "💓", "💗", "💖", "💘", "💝", "☮️", "✝️", "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎",
+                    "☯️", "☦️", "🛐", "⛎", "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐",
+                    "♑", "♒", "♓", "🆔", "⚛️", "☢️", "☣️", "📴", "📳", "✴️", "🆚", "🅰️", "🅱️",
+                    "🆎", "🅾️", "🆘", "❌", "⭕", "🛑", "⛔", "📛", "🚫", "💯", "💢", "♨️", "❗",
+                    "❕", "❓", "❔", "‼️", "⁉️", "⚠️", "🔱", "⚜️", "🔰", "♻️", "✅", "❇️", "✳️",
+                    "❎", "🌐", "🌀", "💤", "🏧", "♿", "🅿️", "🚹", "🚺", "🚼", "🚻", "🎦", "📶",
+                    "🆗", "🆙", "🆒", "🆕", "🆓", "0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣",
+                    "8️⃣", "9️⃣", "🔟", "▶️", "⏸️", "⏹️", "⏩", "⏪", "⏫", "⏬", "➡️", "⬅️", "⬆️",
+                    "⬇️", "🎵", "🎶", "➕", "➖", "➗", "✖️", "💲", "💱", "™️", "©️", "®️", "✔️",
+                    "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "⚫", "⚪", "🟤", "🔺", "🔻", "🔸", "🔹",
+                    "🔶", "🔷", "▪️", "▫️", "🔔", "🔕", "📢",
                 ],
             ),
             (
                 "flags",
                 "BANDEIRAS",
                 &[
-                    "🏁", "🚩", "🎌", "🏴", "🏳️", "🏳️‍🌈", "🏳️‍⚧️", "🏴‍☠️", "🇧🇷", "🇺🇸",
-                    "🇵🇹", "🇪🇸", "🇫🇷", "🇩🇪", "🇮🇹", "🇬🇧", "🇯🇵", "🇰🇷", "🇨🇳", "🇨🇦",
-                    "🇦🇺", "🇷🇺", "🇮🇳", "🇲🇽", "🇦🇷", "🇨🇱", "🇨🇴", "🇺🇾", "🇿🇦", "🇪🇺",
+                    "🏁",
+                    "🚩",
+                    "🎌",
+                    "🏴",
+                    "🏳️",
+                    "🏳️‍🌈",
+                    "🏳️‍⚧️",
+                    "🏴‍☠️",
+                    "🇧🇷",
+                    "🇺🇸",
+                    "🇵🇹",
+                    "🇪🇸",
+                    "🇫🇷",
+                    "🇩🇪",
+                    "🇮🇹",
+                    "🇬🇧",
+                    "🇯🇵",
+                    "🇰🇷",
+                    "🇨🇳",
+                    "🇨🇦",
+                    "🇦🇺",
+                    "🇷🇺",
+                    "🇮🇳",
+                    "🇲🇽",
+                    "🇦🇷",
+                    "🇨🇱",
+                    "🇨🇴",
+                    "🇺🇾",
+                    "🇿🇦",
+                    "🇪🇺",
                     "🇺🇳",
                 ],
             ),
         ]
+    }
+
+    /// Nome oficial Unicode (UTS #51, Emoji 18.0) usado pela busca do seletor.
+    pub fn unicode_emoji_name(emoji: &str) -> Option<&'static str> {
+        match emoji {
+            "0️⃣" => Some("keycap: 0"),
+            "1️⃣" => Some("keycap: 1"),
+            "2️⃣" => Some("keycap: 2"),
+            "3️⃣" => Some("keycap: 3"),
+            "4️⃣" => Some("keycap: 4"),
+            "5️⃣" => Some("keycap: 5"),
+            "6️⃣" => Some("keycap: 6"),
+            "7️⃣" => Some("keycap: 7"),
+            "8️⃣" => Some("keycap: 8"),
+            "9️⃣" => Some("keycap: 9"),
+            "©️" => Some("copyright"),
+            "®️" => Some("registered"),
+            "‼️" => Some("double exclamation mark"),
+            "⁉️" => Some("exclamation question mark"),
+            "™️" => Some("trade mark"),
+            "⌚" => Some("watch"),
+            "⌛" => Some("hourglass done"),
+            "⌨️" => Some("keyboard"),
+            "⏩" => Some("fast-forward button"),
+            "⏪" => Some("fast reverse button"),
+            "⏫" => Some("fast up button"),
+            "⏬" => Some("fast down button"),
+            "⏰" => Some("alarm clock"),
+            "⏱️" => Some("stopwatch"),
+            "⏲️" => Some("timer clock"),
+            "⏳" => Some("hourglass not done"),
+            "⏸️" => Some("pause button"),
+            "⏹️" => Some("stop button"),
+            "▪️" => Some("black small square"),
+            "▫️" => Some("white small square"),
+            "▶️" => Some("play button"),
+            "☀️" => Some("sun"),
+            "☁️" => Some("cloud"),
+            "☄️" => Some("comet"),
+            "☎️" => Some("telephone"),
+            "☕" => Some("hot beverage"),
+            "☘️" => Some("shamrock"),
+            "☠️" => Some("skull and crossbones"),
+            "☢️" => Some("radioactive"),
+            "☣️" => Some("biohazard"),
+            "☦️" => Some("orthodox cross"),
+            "☪️" => Some("star and crescent"),
+            "☮️" => Some("peace symbol"),
+            "☯️" => Some("yin yang"),
+            "☸️" => Some("wheel of dharma"),
+            "☹️" => Some("frowning face"),
+            "♈" => Some("Aries"),
+            "♉" => Some("Taurus"),
+            "♊" => Some("Gemini"),
+            "♋" => Some("Cancer"),
+            "♌" => Some("Leo"),
+            "♍" => Some("Virgo"),
+            "♎" => Some("Libra"),
+            "♏" => Some("Scorpio"),
+            "♐" => Some("Sagittarius"),
+            "♑" => Some("Capricorn"),
+            "♒" => Some("Aquarius"),
+            "♓" => Some("Pisces"),
+            "♟️" => Some("chess pawn"),
+            "♨️" => Some("hot springs"),
+            "♻️" => Some("recycling symbol"),
+            "♿" => Some("wheelchair symbol"),
+            "⚒️" => Some("hammer and pick"),
+            "⚓" => Some("anchor"),
+            "⚔️" => Some("crossed swords"),
+            "⚖️" => Some("balance scale"),
+            "⚙️" => Some("gear"),
+            "⚛️" => Some("atom symbol"),
+            "⚜️" => Some("fleur-de-lis"),
+            "⚠️" => Some("warning"),
+            "⚡" => Some("high voltage"),
+            "⚪" => Some("white circle"),
+            "⚫" => Some("black circle"),
+            "⚰️" => Some("coffin"),
+            "⚽" => Some("soccer ball"),
+            "⚾" => Some("baseball"),
+            "⛄" => Some("snowman without snow"),
+            "⛅" => Some("sun behind cloud"),
+            "⛈️" => Some("cloud with lightning and rain"),
+            "⛎" => Some("Ophiuchus"),
+            "⛏️" => Some("pick"),
+            "⛓️" => Some("chains"),
+            "⛔" => Some("no entry"),
+            "⛰️" => Some("mountain"),
+            "⛳" => Some("flag in hole"),
+            "⛴️" => Some("ferry"),
+            "⛵" => Some("sailboat"),
+            "⛺" => Some("tent"),
+            "⛽" => Some("fuel pump"),
+            "✂️" => Some("scissors"),
+            "✅" => Some("check mark button"),
+            "✈️" => Some("airplane"),
+            "✉️" => Some("envelope"),
+            "✊" => Some("raised fist"),
+            "✋" => Some("raised hand"),
+            "✌️" => Some("victory hand"),
+            "✍️" => Some("writing hand"),
+            "✔️" => Some("check mark"),
+            "✖️" => Some("multiply"),
+            "✝️" => Some("latin cross"),
+            "✡️" => Some("star of David"),
+            "✨" => Some("sparkles"),
+            "✳️" => Some("eight-spoked asterisk"),
+            "✴️" => Some("eight-pointed star"),
+            "❄️" => Some("snowflake"),
+            "❇️" => Some("sparkle"),
+            "❌" => Some("cross mark"),
+            "❎" => Some("cross mark button"),
+            "❓" => Some("red question mark"),
+            "❔" => Some("white question mark"),
+            "❕" => Some("white exclamation mark"),
+            "❗" => Some("red exclamation mark"),
+            "❣️" => Some("heart exclamation"),
+            "❤️" => Some("red heart"),
+            "➕" => Some("plus"),
+            "➖" => Some("minus"),
+            "➗" => Some("divide"),
+            "➡️" => Some("right arrow"),
+            "⬅️" => Some("left arrow"),
+            "⬆️" => Some("up arrow"),
+            "⬇️" => Some("down arrow"),
+            "⭐" => Some("star"),
+            "⭕" => Some("hollow red circle"),
+            "🅰️" => Some("A button (blood type)"),
+            "🅱️" => Some("B button (blood type)"),
+            "🅾️" => Some("O button (blood type)"),
+            "🅿️" => Some("P button"),
+            "🆎" => Some("AB button (blood type)"),
+            "🆒" => Some("COOL button"),
+            "🆓" => Some("FREE button"),
+            "🆔" => Some("ID button"),
+            "🆕" => Some("NEW button"),
+            "🆗" => Some("OK button"),
+            "🆘" => Some("SOS button"),
+            "🆙" => Some("UP! button"),
+            "🆚" => Some("VS button"),
+            "🇦🇷" => Some("flag: Argentina"),
+            "🇦🇺" => Some("flag: Australia"),
+            "🇧🇷" => Some("flag: Brazil"),
+            "🇨🇦" => Some("flag: Canada"),
+            "🇨🇱" => Some("flag: Chile"),
+            "🇨🇳" => Some("flag: China"),
+            "🇨🇴" => Some("flag: Colombia"),
+            "🇩🇪" => Some("flag: Germany"),
+            "🇪🇸" => Some("flag: Spain"),
+            "🇪🇺" => Some("flag: European Union"),
+            "🇫🇷" => Some("flag: France"),
+            "🇬🇧" => Some("flag: United Kingdom"),
+            "🇮🇳" => Some("flag: India"),
+            "🇮🇹" => Some("flag: Italy"),
+            "🇯🇵" => Some("flag: Japan"),
+            "🇰🇷" => Some("flag: South Korea"),
+            "🇲🇽" => Some("flag: Mexico"),
+            "🇵🇹" => Some("flag: Portugal"),
+            "🇷🇺" => Some("flag: Russia"),
+            "🇺🇳" => Some("flag: United Nations"),
+            "🇺🇸" => Some("flag: United States"),
+            "🇺🇾" => Some("flag: Uruguay"),
+            "🇿🇦" => Some("flag: South Africa"),
+            "🌀" => Some("cyclone"),
+            "🌈" => Some("rainbow"),
+            "🌊" => Some("water wave"),
+            "🌋" => Some("volcano"),
+            "🌐" => Some("globe with meridians"),
+            "🌝" => Some("full moon face"),
+            "🌞" => Some("sun with face"),
+            "🌟" => Some("glowing star"),
+            "🌤️" => Some("sun behind small cloud"),
+            "🌧️" => Some("cloud with rain"),
+            "🌨️" => Some("cloud with snow"),
+            "🌩️" => Some("cloud with lightning"),
+            "🌪️" => Some("tornado"),
+            "🌭" => Some("hot dog"),
+            "🌮" => Some("taco"),
+            "🌯" => Some("burrito"),
+            "🌱" => Some("seedling"),
+            "🌲" => Some("evergreen tree"),
+            "🌳" => Some("deciduous tree"),
+            "🌴" => Some("palm tree"),
+            "🌵" => Some("cactus"),
+            "🌶️" => Some("hot pepper"),
+            "🌷" => Some("tulip"),
+            "🌸" => Some("cherry blossom"),
+            "🌹" => Some("rose"),
+            "🌺" => Some("hibiscus"),
+            "🌻" => Some("sunflower"),
+            "🌼" => Some("blossom"),
+            "🌽" => Some("ear of corn"),
+            "🌾" => Some("sheaf of rice"),
+            "🌿" => Some("herb"),
+            "🍀" => Some("four leaf clover"),
+            "🍁" => Some("maple leaf"),
+            "🍂" => Some("fallen leaf"),
+            "🍃" => Some("leaf fluttering in wind"),
+            "🍄" => Some("mushroom"),
+            "🍅" => Some("tomato"),
+            "🍇" => Some("grapes"),
+            "🍈" => Some("melon"),
+            "🍉" => Some("watermelon"),
+            "🍊" => Some("tangerine"),
+            "🍋" => Some("lemon"),
+            "🍌" => Some("banana"),
+            "🍍" => Some("pineapple"),
+            "🍎" => Some("red apple"),
+            "🍏" => Some("green apple"),
+            "🍐" => Some("pear"),
+            "🍑" => Some("peach"),
+            "🍒" => Some("cherries"),
+            "🍓" => Some("strawberry"),
+            "🍔" => Some("hamburger"),
+            "🍕" => Some("pizza"),
+            "🍖" => Some("meat on bone"),
+            "🍗" => Some("poultry leg"),
+            "🍘" => Some("rice cracker"),
+            "🍙" => Some("rice ball"),
+            "🍚" => Some("cooked rice"),
+            "🍛" => Some("curry rice"),
+            "🍜" => Some("steaming bowl"),
+            "🍝" => Some("spaghetti"),
+            "🍞" => Some("bread"),
+            "🍟" => Some("french fries"),
+            "🍠" => Some("roasted sweet potato"),
+            "🍣" => Some("sushi"),
+            "🍤" => Some("fried shrimp"),
+            "🍦" => Some("soft ice cream"),
+            "🍧" => Some("shaved ice"),
+            "🍨" => Some("ice cream"),
+            "🍩" => Some("doughnut"),
+            "🍪" => Some("cookie"),
+            "🍫" => Some("chocolate bar"),
+            "🍬" => Some("candy"),
+            "🍭" => Some("lollipop"),
+            "🍮" => Some("custard"),
+            "🍯" => Some("honey pot"),
+            "🍰" => Some("shortcake"),
+            "🍱" => Some("bento box"),
+            "🍲" => Some("pot of food"),
+            "🍳" => Some("cooking"),
+            "🍵" => Some("teacup without handle"),
+            "🍶" => Some("sake"),
+            "🍷" => Some("wine glass"),
+            "🍸" => Some("cocktail glass"),
+            "🍹" => Some("tropical drink"),
+            "🍺" => Some("beer mug"),
+            "🍻" => Some("clinking beer mugs"),
+            "🍼" => Some("baby bottle"),
+            "🍽️" => Some("fork and knife with plate"),
+            "🍾" => Some("bottle with popping cork"),
+            "🎁" => Some("wrapped gift"),
+            "🎂" => Some("birthday cake"),
+            "🎃" => Some("jack-o-lantern"),
+            "🎄" => Some("Christmas tree"),
+            "🎈" => Some("balloon"),
+            "🎉" => Some("party popper"),
+            "🎊" => Some("confetti ball"),
+            "🎋" => Some("tanabata tree"),
+            "🎌" => Some("crossed flags"),
+            "🎍" => Some("pine decoration"),
+            "🎖️" => Some("military medal"),
+            "🎙️" => Some("studio microphone"),
+            "🎞️" => Some("film frames"),
+            "🎟️" => Some("admission tickets"),
+            "🎠" => Some("carousel horse"),
+            "🎡" => Some("ferris wheel"),
+            "🎢" => Some("roller coaster"),
+            "🎣" => Some("fishing pole"),
+            "🎤" => Some("microphone"),
+            "🎥" => Some("movie camera"),
+            "🎦" => Some("cinema"),
+            "🎧" => Some("headphone"),
+            "🎨" => Some("artist palette"),
+            "🎪" => Some("circus tent"),
+            "🎫" => Some("ticket"),
+            "🎬" => Some("clapper board"),
+            "🎭" => Some("performing arts"),
+            "🎮" => Some("video game"),
+            "🎯" => Some("bullseye"),
+            "🎰" => Some("slot machine"),
+            "🎱" => Some("pool 8 ball"),
+            "🎲" => Some("game die"),
+            "🎳" => Some("bowling"),
+            "🎵" => Some("musical note"),
+            "🎶" => Some("musical notes"),
+            "🎷" => Some("saxophone"),
+            "🎸" => Some("guitar"),
+            "🎹" => Some("musical keyboard"),
+            "🎺" => Some("trumpet"),
+            "🎻" => Some("violin"),
+            "🎼" => Some("musical score"),
+            "🎽" => Some("running shirt"),
+            "🎾" => Some("tennis"),
+            "🎿" => Some("skis"),
+            "🏀" => Some("basketball"),
+            "🏁" => Some("chequered flag"),
+            "🏂" => Some("snowboarder"),
+            "🏄" => Some("person surfing"),
+            "🏅" => Some("sports medal"),
+            "🏆" => Some("trophy"),
+            "🏇" => Some("horse racing"),
+            "🏈" => Some("american football"),
+            "🏉" => Some("rugby football"),
+            "🏊" => Some("person swimming"),
+            "🏋️" => Some("person lifting weights"),
+            "🏍️" => Some("motorcycle"),
+            "🏎️" => Some("racing car"),
+            "🏏" => Some("cricket game"),
+            "🏐" => Some("volleyball"),
+            "🏑" => Some("field hockey"),
+            "🏒" => Some("ice hockey"),
+            "🏓" => Some("ping pong"),
+            "🏔️" => Some("snow-capped mountain"),
+            "🏕️" => Some("camping"),
+            "🏖️" => Some("beach with umbrella"),
+            "🏜️" => Some("desert"),
+            "🏝️" => Some("desert island"),
+            "🏟️" => Some("stadium"),
+            "🏠" => Some("house"),
+            "🏡" => Some("house with garden"),
+            "🏢" => Some("office building"),
+            "🏧" => Some("ATM sign"),
+            "🏯" => Some("Japanese castle"),
+            "🏰" => Some("castle"),
+            "🏳️" => Some("white flag"),
+            "🏳️‍⚧️" => Some("transgender flag"),
+            "🏳️‍🌈" => Some("rainbow flag"),
+            "🏴" => Some("black flag"),
+            "🏴‍☠️" => Some("pirate flag"),
+            "🏷️" => Some("label"),
+            "🏸" => Some("badminton"),
+            "🏹" => Some("bow and arrow"),
+            "🐅" => Some("tiger"),
+            "🐆" => Some("leopard"),
+            "🐊" => Some("crocodile"),
+            "🐋" => Some("whale"),
+            "🐌" => Some("snail"),
+            "🐍" => Some("snake"),
+            "🐒" => Some("monkey"),
+            "🐔" => Some("chicken"),
+            "🐗" => Some("boar"),
+            "🐙" => Some("octopus"),
+            "🐚" => Some("spiral shell"),
+            "🐛" => Some("bug"),
+            "🐜" => Some("ant"),
+            "🐝" => Some("honeybee"),
+            "🐞" => Some("lady beetle"),
+            "🐟" => Some("fish"),
+            "🐠" => Some("tropical fish"),
+            "🐡" => Some("blowfish"),
+            "🐢" => Some("turtle"),
+            "🐣" => Some("hatching chick"),
+            "🐤" => Some("baby chick"),
+            "🐥" => Some("front-facing baby chick"),
+            "🐦" => Some("bird"),
+            "🐧" => Some("penguin"),
+            "🐨" => Some("koala"),
+            "🐬" => Some("dolphin"),
+            "🐭" => Some("mouse face"),
+            "🐮" => Some("cow face"),
+            "🐯" => Some("tiger face"),
+            "🐰" => Some("rabbit face"),
+            "🐱" => Some("cat face"),
+            "🐳" => Some("spouting whale"),
+            "🐴" => Some("horse face"),
+            "🐵" => Some("monkey face"),
+            "🐶" => Some("dog face"),
+            "🐷" => Some("pig face"),
+            "🐸" => Some("frog"),
+            "🐹" => Some("hamster"),
+            "🐺" => Some("wolf"),
+            "🐻" => Some("bear"),
+            "🐻‍❄️" => Some("polar bear"),
+            "🐼" => Some("panda"),
+            "🐽" => Some("pig nose"),
+            "👆" => Some("backhand index pointing up"),
+            "👇" => Some("backhand index pointing down"),
+            "👈" => Some("backhand index pointing left"),
+            "👉" => Some("backhand index pointing right"),
+            "👊" => Some("oncoming fist"),
+            "👋" => Some("waving hand"),
+            "👌" => Some("OK hand"),
+            "👍" => Some("thumbs up"),
+            "👎" => Some("thumbs down"),
+            "👏" => Some("clapping hands"),
+            "👐" => Some("open hands"),
+            "👹" => Some("ogre"),
+            "👺" => Some("goblin"),
+            "👻" => Some("ghost"),
+            "👽" => Some("alien"),
+            "👾" => Some("alien monster"),
+            "👿" => Some("angry face with horns"),
+            "💀" => Some("skull"),
+            "💈" => Some("barber pole"),
+            "💉" => Some("syringe"),
+            "💊" => Some("pill"),
+            "💎" => Some("gem stone"),
+            "💐" => Some("bouquet"),
+            "💓" => Some("beating heart"),
+            "💔" => Some("broken heart"),
+            "💕" => Some("two hearts"),
+            "💖" => Some("sparkling heart"),
+            "💗" => Some("growing heart"),
+            "💘" => Some("heart with arrow"),
+            "💙" => Some("blue heart"),
+            "💚" => Some("green heart"),
+            "💛" => Some("yellow heart"),
+            "💜" => Some("purple heart"),
+            "💝" => Some("heart with ribbon"),
+            "💞" => Some("revolving hearts"),
+            "💡" => Some("light bulb"),
+            "💢" => Some("anger symbol"),
+            "💣" => Some("bomb"),
+            "💤" => Some("ZZZ"),
+            "💥" => Some("collision"),
+            "💧" => Some("droplet"),
+            "💨" => Some("dashing away"),
+            "💩" => Some("pile of poo"),
+            "💪" => Some("flexed biceps"),
+            "💯" => Some("hundred points"),
+            "💰" => Some("money bag"),
+            "💱" => Some("currency exchange"),
+            "💲" => Some("heavy dollar sign"),
+            "💳" => Some("credit card"),
+            "💵" => Some("dollar banknote"),
+            "💸" => Some("money with wings"),
+            "💻" => Some("laptop"),
+            "💾" => Some("floppy disk"),
+            "💿" => Some("optical disk"),
+            "📀" => Some("dvd"),
+            "📁" => Some("file folder"),
+            "📂" => Some("open file folder"),
+            "📅" => Some("calendar"),
+            "📆" => Some("tear-off calendar"),
+            "📊" => Some("bar chart"),
+            "📋" => Some("clipboard"),
+            "📌" => Some("pushpin"),
+            "📍" => Some("round pushpin"),
+            "📎" => Some("paperclip"),
+            "📏" => Some("straight ruler"),
+            "📐" => Some("triangular ruler"),
+            "📛" => Some("name badge"),
+            "📞" => Some("telephone receiver"),
+            "📟" => Some("pager"),
+            "📠" => Some("fax machine"),
+            "📡" => Some("satellite antenna"),
+            "📢" => Some("loudspeaker"),
+            "📦" => Some("package"),
+            "📩" => Some("envelope with arrow"),
+            "📱" => Some("mobile phone"),
+            "📲" => Some("mobile phone with arrow"),
+            "📳" => Some("vibration mode"),
+            "📴" => Some("mobile phone off"),
+            "📶" => Some("antenna bars"),
+            "📷" => Some("camera"),
+            "📸" => Some("camera with flash"),
+            "📹" => Some("video camera"),
+            "📺" => Some("television"),
+            "📻" => Some("radio"),
+            "📽️" => Some("film projector"),
+            "🔋" => Some("battery"),
+            "🔌" => Some("electric plug"),
+            "🔏" => Some("locked with pen"),
+            "🔐" => Some("locked with key"),
+            "🔑" => Some("key"),
+            "🔒" => Some("locked"),
+            "🔓" => Some("unlocked"),
+            "🔔" => Some("bell"),
+            "🔕" => Some("bell with slash"),
+            "🔟" => Some("keycap: 10"),
+            "🔥" => Some("fire"),
+            "🔦" => Some("flashlight"),
+            "🔧" => Some("wrench"),
+            "🔨" => Some("hammer"),
+            "🔩" => Some("nut and bolt"),
+            "🔪" => Some("kitchen knife"),
+            "🔫" => Some("water pistol"),
+            "🔬" => Some("microscope"),
+            "🔭" => Some("telescope"),
+            "🔮" => Some("crystal ball"),
+            "🔯" => Some("dotted six-pointed star"),
+            "🔰" => Some("Japanese symbol for beginner"),
+            "🔱" => Some("trident emblem"),
+            "🔴" => Some("red circle"),
+            "🔵" => Some("blue circle"),
+            "🔶" => Some("large orange diamond"),
+            "🔷" => Some("large blue diamond"),
+            "🔸" => Some("small orange diamond"),
+            "🔹" => Some("small blue diamond"),
+            "🔺" => Some("red triangle pointed up"),
+            "🔻" => Some("red triangle pointed down"),
+            "🕉️" => Some("om"),
+            "🕎" => Some("menorah"),
+            "🕯️" => Some("candle"),
+            "🕰️" => Some("mantelpiece clock"),
+            "🕷️" => Some("spider"),
+            "🕸️" => Some("spider web"),
+            "🕹️" => Some("joystick"),
+            "🖐️" => Some("hand with fingers splayed"),
+            "🖖" => Some("vulcan salute"),
+            "🖤" => Some("black heart"),
+            "🖥️" => Some("desktop computer"),
+            "🖨️" => Some("printer"),
+            "🖱️" => Some("computer mouse"),
+            "🗑️" => Some("wastebasket"),
+            "🗝️" => Some("old key"),
+            "🗡️" => Some("dagger"),
+            "🗺️" => Some("world map"),
+            "🗼" => Some("Tokyo tower"),
+            "🗽" => Some("Statue of Liberty"),
+            "🗿" => Some("moai"),
+            "😀" => Some("grinning face"),
+            "😁" => Some("beaming face with smiling eyes"),
+            "😂" => Some("face with tears of joy"),
+            "😃" => Some("grinning face with big eyes"),
+            "😄" => Some("grinning face with smiling eyes"),
+            "😅" => Some("grinning face with sweat"),
+            "😆" => Some("grinning squinting face"),
+            "😇" => Some("smiling face with halo"),
+            "😈" => Some("smiling face with horns"),
+            "😉" => Some("winking face"),
+            "😊" => Some("smiling face with smiling eyes"),
+            "😋" => Some("face savoring food"),
+            "😌" => Some("relieved face"),
+            "😍" => Some("smiling face with heart-eyes"),
+            "😎" => Some("smiling face with sunglasses"),
+            "😏" => Some("smirking face"),
+            "😐" => Some("neutral face"),
+            "😑" => Some("expressionless face"),
+            "😒" => Some("unamused face"),
+            "😓" => Some("downcast face with sweat"),
+            "😔" => Some("pensive face"),
+            "😕" => Some("confused face"),
+            "😖" => Some("confounded face"),
+            "😗" => Some("kissing face"),
+            "😘" => Some("face blowing a kiss"),
+            "😙" => Some("kissing face with smiling eyes"),
+            "😚" => Some("kissing face with closed eyes"),
+            "😛" => Some("face with tongue"),
+            "😜" => Some("winking face with tongue"),
+            "😝" => Some("squinting face with tongue"),
+            "😞" => Some("disappointed face"),
+            "😟" => Some("worried face"),
+            "😠" => Some("angry face"),
+            "😡" => Some("enraged face"),
+            "😢" => Some("crying face"),
+            "😣" => Some("persevering face"),
+            "😤" => Some("face with steam from nose"),
+            "😥" => Some("sad but relieved face"),
+            "😦" => Some("frowning face with open mouth"),
+            "😧" => Some("anguished face"),
+            "😨" => Some("fearful face"),
+            "😩" => Some("weary face"),
+            "😪" => Some("sleepy face"),
+            "😫" => Some("tired face"),
+            "😬" => Some("grimacing face"),
+            "😭" => Some("loudly crying face"),
+            "😮" => Some("face with open mouth"),
+            "😮‍💨" => Some("face exhaling"),
+            "😯" => Some("hushed face"),
+            "😰" => Some("anxious face with sweat"),
+            "😱" => Some("face screaming in fear"),
+            "😲" => Some("astonished face"),
+            "😳" => Some("flushed face"),
+            "😴" => Some("sleeping face"),
+            "😵" => Some("face with crossed-out eyes"),
+            "😶" => Some("face without mouth"),
+            "😷" => Some("face with medical mask"),
+            "😸" => Some("grinning cat with smiling eyes"),
+            "😹" => Some("cat with tears of joy"),
+            "😺" => Some("grinning cat"),
+            "😻" => Some("smiling cat with heart-eyes"),
+            "😼" => Some("cat with wry smile"),
+            "😽" => Some("kissing cat"),
+            "🙀" => Some("weary cat"),
+            "🙁" => Some("slightly frowning face"),
+            "🙂" => Some("slightly smiling face"),
+            "🙃" => Some("upside-down face"),
+            "🙄" => Some("face with rolling eyes"),
+            "🙈" => Some("see-no-evil monkey"),
+            "🙉" => Some("hear-no-evil monkey"),
+            "🙊" => Some("speak-no-evil monkey"),
+            "🙌" => Some("raising hands"),
+            "🙏" => Some("folded hands"),
+            "🚀" => Some("rocket"),
+            "🚁" => Some("helicopter"),
+            "🚂" => Some("locomotive"),
+            "🚃" => Some("railway car"),
+            "🚄" => Some("high-speed train"),
+            "🚅" => Some("bullet train"),
+            "🚆" => Some("train"),
+            "🚇" => Some("metro"),
+            "🚈" => Some("light rail"),
+            "🚉" => Some("station"),
+            "🚊" => Some("tram"),
+            "🚋" => Some("tram car"),
+            "🚌" => Some("bus"),
+            "🚐" => Some("minibus"),
+            "🚑" => Some("ambulance"),
+            "🚒" => Some("fire engine"),
+            "🚓" => Some("police car"),
+            "🚔" => Some("oncoming police car"),
+            "🚕" => Some("taxi"),
+            "🚗" => Some("automobile"),
+            "🚙" => Some("sport utility vehicle"),
+            "🚚" => Some("delivery truck"),
+            "🚛" => Some("articulated lorry"),
+            "🚜" => Some("tractor"),
+            "🚠" => Some("mountain cableway"),
+            "🚡" => Some("aerial tramway"),
+            "🚢" => Some("ship"),
+            "🚣" => Some("person rowing boat"),
+            "🚤" => Some("speedboat"),
+            "🚥" => Some("horizontal traffic light"),
+            "🚦" => Some("vertical traffic light"),
+            "🚧" => Some("construction"),
+            "🚨" => Some("police car light"),
+            "🚩" => Some("triangular flag"),
+            "🚪" => Some("door"),
+            "🚫" => Some("prohibited"),
+            "🚲" => Some("bicycle"),
+            "🚴" => Some("person biking"),
+            "🚵" => Some("person mountain biking"),
+            "🚹" => Some("men’s room"),
+            "🚺" => Some("women’s room"),
+            "🚻" => Some("restroom"),
+            "🚼" => Some("baby symbol"),
+            "🚽" => Some("toilet"),
+            "🚿" => Some("shower"),
+            "🛁" => Some("bathtub"),
+            "🛋️" => Some("couch and lamp"),
+            "🛍️" => Some("shopping bags"),
+            "🛐" => Some("place of worship"),
+            "🛑" => Some("stop sign"),
+            "🛒" => Some("shopping cart"),
+            "🛠️" => Some("hammer and wrench"),
+            "🛡️" => Some("shield"),
+            "🛥️" => Some("motor boat"),
+            "🛩️" => Some("small airplane"),
+            "🛫" => Some("airplane departure"),
+            "🛬" => Some("airplane arrival"),
+            "🛰️" => Some("satellite"),
+            "🛳️" => Some("passenger ship"),
+            "🛴" => Some("kick scooter"),
+            "🛵" => Some("motor scooter"),
+            "🛸" => Some("flying saucer"),
+            "🛹" => Some("skateboard"),
+            "🛼" => Some("roller skate"),
+            "🟠" => Some("orange circle"),
+            "🟡" => Some("yellow circle"),
+            "🟢" => Some("green circle"),
+            "🟣" => Some("purple circle"),
+            "🟤" => Some("brown circle"),
+            "🤌" => Some("pinched fingers"),
+            "🤍" => Some("white heart"),
+            "🤎" => Some("brown heart"),
+            "🤏" => Some("pinching hand"),
+            "🤐" => Some("zipper-mouth face"),
+            "🤑" => Some("money-mouth face"),
+            "🤒" => Some("face with thermometer"),
+            "🤓" => Some("nerd face"),
+            "🤔" => Some("thinking face"),
+            "🤕" => Some("face with head-bandage"),
+            "🤖" => Some("robot"),
+            "🤗" => Some("smiling face with open hands"),
+            "🤘" => Some("sign of the horns"),
+            "🤙" => Some("call me hand"),
+            "🤚" => Some("raised back of hand"),
+            "🤝" => Some("handshake"),
+            "🤞" => Some("crossed fingers"),
+            "🤟" => Some("love-you gesture"),
+            "🤠" => Some("cowboy hat face"),
+            "🤡" => Some("clown face"),
+            "🤢" => Some("nauseated face"),
+            "🤣" => Some("rolling on the floor laughing"),
+            "🤤" => Some("drooling face"),
+            "🤥" => Some("lying face"),
+            "🤧" => Some("sneezing face"),
+            "🤨" => Some("face with raised eyebrow"),
+            "🤩" => Some("star-struck"),
+            "🤪" => Some("zany face"),
+            "🤫" => Some("shushing face"),
+            "🤬" => Some("face with symbols on mouth"),
+            "🤭" => Some("face with hand over mouth"),
+            "🤮" => Some("face vomiting"),
+            "🤯" => Some("exploding head"),
+            "🤲" => Some("palms up together"),
+            "🤺" => Some("person fencing"),
+            "🤿" => Some("diving mask"),
+            "🥀" => Some("wilted flower"),
+            "🥁" => Some("drum"),
+            "🥂" => Some("clinking glasses"),
+            "🥃" => Some("tumbler glass"),
+            "🥇" => Some("1st place medal"),
+            "🥈" => Some("2nd place medal"),
+            "🥉" => Some("3rd place medal"),
+            "🥊" => Some("boxing glove"),
+            "🥋" => Some("martial arts uniform"),
+            "🥎" => Some("softball"),
+            "🥏" => Some("flying disc"),
+            "🥐" => Some("croissant"),
+            "🥑" => Some("avocado"),
+            "🥒" => Some("cucumber"),
+            "🥓" => Some("bacon"),
+            "🥔" => Some("potato"),
+            "🥕" => Some("carrot"),
+            "🥖" => Some("baguette bread"),
+            "🥗" => Some("green salad"),
+            "🥘" => Some("shallow pan of food"),
+            "🥙" => Some("stuffed flatbread"),
+            "🥚" => Some("egg"),
+            "🥛" => Some("glass of milk"),
+            "🥝" => Some("kiwi fruit"),
+            "🥞" => Some("pancakes"),
+            "🥟" => Some("dumpling"),
+            "🥤" => Some("cup with straw"),
+            "🥥" => Some("coconut"),
+            "🥦" => Some("broccoli"),
+            "🥧" => Some("pie"),
+            "🥨" => Some("pretzel"),
+            "🥩" => Some("cut of meat"),
+            "🥪" => Some("sandwich"),
+            "🥬" => Some("leafy green"),
+            "🥭" => Some("mango"),
+            "🥯" => Some("bagel"),
+            "🥰" => Some("smiling face with hearts"),
+            "🥱" => Some("yawning face"),
+            "🥲" => Some("smiling face with tear"),
+            "🥳" => Some("partying face"),
+            "🥴" => Some("woozy face"),
+            "🥵" => Some("hot face"),
+            "🥶" => Some("cold face"),
+            "🥸" => Some("disguised face"),
+            "🥹" => Some("face holding back tears"),
+            "🥺" => Some("pleading face"),
+            "🦀" => Some("crab"),
+            "🦁" => Some("lion"),
+            "🦂" => Some("scorpion"),
+            "🦄" => Some("unicorn"),
+            "🦅" => Some("eagle"),
+            "🦆" => Some("duck"),
+            "🦇" => Some("bat"),
+            "🦈" => Some("shark"),
+            "🦉" => Some("owl"),
+            "🦊" => Some("fox"),
+            "🦋" => Some("butterfly"),
+            "🦎" => Some("lizard"),
+            "🦐" => Some("shrimp"),
+            "🦑" => Some("squid"),
+            "🦕" => Some("sauropod"),
+            "🦖" => Some("T-Rex"),
+            "🦗" => Some("cricket"),
+            "🦞" => Some("lobster"),
+            "🦟" => Some("mosquito"),
+            "🦭" => Some("seal"),
+            "🧀" => Some("cheese wedge"),
+            "🧁" => Some("cupcake"),
+            "🧃" => Some("beverage box"),
+            "🧄" => Some("garlic"),
+            "🧅" => Some("onion"),
+            "🧇" => Some("waffle"),
+            "🧈" => Some("butter"),
+            "🧉" => Some("mate"),
+            "🧊" => Some("ice"),
+            "🧋" => Some("bubble tea"),
+            "🧐" => Some("face with monocle"),
+            "🧗" => Some("person climbing"),
+            "🧡" => Some("orange heart"),
+            "🧨" => Some("firecracker"),
+            "🧩" => Some("puzzle piece"),
+            "🧬" => Some("dna"),
+            "🧯" => Some("fire extinguisher"),
+            "🧰" => Some("toolbox"),
+            "🧱" => Some("brick"),
+            "🧲" => Some("magnet"),
+            "🧹" => Some("broom"),
+            "🧺" => Some("basket"),
+            "🧻" => Some("roll of paper"),
+            "🧼" => Some("soap"),
+            "🪑" => Some("chair"),
+            "🪕" => Some("banjo"),
+            "🪙" => Some("coin"),
+            "🪰" => Some("fly"),
+            "🪲" => Some("beetle"),
+            "🪳" => Some("cockroach"),
+            "🪴" => Some("potted plant"),
+            "🫐" => Some("blueberries"),
+            "🫑" => Some("bell pepper"),
+            "🫖" => Some("teapot"),
+            "🫠" => Some("melting face"),
+            "🫡" => Some("saluting face"),
+            "🫢" => Some("face with open eyes and hand over mouth"),
+            "🫣" => Some("face with peeking eye"),
+            "🫤" => Some("face with diagonal mouth"),
+            "🫥" => Some("dotted line face"),
+            "🫨" => Some("shaking face"),
+            "🫶" => Some("heart hands"),
+            _ => None,
+        }
+    }
+
+    /// Indica se o emoji aceita os modificadores oficiais de tom de pele.
+    pub fn supports_skin_tone(emoji: &str) -> bool {
+        matches!(
+            emoji,
+            "✊" | "✋"
+                | "✌️"
+                | "✍️"
+                | "🏂"
+                | "🏄"
+                | "🏇"
+                | "🏊"
+                | "🏋️"
+                | "👆"
+                | "👇"
+                | "👈"
+                | "👉"
+                | "👊"
+                | "👋"
+                | "👌"
+                | "👍"
+                | "👎"
+                | "👏"
+                | "👐"
+                | "💪"
+                | "🖐️"
+                | "🖖"
+                | "🙌"
+                | "🙏"
+                | "🚣"
+                | "🚴"
+                | "🚵"
+                | "🤌"
+                | "🤏"
+                | "🤘"
+                | "🤙"
+                | "🤚"
+                | "🤝"
+                | "🤞"
+                | "🤟"
+                | "🤲"
+                | "🧗"
+                | "🫶"
+        )
+    }
+
+    /// Aplica o modificador selecionado sem duplicar tons já presentes.
+    pub fn apply_skin_tone(emoji: &str, modifier: &str) -> String {
+        if modifier.is_empty() || !Self::supports_skin_tone(emoji) {
+            return emoji.to_string();
+        }
+        let base: String = emoji
+            .chars()
+            .filter(|character| !matches!(character, '🏻' | '🏼' | '🏽' | '🏾' | '🏿'))
+            .collect();
+        format!("{}{}", base, modifier)
     }
 }
 
@@ -1232,18 +2815,25 @@ mod tests {
 
     #[test]
     fn test_media_cache_cas_sharding() {
-        let temp_dir = std::env::temp_dir().join(format!("discord_rs_cache_test_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "discord_rs_cache_test_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
         let mgr = MediaCacheManager::with_root(&temp_dir);
 
         let test_bytes = b"discord-rs media cache CAS test content";
         let url = "https://cdn.discordapp.com/emojis/123456.png";
-        let meta = mgr.store_media_for_url(url, test_bytes, "image/png").unwrap();
+        let meta = mgr
+            .store_media_for_url(url, test_bytes, "image/png")
+            .unwrap();
 
         assert_eq!(meta.size_bytes, test_bytes.len());
         assert_eq!(meta.url, url);
 
         // Verifica recuperação do cache pelo hash e pela URL (evitando re-downloads)
-        let loaded = mgr.load_media_by_url(url).expect("Media should be in cache");
+        let loaded = mgr
+            .load_media_by_url(url)
+            .expect("Media should be in cache");
         assert_eq!(loaded, test_bytes);
 
         let (bin_path, meta_path) = mgr.asset_paths(&meta.sha256_hash);
@@ -1256,17 +2846,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_recent_emojis_recording() {
-        let temp_dir = std::env::temp_dir().join(format!("discord_rs_recents_test_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "discord_rs_recents_test_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
         let mgr = MediaCacheManager::with_root(&temp_dir);
 
         let initial = mgr.get_recent_emojis().await;
-        assert!(initial.is_empty(), "Sem histórico de uso, recentes deve vir vazio");
+        assert!(
+            initial.is_empty(),
+            "Sem histórico de uso, recentes deve vir vazio"
+        );
 
         mgr.record_emoji_use("🦀", "ferris", false, None).await;
         mgr.record_emoji_use("🦀", "ferris", false, None).await;
 
         let recents = mgr.get_recent_emojis().await;
-        let ferris = recents.iter().find(|i| i.emoji == "🦀").expect("Ferris must be in recents");
+        let ferris = recents
+            .iter()
+            .find(|i| i.emoji == "🦀")
+            .expect("Ferris must be in recents");
         assert!(ferris.use_count >= 2);
 
         let _ = fs::remove_dir_all(&temp_dir);
@@ -1275,13 +2874,19 @@ mod tests {
     #[test]
     fn test_soundboard_defaults() {
         let sounds = MediaCacheManager::get_default_soundboard_sounds();
-        assert!(sounds.is_empty(), "Sem resposta da rede/API, lista deve vir vazia (zero mocks)");
+        assert!(
+            sounds.is_empty(),
+            "Sem resposta da rede/API, lista deve vir vazia (zero mocks)"
+        );
     }
 
     #[test]
     fn test_tenor_gif_categories() {
         let trending = MediaCacheManager::get_curated_tenor_gifs_for_category("trending");
-        assert!(trending.is_empty(), "Sem rede/resposta real da API, lista de GIFs deve vir vazia (zero mocks)");
+        assert!(
+            trending.is_empty(),
+            "Sem rede/resposta real da API, lista de GIFs deve vir vazia (zero mocks)"
+        );
 
         let anime = MediaCacheManager::get_curated_tenor_gifs_for_category("anime");
         assert!(anime.is_empty());
@@ -1296,12 +2901,18 @@ mod tests {
     #[test]
     fn test_sticker_packs_defaults() {
         let packs = MediaCacheManager::get_default_sticker_packs();
-        assert!(packs.is_empty(), "Sem resposta da rede/API, lista deve vir vazia (zero mocks)");
+        assert!(
+            packs.is_empty(),
+            "Sem resposta da rede/API, lista deve vir vazia (zero mocks)"
+        );
     }
 
     #[tokio::test]
     async fn test_favorite_stickers_persistence() {
-        let temp_dir = std::env::temp_dir().join(format!("discord_rs_fav_stickers_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "discord_rs_fav_stickers_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
         let mgr = MediaCacheManager::with_root(&temp_dir);
 
         let sticker = DiscordSticker {
@@ -1328,25 +2939,25 @@ mod tests {
         assert_eq!(favs2[0].name, "Super Wumpus");
 
         // Test aggregation in get_all_stickers
-        let guild_stickers = vec![
-            DiscordSticker {
-                id: "guild_sticker_1".into(),
-                pack_id: None,
-                name: "Guild Crab".into(),
-                description: None,
-                tags: "crab".into(),
-                format_type: StickerFormatType::Gif,
-                available: true,
-                guild_id: Some("guild_123".into()),
-            }
-        ];
+        let guild_stickers = vec![DiscordSticker {
+            id: "guild_sticker_1".into(),
+            pack_id: None,
+            name: "Guild Crab".into(),
+            description: None,
+            tags: "crab".into(),
+            format_type: StickerFormatType::Gif,
+            available: true,
+            guild_id: Some("guild_123".into()),
+        }];
         let all = mgr2.get_all_stickers(&guild_stickers).await;
         assert_eq!(all.len(), 2);
         assert!(all.iter().any(|s| s.id == "sticker_fav_123"));
         assert!(all.iter().any(|s| s.id == "guild_sticker_1"));
 
         // Test removal
-        mgr2.remove_favorite_sticker("sticker_fav_123").await.unwrap();
+        mgr2.remove_favorite_sticker("sticker_fav_123")
+            .await
+            .unwrap();
         let favs3 = mgr2.get_favorite_stickers().await;
         assert!(favs3.is_empty());
 
@@ -1365,35 +2976,347 @@ mod tests {
 
         let serialized = serde_json::to_string(&fmt2).unwrap();
         assert_eq!(serialized, "2");
+
+        for invalid in ["0", "5", "-1", "\"webp\""] {
+            assert!(serde_json::from_str::<StickerFormatType>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn test_sticker_urls_match_official_format_types() {
+        let mut sticker = DiscordSticker {
+            id: "9001".into(),
+            pack_id: None,
+            name: "Sticker".into(),
+            description: None,
+            tags: String::new(),
+            format_type: StickerFormatType::Png,
+            available: true,
+            guild_id: None,
+        };
+        for (format, expected) in [
+            (
+                StickerFormatType::Png,
+                "https://cdn.discordapp.com/stickers/9001.png",
+            ),
+            (
+                StickerFormatType::Apng,
+                "https://cdn.discordapp.com/stickers/9001.png",
+            ),
+            (
+                StickerFormatType::Lottie,
+                "https://cdn.discordapp.com/stickers/9001.json",
+            ),
+            (
+                StickerFormatType::Gif,
+                "https://media.discordapp.net/stickers/9001.gif?size=160",
+            ),
+        ] {
+            sticker.format_type = format;
+            assert_eq!(sticker.cdn_url(), expected);
+        }
+    }
+
+    #[test]
+    fn test_store_media_for_url_replaces_stale_bytes() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "discord_rs_cache_replace_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let manager = MediaCacheManager::with_root(&temp_dir);
+        let url = "https://cdn.discordapp.com/stickers/9001.png";
+        manager
+            .store_media_for_url(url, b"old-bytes", "image/png")
+            .unwrap();
+        manager
+            .store_media_for_url(url, b"new-bytes", "image/png")
+            .unwrap();
+
+        let reloaded = MediaCacheManager::with_root(&temp_dir);
+        assert_eq!(reloaded.load_media_by_url(url), Some(b"new-bytes".to_vec()));
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
     fn test_parse_gifs_discord_format() {
         let discord_json = serde_json::json!({
             "categories": [
-                { "name": "trending", "src": "https://media.discord.com/cat.gif" }
+                { "name": "trending", "src": "https://media.discord.com/category.webp" }
             ],
             "gifs": [
                 {
                     "id": "discord_gif_1",
                     "title": "Cool Dancing Cat",
-                    "url": "https://media.discord.com/cat.mp4",
-                    "src": "https://media.discord.com/cat.webm",
-                    "gif_src": "https://media.discord.com/cat.gif",
-                    "preview": "https://media.discord.com/cat_preview.gif"
+                    "url": "https://tenor.example/view/discord_gif_1",
+                    "src": "https://media.discord.com/cat.mp4",
+                    "gif_src": "https://media.discord.com/cat.webp",
+                    "preview": "https://media.discord.com/cat_preview.mp4",
+                    "width": 640,
+                    "height": 360
                 }
             ]
         });
 
-        let gifs = MediaCacheManager::parse_gifs_response(&discord_json, Some("trending"));
+        let (categories, gifs) =
+            MediaCacheManager::parse_trending_gifs_response(&discord_json).unwrap();
+        assert_eq!(categories.len(), 1);
+        assert_eq!(categories[0].src, "https://media.discord.com/category.webp");
         assert_eq!(gifs.len(), 1);
-        assert_eq!(gifs[0].id, "discord_gif_1");
-        assert_eq!(gifs[0].title, "Cool Dancing Cat");
-        assert_eq!(gifs[0].url, "https://media.discord.com/cat.mp4");
-        assert_eq!(gifs[0].preview_url, "https://media.discord.com/cat_preview.gif");
+        assert_eq!(gifs[0].url, "https://tenor.example/view/discord_gif_1");
+        assert_eq!(
+            gifs[0].send_url(),
+            Some("https://media.discord.com/cat.webp")
+        );
+        assert_eq!(gifs[0].preview, "https://media.discord.com/cat_preview.mp4");
+        assert_eq!(gifs[0].preview_url, "https://media.discord.com/cat.webp");
+        assert_eq!((gifs[0].width, gifs[0].height), (640, 360));
+        assert_eq!(gifs[0].dims, (640, 360));
+    }
 
-        let cats = MediaCacheManager::parse_gif_categories_response(&discord_json);
-        assert_eq!(cats.len(), 1);
-        assert_eq!(cats[0].name, "trending");
+    #[test]
+    fn test_tenor_gif_constructor_preserves_share_and_preview_sources() {
+        let gif = TenorGif::new(
+            "constructor-1",
+            "Constructor",
+            "https://media.example/constructor.webp",
+            "https://example.com/view/constructor",
+            (320, 240),
+            Some("api".into()),
+        );
+        assert_eq!(gif.src.as_deref(), Some(gif.preview_url.as_str()));
+        assert_eq!(gif.gif_src.as_deref(), Some(gif.preview_url.as_str()));
+        assert_eq!(gif.preview, gif.preview_url);
+        assert_eq!((gif.width, gif.height), (320, 240));
+        assert_eq!(gif.send_url(), Some(gif.preview_url.as_str()));
+    }
+
+    #[test]
+    fn test_parse_tenor_v2_search_results() {
+        let payload = serde_json::json!([{
+            "id": "tenor-1",
+            "title": "Dancing cat",
+            "url": "https://tenor.example/view/tenor-1",
+            "content_description": "Dancing cat",
+            "media_formats": {
+                "gif": { "url": "https://media.tenor.com/tenor-1.gif", "dims": [320, 240] },
+                "mp4": { "url": "https://media.tenor.com/tenor-1.mp4", "dims": [320, 240] },
+                "preview": { "url": "https://media.tenor.com/tenor-1-preview.mp4", "dims": [320, 240] },
+                "tinygif": { "url": "https://media.tenor.com/tenor-1-tiny.gif", "dims": [160, 120] }
+            }
+        }]);
+        let gifs = MediaCacheManager::parse_search_gifs_response(&payload).unwrap();
+        assert_eq!(gifs[0].url, "https://media.tenor.com/tenor-1.gif");
+        assert_eq!(
+            gifs[0].send_url(),
+            Some("https://media.tenor.com/tenor-1.gif")
+        );
+        assert_eq!(
+            gifs[0].src.as_deref(),
+            Some("https://media.tenor.com/tenor-1.mp4")
+        );
+        assert_eq!(
+            gifs[0].preview,
+            "https://media.tenor.com/tenor-1-preview.mp4"
+        );
+        assert_eq!(gifs[0].preview_url, "https://media.tenor.com/tenor-1.gif");
+        assert_eq!(gifs[0].dims, (320, 240));
+    }
+
+    #[test]
+    fn test_gif_dimensions_prefer_top_level_then_valid_legacy_dims() {
+        let payload = serde_json::json!({
+            "id": "tenor-dims",
+            "width": 640,
+            "height": 360,
+            "dims": [1, 1],
+            "media_formats": {
+                "gif": { "url": "https://media.example/dims.gif", "dims": [320, 240] }
+            }
+        });
+        let gif = MediaCacheManager::parse_gif_from_json(&payload, None).unwrap();
+        assert_eq!((gif.width, gif.height), (640, 360));
+        assert_eq!(gif.dims, (640, 360));
+
+        let malformed_top = serde_json::json!({
+            "id": "tenor-dims",
+            "dims": [0, "invalid"],
+            "media_formats": {
+                "gif": { "url": "https://media.example/dims.gif", "dims": [320, 240] }
+            }
+        });
+        let gif = MediaCacheManager::parse_gif_from_json(&malformed_top, None).unwrap();
+        assert_eq!((gif.width, gif.height), (320, 240));
+        assert_eq!(gif.dims, (320, 240));
+    }
+
+    #[test]
+    fn test_gif_categories_reject_invalid_sources() {
+        for payload in [
+            serde_json::json!([{ "name": "missing" }]),
+            serde_json::json!([{ "name": "empty", "src": "" }]),
+            serde_json::json!([{ "name": "file", "src": "file:///tmp/category.gif" }]),
+        ] {
+            assert!(MediaCacheManager::parse_gif_categories_response(&payload).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_gif_parser_rejects_invalid_media_urls() {
+        for payload in [
+            serde_json::json!({ "id": "", "url": "https://example.com", "src": "https://example.com/a.mp4", "gif_src": "https://example.com/a.webp" }),
+            serde_json::json!({ "id": "1", "src": "https://example.com/a.mp4", "gif_src": "https://example.com/a.webp" }),
+            serde_json::json!({ "id": "1", "url": "file:///tmp/a", "src": "https://example.com/a.mp4", "gif_src": "https://example.com/a.webp" }),
+            serde_json::json!({ "id": "1", "url": "https://example.com", "src": "https://example.com/a.mp4" }),
+            serde_json::json!({ "id": "1", "media_formats": {} }),
+            serde_json::json!({ "id": "1", "media_formats": { "gif": { "url": "" } } }),
+            serde_json::json!({ "id": "1", "media_formats": { "gif": { "url": "file:///tmp/a.gif" } } }),
+        ] {
+            assert!(MediaCacheManager::parse_gif_from_json(&payload, None).is_none());
+        }
+    }
+
+    #[test]
+    fn test_gif_dimensions_fall_back_when_payload_dimensions_are_malformed() {
+        let payload = serde_json::json!({
+            "id": "legacy",
+            "url": "https://example.com/view/legacy",
+            "src": "https://example.com/legacy.mp4",
+            "gif_src": "https://example.com/legacy.webp",
+            "dims": [0, "invalid"]
+        });
+        let gif = MediaCacheManager::parse_gif_from_json(&payload, None).unwrap();
+        assert_eq!(gif.dims, (220, 180));
+    }
+
+    #[tokio::test]
+    async fn test_gif_cache_is_scoped_and_keeps_empty_hits() {
+        assert_eq!(
+            MediaCacheManager::gif_cache_key("en-US", "mp4", None),
+            "gifs|en-us|mp4|trending"
+        );
+        assert_eq!(
+            MediaCacheManager::gif_cache_key("en-US", "webm", Some(" Cat ")),
+            "gifs|en-us|webm|search|cat"
+        );
+        let manager = MediaCacheManager::with_root(std::env::temp_dir().join(format!(
+            "discord_rs_gif_cache_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        )));
+        manager.cache_gifs("en-US", "mp4", None, &[]).await;
+        assert!(manager.has_cached_gifs("en-US", "mp4", None).await);
+        assert!(
+            manager
+                .get_cached_gifs("en-US", "mp4", None)
+                .await
+                .is_empty()
+        );
+        assert!(!manager.has_cached_gifs("pt-BR", "mp4", None).await);
+        assert!(!manager.has_cached_gifs("en-US", "webm", None).await);
+    }
+
+    #[test]
+    fn test_recent_custom_metadata_and_skin_tone() {
+        let recent = RecentEmojiItem {
+            emoji: "<a:party:9002>".into(),
+            name: "ignored".into(),
+            is_custom: false,
+            custom_id: None,
+            use_count: 1,
+            last_used_timestamp: 1,
+        };
+        let emoji = recent.to_discord_emoji().unwrap();
+        assert!(emoji.animated);
+        assert_eq!(emoji.to_tag(), "<a:party:9002>");
+        assert_eq!(
+            emoji.cdn_url().as_deref(),
+            Some("https://cdn.discordapp.com/emojis/9002.gif?size=64&quality=lossless")
+        );
+
+        let invalid = RecentEmojiItem {
+            custom_id: None,
+            is_custom: true,
+            ..recent.clone()
+        };
+        assert!(invalid.to_discord_emoji().is_none());
+
+        let empty = RecentEmojiItem {
+            emoji: String::new(),
+            name: String::new(),
+            is_custom: false,
+            custom_id: None,
+            use_count: 1,
+            last_used_timestamp: 1,
+        };
+        assert!(empty.to_discord_emoji().is_none());
+
+        assert_eq!(
+            MediaCacheManager::unicode_emoji_name("❤️"),
+            Some("red heart")
+        );
+        assert_eq!(MediaCacheManager::apply_skin_tone("👍", "🏽"), "👍🏽");
+        assert_eq!(MediaCacheManager::apply_skin_tone("❤️", "🏽"), "❤️");
+    }
+
+    #[test]
+    fn test_sticker_pack_parser_and_disk_cache() {
+        let payload = serde_json::json!({
+            "sticker_packs": [{
+                "id": "pack-1",
+                "name": "Pack",
+                "sku_id": "sku-1",
+                "description": "Description",
+                "stickers": [{
+                    "id": "sticker-1",
+                    "pack_id": "pack-1",
+                    "name": "Sticker",
+                    "description": "Description",
+                    "tags": "tag",
+                    "type": 1,
+                    "format_type": 4,
+                    "available": false,
+                    "sort_value": 7
+                }]
+            }]
+        });
+        let packs = MediaCacheManager::parse_sticker_packs_response(&payload);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].stickers[0].format_type, StickerFormatType::Gif);
+        assert!(!packs[0].stickers[0].available);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "discord_rs_pack_cache_{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let manager = MediaCacheManager::with_root(&temp_dir);
+        manager.save_sticker_packs_to_disk(&packs).unwrap();
+        assert_eq!(
+            MediaCacheManager::with_root(&temp_dir).get_sticker_packs_cached(),
+            packs
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+
+        let mut unknown = payload.clone();
+        unknown["sticker_packs"][0]["stickers"][0]["format_type"] = serde_json::json!(99);
+        assert!(MediaCacheManager::parse_sticker_packs_response(&unknown).is_empty());
+    }
+
+    #[test]
+    fn test_aggregate_stickers_prefers_fresh_and_filters_unavailable() {
+        let stale = DiscordSticker {
+            id: "same".into(),
+            pack_id: None,
+            name: "Stale".into(),
+            description: None,
+            tags: String::new(),
+            format_type: StickerFormatType::Png,
+            available: true,
+            guild_id: None,
+        };
+        let fresh = DiscordSticker {
+            available: false,
+            ..stale.clone()
+        };
+        let result = MediaCacheManager::aggregate_stickers(&[stale], &[fresh], &[]);
+        assert!(result.is_empty());
     }
 }

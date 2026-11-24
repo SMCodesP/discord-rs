@@ -3,7 +3,7 @@
 //! Implementa o popup flutuante de seleção de:
 //! 1. Emojis (Frequentemente Usados, 8 Categorias Unicode Oficiais, Emojis de Servidores)
 //! 2. Figurinhas / Stickers (Pacotes padrão Wumpus e stickers de guildas)
-//! 3. GIFs (Busca e Trending integrados ao Tenor)
+//! 3. GIFs (Busca e Trending integrados à API do Discord)
 //! 4. Soundboard (Sons padrão e sons de servidores com preview de áudio)
 //! 5. Barra de busca adaptável com filtragem em tempo real
 //! 6. Faixa inferior de pré-visualização (Hover Preview Strip)
@@ -11,7 +11,9 @@
 use gpui::component::tooltip::Tooltip;
 use gpui::prelude::*;
 use gpui::*;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::protocol::media_cache::{
     DiscordEmoji, DiscordSticker, MediaCacheManager, RecentEmojiItem, SoundboardSound, TenorGif,
@@ -41,6 +43,62 @@ pub type OnSelectGifCategoryCallback =
     Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
 pub type OnSelectGuildCallback =
     Arc<dyn Fn(Option<&str>, &mut Window, &mut App) + Send + Sync + 'static>;
+
+static GUILD_STICKER_REQUESTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+/// Carrega stickers de uma guilda sob demanda usando o ClientManager já autenticado.
+fn request_guild_stickers(guild_id: &str, cx: &mut App) {
+    let Some(global) = cx.try_global::<crate::app::state::AppStateGlobal>() else {
+        return;
+    };
+    let state_entity = global.0.clone();
+    state_entity.update(cx, |state, _cx| {
+        if state
+            .guilds
+            .iter()
+            .any(|guild| guild.id == guild_id && !guild.stickers.is_empty())
+        {
+            return;
+        }
+        let Some(client_manager) = state.client_manager.clone() else {
+            return;
+        };
+        let requests = GUILD_STICKER_REQUESTS.get_or_init(|| Mutex::new(HashSet::new()));
+        let Ok(mut requests) = requests.lock() else {
+            return;
+        };
+        if !requests.insert(guild_id.to_string()) {
+            return;
+        }
+        drop(requests);
+
+        let guild_id = guild_id.to_string();
+        tokio::spawn(async move {
+            match client_manager.get_guild_stickers(&guild_id).await {
+                Ok(stickers) => {
+                    client_manager.emit_event(
+                        crate::protocol::TransportEvent::GuildStickersUpdated {
+                            guild_id: guild_id.clone(),
+                            stickers,
+                        },
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Falha ao carregar stickers da guilda {}: {:?}",
+                        guild_id,
+                        error
+                    );
+                }
+            }
+            if let Some(requests) = GUILD_STICKER_REQUESTS.get() {
+                if let Ok(mut requests) = requests.lock() {
+                    requests.remove(&guild_id);
+                }
+            }
+        });
+    });
+}
 
 // ============================================================================
 // Enums de Abas e Categorias
@@ -88,7 +146,7 @@ impl MediaPickerTab {
         match self {
             Self::Emojis => "Buscar emojis...",
             Self::Stickers => "Buscar figurinhas...",
-            Self::Gifs => "Buscar no Tenor...",
+            Self::Gifs => "Buscar GIFs...",
             Self::Soundboard => "Buscar sons...",
         }
     }
@@ -156,6 +214,57 @@ pub struct MediaPickerConfig {
     pub on_search_query: Option<OnSearchQueryCallback>,
     pub on_select_gif_category: Option<OnSelectGifCategoryCallback>,
     pub on_select_guild: Option<OnSelectGuildCallback>,
+}
+
+// ============================================================================
+// Tom de pele Unicode
+// ============================================================================
+
+const SKIN_TONE_MODIFIERS: [&str; 6] = ["", "🏻", "🏼", "🏽", "🏾", "🏿"];
+static SELECTED_SKIN_TONE: AtomicU8 = AtomicU8::new(0);
+
+fn selected_skin_tone_modifier() -> &'static str {
+    SKIN_TONE_MODIFIERS[SELECTED_SKIN_TONE.load(Ordering::Relaxed) as usize]
+}
+
+fn append_skin_tone_buttons(mut rail: Stateful<Div>, selected: usize) -> Stateful<Div> {
+    for (index, modifier) in SKIN_TONE_MODIFIERS.iter().enumerate() {
+        let is_selected = index == selected;
+        let mut button = div()
+            .id(ElementId::from(SharedString::from(format!(
+                "media-picker-skin-tone-{}",
+                index
+            ))))
+            .flex_shrink_0()
+            .size(px(32.0))
+            .min_h(px(32.0))
+            .min_w(px(32.0))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .bg(if is_selected {
+                blurple()
+            } else {
+                bg_channels()
+            })
+            .text_color(if is_selected { white() } else { text_muted() })
+            .hover(move |style| {
+                if is_selected {
+                    style.bg(blurple_hover()).text_color(white())
+                } else {
+                    style.bg(channel_hover()).text_color(text_titles())
+                }
+            })
+            .child(div().text_size(px(18.0)).child(format!("✋{}", modifier)));
+        button = button.on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            SELECTED_SKIN_TONE.store(index as u8, Ordering::Relaxed);
+            cx.refresh_windows();
+        });
+        rail = rail.child(button);
+    }
+    rail
 }
 
 // ============================================================================
@@ -246,32 +355,28 @@ pub fn render_media_picker(config: MediaPickerConfig) -> Div {
                     .child(content_element)
                     .into_any_element()
             }
-            MediaPickerTab::Gifs => {
-                div()
-                    .id("media-picker-scroll-content")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(|_ev, _win, cx| {
-                        cx.stop_propagation();
-                    })
-                    .p(px(8.0))
-                    .child(render_gifs_tab(&config, &query))
-                    .into_any_element()
-            }
-            MediaPickerTab::Soundboard => {
-                div()
-                    .id("media-picker-scroll-content")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .on_scroll_wheel(|_ev, _win, cx| {
-                        cx.stop_propagation();
-                    })
-                    .p(px(8.0))
-                    .child(render_soundboard_tab(&config, &query))
-                    .into_any_element()
-            }
+            MediaPickerTab::Gifs => div()
+                .id("media-picker-scroll-content")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .on_scroll_wheel(|_ev, _win, cx| {
+                    cx.stop_propagation();
+                })
+                .p(px(8.0))
+                .child(render_gifs_tab(&config, &query))
+                .into_any_element(),
+            MediaPickerTab::Soundboard => div()
+                .id("media-picker-scroll-content")
+                .flex_1()
+                .min_h(px(0.0))
+                .overflow_y_scroll()
+                .on_scroll_wheel(|_ev, _win, cx| {
+                    cx.stop_propagation();
+                })
+                .p(px(8.0))
+                .child(render_soundboard_tab(&config, &query))
+                .into_any_element(),
         })
         // 4. Faixa Inferior de Preview (Hover Preview Strip)
         .child(render_preview_strip(config.hovered_info.as_deref()))
@@ -297,14 +402,30 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
         .h(px(40.0))
         .px(px(12.0));
 
+    let picker_guild_id = config.selected_guild_id.clone();
     for tab in tabs {
         let is_active = tab == config.active_tab;
-        let icon_col = if is_active { text_titles() } else { text_secondary() };
-        let text_col = if is_active { text_titles() } else { text_secondary() };
-        let tab_bg = if is_active { control_secondary_bg_active() } else { transparent() };
+        let icon_col = if is_active {
+            text_titles()
+        } else {
+            text_secondary()
+        };
+        let text_col = if is_active {
+            text_titles()
+        } else {
+            text_secondary()
+        };
+        let tab_bg = if is_active {
+            control_secondary_bg_active()
+        } else {
+            transparent()
+        };
 
         let mut item = div()
-            .id(ElementId::from(SharedString::from(format!("media-tab-{}", tab.label()))))
+            .id(ElementId::from(SharedString::from(format!(
+                "media-tab-{}",
+                tab.label()
+            ))))
             .flex()
             .flex_row()
             .items_center()
@@ -317,7 +438,8 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
             .bg(tab_bg)
             .hover(move |s| {
                 if !is_active {
-                    s.bg(control_secondary_bg_default()).text_color(text_titles())
+                    s.bg(control_secondary_bg_default())
+                        .text_color(text_titles())
                 } else {
                     s
                 }
@@ -326,15 +448,29 @@ fn render_top_tabs(config: &MediaPickerConfig) -> Div {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .font_weight(if is_active { WEIGHT_SEMIBOLD } else { WEIGHT_MEDIUM })
+                    .font_weight(if is_active {
+                        WEIGHT_SEMIBOLD
+                    } else {
+                        WEIGHT_MEDIUM
+                    })
                     .text_color(text_col)
                     .child(tab.label()),
             );
 
         if let Some(ref on_tab) = config.on_tab_change {
             let on_tab = on_tab.clone();
+            let picker_guild_id = picker_guild_id.clone();
             item = item.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
                 on_tab(tab, window, cx);
+                if tab == MediaPickerTab::Stickers {
+                    let guild_id = picker_guild_id.clone().or_else(|| {
+                        cx.try_global::<crate::app::state::AppStateGlobal>()
+                            .and_then(|global| global.0.read(cx).selected_guild_id.clone())
+                    });
+                    if let Some(guild_id) = guild_id {
+                        request_guild_stickers(&guild_id, cx);
+                    }
+                }
             });
         }
 
@@ -637,11 +773,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
                 .justify_center()
                 .text_size(px(11.0))
                 .font_weight(WEIGHT_BOLD)
-                .text_color(if is_selected {
-                    white()
-                } else {
-                    text_muted()
-                })
+                .text_color(if is_selected { white() } else { text_muted() })
                 .child(guild.acronym.clone())
         };
 
@@ -660,11 +792,7 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
             .justify_center()
             .cursor_pointer()
             .overflow_hidden()
-            .bg(if is_selected {
-                blurple()
-            } else {
-                bg_chat()
-            })
+            .bg(if is_selected { blurple() } else { bg_chat() })
             .border_2()
             .border_color(if is_selected {
                 blurple()
@@ -677,9 +805,13 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
 
         if let Some(on_sel) = config.on_select_guild.clone() {
             let gid = guild.guild_id.clone();
-            let next = if is_selected { None } else { Some(gid) };
+            let next = if is_selected { None } else { Some(gid.clone()) };
+            let load_stickers = config.active_tab == MediaPickerTab::Stickers && !is_selected;
             guild_btn = guild_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
                 on_sel(next.as_deref(), window, cx);
+                if load_stickers {
+                    request_guild_stickers(&gid, cx);
+                }
             });
         }
         rail = rail.child(guild_btn);
@@ -750,12 +882,19 @@ fn render_navigation_rail(config: &MediaPickerConfig) -> impl IntoElement {
         .child(official_icon);
 
     if let Some(on_sel) = config.on_select_guild.clone() {
-        let next = if is_standard_selected { None } else { Some("standard") };
+        let next = if is_standard_selected {
+            None
+        } else {
+            Some("standard")
+        };
         standard_btn = standard_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
             on_sel(next, window, cx);
         });
     }
     rail = rail.child(standard_btn);
+    if config.active_tab == MediaPickerTab::Emojis {
+        rail = append_skin_tone_buttons(rail, SELECTED_SKIN_TONE.load(Ordering::Relaxed) as usize);
+    }
 
     rail
 }
@@ -776,37 +915,78 @@ pub fn emoji_matches_query(emoji: &str, cat_key: &str, cat_title: &str, query: &
     if cat_key.to_lowercase().contains(&q) || cat_title.to_lowercase().contains(&q) {
         return true;
     }
+    if let Some(name) = MediaCacheManager::unicode_emoji_name(emoji) {
+        let name = name.to_lowercase().replace(['-', '_', ':'], " ");
+        if name.contains(&q)
+            || q.split_whitespace()
+                .filter(|term| !term.is_empty())
+                .all(|term| name.contains(term))
+        {
+            return true;
+        }
+    }
 
     let tags: &[&str] = match emoji {
         "😀" | "😃" | "😄" | "😁" | "😆" | "😅" => {
             &["smile", "sorriso", "feliz", "happy", "joy", "alegria"]
         }
-        "😂" | "🤣" => &["lol", "laugh", "risada", "haha", "crying laughing", "chorando de rir"],
-        "🥲" | "🥹" | "🥺" | "😢" | "😭" => {
-            &["cry", "choro", "sad", "triste", "lagrimas", "tears", "pleading"]
-        }
+        "😂" | "🤣" => &[
+            "lol",
+            "laugh",
+            "risada",
+            "haha",
+            "crying laughing",
+            "chorando de rir",
+        ],
+        "🥲" | "🥹" | "🥺" | "😢" | "😭" => &[
+            "cry", "choro", "sad", "triste", "lagrimas", "tears", "pleading",
+        ],
         "😊" | "😇" | "🙂" | "🙃" | "😉" | "😌" => {
             &["angel", "anjo", "smile", "piscadinha", "calm", "relax"]
         }
         "😍" | "🥰" | "😘" | "😗" | "😙" | "😚" => {
             &["love", "amor", "kiss", "beijo", "apaixonado", "heart"]
         }
-        "😋" | "😛" | "😝" | "😜" | "🤪" => {
-            &["tongue", "lingua", "yummy", "crazy", "maluco", "brincadeira"]
-        }
-        "😎" | "🥸" => &["cool", "sunglasses", "oculos", "estiloso", "swag", "disfarce"],
+        "😋" | "😛" | "😝" | "😜" | "🤪" => &[
+            "tongue",
+            "lingua",
+            "yummy",
+            "crazy",
+            "maluco",
+            "brincadeira",
+        ],
+        "😎" | "🥸" => &[
+            "cool",
+            "sunglasses",
+            "oculos",
+            "estiloso",
+            "swag",
+            "disfarce",
+        ],
         "🤩" | "🥳" => &["party", "festa", "star", "celebrar", "hype"],
-        "😏" | "😒" | "😞" | "😔" | "😟" | "😕" => &["smug", "meh", "sad", "desapontado", "bad"],
+        "😏" | "😒" | "😞" | "😔" | "😟" | "😕" => {
+            &["smug", "meh", "sad", "desapontado", "bad"]
+        }
         "😤" | "😠" | "😡" | "🤬" => &["angry", "raiva", "furious", "bravo", "mad"],
-        "🤯" | "😳" | "😱" | "😨" => &["mindblown", "boom", "choque", "scared", "medo", "surpreso"],
+        "🤯" | "😳" | "😱" | "😨" => {
+            &["mindblown", "boom", "choque", "scared", "medo", "surpreso"]
+        }
         "🤔" | "🧐" | "🤨" => &["think", "pensar", "duvida", "ponder", "hmm"],
         "👍" => &["thumbsup", "joinha", "positivo", "like", "ok", "aprovado"],
         "👎" => &["thumbsdown", "desjoinha", "negativo", "dislike"],
-        "👋" | "🤚" | "🖐️" | "✋" => &["wave", "ola", "oi", "tchau", "bye", "hello", "hi", "acenar"],
+        "👋" | "🤚" | "🖐️" | "✋" => {
+            &["wave", "ola", "oi", "tchau", "bye", "hello", "hi", "acenar"]
+        }
         "👌" => &["ok", "perfeito", "nice", "suave"],
         "✌️" | "🤞" | "🤟" | "🤘" => &["peace", "paz", "rock", "sorte", "victory"],
         "👏" | "🙌" | "🫶" | "🙏" => &[
-            "clap", "palmas", "obrigado", "thanks", "rezar", "pray", "heart hands",
+            "clap",
+            "palmas",
+            "obrigado",
+            "thanks",
+            "rezar",
+            "pray",
+            "heart hands",
         ],
         "❤️" | "🧡" | "💛" | "💚" | "💙" | "💜" | "🖤" | "🤍" | "🤎" | "💔" => {
             &["heart", "coracao", "love", "amor"]
@@ -814,10 +994,14 @@ pub fn emoji_matches_query(emoji: &str, cat_key: &str, cat_title: &str, query: &
         "🔥" => &["fire", "fogo", "hot", "chama", "lit", "quente"],
         "✨" | "⭐" | "🌟" => &["star", "sparkles", "estrela", "brilho", "shine"],
         "🎉" | "🎊" => &["party", "tada", "festa", "confete", "celebration"],
-        "🐶" | "🐱" => &["dog", "cat", "cachorro", "gato", "pet", "animal", "auau", "miau"],
+        "🐶" | "🐱" => &[
+            "dog", "cat", "cachorro", "gato", "pet", "animal", "auau", "miau",
+        ],
         "🐸" => &["frog", "sapo", "pepe"],
         "🦀" => &["crab", "caranguejo", "ferris", "rust"],
-        "🍕" | "🍔" | "🍟" => &["pizza", "burger", "batata", "fastfood", "lanche", "food", "comida"],
+        "🍕" | "🍔" | "🍟" => &[
+            "pizza", "burger", "batata", "fastfood", "lanche", "food", "comida",
+        ],
         "☕" | "🍺" | "🍻" => &["coffee", "cafe", "beer", "cerveja", "drink", "bebida"],
         "🎮" => &["game", "jogo", "videogame", "gamer", "play"],
         "⚽" | "🏀" | "🏈" | "⚾" => &[
@@ -890,7 +1074,11 @@ pub fn build_emoji_virtual_rows(
     // 2. Seção Frequentemente Usados
     let show_recents = !is_searching && is_global;
     if show_recents {
-        let recents = &config.recent_emojis;
+        let recents: Vec<&RecentEmojiItem> = config
+            .recent_emojis
+            .iter()
+            .filter(|recent| recent.to_discord_emoji().is_some())
+            .collect();
 
         if !recents.is_empty() {
             rows.push(EmojiVirtualRow::SectionHeader {
@@ -903,7 +1091,14 @@ pub fn build_emoji_virtual_rows(
             for chunk in recents.chunks(EMOJIS_PER_ROW) {
                 let items = chunk
                     .iter()
-                    .map(|r| EmojiVirtualItem::Unicode(r.emoji.clone()))
+                    .filter_map(|recent| {
+                        let emoji = recent.to_discord_emoji()?;
+                        Some(if emoji.is_unicode() {
+                            EmojiVirtualItem::Unicode(emoji.name)
+                        } else {
+                            EmojiVirtualItem::Custom(emoji)
+                        })
+                    })
                     .collect();
                 rows.push(EmojiVirtualRow::GridRow { items });
             }
@@ -925,11 +1120,13 @@ pub fn build_emoji_virtual_rows(
                     .emojis
                     .iter()
                     .filter(|e| {
-                        if is_searching {
-                            e.name.to_lowercase().contains(query)
-                        } else {
-                            true
-                        }
+                        e.available
+                            && if is_searching {
+                                e.name.to_lowercase().contains(query)
+                                    || e.to_tag().to_lowercase().contains(query)
+                            } else {
+                                true
+                            }
                     })
                     .collect();
 
@@ -959,11 +1156,13 @@ pub fn build_emoji_virtual_rows(
                 .custom_emojis
                 .iter()
                 .filter(|e| {
-                    if is_searching {
-                        e.name.to_lowercase().contains(query)
-                    } else {
-                        true
-                    }
+                    e.available
+                        && if is_searching {
+                            e.name.to_lowercase().contains(query)
+                                || e.to_tag().to_lowercase().contains(query)
+                        } else {
+                            true
+                        }
                 })
                 .collect();
 
@@ -1224,7 +1423,7 @@ fn render_emoji_item(
                 div()
                     .text_size(px(14.0))
                     .text_color(blurple())
-                    .child(format!(":{}", name))
+                    .child(format!(":{}:", name.clone()))
             };
 
             // Célula de emoji: 48x48, radius 4px conforme DOM oficial
@@ -1248,7 +1447,7 @@ fn render_emoji_item(
             btn.into_any_element()
         }
         EmojiVirtualItem::Unicode(em) => {
-            let em_str = em.clone();
+            let display = MediaCacheManager::apply_skin_tone(em, selected_skin_tone_modifier());
             // Célula de emoji: 48x48, radius 4px conforme DOM oficial
             let mut btn = div()
                 .flex()
@@ -1258,13 +1457,12 @@ fn render_emoji_item(
                 .rounded(px(4.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(channel_hover()))
-                .child(div().text_size(px(26.0)).child(em_str.clone()));
+                .child(div().text_size(px(26.0)).child(display.clone()));
 
             if let Some(on_sel) = on_select_emoji {
                 let on_sel_clone = (*on_sel).clone();
-                let em_clone = em_str.clone();
                 btn = btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                    on_sel_clone(&em_clone, window, cx);
+                    on_sel_clone(&display, window, cx);
                 });
             }
             btn.into_any_element()
@@ -1334,7 +1532,11 @@ fn render_emojis_tab(config: &MediaPickerConfig, query: &str, is_searching: bool
     let on_select_guild = config.on_select_guild.as_ref();
     let mut container = div().flex().flex_col().gap(px(4.0));
     for row in &rows {
-        container = container.child(render_emoji_virtual_row(row, on_select_emoji, on_select_guild));
+        container = container.child(render_emoji_virtual_row(
+            row,
+            on_select_emoji,
+            on_select_guild,
+        ));
     }
     container.into_any_element()
 }
@@ -1395,7 +1597,7 @@ pub fn build_sticker_virtual_rows(
         let favorites: Vec<&DiscordSticker> = config
             .stickers
             .iter()
-            .filter(|s| s.guild_id.is_none())
+            .filter(|s| s.available && s.guild_id.is_none() && s.pack_id.is_none())
             .filter(|s| {
                 if query.is_empty() {
                     true
@@ -1436,6 +1638,9 @@ pub fn build_sticker_virtual_rows(
                     .stickers
                     .iter()
                     .filter(|s| {
+                        if !s.available {
+                            return false;
+                        }
                         if query.is_empty() {
                             true
                         } else {
@@ -1467,7 +1672,7 @@ pub fn build_sticker_virtual_rows(
             let server_stickers: Vec<&DiscordSticker> = config
                 .stickers
                 .iter()
-                .filter(|s| s.guild_id.is_some())
+                .filter(|s| s.available && s.guild_id.is_some())
                 .filter(|s| {
                     if query.is_empty() {
                         true
@@ -1498,7 +1703,8 @@ pub fn build_sticker_virtual_rows(
         if let Some(gid) = selected_guild {
             if gid != "standard" && gid != "recents" && rendered_guild_count == 0 {
                 rows.push(StickerVirtualRow::EmptyNotice {
-                    message: "Nenhuma figurinha personalizada disponível neste servidor.".to_string(),
+                    message: "Nenhuma figurinha personalizada disponível neste servidor."
+                        .to_string(),
                 });
             }
         }
@@ -1507,35 +1713,31 @@ pub fn build_sticker_virtual_rows(
     // 4. Pacotes padrão do Discord (Wumpus, Clyde, Nelly, etc.)
     let show_packs = is_global || selected_guild == Some("standard");
     if show_packs {
-        let default_packs = MediaCacheManager::get_default_sticker_packs();
-        for pack in default_packs {
-            let matching: Vec<&DiscordSticker> = if query.is_empty() {
-                pack.stickers.iter().collect()
-            } else {
-                pack.stickers
-                    .iter()
-                    .filter(|s| {
-                        s.name.to_lowercase().contains(query)
-                            || s.tags.to_lowercase().contains(query)
-                    })
-                    .collect()
-            };
-
-            if matching.is_empty() {
-                continue;
-            }
-
+        // Compatibilidade com clientes que já achatam os packs da API em `config.stickers`.
+        let standard_stickers: Vec<&DiscordSticker> = config
+            .stickers
+            .iter()
+            .filter(|sticker| {
+                sticker.available
+                    && sticker.guild_id.is_none()
+                    && sticker.pack_id.is_some()
+                    && (query.is_empty()
+                        || sticker.name.to_lowercase().contains(query)
+                        || sticker.tags.to_lowercase().contains(query))
+            })
+            .collect();
+        if !standard_stickers.is_empty() {
             rows.push(StickerVirtualRow::SectionHeader {
-                title: pack.name.to_uppercase(),
+                title: "FIGURINHAS PADRÃO".to_string(),
                 icon_url: None,
                 acronym: None,
                 is_favorites: false,
-                count: matching.len(),
+                count: standard_stickers.len(),
             });
-
-            for chunk in matching.chunks(STICKERS_PER_ROW) {
-                let items = chunk.iter().map(|&s| s.clone()).collect();
-                rows.push(StickerVirtualRow::GridRow { items });
+            for chunk in standard_stickers.chunks(STICKERS_PER_ROW) {
+                rows.push(StickerVirtualRow::GridRow {
+                    items: chunk.iter().map(|sticker| (*sticker).clone()).collect(),
+                });
             }
         }
     }
@@ -1571,9 +1773,7 @@ pub fn render_sticker_virtual_row(
             *is_favorites,
             *count,
         ),
-        StickerVirtualRow::GridRow { items } => {
-            render_sticker_grid_row(items, on_select_sticker)
-        }
+        StickerVirtualRow::GridRow { items } => render_sticker_grid_row(items, on_select_sticker),
         StickerVirtualRow::EmptyNotice { message } => render_empty_notice(message),
     }
 }
@@ -1753,11 +1953,13 @@ fn render_sticker_card(
                 .child(name),
         );
 
-    if let Some(on_sel) = on_select_sticker {
-        let on_sel_clone = (*on_sel).clone();
-        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-            on_sel_clone(&sticker_clone, window, cx);
-        });
+    if sticker.available {
+        if let Some(on_sel) = on_select_sticker {
+            let on_sel_clone = (*on_sel).clone();
+            card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_sel_clone(&sticker_clone, window, cx);
+            });
+        }
     }
 
     card.into_any_element()
@@ -1817,14 +2019,14 @@ fn render_stickers_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
 }
 
 // ============================================================================
-// 5. Conteúdo da Aba GIFs (Integração Tenor)
+// 5. Conteúdo da Aba GIFs (API do Discord)
 // ============================================================================
 
 fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
     let mut container = div().flex().flex_col().gap(px(10.0));
 
     let header_title = if query.is_empty() {
-        "GIFS EM ALTA NO TENOR"
+        "GIFS EM ALTA"
     } else {
         "RESULTADOS DA BUSCA"
     };
@@ -1845,27 +2047,20 @@ fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
             ),
     );
 
-    // Chips de categorias
+    // Categorias vêm somente dos resultados reais; nenhuma lista fixa de produção.
+    let categories = collect_gif_categories(&config.gifs);
     container = container.child(render_gif_category_chips(
         query,
+        &categories,
         config.on_select_gif_category.as_ref(),
         config.on_search_query.as_ref(),
     ));
 
-    // Fallback para biblioteca curada caso config.gifs esteja vazio
-    let default_gifs;
-    let gifs_to_render = if config.gifs.is_empty() {
-        default_gifs = MediaCacheManager::get_curated_tenor_gifs_for_category(query);
-        &default_gifs
-    } else {
-        &config.gifs
-    };
-
-    if gifs_to_render.is_empty() {
+    if config.gifs.is_empty() {
         container = container.child(render_empty_notice("Nenhum GIF disponível."));
     } else {
         let mut grid = div().flex().flex_row().flex_wrap().gap(px(8.0));
-        for gif in gifs_to_render {
+        for gif in &config.gifs {
             grid = grid.child(render_gif_card(gif, config.on_select_gif.as_ref()));
         }
         container = container.child(grid);
@@ -1874,23 +2069,33 @@ fn render_gifs_tab(config: &MediaPickerConfig, query: &str) -> AnyElement {
     container.into_any_element()
 }
 
+fn collect_gif_categories(gifs: &[TenorGif]) -> Vec<String> {
+    let mut categories = Vec::new();
+    let mut seen = HashSet::new();
+    for gif in gifs {
+        if let Some(category) = gif
+            .category
+            .as_deref()
+            .map(str::trim)
+            .filter(|category| !category.is_empty())
+        {
+            if seen.insert(category.to_string()) {
+                categories.push(category.to_string());
+            }
+        }
+    }
+    categories
+}
+
 fn render_gif_category_chips(
     query: &str,
+    categories: &[String],
     on_select_category: Option<&OnSelectGifCategoryCallback>,
     on_search_query: Option<&OnSearchQueryCallback>,
 ) -> AnyElement {
-    let categories: [(&str, &str, fn(Pixels, Hsla) -> Div); 6] = [
-        ("trending", "Trending", |sz, col| icon_sparkles(sz, col)),
-        ("anime", "Anime", |sz, col| icon_sparkles(sz, col)),
-        ("reactions", "Reactions", |sz, col| icon_smile(sz, col)),
-        ("memes", "Memes", |sz, col| icon_chat(sz, col)),
-        ("gaming", "Gaming", |sz, col| icon_gamepad(sz, col)),
-        ("music", "Music", |sz, col| icon_music(sz, col)),
-    ];
-
     let mut cat_row = div().flex().flex_row().items_center().gap(px(6.0));
-    for (cat_id, cat_label, icon_builder) in categories {
-        let is_active = query == cat_id;
+    for category in categories {
+        let is_active = query == category;
         let icon_color = if is_active { white() } else { text_muted() };
         let mut chip = div()
             .flex()
@@ -1902,29 +2107,33 @@ fn render_gif_category_chips(
             .rounded(radius_pill())
             .bg(if is_active { blurple() } else { bg_user_bar() })
             .border_1()
-            .border_color(if is_active { blurple() } else { bg_chat_hover() })
+            .border_color(if is_active {
+                blurple()
+            } else {
+                bg_chat_hover()
+            })
             .cursor_pointer()
             .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
-            .child(icon_builder(px(12.0), icon_color.into()))
+            .child(icon_gif(px(12.0), icon_color))
             .child(
                 div()
                     .text_size(font_size_xs())
                     .font_weight(WEIGHT_BOLD)
                     .text_color(if is_active { white() } else { text_muted() })
-                    .child(cat_label),
+                    .child(category.clone()),
             );
 
         if let Some(on_cat) = on_select_category {
             let on_cat_clone = (*on_cat).clone();
-            let cat_str = cat_id.to_string();
+            let category = category.clone();
             chip = chip.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_cat_clone(&cat_str, window, cx);
+                on_cat_clone(&category, window, cx);
             });
         } else if let Some(on_search) = on_search_query {
             let on_search_clone = (*on_search).clone();
-            let cat_str = cat_id.to_string();
+            let category = category.clone();
             chip = chip.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-                on_search_clone(&cat_str, window, cx);
+                on_search_clone(&category, window, cx);
             });
         }
         cat_row = cat_row.child(chip);
@@ -1932,21 +2141,23 @@ fn render_gif_category_chips(
     cat_row.into_any_element()
 }
 
-fn render_gif_card(
-    gif: &TenorGif,
-    on_select_gif: Option<&OnSelectGifCallback>,
-) -> AnyElement {
-    let gif_url = gif.url.clone();
+fn render_gif_card(gif: &TenorGif, on_select_gif: Option<&OnSelectGifCallback>) -> AnyElement {
+    let send_url = gif.send_url().map(ToString::to_string);
     let title = gif.title.clone();
-    let preview_url = if let Some(ref gs) = gif.gif_src {
-        gs.clone()
-    } else if let Some(ref s) = gif.src {
-        s.clone()
+    let preview = if gif.preview_url.is_empty() {
+        icon_gif(px(28.0), text_muted()).into_any_element()
     } else {
-        gif.preview_url.clone()
+        img(gif.preview_url.clone())
+            .id(ElementId::from(SharedString::from(format!(
+                "picker-gif-img-{}",
+                gif.id
+            ))))
+            .size_full()
+            .rounded(px(5.0))
+            .into_any_element()
     };
 
-    // Miniatura Tenor: 230x110 com radius 5px conforme DOM oficial (gif-picker.md)
+    // Miniatura: 230x110 com radius 5px conforme DOM oficial (gif-picker.md).
     let mut card = div()
         .relative()
         .flex()
@@ -1961,15 +2172,7 @@ fn render_gif_card(
         .cursor_pointer()
         .overflow_hidden()
         .hover(|s| s.border_color(blurple()))
-        .child(
-            img(preview_url)
-                .id(ElementId::from(SharedString::from(format!(
-                    "picker-gif-img-{}",
-                    gif.id
-                ))))
-                .size_full()
-                .rounded(px(5.0)),
-        )
+        .child(preview)
         .child(
             div()
                 .absolute()
@@ -1988,11 +2191,10 @@ fn render_gif_card(
                 ),
         );
 
-    if let Some(on_sel) = on_select_gif {
+    if let (Some(on_sel), Some(url)) = (on_select_gif, send_url) {
         let on_sel_clone = (*on_sel).clone();
-        let url_clone = gif_url.clone();
         card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-            on_sel_clone(&url_clone, window, cx);
+            on_sel_clone(&url, window, cx);
         });
     }
 
@@ -2031,11 +2233,11 @@ fn render_soundboard_tab(config: &MediaPickerConfig, query: &str) -> AnyElement 
     };
 
     let matching_sounds: Vec<&SoundboardSound> = if query.is_empty() {
-        all_sounds.iter().collect()
+        all_sounds.iter().filter(|sound| sound.available).collect()
     } else {
         all_sounds
             .iter()
-            .filter(|s| s.name.to_lowercase().contains(query))
+            .filter(|sound| sound.available && sound.name.to_lowercase().contains(query))
             .collect()
     };
 
@@ -2111,28 +2313,32 @@ fn render_sound_item(
         .hover(|s| s.bg(channel_hover()).text_color(text_titles()))
         .child("▶");
 
-    if let Some(on_play_cb) = on_play {
-        let s_clone = sound_clone.clone();
-        let on_play_cb = (*on_play_cb).clone();
-        play_btn = play_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-            on_play_cb(&s_clone, window, cx);
-        });
+    if sound.available {
+        if let Some(on_play_cb) = on_play {
+            let s_clone = sound_clone.clone();
+            let on_play_cb = (*on_play_cb).clone();
+            play_btn = play_btn.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_play_cb(&s_clone, window, cx);
+            });
+        }
     }
     card = card.child(play_btn);
 
-    // Clique no card envia ou reproduz o som
-    if let Some(on_send_cb) = on_send {
-        let s_clone = sound_clone.clone();
-        let on_send_cb = (*on_send_cb).clone();
-        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-            on_send_cb(&s_clone, window, cx);
-        });
-    } else if let Some(on_play_cb) = on_play {
-        let s_clone = sound_clone.clone();
-        let on_play_cb = (*on_play_cb).clone();
-        card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
-            on_play_cb(&s_clone, window, cx);
-        });
+    // Clique no card envia ou reproduz o som somente quando disponível.
+    if sound.available {
+        if let Some(on_send_cb) = on_send {
+            let s_clone = sound_clone.clone();
+            let on_send_cb = (*on_send_cb).clone();
+            card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_send_cb(&s_clone, window, cx);
+            });
+        } else if let Some(on_play_cb) = on_play {
+            let s_clone = sound_clone.clone();
+            let on_play_cb = (*on_play_cb).clone();
+            card = card.on_mouse_down(MouseButton::Left, move |_e, window, cx| {
+                on_play_cb(&s_clone, window, cx);
+            });
+        }
     }
 
     card.into_any_element()
@@ -2188,10 +2394,19 @@ mod tests {
         assert_eq!(MediaPickerTab::Gifs.icon(), DiscordIcon::Gif);
         assert_eq!(MediaPickerTab::Soundboard.icon(), DiscordIcon::Speaker);
 
-        assert_eq!(MediaPickerTab::Emojis.search_placeholder(), "Buscar emojis...");
-        assert_eq!(MediaPickerTab::Stickers.search_placeholder(), "Buscar figurinhas...");
-        assert_eq!(MediaPickerTab::Gifs.search_placeholder(), "Buscar no Tenor...");
-        assert_eq!(MediaPickerTab::Soundboard.search_placeholder(), "Buscar sons...");
+        assert_eq!(
+            MediaPickerTab::Emojis.search_placeholder(),
+            "Buscar emojis..."
+        );
+        assert_eq!(
+            MediaPickerTab::Stickers.search_placeholder(),
+            "Buscar figurinhas..."
+        );
+        assert_eq!(MediaPickerTab::Gifs.search_placeholder(), "Buscar GIFs...");
+        assert_eq!(
+            MediaPickerTab::Soundboard.search_placeholder(),
+            "Buscar sons..."
+        );
     }
 
     #[::core::prelude::v1::test]
@@ -2232,7 +2447,12 @@ mod tests {
         assert!(emoji_matches_query("🍕", "food", "COMIDAS", "pizza"));
         assert!(emoji_matches_query("🇧🇷", "flags", "BANDEIRAS", "brasil"));
         assert!(emoji_matches_query("🚗", "travel", "VIAGEM", "car"));
-        assert!(emoji_matches_query("⚽", "activity", "ATIVIDADES", "futebol"));
+        assert!(emoji_matches_query(
+            "⚽",
+            "activity",
+            "ATIVIDADES",
+            "futebol"
+        ));
     }
 
     #[::core::prelude::v1::test]
@@ -2322,7 +2542,12 @@ mod tests {
             guild_name: "Server One".to_string(),
             icon_url: None,
             acronym: "S1".to_string(),
-            emojis: vec![DiscordEmoji::new_custom("1", "alpha", false, Some("g1".to_string()))],
+            emojis: vec![DiscordEmoji::new_custom(
+                "1",
+                "alpha",
+                false,
+                Some("g1".to_string()),
+            )],
             stickers: Vec::new(),
         };
         let g2 = MediaPickerGuildSection {
@@ -2330,7 +2555,12 @@ mod tests {
             guild_name: "Server Two".to_string(),
             icon_url: None,
             acronym: "S2".to_string(),
-            emojis: vec![DiscordEmoji::new_custom("2", "beta", false, Some("g2".to_string()))],
+            emojis: vec![DiscordEmoji::new_custom(
+                "2",
+                "beta",
+                false,
+                Some("g2".to_string()),
+            )],
             stickers: Vec::new(),
         };
 
@@ -2510,5 +2740,310 @@ mod tests {
         // Verifica que render_emoji_item cria elemento com célula correta
         let item = EmojiVirtualItem::Unicode("😀".to_string());
         let _el = render_emoji_item(&item, None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_gif_categories_come_only_from_api_results() {
+        let gifs = vec![
+            TenorGif::new(
+                "1",
+                "First",
+                "https://media.example/1.webp",
+                "https://media.example/1.webp",
+                (320, 240),
+                Some("API Category".into()),
+            ),
+            TenorGif::new(
+                "2",
+                "Second",
+                "https://media.example/2.webp",
+                "https://media.example/2.webp",
+                (320, 240),
+                Some("API Category".into()),
+            ),
+        ];
+        assert_eq!(collect_gif_categories(&gifs), vec!["API Category"]);
+        assert!(collect_gif_categories(&[]).is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_unicode_search_and_skin_tone_are_applied() {
+        assert!(emoji_matches_query(
+            "❤️",
+            "symbols",
+            "SÍMBOLOS",
+            "red heart"
+        ));
+        assert_eq!(MediaCacheManager::apply_skin_tone("👍", "🏾"), "👍🏾");
+        assert_eq!(MediaCacheManager::apply_skin_tone("🔥", "🏾"), "🔥");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_emoji_rows_preserve_custom_recents_and_hide_unavailable() {
+        let available =
+            DiscordEmoji::new_custom("available-1", "available", false, Some("g1".into()));
+        let unavailable = DiscordEmoji {
+            available: false,
+            ..available.clone()
+        };
+        let config = MediaPickerConfig {
+            active_tab: MediaPickerTab::Emojis,
+            search_query: String::new(),
+            recent_emojis: vec![
+                RecentEmojiItem {
+                    emoji: "<a:party:9002>".into(),
+                    name: "party".into(),
+                    is_custom: true,
+                    custom_id: Some("9002".into()),
+                    use_count: 2,
+                    last_used_timestamp: 2,
+                },
+                RecentEmojiItem {
+                    emoji: String::new(),
+                    name: String::new(),
+                    is_custom: true,
+                    custom_id: None,
+                    use_count: 1,
+                    last_used_timestamp: 1,
+                },
+            ],
+            custom_emojis: Vec::new(),
+            stickers: Vec::new(),
+            gifs: Vec::new(),
+            sounds: Vec::new(),
+            hovered_info: None,
+            guild_sections: vec![MediaPickerGuildSection {
+                guild_id: "g1".into(),
+                guild_name: "Guild".into(),
+                icon_url: None,
+                acronym: "G".into(),
+                emojis: vec![available, unavailable],
+                stickers: Vec::new(),
+            }],
+            selected_guild_id: None,
+            focus_handle: None,
+            is_focused: false,
+            list_state: None,
+            on_select_emoji: None,
+            on_select_sticker: None,
+            on_select_gif: None,
+            on_play_sound: None,
+            on_send_sound: None,
+            on_close: None,
+            on_tab_change: None,
+            on_search_query: None,
+            on_select_gif_category: None,
+            on_select_guild: None,
+        };
+
+        let custom: Vec<DiscordEmoji> = build_emoji_virtual_rows(&config, "", false)
+            .into_iter()
+            .flat_map(|row| match row {
+                EmojiVirtualRow::GridRow { items } => items,
+                _ => Vec::new(),
+            })
+            .filter_map(|item| match item {
+                EmojiVirtualItem::Custom(emoji) => Some(emoji),
+                EmojiVirtualItem::Unicode(_) => None,
+            })
+            .collect();
+        assert_eq!(custom.len(), 2);
+        assert_eq!(custom[0].to_tag(), "<a:party:9002>");
+        assert!(custom[0].animated);
+        assert_eq!(custom[1].id.as_deref(), Some("available-1"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_emoji_fallback_rows_hide_unavailable_custom_emojis() {
+        let available =
+            DiscordEmoji::new_custom("fallback-1", "fallback", false, Some("g1".into()));
+        let unavailable = DiscordEmoji {
+            available: false,
+            ..available.clone()
+        };
+        let config = MediaPickerConfig {
+            active_tab: MediaPickerTab::Emojis,
+            search_query: String::new(),
+            recent_emojis: Vec::new(),
+            custom_emojis: vec![available, unavailable],
+            stickers: Vec::new(),
+            gifs: Vec::new(),
+            sounds: Vec::new(),
+            hovered_info: None,
+            guild_sections: Vec::new(),
+            selected_guild_id: Some("g1".into()),
+            focus_handle: None,
+            is_focused: false,
+            list_state: None,
+            on_select_emoji: None,
+            on_select_sticker: None,
+            on_select_gif: None,
+            on_play_sound: None,
+            on_send_sound: None,
+            on_close: None,
+            on_tab_change: None,
+            on_search_query: None,
+            on_select_gif_category: None,
+            on_select_guild: None,
+        };
+
+        let custom: Vec<DiscordEmoji> = build_emoji_virtual_rows(&config, "", false)
+            .into_iter()
+            .flat_map(|row| match row {
+                EmojiVirtualRow::GridRow { items } => items,
+                _ => Vec::new(),
+            })
+            .filter_map(|item| match item {
+                EmojiVirtualItem::Custom(emoji) => Some(emoji),
+                EmojiVirtualItem::Unicode(_) => None,
+            })
+            .collect();
+        assert_eq!(custom.len(), 1);
+        assert_eq!(custom[0].id.as_deref(), Some("fallback-1"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_sticker_rows_hide_unavailable_favorites_guilds_and_packs() {
+        let available = DiscordSticker {
+            id: "guild-available".into(),
+            pack_id: None,
+            name: "Guild".into(),
+            description: None,
+            tags: String::new(),
+            format_type: StickerFormatType::Png,
+            available: true,
+            guild_id: Some("g1".into()),
+        };
+        let favorite = DiscordSticker {
+            id: "favorite".into(),
+            guild_id: None,
+            ..available.clone()
+        };
+        let standard = DiscordSticker {
+            id: "standard".into(),
+            guild_id: None,
+            pack_id: Some("pack-1".into()),
+            ..available.clone()
+        };
+        let unavailable_guild = DiscordSticker {
+            id: "guild-unavailable".into(),
+            available: false,
+            ..available.clone()
+        };
+        let unavailable_favorite = DiscordSticker {
+            id: "favorite-unavailable".into(),
+            available: false,
+            ..favorite.clone()
+        };
+        let unavailable_standard = DiscordSticker {
+            id: "standard-unavailable".into(),
+            available: false,
+            ..standard.clone()
+        };
+        let config = MediaPickerConfig {
+            active_tab: MediaPickerTab::Stickers,
+            search_query: String::new(),
+            recent_emojis: Vec::new(),
+            custom_emojis: Vec::new(),
+            stickers: vec![
+                favorite,
+                standard,
+                available,
+                unavailable_favorite,
+                unavailable_standard,
+                unavailable_guild,
+            ],
+            gifs: Vec::new(),
+            sounds: Vec::new(),
+            hovered_info: None,
+            guild_sections: Vec::new(),
+            selected_guild_id: None,
+            focus_handle: None,
+            is_focused: false,
+            list_state: None,
+            on_select_emoji: None,
+            on_select_sticker: None,
+            on_select_gif: None,
+            on_play_sound: None,
+            on_send_sound: None,
+            on_close: None,
+            on_tab_change: None,
+            on_search_query: None,
+            on_select_gif_category: None,
+            on_select_guild: None,
+        };
+
+        let ids: Vec<String> = build_sticker_virtual_rows(&config, "")
+            .into_iter()
+            .flat_map(|row| match row {
+                StickerVirtualRow::GridRow { items } => items,
+                _ => Vec::new(),
+            })
+            .map(|sticker| sticker.id)
+            .collect();
+        assert_eq!(ids, vec!["favorite", "guild-available", "standard"]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_sticker_rows_hide_unavailable_items() {
+        let available = DiscordSticker {
+            id: "available".into(),
+            pack_id: None,
+            name: "Available".into(),
+            description: None,
+            tags: String::new(),
+            format_type: StickerFormatType::Png,
+            available: true,
+            guild_id: Some("g1".into()),
+        };
+        let unavailable = DiscordSticker {
+            id: "unavailable".into(),
+            available: false,
+            ..available.clone()
+        };
+        let config = MediaPickerConfig {
+            active_tab: MediaPickerTab::Stickers,
+            search_query: String::new(),
+            recent_emojis: Vec::new(),
+            custom_emojis: Vec::new(),
+            stickers: vec![unavailable.clone()],
+            gifs: Vec::new(),
+            sounds: Vec::new(),
+            hovered_info: None,
+            guild_sections: vec![MediaPickerGuildSection {
+                guild_id: "g1".into(),
+                guild_name: "Guild".into(),
+                icon_url: None,
+                acronym: "G".into(),
+                emojis: Vec::new(),
+                stickers: vec![available.clone(), unavailable],
+            }],
+            selected_guild_id: Some("g1".into()),
+            focus_handle: None,
+            is_focused: false,
+            list_state: None,
+            on_select_emoji: None,
+            on_select_sticker: None,
+            on_select_gif: None,
+            on_play_sound: None,
+            on_send_sound: None,
+            on_close: None,
+            on_tab_change: None,
+            on_search_query: None,
+            on_select_gif_category: None,
+            on_select_guild: None,
+        };
+        let rows = build_sticker_virtual_rows(&config, "");
+        let ids: Vec<String> = rows
+            .iter()
+            .flat_map(|row| match row {
+                StickerVirtualRow::GridRow { items } => items
+                    .iter()
+                    .map(|sticker| sticker.id.clone())
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(ids, vec!["available"]);
     }
 }

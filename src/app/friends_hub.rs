@@ -9,23 +9,23 @@
 //! - Colors: `crate::tokens` accessors only; literals kept are inventoried as
 //!   TOKEN FALTANDO in the task report (untouchable `src/tokens`).
 //!
-//! INPUT PENDENTE: the search box and the add-friend field need the kit
-//! `Input`, which requires an `Entity<InputState>` created via `cx` plus
-//! storage in `AppState` — both owned by other fronts (state/components).
-//! They stay static token-styled boxes with identical text/behavior.
-//! DECORAÇÃO: `FriendItemState.avatar_decoration_data` é repassado ao `Avatar`
-//! (quando presente no modelo). `MessageRequestItem` e `ActiveNowItem` não têm
-//! decoração na API atual.
+//! Friend rows come exclusively from real relationship state. Search and add
+//! friend fields are bound to kit `InputState` entities owned by `RootView`.
+//! DECORAÇÃO: `FriendItemState.avatar_decoration_data` e
+//! `ActiveNowItem.avatar_decoration_data` são repassados ao `Avatar`.
+//! `MessageRequestItem` ainda não carrega decoração no modelo atual.
 
-use gpui::component::Disableable as _;
-use gpui::component::button::{Button as KitButton, ButtonVariants as _};
-use gpui::component::input::InputState;
-use gpui::*;
 use crate::app::state::*;
 use crate::components::{Avatar, AvatarSize, Button, ButtonSize, TextInput};
 use crate::domain::user::{AvatarDecorationData, PresenceStatus as DomainPresence};
 use crate::tokens::colors::white;
 use crate::tokens::*;
+use gpui::component::Disableable as _;
+use gpui::component::button::{Button as KitButton, ButtonVariants as _};
+use gpui::component::input::InputState;
+use gpui::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui::component::tooltip::Tooltip;
+use gpui::*;
 
 /// Maps state presence to the domain presence the `Avatar` component takes.
 fn domain_presence(p: PresenceStatus) -> DomainPresence {
@@ -34,6 +34,48 @@ fn domain_presence(p: PresenceStatus) -> DomainPresence {
         PresenceStatus::Idle => DomainPresence::Idle,
         PresenceStatus::DoNotDisturb => DomainPresence::DoNotDisturb,
         PresenceStatus::Offline => DomainPresence::Offline,
+    }
+}
+
+/// Resolves the friend subtitle from the live presence cache first so custom
+/// status emoji (including emoji-only statuses) are not lost in the string-only
+/// relationship snapshot.
+fn friend_status_text(state: &AppState, friend: &FriendItemState) -> String {
+    if let Some(custom) = state
+        .get_user_presence(&friend.id)
+        .and_then(|presence| presence.custom_status.as_ref())
+    {
+        let text = custom.text.as_deref().unwrap_or("").trim();
+        let emoji = custom
+            .emoji
+            .as_ref()
+            .map(|emoji| emoji.name.trim())
+            .filter(|emoji| !emoji.is_empty());
+        if let Some(emoji) = emoji {
+            return if text.is_empty() {
+                emoji.to_string()
+            } else {
+                format!("{} {}", emoji, text)
+            };
+        }
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+
+    if let Some(status) = friend
+        .custom_status
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        return status.to_string();
+    }
+
+    match friend.presence {
+        PresenceStatus::Online => "Disponível".into(),
+        PresenceStatus::Idle => "Ausente".into(),
+        PresenceStatus::DoNotDisturb => "Não Perturbar".into(),
+        PresenceStatus::Offline => "Offline".into(),
     }
 }
 
@@ -54,6 +96,7 @@ pub fn render_friends_hub(
         .overflow_hidden();
 
     container = container.child(render_header(entity.clone(), state));
+    container = container.children(render_friends_feedback(state));
 
     let left_column = if state.friends_tab == FriendsTab::MessageRequests {
         render_message_requests_view(entity.clone(), state)
@@ -67,6 +110,7 @@ pub fn render_friends_hub(
         div()
             .flex_1()
             .w_full()
+            .min_w(px(0.0))
             .flex()
             .flex_row()
             .overflow_hidden()
@@ -89,19 +133,36 @@ fn render_header(entity: Entity<AppState>, state: &AppState) -> Div {
         .items_center()
         .justify_between()
         .child(render_header_tabs(entity.clone(), state))
-        .child(render_header_actions())
+        .child(render_header_actions(entity, state))
+}
+
+/// API-backed feedback shared by friend requests and DM call resolution.
+fn render_friends_feedback(state: &AppState) -> Option<AnyElement> {
+    state.add_friend_feedback.clone().map(|(ok, msg)| {
+        div()
+            .px(px(24.0))
+            .pt(px(8.0))
+            .text_size(px(13.0))
+            .text_color(if ok { status_online() } else { status_danger() })
+            .child(msg)
+            .into_any_element()
+    })
 }
 
 /// Left side of the header: section icon + title + separator + tab bar.
 fn render_header_tabs(entity: Entity<AppState>, state: &AppState) -> AnyElement {
     let entity_home = entity.clone();
     div()
+        .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_row()
         .items_center()
         .gap(px(16.0))
+        .overflow_hidden()
         .child(
             div()
+                .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .items_center()
@@ -130,7 +191,13 @@ fn render_header_tabs(entity: Entity<AppState>, state: &AppState) -> AnyElement 
                         }),
                 ),
         )
-        .child(div().w(px(1.0)).h(px(16.0)).bg(channel_active()))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(1.0))
+                .h(px(16.0))
+                .bg(channel_active()),
+        )
         .child(render_tab_bar(entity.clone(), state))
         .into_any_element()
 }
@@ -192,9 +259,7 @@ fn render_tab_item(
         .font_weight(FontWeight::NORMAL);
 
     if selected {
-        tab = tab
-            .bg(control_secondary_bg_active())
-            .text_color(white());
+        tab = tab.bg(control_secondary_bg_active()).text_color(white());
     } else {
         tab = tab
             .bg(transparent())
@@ -235,10 +300,13 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
 
     let mut tab_bar = div()
         .id("friends-tabbar")
+        .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_row()
         .items_center()
         .gap(px(16.0))
+        .overflow_x_scroll()
         .child(render_tab_item(
             "tab-online",
             "Disponível",
@@ -295,40 +363,28 @@ fn render_friends_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElem
         ));
     }
 
-    tab_bar = tab_bar.child(render_add_friend_tab_button(
-        entity.clone(),
-        state.friends_tab == FriendsTab::AddFriend,
-    ));
-
     tab_bar.into_any_element()
 }
 
-/// "Adicionar amigo" brand button (TabBar suffix of the main tab bar).
-/// Uses `crate::components::Button` with Blurple styling matching modern Discord parity.
+/// "Adicionar amigo" brand button in the right-side header cluster.
+/// The official local capture `/tmp/discord-desktop.png` has a solid
+/// `#5865F2` button; the shared `Button` wrapper provides the matching token
+/// color and Discord interaction states.
 fn render_add_friend_tab_button(entity: Entity<AppState>, _selected: bool) -> AnyElement {
-    let mut btn = Button::blurple("btn-add-friend", "Adicionar amigo")
-        .size(ButtonSize::Sm);
-    btn = btn.on_click(move |_ev, _window, cx| {
-        entity.update(cx, |s, cx| {
-            s.select_friends_tab(FriendsTab::AddFriend);
+    let mut button = Button::blurple("btn-add-friend", "Adicionar amigo").size(ButtonSize::Md);
+    button = button.on_click(move |_ev, _window, cx| {
+        entity.update(cx, |state, cx| {
+            state.select_friends_tab(FriendsTab::AddFriend);
             cx.notify();
         });
     });
-    btn.into_any_element()
+    button.into_any_element()
 }
 
 /// Subtabs of the message-requests view: Você pode conhecer, Spam, Voltar.
 fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyElement {
-    let pending_req = state
-        .message_requests
-        .iter()
-        .filter(|r| !r.is_spam)
-        .count();
-    let spam_count = state
-        .message_requests
-        .iter()
-        .filter(|r| r.is_spam)
-        .count();
+    let pending_req = state.message_requests.iter().filter(|r| !r.is_spam).count();
+    let spam_count = state.message_requests.iter().filter(|r| r.is_spam).count();
 
     let e_you_may_know = entity.clone();
     let e_spam = entity.clone();
@@ -336,10 +392,13 @@ fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
 
     div()
         .id("msgreq-tabbar")
+        .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_row()
         .items_center()
         .gap(px(16.0))
+        .overflow_x_scroll()
         .child(render_tab_item(
             "subtab-you-may-know",
             "Você pode conhecer",
@@ -382,23 +441,80 @@ fn render_msgreq_tab_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
         .into_any_element()
 }
 
-/// Right side of the header: new group dm + inbox + help icons per friends-online.png.
-fn render_header_actions() -> AnyElement {
+/// Right side of the header: new group DM, message requests and help.
+fn render_header_actions(entity: Entity<AppState>, state: &AppState) -> AnyElement {
+    let add_friend_entity = entity.clone();
+    let group_entity = entity.clone();
+    let inbox_entity = entity;
+    let inbox_color = if state.friends_tab == FriendsTab::MessageRequests {
+        white()
+    } else {
+        text_muted()
+    };
+
     div()
         .flex()
+        .flex_shrink_0()
         .flex_row()
         .items_center()
         .gap(px(16.0))
-        .child(icon_chat(px(20.0), text_muted()))
+        .child(render_add_friend_tab_button(
+            add_friend_entity,
+            state.friends_tab == FriendsTab::AddFriend,
+        ))
+        .child(render_header_action_button(
+            "friends-new-group-dm",
+            icon_chat(px(20.0), text_muted()).into_any_element(),
+            "Novo grupo",
+            move |_ev, _window, cx| {
+                group_entity.update(cx, |s, cx| {
+                    s.open_modal(ActiveModal::CreateGroupDm);
+                    cx.notify();
+                });
+            },
+        ))
+        .child(div().w(px(1.0)).h(px(16.0)).bg(border_subtle()).mx(px(2.0)))
+        .child(render_header_action_button(
+            "friends-message-requests",
+            icon_inbox(px(20.0), inbox_color).into_any_element(),
+            "Solicitações de mensagens",
+            move |_ev, _window, cx| {
+                inbox_entity.update(cx, |s, cx| {
+                    s.select_friends_tab(FriendsTab::MessageRequests);
+                    cx.notify();
+                });
+            },
+        ))
+        // No help surface exists in AppState yet; keep the official affordance
+        // visible without pretending that a click performs an action.
         .child(
             div()
-                .w(px(1.0))
-                .h(px(16.0))
-                .bg(border_subtle())
-                .mx(px(2.0)),
+                .w(px(32.0))
+                .h(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon_help(px(20.0), text_muted())),
         )
-        .child(icon_inbox(px(20.0), text_muted()))
-        .child(icon_help(px(20.0), text_muted()))
+        .into_any_element()
+}
+
+fn render_header_action_button(
+    id: &'static str,
+    icon: AnyElement,
+    tooltip: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    KitButton::new(id)
+        .ghost()
+        .compact()
+        .tooltip(tooltip)
+        .w(px(32.0))
+        .h(px(32.0))
+        .rounded(px(16.0))
+        .text_color(text_muted())
+        .child(icon)
+        .on_click(on_click)
         .into_any_element()
 }
 
@@ -406,6 +522,7 @@ fn render_header_actions() -> AnyElement {
 fn render_message_requests_view(entity: Entity<AppState>, state: &AppState) -> Div {
     let mut container = div()
         .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -469,8 +586,7 @@ fn render_msgreq_top_bar(entity: Entity<AppState>, state: &AppState) -> AnyEleme
         );
 
     if is_spam_tab && count > 0 {
-        let mut clear =
-            Button::danger("msgreq-clear-spam", "Limpar tudo").size(ButtonSize::Sm);
+        let mut clear = Button::danger("msgreq-clear-spam", "Limpar tudo").size(ButtonSize::Sm);
         clear = clear.on_click(move |_ev, _window, cx| {
             entity.update(cx, |s, cx| {
                 s.clear_spam_requests();
@@ -689,6 +805,7 @@ fn render_friends_list_view(
 
     div()
         .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -700,37 +817,31 @@ fn render_friends_list_view(
         })
 }
 
-/// Builds the visible friend rows: real relationships first, then offline
-/// demo fallbacks (members, DMs) exactly as today — no invented data.
+/// Builds the visible rows from real relationship state only. Members and DM
+/// channels are not relationships and must never be promoted to friends.
 pub fn collect_friend_rows(state: &AppState, search_query: &str) -> Vec<FriendRowData> {
-    let mut friends: Vec<FriendRowData> = Vec::new();
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for f in &state.friends {
-        let lower = f.username.to_lowercase();
-        if !seen_names.insert(lower) {
-            continue;
-        }
-        let status = if let Some(ref s) = f.custom_status {
-            s.clone()
-        } else {
-            match f.presence {
-                PresenceStatus::Online => "Disponível".into(),
-                PresenceStatus::Idle => "Ausente".into(),
-                PresenceStatus::DoNotDisturb => "Não Perturbar".into(),
-                PresenceStatus::Offline => "Offline".into(),
+    let mut seen = std::collections::HashSet::new();
+    let mut friends: Vec<FriendRowData> = state
+        .friends
+        .iter()
+        .filter_map(|f| {
+            let identity = if f.id.is_empty() {
+                format!("username:{}", f.username.to_lowercase())
+            } else {
+                format!("id:{}", f.id)
+            };
+            if !seen.insert(identity) {
+                return None;
             }
-        };
-        friends.push(FriendRowData {
-            user_id: f.id.clone(),
-            display_name: if f.display_name.is_empty() {
+
+            let status = friend_status_text(state, f);
+            let display_name = if f.display_name.is_empty() {
                 f.username.clone()
             } else {
                 f.display_name.clone()
-            },
-            username: format!("@{}", f.username),
-            avatar_text: if f.avatar_text.is_empty() {
-                f.display_name
+            };
+            let avatar_text = if f.avatar_text.is_empty() {
+                display_name
                     .chars()
                     .next()
                     .or_else(|| f.username.chars().next())
@@ -739,116 +850,40 @@ pub fn collect_friend_rows(state: &AppState, search_query: &str) -> Vec<FriendRo
                     .to_string()
             } else {
                 f.avatar_text.clone()
-            },
-            avatar_url: f.avatar_url.clone(),
-            avatar_decoration_data: f.avatar_decoration_data.clone(),
-            status,
-            channel_id: find_dm_for(state, &f.id, &f.username, &f.display_name),
-            presence: f.presence,
-            relationship_type: f.relationship_type,
-        });
-    }
-
-    if !state.is_connected_to_gateway && state.auth_token.is_none() && state.friends.is_empty() {
-        for m in &state.members {
-            if m.is_bot || m.id == state.current_user.id {
-                continue;
-            }
-            let lower = m.name.to_lowercase();
-            if !seen_names.insert(lower.clone()) {
-                continue;
-            }
-            let status = if let Some(ref act) = m.activity {
-                act.clone()
-            } else {
-                match m.presence {
-                    PresenceStatus::Online => "Disponível".into(),
-                    PresenceStatus::Idle => "Ausente".into(),
-                    PresenceStatus::DoNotDisturb => "Não Perturbar".into(),
-                    PresenceStatus::Offline => "Offline".into(),
-                }
             };
-            friends.push(FriendRowData {
-                user_id: m.id.clone(),
-                display_name: m.name.clone(),
-                username: format!("@{}", lower.replace(' ', "_")),
-                avatar_text: if m.avatar_text.is_empty() {
-                    m.name
-                        .chars()
-                        .next()
-                        .unwrap_or('?')
-                        .to_uppercase()
-                        .to_string()
-                } else {
-                    m.avatar_text.clone()
-                },
-                avatar_url: None,
-                avatar_decoration_data: None,
+            let channel_id = find_dm_for(state, &f.id, &f.username, &display_name);
+
+            Some(FriendRowData {
+                user_id: f.id.clone(),
+                display_name,
+                username: format!("@{}", f.username),
+                avatar_text,
+                avatar_url: f.avatar_url.clone(),
+                avatar_decoration_data: f.avatar_decoration_data.clone(),
                 status,
-                channel_id: find_dm_for(state, &m.id, &m.name, &m.name),
-                presence: m.presence,
-                relationship_type: 1,
-            });
-        }
+                channel_id,
+                presence: f.presence,
+                relationship_type: f.relationship_type,
+            })
+        })
+        .collect();
 
-        for dm in &state.dm_channels {
-            if dm.id == "dm-group-gpui" {
-                continue;
-            }
-            let lower = dm.name.to_lowercase();
-            if !seen_names.insert(lower.clone()) {
-                continue;
-            }
-            friends.push(FriendRowData {
-                user_id: dm.recipient_ids.first().cloned().unwrap_or_default(),
-                display_name: dm.name.clone(),
-                username: format!("@{}", lower.replace(' ', "_")),
-                avatar_text: dm
-                    .name
-                    .chars()
-                    .next()
-                    .unwrap_or('?')
-                    .to_uppercase()
-                    .to_string(),
-                avatar_url: dm.icon_url.clone(),
-                avatar_decoration_data: None,
-                status: dm.topic.clone().unwrap_or_else(|| "Disponível".into()),
-                channel_id: dm.id.clone(),
-                presence: PresenceStatus::Online,
-                relationship_type: 1,
-            });
-        }
-    }
-
-    let mut filtered: Vec<FriendRowData> = match state.friends_tab {
-        FriendsTab::Online => friends
-            .into_iter()
-            .filter(|f| f.relationship_type == 1 && f.presence != PresenceStatus::Offline)
-            .collect(),
-        FriendsTab::All => friends
-            .into_iter()
-            .filter(|f| f.relationship_type == 1)
-            .collect(),
-        FriendsTab::Pending => friends
-            .into_iter()
-            .filter(|f| f.relationship_type == 3 || f.relationship_type == 4)
-            .collect(),
-        FriendsTab::Blocked => friends
-            .into_iter()
-            .filter(|f| f.relationship_type == 2)
-            .collect(),
-        _ => Vec::new(),
-    };
+    friends.retain(|f| match state.friends_tab {
+        FriendsTab::Online => f.relationship_type == 1 && f.presence != PresenceStatus::Offline,
+        FriendsTab::All => f.relationship_type == 1,
+        FriendsTab::Pending => f.relationship_type == 3 || f.relationship_type == 4,
+        FriendsTab::Blocked => f.relationship_type == 2,
+        _ => false,
+    });
 
     let q = search_query.trim().to_lowercase();
     if !q.is_empty() {
-        filtered.retain(|r| {
-            r.display_name.to_lowercase().contains(&q)
-                || r.username.to_lowercase().contains(&q)
+        friends.retain(|r| {
+            r.display_name.to_lowercase().contains(&q) || r.username.to_lowercase().contains(&q)
         });
     }
 
-    filtered
+    friends
 }
 
 /// Finds the 1:1 DM channel for a user, falling back to `dm-<id>` as today.
@@ -858,7 +893,7 @@ fn find_dm_for(state: &AppState, user_id: &str, username: &str, display_name: &s
         .iter()
         .find(|d| {
             !d.is_group_dm
-                && (d.recipient_ids.contains(&user_id.to_string())
+                && ((!user_id.is_empty() && d.recipient_ids.iter().any(|id| id == user_id))
                     || d.name.eq_ignore_ascii_case(username)
                     || d.name.eq_ignore_ascii_case(display_name))
         })
@@ -1173,7 +1208,7 @@ fn render_friend_row_actions(
         3 => render_incoming_actions(entity, &row.user_id, idx, pending),
         4 => render_outgoing_actions(entity, &row.user_id, idx, pending),
         2 => render_blocked_actions(entity, &row.user_id, idx, pending),
-        _ => render_mutual_actions(entity, row, idx),
+        _ => render_mutual_actions(entity, row, idx, pending),
     }
 }
 
@@ -1282,12 +1317,21 @@ fn render_blocked_actions(
         .into_any_element()
 }
 
-/// Mutual friend: DM button + "more" button (both kit, with tooltips).
-fn render_mutual_actions(entity: Entity<AppState>, row: &FriendRowData, idx: usize) -> AnyElement {
+/// Mutual friend: DM button + a real menu with call and remove actions.
+fn render_mutual_actions(
+    entity: Entity<AppState>,
+    row: &FriendRowData,
+    idx: usize,
+    pending: bool,
+) -> AnyElement {
     let dm_uid = row.user_id.clone();
     let dm_uname = row.display_name.clone();
     let dm_cid = row.channel_id.clone();
     let entity_dm = entity.clone();
+    let call_entity = entity.clone();
+    let call_uid = row.user_id.clone();
+    let remove_entity = entity;
+    let remove_uid = row.user_id.clone();
 
     div()
         .flex()
@@ -1323,7 +1367,28 @@ fn render_mutual_actions(entity: Entity<AppState>, row: &FriendRowData, idx: usi
                 .rounded(px(18.0))
                 .bg(bg_channels())
                 .text_color(text_muted())
-                .child(div().text_size(px(16.0)).child("⋮")),
+                .child(div().text_size(px(16.0)).child("⋮"))
+                .context_menu(move |menu: PopupMenu, _window, _cx| {
+                    let call_app = call_entity.clone();
+                    let call_id = call_uid.clone();
+                    let remove_app = remove_entity.clone();
+                    let remove_id = remove_uid.clone();
+                    menu.item(PopupMenuItem::new("Chamar").disabled(pending).on_click(
+                        move |_ev, _win, cx| {
+                            AppState::call_friend(call_app.clone(), call_id.clone(), cx);
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new("Remover amigo")
+                            .disabled(pending)
+                            .on_click(move |_ev, _win, cx| {
+                                remove_app.update(cx, |state, cx| {
+                                    state.remove_relationship(&remove_id);
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                }),
         )
         .into_any_element()
 }
@@ -1336,6 +1401,7 @@ pub fn render_add_friend_view(
 ) -> Div {
     div()
         .flex_1()
+        .min_w(px(0.0))
         .flex()
         .flex_col()
         .px(px(32.0))
@@ -1343,24 +1409,12 @@ pub fn render_add_friend_view(
         .gap(px(16.0))
         .overflow_hidden()
         .child(render_add_friend_header())
-        .child(render_add_friend_card(entity.clone(), state, add_friend_state))
-        .children(state.add_friend_feedback.clone().map(|(ok, msg)| {
-            div()
-                .text_size(px(13.0))
-                .text_color(if ok {
-                    status_online()
-                } else {
-                    status_danger()
-                })
-                .child(msg)
-        }))
-        .child(
-            div()
-                .w_full()
-                .h(px(1.0))
-                .bg(bg_chat_hover())
-                .my(px(16.0)),
-        )
+        .child(render_add_friend_card(
+            entity.clone(),
+            state,
+            add_friend_state,
+        ))
+        .child(div().w_full().h(px(1.0)).bg(bg_chat_hover()).my(px(16.0)))
         .child(
             div()
                 .font_weight(FontWeight::BOLD)
@@ -1418,14 +1472,12 @@ fn render_add_friend_card(
         .justify_between()
         .gap(px(12.0))
         .child(
-            div()
-                .flex_1()
-                .child(
-                    TextInput::new("add-friend-input", add_friend_state)
-                        .placeholder("Insira um nome de usuário")
-                        .show_paste(false)
-                        .show_clear(false),
-                ),
+            div().flex_1().child(
+                TextInput::new("add-friend-input", add_friend_state)
+                    .placeholder("Insira um nome de usuário")
+                    .show_paste(false)
+                    .show_clear(false),
+            ),
         )
         .child(render_send_request_button(entity, current_input, can_send))
         .into_any_element()
@@ -1442,8 +1494,7 @@ fn render_send_request_button(
     } else {
         "Enviando..."
     };
-    let mut btn =
-        Button::new("btn-send-friend-request", label).size(ButtonSize::Sm);
+    let mut btn = Button::new("btn-send-friend-request", label).size(ButtonSize::Sm);
     // TOKEN FALTANDO (desabilitado): fundo 0x3c4270 + texto 0x949ba4 do
     // estado sem texto; o Button desabilitado usa opacidade .5 sobre o tema.
     if !can_send && label == "Enviar pedido de amizade" {
@@ -1509,15 +1560,12 @@ fn render_discover_row() -> AnyElement {
 }
 
 /// Active Now sidebar (360px): title + empty card or rich-presence cards.
-pub fn render_active_now_panel(
-    _entity: Entity<AppState>,
-    state: &AppState,
-) -> Stateful<Div> {
+pub fn render_active_now_panel(_entity: Entity<AppState>, state: &AppState) -> Stateful<Div> {
     let mut panel = div()
         .id("active-now-scroll")
         .w(px(360.0))
         .flex_shrink_0()
-        .bg(bg_channels())
+        .bg(bg_server())
         .border_l_1()
         .border_color(channel_hover())
         .p(px(16.0))
@@ -1577,7 +1625,7 @@ fn render_active_now_card(item: &ActiveNowItem) -> AnyElement {
         .w_full()
         .p(px(16.0))
         .rounded(px(16.0))
-        .bg(bg_server())
+        .bg(bg_channels())
         .border_1()
         .border_color(bg_chat_hover())
         .hover(|s| s.border_color(borders()))
@@ -1612,32 +1660,40 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
         .justify_between()
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.0))
                 .flex()
                 .items_center()
                 .gap(px(10.0))
+                .overflow_hidden()
                 .child(
                     Avatar::new(item.avatar_text.clone())
                         .opt_src(item.avatar_url.clone())
                         .size(AvatarSize::Px32)
                         .opt_status(Some(domain_presence(item.presence)))
+                        .opt_decoration(item.avatar_decoration_data.clone())
                         .bg_color(blurple())
-                        .cutout_color(bg_server()),
+                        .cutout_color(bg_channels()),
                 )
                 .child(
                     div()
                         .flex()
                         .flex_col()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
                         .child(
                             div()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(14.0))
                                 .text_color(white())
+                                .truncate()
                                 .child(item.display_name.clone()),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(legacy_949ba4())
+                                .truncate()
                                 .child(item.header_subtitle.clone()),
                         ),
                 ),
@@ -1645,6 +1701,7 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
         .child(
             div()
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
                 .child(match item.kind {
@@ -1652,9 +1709,7 @@ fn render_active_now_card_header(item: &ActiveNowItem) -> AnyElement {
                         icon_gamepad(px(16.0), legacy_949ba4())
                     }
                     ActiveNowKind::Spotify => icon_music(px(16.0), status_online()),
-                    ActiveNowKind::RichPresence => {
-                        icon_screen_share(px(16.0), legacy_949ba4())
-                    }
+                    ActiveNowKind::RichPresence => icon_screen_share(px(16.0), legacy_949ba4()),
                 }),
         )
         .into_any_element()
@@ -1676,6 +1731,7 @@ fn render_active_now_details(item: &ActiveNowItem) -> AnyElement {
         .child(
             div()
                 .flex_1()
+                .min_w(px(0.0))
                 .flex()
                 .flex_col()
                 .gap(px(2.0))
@@ -1685,18 +1741,28 @@ fn render_active_now_details(item: &ActiveNowItem) -> AnyElement {
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(14.0))
                         .text_color(text_titles())
+                        .truncate()
                         .child(item.details_title.clone()),
                 )
                 .children(item.details_state.as_ref().map(|state_text| {
                     div()
                         .text_size(px(12.0))
                         .text_color(legacy_949ba4())
+                        .truncate()
                         .child(state_text.clone())
+                }))
+                .children(item.spotify_album.as_ref().map(|album| {
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(text_muted())
+                        .truncate()
+                        .child(album.clone())
                 }))
                 .children(item.elapsed_time_text.as_ref().map(|elapsed| {
                     div()
                         .text_size(px(12.0))
                         .text_color(text_muted())
+                        .truncate()
                         .child(elapsed.clone())
                 }))
                 .children(render_spotify_progress(item)),
@@ -1706,61 +1772,75 @@ fn render_active_now_details(item: &ActiveNowItem) -> AnyElement {
 
 /// Big 48px app icon or album cover, rendered from real assets, with fallback to kind vector icon.
 fn render_active_now_app_icon(item: &ActiveNowItem) -> AnyElement {
+    let mut base = div()
+        .id(ElementId::Name(
+            format!("active-now-asset-{}", item.id).into(),
+        ))
+        .relative()
+        .size(px(48.0))
+        .rounded(px(8.0))
+        .overflow_hidden()
+        .flex_shrink_0();
+
     if let Some(ref url) = item.large_image_url {
-        let mut base = div()
-            .relative()
-            .size(px(48.0))
-            .rounded(px(8.0))
-            .overflow_hidden()
-            .flex_shrink_0()
-            .child(
-                img(url.clone())
-                    .size_full()
-                    .rounded(px(8.0)),
-            );
-
-        if let Some(ref small_url) = item.small_image_url {
-            base = base.child(
-                div()
-                    .absolute()
-                    .bottom(px(-2.0))
-                    .right(px(-2.0))
-                    .size(px(20.0))
-                    .rounded_full()
-                    .border_2()
-                    .border_color(bg_input())
-                    .overflow_hidden()
-                    .child(
-                        img(small_url.clone())
-                            .size_full()
-                            .rounded_full(),
-                    ),
-            );
-        }
-
-        base.into_any_element()
+        base = base.child(img(url.clone()).size_full().rounded(px(8.0)));
     } else {
-        // Sem imagem: exibe o ícone oficial da atividade sobre fundo neutro do Discord.
-        div()
-            .size(px(48.0))
-            .rounded(px(8.0))
+        base = base
             .bg(bg_channels())
-            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
-            .child(match item.kind {
-                ActiveNowKind::Quest | ActiveNowKind::Game => {
-                    icon_gamepad(px(24.0), text_muted()).into_any_element()
-                }
-                ActiveNowKind::Spotify => {
-                    icon_music(px(24.0), status_online()).into_any_element()
-                }
-                ActiveNowKind::RichPresence => {
-                    icon_screen_share(px(24.0), text_muted()).into_any_element()
-                }
-            })
-            .into_any_element()
+            .child(render_active_now_fallback_icon(item));
+    }
+
+    if let Some(text) = item
+        .large_image_text
+        .as_ref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        let text: SharedString = text.clone().into();
+        base = base.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+    }
+
+    // The small asset is independent from the large one. Some real presence
+    // payloads carry only a status/platform badge.
+    if let Some(ref small_url) = item.small_image_url {
+        let mut overlay = div()
+            .id(ElementId::Name(
+                format!("active-now-small-asset-{}", item.id).into(),
+            ))
+            .absolute()
+            .bottom(px(-2.0))
+            .right(px(-2.0))
+            .size(px(20.0))
+            .rounded_full()
+            .border_2()
+            .border_color(bg_input())
+            .overflow_hidden()
+            .child(img(small_url.clone()).size_full().rounded_full());
+        if let Some(text) = item
+            .small_image_text
+            .as_ref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let text: SharedString = text.clone().into();
+            overlay =
+                overlay.tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx));
+        }
+        base = base.child(overlay);
+    }
+
+    base.into_any_element()
+}
+
+/// Vector fallback used only when the activity has no real large asset.
+fn render_active_now_fallback_icon(item: &ActiveNowItem) -> AnyElement {
+    match item.kind {
+        ActiveNowKind::Quest | ActiveNowKind::Game => {
+            icon_gamepad(px(24.0), text_muted()).into_any_element()
+        }
+        ActiveNowKind::Spotify => icon_music(px(24.0), status_online()).into_any_element(),
+        ActiveNowKind::RichPresence => icon_screen_share(px(24.0), text_muted()).into_any_element(),
     }
 }
 
@@ -1770,11 +1850,11 @@ fn compute_spotify_progress(
     end_ms: i64,
     now_ms: i64,
 ) -> Option<((String, String), f32)> {
-    if end_ms <= start_ms {
+    let total_ms = end_ms.checked_sub(start_ms)?;
+    if total_ms <= 0 {
         return None;
     }
-    let total_ms = end_ms - start_ms;
-    let elapsed_ms = (now_ms - start_ms).clamp(0, total_ms);
+    let elapsed_ms = now_ms.saturating_sub(start_ms).clamp(0, total_ms);
     let ratio = (elapsed_ms as f32 / total_ms as f32).clamp(0.0, 1.0);
 
     let cur_secs = elapsed_ms / 1000;
@@ -1793,16 +1873,18 @@ fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
         return None;
     }
 
-    let (cur, total, progress_ratio) = if let (Some(start), Some(end)) = (item.timestamps_start, item.timestamps_end) {
+    let (cur, total, progress_ratio) = if let Some((start_ms, end_ms)) =
+        item.spotify_timestamp_range()
+    {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let start_ms = if start < 100_000_000_000 { start * 1000 } else { start };
-        let end_ms = if end < 100_000_000_000 { end * 1000 } else { end };
         if let Some(((cur, total), ratio)) = compute_spotify_progress(start_ms, end_ms, now_ms) {
             (cur, total, ratio)
         } else {
             return None;
         }
-    } else if let (Some(progress_text), Some(ratio)) = (&item.spotify_progress_text, item.spotify_progress_pct) {
+    } else if let (Some(progress_text), Some(ratio)) =
+        (&item.spotify_progress_text, item.spotify_progress_pct)
+    {
         (progress_text.0.clone(), progress_text.1.clone(), ratio)
     } else {
         return None;
@@ -1819,6 +1901,7 @@ fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
                 div()
                     .text_size(px(11.0))
                     .text_color(text_muted())
+                    .flex_shrink_0()
                     .child(cur),
             )
             .child(
@@ -1841,19 +1924,19 @@ fn render_spotify_progress(item: &ActiveNowItem) -> Option<AnyElement> {
                 div()
                     .text_size(px(11.0))
                     .text_color(text_muted())
+                    .flex_shrink_0()
                     .child(total),
             )
             .into_any_element(),
     )
 }
 
-/// Helper to check if any active Spotify item with timestamps is present in state.
+/// Helper to check if any active Spotify item has a valid timed interval.
 pub fn has_spotify_with_timestamps(state: &AppState) -> bool {
-    state.active_now_items.iter().any(|item| {
-        item.kind == ActiveNowKind::Spotify
-            && item.timestamps_start.is_some()
-            && item.timestamps_end.is_some()
-    })
+    state
+        .active_now_items
+        .iter()
+        .any(|item| item.kind == ActiveNowKind::Spotify && item.spotify_timestamp_range().is_some())
 }
 
 /// Synchronizes a 1-second GPUI timer task for dynamic Spotify progress updates.
@@ -1887,9 +1970,11 @@ pub fn sync_spotify_progress_timer<V: 'static>(
                             app_weak
                                 .update(cx, |state, cx| {
                                     if state.has_visible_spotify_progress() {
-                                        state.tick_spotify_progress();
-                                        cx.notify();
-                                        true
+                                        let updated = state.tick_spotify_progress();
+                                        if updated {
+                                            cx.notify();
+                                        }
+                                        updated
                                     } else {
                                         false
                                     }

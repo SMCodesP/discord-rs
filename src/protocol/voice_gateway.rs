@@ -4,20 +4,20 @@
 //! heartbeats with `seq_ack`, protocol selection, encryption mode negotiation,
 //! speaking indicators, session resumption, and DAVE (E2EE) signaling.
 
-use anyhow::{bail, Context, Result};
+use crate::protocol::voice_dave::{
+    DaveExecuteTransitionPayload, DaveInvalidCommitWelcomePayload, DaveOpcode, DavePrepareEpochPayload,
+    DavePrepareTransitionPayload, SUPPORTED_DAVE_PROTOCOL_VERSION, VoiceDaveSession,
+    format_client_binary_message, parse_server_binary_message,
+};
+use anyhow::{Context, Result, bail};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::{broadcast, watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, WebSocketConfig};
-use crate::protocol::voice_dave::{
-    parse_server_binary_message, DaveAnnounceCommitTransitionPayload, DaveExecuteTransitionPayload,
-    DaveOpcode, DavePrepareEpochPayload, DavePrepareTransitionPayload, VoiceDaveSession,
-    SUPPORTED_DAVE_PROTOCOL_VERSION,
-};
 
 /// Preferred voice encryption mode for Discord voice connections.
 pub const PREFERRED_ENCRYPTION_MODE: &str = "aead_aes256_gcm_rtpsize";
@@ -54,7 +54,8 @@ pub const DEFAULT_MAX_DAVE_PROTOCOL_VERSION: u32 = SUPPORTED_DAVE_PROTOCOL_VERSI
 //    - Session Description (Opcode 4) provides negotiated `dave_protocol_version` and secret key.
 // 3. Media Cryptor Contract:
 //    - Opus frames are encrypted with current MLS epoch key and decrypted per remote sender.
-//    - Automatic passthrough fallback is preserved during handshakes, transitions, or version 0.
+//    - Media is fail-closed while a negotiated DAVE session has no active MLS ratchet.
+//    - Raw passthrough is limited to transport-only sessions and davey-managed transition grace.
 
 // ============================================================================
 // CONTRACT WITH VoiceUDP AGENT (Primitive Types Only)
@@ -83,7 +84,10 @@ impl VoiceReady {
         } else if self.modes.iter().any(|m| m == FALLBACK_ENCRYPTION_MODE) {
             FALLBACK_ENCRYPTION_MODE
         } else {
-            self.modes.first().map(|s| s.as_str()).unwrap_or(PREFERRED_ENCRYPTION_MODE)
+            self.modes
+                .first()
+                .map(|s| s.as_str())
+                .unwrap_or(PREFERRED_ENCRYPTION_MODE)
         }
     }
 }
@@ -128,6 +132,8 @@ pub enum VoiceOpcode {
     Resume = 7,
     Hello = 8,
     Resumed = 9,
+    ClientsConnect = 11,
+    ClientDisconnect = 13,
 }
 
 impl VoiceOpcode {
@@ -143,6 +149,8 @@ impl VoiceOpcode {
             7 => Some(Self::Resume),
             8 => Some(Self::Hello),
             9 => Some(Self::Resumed),
+            11 => Some(Self::ClientsConnect),
+            13 => Some(Self::ClientDisconnect),
             _ => None,
         }
     }
@@ -228,6 +236,25 @@ pub struct SpeakingPayload {
     pub user_id: Option<String>,
 }
 
+/// Opcode 11: participantes que entraram na chamada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientsConnectPayload {
+    pub user_ids: Vec<String>,
+}
+
+/// Opcode 13: participante que saiu da chamada.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientDisconnectPayload {
+    pub user_id: String,
+}
+
+/// Opcode 6 no Voice Gateway v8: ecoa o nonce dentro do objeto `t`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatAckPayload {
+    #[serde(default)]
+    pub t: Option<u64>,
+}
+
 /// Bitflags for Speaking status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpeakingFlags;
@@ -292,23 +319,24 @@ impl VoiceCloseDecision {
             1001 | 1006 => Self::Resume, // Going away / Abnormal closure
 
             // Session invalidation requiring a fresh Identify (Opcode 0)
-            4003 => Self::NewSession,    // Not authenticated (sent payload prior to identifying)
-            4005 => Self::NewSession,    // Already authenticated (sent more than one identify)
-            4006 => Self::NewSession,    // Session no longer valid
-            4009 => Self::NewSession,    // Session timeout
+            4003 => Self::NewSession, // Not authenticated (sent payload prior to identifying)
+            4005 => Self::NewSession, // Already authenticated (sent more than one identify)
+            4006 => Self::NewSession, // Session no longer valid
+            4009 => Self::NewSession, // Session timeout
 
             // Fatal codes (must not reconnect automatically)
-            4001 => Self::Fatal,         // Unknown opcode
-            4002 => Self::Fatal,         // Failed to decode payload
-            4004 => Self::Fatal,         // Authentication failed (token is invalid)
-            4011 => Self::Fatal,         // Server not found
-            4012 => Self::Fatal,         // Unknown protocol
-            4014 => Self::Fatal,         // Disconnected (channel deleted or user kicked - "Should not reconnect")
-            4016 => Self::Fatal,         // Unknown encryption mode
-            4017 => Self::Fatal,         // E2EE/DAVE protocol required
-            4020 => Self::Fatal,         // Bad request
-            4022 => Self::Fatal,         // Call terminated
-            1000 => Self::Fatal,         // Normal closure
+            4001 => Self::Fatal, // Unknown opcode
+            4002 => Self::Fatal, // Failed to decode payload
+            4004 => Self::Fatal, // Authentication failed (token is invalid)
+            4011 => Self::Fatal, // Server not found
+            4012 => Self::Fatal, // Unknown protocol
+            4014 => Self::Fatal, // Disconnected (channel deleted or user kicked - "Should not reconnect")
+            4016 => Self::Fatal, // Unknown encryption mode
+            4017 => Self::Fatal, // E2EE/DAVE protocol required
+            4020 => Self::Fatal, // Bad request
+            4021 => Self::Fatal, // Rate limited: should not reconnect
+            4022 => Self::Fatal, // Call terminated
+            1000 => Self::Fatal, // Normal closure
 
             // Any unknown or unhandled close codes default to Fatal to avoid infinite reconnection loops
             _ => Self::Fatal,
@@ -347,6 +375,7 @@ pub fn describe_voice_close_code(code: u16) -> &'static str {
         4016 => "Unknown encryption mode: unrecognized encryption mode",
         4017 => "E2EE/DAVE protocol required: this channel requires DAVE end-to-end encryption",
         4020 => "Bad request",
+        4021 => "Disconnected: rate limited",
         4022 => "Call terminated",
         _ => "Unknown voice close code",
     }
@@ -431,16 +460,20 @@ impl VoiceReconnectPolicy {
 /// Real-time events emitted by the Voice Gateway client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VoiceGatewayEvent {
+    /// WebSocket aberto; não significa que UDP/DAVE estejam prontos.
     Connected,
     Ready(VoiceReady),
     SessionDescription(SessionDescription),
     Speaking(SpeakingPayload),
-    HeartbeatAck { latency_ms: Option<u64> },
+    ClientsConnect(ClientsConnectPayload),
+    ClientDisconnect(ClientDisconnectPayload),
+    HeartbeatAck {
+        latency_ms: Option<u64>,
+    },
     Resumed,
     DavePrepareTransition(DavePrepareTransitionPayload),
     DaveExecuteTransition(DaveExecuteTransitionPayload),
     DavePrepareEpoch(DavePrepareEpochPayload),
-    DaveAnnounceCommit(DaveAnnounceCommitTransitionPayload),
     DaveBinaryMessage(Vec<u8>),
     Disconnected {
         code: Option<u16>,
@@ -463,6 +496,9 @@ pub enum VoiceConnectionState {
     SelectingProtocol,
     Connected(SessionDescription),
     Resuming,
+    /// The voice session is invalid; the caller must obtain fresh main-gateway
+    /// credentials and create a new VoiceGateway instance.
+    NeedsNewSession(String),
     Failed(String),
 }
 
@@ -475,12 +511,14 @@ pub enum VoiceGatewayAction {
     ReadyReceived(VoiceReady),
     SessionDescriptionReceived(SessionDescription),
     SpeakingUpdate(SpeakingPayload),
+    ClientsConnected(ClientsConnectPayload),
+    ClientDisconnected(ClientDisconnectPayload),
+    DaveBinaryMessage(Vec<u8>),
     HeartbeatAckReceived { timestamp: Option<u64> },
     Resumed,
     DavePrepareTransition(DavePrepareTransitionPayload),
     DaveExecuteTransition(DaveExecuteTransitionPayload),
     DavePrepareEpoch(DavePrepareEpochPayload),
-    DaveAnnounceCommit(DaveAnnounceCommitTransitionPayload),
     CloseConnection { reason: String, can_resume: bool },
 }
 
@@ -493,12 +531,24 @@ pub struct VoiceGatewayStateMachine {
     heartbeat_interval_ms: Option<u64>,
     ready_data: Option<VoiceReady>,
     session_description: Option<SessionDescription>,
+    protocol_selected: bool,
     pub dave_session: VoiceDaveSession,
+    dave_signaling_external: bool,
 }
 
 impl VoiceGatewayStateMachine {
     /// Creates a new state machine in `Disconnected` state.
     pub fn new(config: VoiceGatewayConfig) -> Self {
+        Self::with_dave_signaling_mode(config, false)
+    }
+
+    /// Usado pela VoiceSession: o handshake DAVE é processado pela sessão de
+    /// mídia compartilhada, enquanto o gateway apenas entrega os eventos.
+    pub fn with_external_dave_signaling(config: VoiceGatewayConfig) -> Self {
+        Self::with_dave_signaling_mode(config, true)
+    }
+
+    fn with_dave_signaling_mode(config: VoiceGatewayConfig, dave_signaling_external: bool) -> Self {
         let user_id = config.user_id.parse::<u64>().unwrap_or(0);
         let channel_id = config.server_id.parse::<u64>().unwrap_or(0);
         Self {
@@ -508,7 +558,9 @@ impl VoiceGatewayStateMachine {
             heartbeat_interval_ms: None,
             ready_data: None,
             session_description: None,
+            protocol_selected: false,
             dave_session: VoiceDaveSession::new(user_id, channel_id),
+            dave_signaling_external,
         }
     }
 
@@ -563,13 +615,20 @@ impl VoiceGatewayStateMachine {
     }
 
     /// Transitions to `WaitingForHello` when the WebSocket connection begins.
+    /// A resumable generation keeps `Resuming` so Hello emits Opcode 7.
     pub fn start(&mut self) -> Result<()> {
-        self.state = VoiceConnectionState::WaitingForHello;
+        if self.state != VoiceConnectionState::Resuming {
+            self.state = VoiceConnectionState::WaitingForHello;
+            self.heartbeat_interval_ms = None;
+        }
         Ok(())
     }
 
     /// Generates Opcode 3 Heartbeat payload containing `seq_ack`.
-    pub fn generate_heartbeat(&self, timestamp: Option<u64>) -> VoiceGatewayPayload<HeartbeatPayload> {
+    pub fn generate_heartbeat(
+        &self,
+        timestamp: Option<u64>,
+    ) -> VoiceGatewayPayload<HeartbeatPayload> {
         VoiceGatewayPayload {
             op: VoiceOpcode::Heartbeat as u8,
             d: Some(HeartbeatPayload {
@@ -643,7 +702,11 @@ impl VoiceGatewayStateMachine {
         VoiceGatewayPayload {
             op: VoiceOpcode::Speaking as u8,
             d: Some(SpeakingPayload {
-                speaking: if speaking { SpeakingFlags::MICROPHONE } else { SpeakingFlags::NONE },
+                speaking: if speaking {
+                    SpeakingFlags::MICROPHONE
+                } else {
+                    SpeakingFlags::NONE
+                },
                 delay,
                 ssrc,
                 user_id: None,
@@ -659,14 +722,23 @@ impl VoiceGatewayStateMachine {
         external_port: u16,
         mode: &str,
     ) -> Result<VoiceGatewayAction> {
+        if self.protocol_selected {
+            bail!("Opcode 1 Select Protocol já foi enviado nesta sessão de voz");
+        }
         let payload = self.generate_select_protocol(external_ip, external_port, mode);
         let json_str = serde_json::to_string(&payload)?;
+        self.protocol_selected = true;
         self.state = VoiceConnectionState::SelectingProtocol;
         Ok(VoiceGatewayAction::SendMessage(json_str))
     }
 
     /// Sets client speaking state (Opcode 5).
-    pub fn set_speaking(&mut self, speaking: bool, delay: u32, ssrc: u32) -> Result<VoiceGatewayAction> {
+    pub fn set_speaking(
+        &mut self,
+        speaking: bool,
+        delay: u32,
+        ssrc: u32,
+    ) -> Result<VoiceGatewayAction> {
         let payload = self.generate_speaking(speaking, delay, ssrc);
         let json_str = serde_json::to_string(&payload)?;
         Ok(VoiceGatewayAction::SendMessage(json_str))
@@ -695,10 +767,22 @@ impl VoiceGatewayStateMachine {
         match VoiceOpcode::from_u8(payload.op) {
             Some(VoiceOpcode::Hello) => {
                 let data = payload.d.context("Missing Hello data payload")?;
-                let hello: HelloPayload = serde_json::from_value(data)
-                    .context("Failed to deserialize Hello payload")?;
+                let hello: HelloPayload =
+                    serde_json::from_value(data).context("Failed to deserialize Hello payload")?;
 
+                if !hello.heartbeat_interval.is_finite() || hello.heartbeat_interval <= 0.0 {
+                    bail!(
+                        "heartbeat_interval inválido no Hello do Voice Gateway: {}",
+                        hello.heartbeat_interval
+                    );
+                }
                 let interval_ms = hello.heartbeat_interval.round() as u64;
+                if interval_ms == 0 {
+                    bail!(
+                        "heartbeat_interval inválido no Hello do Voice Gateway: {}",
+                        hello.heartbeat_interval
+                    );
+                }
                 self.heartbeat_interval_ms = Some(interval_ms);
                 log::info!("[VoiceDiag] Hello recebido: intervalo_ms={}", interval_ms);
                 actions.push(VoiceGatewayAction::StartHeartbeat { interval_ms });
@@ -706,19 +790,29 @@ impl VoiceGatewayStateMachine {
                 // If we are in Resuming state, send Resume (Op 7). Otherwise send Identify (Op 0).
                 if self.state == VoiceConnectionState::Resuming {
                     let resume = self.generate_resume();
-                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&resume)?));
+                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(
+                        &resume,
+                    )?));
                 } else {
                     self.state = VoiceConnectionState::Identifying;
                     let identify = self.generate_identify();
-                    let dave_v = self.config.max_dave_protocol_version.unwrap_or(DEFAULT_MAX_DAVE_PROTOCOL_VERSION);
-                    log::info!("[VoiceDiag] Identify enviado: campos=[server_id, user_id, session_id, token, max_dave_protocol_version], dave_version={}", dave_v);
-                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&identify)?));
+                    let dave_v = self
+                        .config
+                        .max_dave_protocol_version
+                        .unwrap_or(DEFAULT_MAX_DAVE_PROTOCOL_VERSION);
+                    log::info!(
+                        "[VoiceDiag] Identify enviado: campos=[server_id, user_id, session_id, token, max_dave_protocol_version], dave_version={}",
+                        dave_v
+                    );
+                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(
+                        &identify,
+                    )?));
                 }
             }
             Some(VoiceOpcode::Ready) => {
                 let data = payload.d.context("Missing Ready data payload")?;
-                let ready: ReadyPayload = serde_json::from_value(data)
-                    .context("Failed to deserialize Ready payload")?;
+                let ready: ReadyPayload =
+                    serde_json::from_value(data).context("Failed to deserialize Ready payload")?;
 
                 let voice_ready = VoiceReady {
                     ssrc: ready.ssrc,
@@ -726,13 +820,19 @@ impl VoiceGatewayStateMachine {
                     port: ready.port,
                     modes: ready.modes,
                 };
-                log::info!("[VoiceDiag] Ready recebido: ssrc={}, modos={:?}", voice_ready.ssrc, voice_ready.modes);
+                log::info!(
+                    "[VoiceDiag] Ready recebido: ssrc={}, modos={:?}",
+                    voice_ready.ssrc,
+                    voice_ready.modes
+                );
                 self.ready_data = Some(voice_ready.clone());
                 self.state = VoiceConnectionState::Ready(voice_ready.clone());
                 actions.push(VoiceGatewayAction::ReadyReceived(voice_ready));
             }
             Some(VoiceOpcode::SessionDescription) => {
-                let data = payload.d.context("Missing SessionDescription data payload")?;
+                let data = payload
+                    .d
+                    .context("Missing SessionDescription data payload")?;
                 let session: SessionDescriptionPayload = serde_json::from_value(data)
                     .context("Failed to deserialize SessionDescription payload")?;
 
@@ -741,9 +841,11 @@ impl VoiceGatewayStateMachine {
                     secret_key: session.secret_key,
                     dave_protocol_version: session.dave_protocol_version,
                 };
-                if let Some(v) = session.dave_protocol_version {
-                    if let Err(e) = self.dave_session.init_session(v as u16) {
-                        log::warn!("Failed to initialize DAVE session for version {}: {}", v, e);
+                if !self.dave_signaling_external {
+                    if let Some(v) = session.dave_protocol_version {
+                        let version = u16::try_from(v)
+                            .context("dave_protocol_version excede o limite u16")?;
+                        self.dave_session.init_session(version)?;
                     }
                 }
                 self.session_description = Some(desc.clone());
@@ -754,15 +856,50 @@ impl VoiceGatewayStateMachine {
                 let data = payload.d.context("Missing Speaking data payload")?;
                 let speaking: SpeakingPayload = serde_json::from_value(data)
                     .context("Failed to deserialize Speaking payload")?;
-                if let Some(ref uid_str) = speaking.user_id {
-                    if let Ok(uid) = uid_str.parse::<u64>() {
-                        self.dave_session.register_ssrc_user_mapping(speaking.ssrc, uid);
+                if !self.dave_signaling_external {
+                    if let Some(ref uid_str) = speaking.user_id {
+                        if let Ok(uid) = uid_str.parse::<u64>() {
+                            self.dave_session
+                                .register_ssrc_user_mapping(speaking.ssrc, uid);
+                        }
                     }
                 }
                 actions.push(VoiceGatewayAction::SpeakingUpdate(speaking));
             }
+            Some(VoiceOpcode::ClientsConnect) => {
+                let connected: ClientsConnectPayload = serde_json::from_value(
+                    payload.d.context("Missing ClientsConnect data payload")?,
+                )
+                .context("Failed to deserialize ClientsConnect payload")?;
+                if !self.dave_signaling_external {
+                    for id in &connected.user_ids {
+                        if let Ok(user_id) = id.parse::<u64>() {
+                            self.dave_session.register_user_connected(user_id);
+                        }
+                    }
+                }
+                actions.push(VoiceGatewayAction::ClientsConnected(connected));
+            }
+            Some(VoiceOpcode::ClientDisconnect) => {
+                let disconnected: ClientDisconnectPayload = serde_json::from_value(
+                    payload.d.context("Missing ClientDisconnect data payload")?,
+                )
+                .context("Failed to deserialize ClientDisconnect payload")?;
+                if !self.dave_signaling_external {
+                    if let Ok(user_id) = disconnected.user_id.parse::<u64>() {
+                        self.dave_session.register_user_disconnected(user_id);
+                    }
+                }
+                actions.push(VoiceGatewayAction::ClientDisconnected(disconnected));
+            }
             Some(VoiceOpcode::HeartbeatAck) => {
-                let timestamp = payload.d.and_then(|v| v.as_u64());
+                let timestamp = match payload.d {
+                    Some(serde_json::Value::Number(value)) => value.as_u64(),
+                    Some(serde_json::Value::Object(value)) => {
+                        value.get("t").and_then(serde_json::Value::as_u64)
+                    }
+                    _ => None,
+                };
                 actions.push(VoiceGatewayAction::HeartbeatAckReceived { timestamp });
             }
             Some(VoiceOpcode::Resumed) => {
@@ -778,43 +915,60 @@ impl VoiceGatewayStateMachine {
                     match dave_op {
                         DaveOpcode::PrepareTransition => {
                             if let Some(data) = payload.d {
-                                let prep: DavePrepareTransitionPayload = serde_json::from_value(data)
-                                    .context("Failed to deserialize DavePrepareTransition payload")?;
-                                let ready = self.dave_session.handle_prepare_transition(prep.transition_id, prep.protocol_version);
-                                let ready_payload = VoiceGatewayPayload {
-                                    op: DaveOpcode::TransitionReady as u8,
-                                    d: Some(ready),
-                                    seq: None,
-                                };
-                                actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&ready_payload)?));
+                                let prep: DavePrepareTransitionPayload = serde_json::from_value(
+                                    data,
+                                )
+                                .context("Failed to deserialize DavePrepareTransition payload")?;
+                                if self.dave_signaling_external {
+                                    actions.push(VoiceGatewayAction::DavePrepareTransition(prep));
+                                } else {
+                                    let ready = self.dave_session.handle_prepare_transition(
+                                        prep.transition_id,
+                                        prep.protocol_version,
+                                    );
+                                    if prep.transition_id == 0 {
+                                        self.dave_session.handle_execute_transition(0)?;
+                                    } else {
+                                        let ready_payload = VoiceGatewayPayload {
+                                            op: DaveOpcode::TransitionReady as u8,
+                                            d: Some(ready),
+                                            seq: None,
+                                        };
+                                        actions.push(VoiceGatewayAction::SendMessage(
+                                            serde_json::to_string(&ready_payload)?,
+                                        ));
+                                    }
+                                }
                             }
                         }
                         DaveOpcode::ExecuteTransition => {
                             if let Some(data) = payload.d {
-                                let exec: DaveExecuteTransitionPayload = serde_json::from_value(data)
-                                    .context("Failed to deserialize DaveExecuteTransition payload")?;
-                                self.dave_session.handle_execute_transition(exec.transition_id)?;
+                                let exec: DaveExecuteTransitionPayload = serde_json::from_value(
+                                    data,
+                                )
+                                .context("Failed to deserialize DaveExecuteTransition payload")?;
+                                if self.dave_signaling_external {
+                                    actions.push(VoiceGatewayAction::DaveExecuteTransition(exec));
+                                } else {
+                                    self.dave_session
+                                        .handle_execute_transition(exec.transition_id)?;
+                                }
                             }
                         }
                         DaveOpcode::PrepareEpoch => {
                             if let Some(data) = payload.d {
                                 let epoch: DavePrepareEpochPayload = serde_json::from_value(data)
-                                    .context("Failed to deserialize DavePrepareEpoch payload")?;
-                                self.dave_session.handle_prepare_epoch(epoch.epoch, epoch.protocol_version);
-                            }
-                        }
-                        DaveOpcode::MlsAnnounceCommitTransition => {
-                            if let Some(data) = payload.d {
-                                let announce: DaveAnnounceCommitTransitionPayload = serde_json::from_value(data)
-                                    .context("Failed to deserialize DaveAnnounceCommitTransition payload")?;
-                                let commit_bytes = announce.commit.as_ref().map(|s| s.as_bytes()).unwrap_or(&[]);
-                                if let Some(invalid_payload) = self.dave_session.handle_announce_commit(announce.transition_id, commit_bytes)? {
-                                    let invalid_msg = VoiceGatewayPayload {
-                                        op: DaveOpcode::MlsInvalidCommitWelcome as u8,
-                                        d: Some(invalid_payload),
-                                        seq: None,
-                                    };
-                                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&invalid_msg)?));
+                                    .context(
+                                    "Failed to deserialize DavePrepareEpoch payload",
+                                )?;
+                                if self.dave_signaling_external {
+                                    actions.push(VoiceGatewayAction::DavePrepareEpoch(epoch));
+                                } else if let Some(key_package) = self
+                                    .dave_session
+                                    .handle_prepare_epoch(epoch.epoch, epoch.protocol_version)?
+                                {
+                                    actions
+                                        .push(VoiceGatewayAction::SendBinaryMessage(key_package));
                                 }
                             }
                         }
@@ -840,6 +994,11 @@ impl VoiceGatewayStateMachine {
         self.last_seq = seq as i64;
         let mut actions = Vec::new();
 
+        if self.dave_signaling_external {
+            actions.push(VoiceGatewayAction::DaveBinaryMessage(data.to_vec()));
+            return Ok(actions);
+        }
+
         match opcode {
             DaveOpcode::MlsExternalSender => {
                 let key_package_frame = self.dave_session.handle_external_sender(payload)?;
@@ -851,23 +1010,53 @@ impl VoiceGatewayStateMachine {
                 }
                 let op_type = payload[0];
                 let proposals_bytes = &payload[1..];
-                if let Some(commit_welcome_frame) = self.dave_session.handle_proposals(op_type, proposals_bytes, None)? {
+                if let Some(commit_welcome_frame) =
+                    self.dave_session
+                        .handle_proposals(op_type, proposals_bytes, None)?
+                {
                     actions.push(VoiceGatewayAction::SendBinaryMessage(commit_welcome_frame));
+                }
+            }
+            DaveOpcode::MlsAnnounceCommitTransition => {
+                if payload.len() < 2 {
+                    bail!(
+                        "Opcode 29 Announce Commit binary frame is too short: {} bytes",
+                        payload.len()
+                    );
+                }
+                let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
+                if let Some(invalid_payload) = self
+                    .dave_session
+                    .handle_announce_commit(transition_id, &payload[2..])?
+                {
+                    actions.push(invalid_commit_action(invalid_payload)?);
+                    let key_package = self.dave_session.create_key_package()?;
+                    actions.push(VoiceGatewayAction::SendBinaryMessage(
+                        format_client_binary_message(DaveOpcode::MlsKeyPackage, &key_package),
+                    ));
+                } else {
+                    actions.push(transition_ready_action(transition_id)?);
                 }
             }
             DaveOpcode::MlsWelcome => {
                 if payload.len() < 2 {
-                    bail!("Opcode 30 Welcome binary frame is too short: {} bytes", payload.len());
+                    bail!(
+                        "Opcode 30 Welcome binary frame is too short: {} bytes",
+                        payload.len()
+                    );
                 }
                 let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
-                let welcome_bytes = &payload[2..];
-                if let Some(invalid_payload) = self.dave_session.handle_welcome(transition_id, welcome_bytes)? {
-                    let invalid_msg = VoiceGatewayPayload {
-                        op: DaveOpcode::MlsInvalidCommitWelcome as u8,
-                        d: Some(invalid_payload),
-                        seq: None,
-                    };
-                    actions.push(VoiceGatewayAction::SendMessage(serde_json::to_string(&invalid_msg)?));
+                if let Some(invalid_payload) = self
+                    .dave_session
+                    .handle_welcome(transition_id, &payload[2..])?
+                {
+                    actions.push(invalid_commit_action(invalid_payload)?);
+                    let key_package = self.dave_session.create_key_package()?;
+                    actions.push(VoiceGatewayAction::SendBinaryMessage(
+                        format_client_binary_message(DaveOpcode::MlsKeyPackage, &key_package),
+                    ));
+                } else {
+                    actions.push(transition_ready_action(transition_id)?);
                 }
             }
             _ => {
@@ -881,7 +1070,8 @@ impl VoiceGatewayStateMachine {
     /// Evaluates a Discord Voice Gateway close code and updates the state machine accordingly.
     ///
     /// - `Resume`: preserves sequence counter, transitions to `Resuming` (if session is valid).
-    /// - `NewSession`: resets sequence counter to -1, transitions to `WaitingForHello` for fresh Identify.
+    /// - `NewSession`: resets sequence counter to -1 and transitions to `NeedsNewSession`;
+    ///   the live loop stops so the caller can obtain fresh main-gateway credentials.
     /// - `Fatal`: transitions to `Failed(reason)`, emits `CloseConnection` with `can_resume: false`.
     pub fn handle_close_code(
         &mut self,
@@ -912,9 +1102,9 @@ impl VoiceGatewayStateMachine {
                 (decision, None)
             }
             VoiceCloseDecision::NewSession => {
-                // Must not resume; clear sequence counter to force a fresh Opcode 0 Identify
+                // Must not resume or reidentify with stale main-gateway credentials.
                 self.last_seq = -1;
-                self.state = VoiceConnectionState::WaitingForHello;
+                self.state = VoiceConnectionState::NeedsNewSession(full_reason);
                 (decision, None)
             }
             VoiceCloseDecision::Fatal => {
@@ -959,6 +1149,28 @@ pub fn format_voice_gateway_url(endpoint: &str) -> String {
     format!("wss://{}/?v={}", clean, VOICE_GATEWAY_VERSION)
 }
 
+fn transition_ready_action(transition_id: u16) -> Result<VoiceGatewayAction> {
+    let payload = VoiceGatewayPayload {
+        op: DaveOpcode::TransitionReady as u8,
+        d: Some(crate::protocol::voice_dave::DaveTransitionReadyPayload { transition_id }),
+        seq: None,
+    };
+    Ok(VoiceGatewayAction::SendMessage(serde_json::to_string(
+        &payload,
+    )?))
+}
+
+fn invalid_commit_action(invalid: DaveInvalidCommitWelcomePayload) -> Result<VoiceGatewayAction> {
+    let payload = VoiceGatewayPayload {
+        op: DaveOpcode::MlsInvalidCommitWelcome as u8,
+        d: Some(invalid),
+        seq: None,
+    };
+    Ok(VoiceGatewayAction::SendMessage(serde_json::to_string(
+        &payload,
+    )?))
+}
+
 // ============================================================================
 // ASYNC LIVE CLIENT (tokio-tungstenite WebSocket client)
 // ============================================================================
@@ -967,6 +1179,7 @@ pub fn format_voice_gateway_url(endpoint: &str) -> String {
 pub struct VoiceGateway {
     config: VoiceGatewayConfig,
     state_machine: Arc<RwLock<VoiceGatewayStateMachine>>,
+    shared_dave_session: Option<Arc<std::sync::Mutex<VoiceDaveSession>>>,
     ready_sender: watch::Sender<Option<VoiceReady>>,
     ready_receiver: watch::Receiver<Option<VoiceReady>>,
     session_sender: watch::Sender<Option<SessionDescription>>,
@@ -978,20 +1191,47 @@ pub struct VoiceGateway {
     connection_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     is_connected: Arc<AtomicBool>,
     stop_signal: Arc<AtomicBool>,
+    connect_started: AtomicBool,
 }
 
 impl VoiceGateway {
     /// Creates a new Voice Gateway client.
     pub fn new(config: VoiceGatewayConfig) -> Self {
+        Self::build(config, false, None)
+    }
+
+    /// Creates a gateway that delegates DAVE signaling to its caller.
+    pub fn with_external_dave_signaling(config: VoiceGatewayConfig) -> Self {
+        Self::build(config, true, None)
+    }
+
+    /// Production bridge: the gateway and media pipeline share one MLS session.
+    pub fn new_with_dave_session(
+        config: VoiceGatewayConfig,
+        dave_session: Arc<std::sync::Mutex<VoiceDaveSession>>,
+    ) -> Self {
+        Self::build(config, true, Some(dave_session))
+    }
+
+    fn build(
+        config: VoiceGatewayConfig,
+        external_dave: bool,
+        shared_dave_session: Option<Arc<std::sync::Mutex<VoiceDaveSession>>>,
+    ) -> Self {
         let (ready_sender, ready_receiver) = watch::channel(None);
         let (session_sender, session_receiver) = watch::channel(None);
         let (closed_sender, closed_receiver) = watch::channel(None);
         let (event_sender, _) = broadcast::channel(64);
-        let state_machine = Arc::new(RwLock::new(VoiceGatewayStateMachine::new(config.clone())));
+        let state_machine = Arc::new(RwLock::new(if external_dave {
+            VoiceGatewayStateMachine::with_external_dave_signaling(config.clone())
+        } else {
+            VoiceGatewayStateMachine::new(config.clone())
+        }));
 
         Self {
             config,
             state_machine,
+            shared_dave_session,
             ready_sender,
             ready_receiver,
             session_sender,
@@ -1003,6 +1243,7 @@ impl VoiceGateway {
             connection_task: Arc::new(Mutex::new(None)),
             is_connected: Arc::new(AtomicBool::new(false)),
             stop_signal: Arc::new(AtomicBool::new(false)),
+            connect_started: AtomicBool::new(false),
         }
     }
 
@@ -1028,6 +1269,13 @@ impl VoiceGateway {
 
     /// Connects to the Discord Voice Gateway WebSocket (`wss://{endpoint}/?v=8`).
     pub async fn connect(&self) -> Result<()> {
+        if self
+            .connect_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            bail!("VoiceGateway já foi iniciado; uma nova sessão lógica exige uma nova instância");
+        }
         self.stop_signal.store(false, Ordering::SeqCst);
         let mut task_lock = self.connection_task.lock().await;
         if let Some(task) = task_lock.take() {
@@ -1065,11 +1313,14 @@ impl VoiceGateway {
 
     /// Injeta encerramento de conexão para testes unitários determinísticos.
     pub fn inject_close(&self, code: Option<u16>, reason: &str) {
+        let decision = code
+            .map(VoiceCloseDecision::from_close_code)
+            .unwrap_or(VoiceCloseDecision::Fatal);
         let _ = self.closed_sender.send(Some((code, reason.to_string())));
         let _ = self.event_sender.send(VoiceGatewayEvent::Disconnected {
             code,
             reason: reason.to_string(),
-            decision: VoiceCloseDecision::Fatal,
+            decision,
         });
     }
 
@@ -1152,23 +1403,57 @@ impl VoiceGateway {
             self.send_text(msg).await?;
         }
 
-        self.wait_for_session_description(Duration::from_secs(10)).await
+        self.wait_for_session_description(Duration::from_secs(10))
+            .await
     }
 
     /// Awaits receipt of `SessionDescription` with a timeout.
-    pub async fn wait_for_session_description(&self, timeout: Duration) -> Result<SessionDescription> {
+    pub async fn wait_for_session_description(
+        &self,
+        timeout: Duration,
+    ) -> Result<SessionDescription> {
         let mut rx = self.session_receiver.clone();
         if let Some(desc) = rx.borrow().clone() {
             return Ok(desc);
         }
+        let mut closed_rx = self.closed_receiver.clone();
+        if let Some((code, reason)) = closed_rx.borrow().clone() {
+            if let Some(code) = code {
+                bail!(
+                    "Voice Gateway fechou com código {}: {}",
+                    code,
+                    describe_voice_close_code(code)
+                );
+            }
+            bail!("Voice Gateway desconectado: {reason}");
+        }
 
         tokio::time::timeout(timeout, async {
-            while rx.changed().await.is_ok() {
-                if let Some(desc) = rx.borrow().clone() {
-                    return Ok(desc);
+            loop {
+                tokio::select! {
+                    res = rx.changed() => {
+                        if res.is_ok() {
+                            if let Some(desc) = rx.borrow().clone() {
+                                return Ok(desc);
+                            }
+                        }
+                    }
+                    res = closed_rx.changed() => {
+                        if res.is_ok() {
+                            if let Some((code, reason)) = closed_rx.borrow().clone() {
+                                if let Some(code) = code {
+                                    bail!(
+                                        "Voice Gateway fechou com código {}: {}",
+                                        code,
+                                        describe_voice_close_code(code)
+                                    );
+                                }
+                                bail!("Voice Gateway desconectado: {reason}");
+                            }
+                        }
+                    }
                 }
             }
-            bail!("Voice gateway session description channel closed");
         })
         .await
         .map_err(|_| anyhow::anyhow!("Timed out waiting for SessionDescription payload"))?
@@ -1194,30 +1479,62 @@ impl VoiceGateway {
 
     /// Encrypts an outgoing Opus frame using the active DAVE session (or passthrough).
     pub async fn encrypt_opus_frame(&self, frame: &[u8]) -> Result<Vec<u8>> {
+        if let Some(shared) = &self.shared_dave_session {
+            return shared
+                .lock()
+                .expect("VoiceDaveSession mutex envenenado")
+                .encrypt_opus_frame_strict(frame);
+        }
         let mut sm = self.state_machine.write().await;
-        sm.dave_session.encrypt_opus_frame(frame)
+        sm.dave_session.encrypt_opus_frame_strict(frame)
     }
 
     /// Decrypts an incoming Opus frame from a remote participant (or passthrough).
     pub async fn decrypt_opus_frame(&self, sender_user_id: u64, frame: &[u8]) -> Result<Vec<u8>> {
+        if let Some(shared) = &self.shared_dave_session {
+            return shared
+                .lock()
+                .expect("VoiceDaveSession mutex envenenado")
+                .decrypt_opus_frame_strict(sender_user_id, frame);
+        }
         let mut sm = self.state_machine.write().await;
-        sm.dave_session.decrypt_opus_frame(sender_user_id, frame)
+        sm.dave_session
+            .decrypt_opus_frame_strict(sender_user_id, frame)
     }
 
     /// Decrypts an incoming Opus frame by sender SSRC (or passthrough).
     pub async fn decrypt_opus_frame_by_ssrc(&self, ssrc: u32, frame: &[u8]) -> Result<Vec<u8>> {
+        if let Some(shared) = &self.shared_dave_session {
+            return shared
+                .lock()
+                .expect("VoiceDaveSession mutex envenenado")
+                .decrypt_opus_frame_by_ssrc_strict(ssrc, frame);
+        }
         let mut sm = self.state_machine.write().await;
-        sm.dave_session.decrypt_opus_frame_by_ssrc(ssrc, frame)
+        sm.dave_session
+            .decrypt_opus_frame_by_ssrc_strict(ssrc, frame)
     }
 
     /// Returns the currently negotiated DAVE protocol version.
     pub async fn dave_protocol_version(&self) -> u16 {
+        if let Some(shared) = &self.shared_dave_session {
+            return shared
+                .lock()
+                .expect("VoiceDaveSession mutex envenenado")
+                .protocol_version();
+        }
         let sm = self.state_machine.read().await;
         sm.dave_session.protocol_version()
     }
 
     /// Returns whether DAVE E2EE is active and ready to encrypt frames.
     pub async fn is_dave_ready(&self) -> bool {
+        if let Some(shared) = &self.shared_dave_session {
+            return shared
+                .lock()
+                .expect("VoiceDaveSession mutex envenenado")
+                .is_ready();
+        }
         let sm = self.state_machine.read().await;
         sm.dave_session.is_ready()
     }
@@ -1274,6 +1591,22 @@ impl VoiceGateway {
 // INTERNAL BACKGROUND LOOP
 // ============================================================================
 
+fn emit_fatal_voice_error(
+    reason: String,
+    closed_sender: &watch::Sender<Option<(Option<u16>, String)>>,
+    event_sender: &broadcast::Sender<VoiceGatewayEvent>,
+    stop_signal: &AtomicBool,
+) {
+    log::error!("{reason}");
+    let _ = closed_sender.send(Some((None, reason.clone())));
+    let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
+        code: None,
+        reason,
+        decision: VoiceCloseDecision::Fatal,
+    });
+    stop_signal.store(true, Ordering::SeqCst);
+}
+
 async fn run_voice_loop(
     config: VoiceGatewayConfig,
     state_machine: Arc<RwLock<VoiceGatewayStateMachine>>,
@@ -1289,7 +1622,11 @@ async fn run_voice_loop(
     let mut reconnect_policy = VoiceReconnectPolicy::default();
 
     while !stop_signal.load(Ordering::SeqCst) {
-        let host = config.endpoint.split(':').next().unwrap_or(&config.endpoint);
+        let host = config
+            .endpoint
+            .split(':')
+            .next()
+            .unwrap_or(&config.endpoint);
         let safe_host = if host.parse::<std::net::IpAddr>().is_ok() {
             "[ip]"
         } else {
@@ -1318,7 +1655,8 @@ async fn run_voice_loop(
                     let _ = sm.start();
                 }
 
-                let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel::<()>();
+                let (heartbeat_stop_tx, mut heartbeat_stop_rx) =
+                    tokio::sync::oneshot::channel::<()>();
                 let (hb_interval_tx, hb_interval_rx) = tokio::sync::oneshot::channel::<u64>();
                 let last_heartbeat_sent = Arc::new(Mutex::new(None::<std::time::Instant>));
 
@@ -1332,7 +1670,8 @@ async fn run_voice_loop(
                         Err(_) => return,
                     };
 
-                    let mut interval_timer = tokio::time::interval(Duration::from_millis(interval_ms));
+                    let mut interval_timer =
+                        tokio::time::interval(Duration::from_millis(interval_ms));
                     loop {
                         tokio::select! {
                             _ = interval_timer.tick() => {
@@ -1358,7 +1697,7 @@ async fn run_voice_loop(
                 let mut hb_interval_sender = Some(hb_interval_tx);
 
                 // WebSocket Message Processing Loop
-                loop {
+                'messages: loop {
                     tokio::select! {
                         Some(msg_to_send) = cmd_rx.recv() => {
                             if ws_write.send(msg_to_send).await.is_err() {
@@ -1378,14 +1717,38 @@ async fn run_voice_loop(
                                             for action in actions {
                                                 match action {
                                                     VoiceGatewayAction::SendMessage(payload_text) => {
-                                                        let _ = ws_write.send(WsMessage::Text(payload_text.into())).await;
+                                                        if let Err(err) = ws_write.send(WsMessage::Text(payload_text.into())).await {
+                                                            emit_fatal_voice_error(
+                                                                format!("Falha ao enviar mensagem Voice Gateway: {err}"),
+                                                                &closed_sender,
+                                                                &event_sender,
+                                                                &stop_signal,
+                                                            );
+                                                            break 'messages;
+                                                        }
                                                     }
                                                     VoiceGatewayAction::SendBinaryMessage(bin) => {
-                                                        let _ = ws_write.send(WsMessage::Binary(bin.into())).await;
+                                                        if let Err(err) = ws_write.send(WsMessage::Binary(bin.into())).await {
+                                                            emit_fatal_voice_error(
+                                                                format!("Falha ao enviar binário Voice Gateway: {err}"),
+                                                                &closed_sender,
+                                                                &event_sender,
+                                                                &stop_signal,
+                                                            );
+                                                            break 'messages;
+                                                        }
                                                     }
                                                     VoiceGatewayAction::StartHeartbeat { interval_ms } => {
-                                                        if let Some(tx) = hb_interval_sender.take() {
-                                                            let _ = tx.send(interval_ms);
+                                                        if let Some(tx) = hb_interval_sender.take()
+                                                            && tx.send(interval_ms).is_err()
+                                                        {
+                                                            emit_fatal_voice_error(
+                                                                "Falha ao iniciar heartbeat do Voice Gateway".into(),
+                                                                &closed_sender,
+                                                                &event_sender,
+                                                                &stop_signal,
+                                                            );
+                                                            break 'messages;
                                                         }
                                                     }
                                                     VoiceGatewayAction::ReadyReceived(ready) => {
@@ -1399,6 +1762,15 @@ async fn run_voice_loop(
                                                     }
                                                     VoiceGatewayAction::SpeakingUpdate(speaking) => {
                                                         let _ = event_sender.send(VoiceGatewayEvent::Speaking(speaking));
+                                                    }
+                                                    VoiceGatewayAction::ClientsConnected(clients) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::ClientsConnect(clients));
+                                                    }
+                                                    VoiceGatewayAction::ClientDisconnected(client) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::ClientDisconnect(client));
+                                                    }
+                                                    VoiceGatewayAction::DaveBinaryMessage(data) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::DaveBinaryMessage(data));
                                                     }
                                                     VoiceGatewayAction::HeartbeatAckReceived { timestamp } => {
                                                         let now = chrono::Utc::now().timestamp_millis() as u64;
@@ -1429,9 +1801,6 @@ async fn run_voice_loop(
                                                     VoiceGatewayAction::DavePrepareEpoch(epoch) => {
                                                         let _ = event_sender.send(VoiceGatewayEvent::DavePrepareEpoch(epoch));
                                                     }
-                                                    VoiceGatewayAction::DaveAnnounceCommit(announce) => {
-                                                        let _ = event_sender.send(VoiceGatewayEvent::DaveAnnounceCommit(announce));
-                                                    }
                                                     VoiceGatewayAction::CloseConnection { reason, can_resume } => {
                                                         log::warn!("Voice connection closing: {}", reason);
                                                         log::info!("[VoiceDiag] Fechamento: codigo=None, motivo={}", reason);
@@ -1449,13 +1818,22 @@ async fn run_voice_loop(
                                                         if !can_resume {
                                                             stop_signal.store(true, Ordering::SeqCst);
                                                         }
-                                                        break;
+                                                        break 'messages;
                                                     }
                                                 }
                                             }
                                         }
                                         Err(e) => {
-                                            log::error!("Error handling voice gateway payload: {}", e);
+                                            let reason = format!("Error handling voice gateway payload: {e}");
+                                            log::error!("{}", reason);
+                                            let _ = closed_sender.send(Some((None, reason.clone())));
+                                            let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
+                                                code: None,
+                                                reason,
+                                                decision: VoiceCloseDecision::Fatal,
+                                            });
+                                            stop_signal.store(true, Ordering::SeqCst);
+                                            break;
                                         }
                                     }
                                 }
@@ -1470,17 +1848,52 @@ async fn run_voice_loop(
                                             for action in actions {
                                                 match action {
                                                     VoiceGatewayAction::SendBinaryMessage(bin) => {
-                                                        let _ = ws_write.send(WsMessage::Binary(bin.into())).await;
+                                                        if let Err(err) = ws_write.send(WsMessage::Binary(bin.into())).await {
+                                                            emit_fatal_voice_error(
+                                                                format!("Falha ao enviar binário Voice Gateway: {err}"),
+                                                                &closed_sender,
+                                                                &event_sender,
+                                                                &stop_signal,
+                                                            );
+                                                            break 'messages;
+                                                        }
                                                     }
                                                     VoiceGatewayAction::SendMessage(payload_text) => {
-                                                        let _ = ws_write.send(WsMessage::Text(payload_text.into())).await;
+                                                        if let Err(err) = ws_write.send(WsMessage::Text(payload_text.into())).await {
+                                                            emit_fatal_voice_error(
+                                                                format!("Falha ao enviar mensagem Voice Gateway: {err}"),
+                                                                &closed_sender,
+                                                                &event_sender,
+                                                                &stop_signal,
+                                                            );
+                                                            break 'messages;
+                                                        }
+                                                    }
+                                                    VoiceGatewayAction::DaveBinaryMessage(data) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::DaveBinaryMessage(data));
+                                                    }
+                                                    VoiceGatewayAction::ClientsConnected(clients) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::ClientsConnect(clients));
+                                                    }
+                                                    VoiceGatewayAction::ClientDisconnected(client) => {
+                                                        let _ = event_sender.send(VoiceGatewayEvent::ClientDisconnect(client));
                                                     }
                                                     _ => {}
                                                 }
                                             }
                                         }
                                         Err(e) => {
-                                            log::error!("Error handling binary voice gateway payload: {}", e);
+                                            let reason =
+                                                format!("Error handling binary voice gateway payload: {e}");
+                                            log::error!("{}", reason);
+                                            let _ = closed_sender.send(Some((None, reason.clone())));
+                                            let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
+                                                code: None,
+                                                reason,
+                                                decision: VoiceCloseDecision::Fatal,
+                                            });
+                                            stop_signal.store(true, Ordering::SeqCst);
+                                            break;
                                         }
                                     }
                                 }
@@ -1522,8 +1935,12 @@ async fn run_voice_loop(
                                         decision,
                                     });
 
-                                    if decision == VoiceCloseDecision::Fatal {
-                                        // Stop reconnection loop completely for fatal close codes
+                                    if matches!(
+                                        decision,
+                                        VoiceCloseDecision::Fatal | VoiceCloseDecision::NewSession
+                                    ) {
+                                        // NewSession exige novas credenciais da sinalização
+                                        // principal; nunca reidentificar com o config antigo.
                                         stop_signal.store(true, Ordering::SeqCst);
                                     }
                                     break;
@@ -1594,10 +2011,17 @@ async fn run_voice_loop(
                 tokio::time::sleep(delay).await;
             }
             None => {
-                log::warn!(
-                    "[VoiceGateway] Excedido o limite máximo de {} tentativas de reconexão; encerrando",
+                let reason = format!(
+                    "Excedido o limite máximo de {} tentativas de reconexão do Voice Gateway",
                     reconnect_policy.max_attempts
                 );
+                log::warn!("{reason}");
+                let _ = closed_sender.send(Some((None, reason.clone())));
+                let _ = event_sender.send(VoiceGatewayEvent::Disconnected {
+                    code: None,
+                    reason,
+                    decision: VoiceCloseDecision::Fatal,
+                });
                 stop_signal.store(true, Ordering::SeqCst);
                 break;
             }
@@ -1772,7 +2196,8 @@ mod tests {
                 "user_id": "user_67890"
             }
         }"#;
-        let incoming: VoiceGatewayPayload<SpeakingPayload> = serde_json::from_str(server_msg).unwrap();
+        let incoming: VoiceGatewayPayload<SpeakingPayload> =
+            serde_json::from_str(server_msg).unwrap();
         let parsed = incoming.d.unwrap();
         assert_eq!(parsed.user_id.as_deref(), Some("user_67890"));
         assert_eq!(parsed.ssrc, 10452);
@@ -1846,7 +2271,10 @@ mod tests {
         let actions = sm.handle_incoming_text(hello_json).unwrap();
         assert_eq!(*sm.current_state(), VoiceConnectionState::Identifying);
         assert_eq!(actions.len(), 2);
-        assert_eq!(actions[0], VoiceGatewayAction::StartHeartbeat { interval_ms: 20000 });
+        assert_eq!(
+            actions[0],
+            VoiceGatewayAction::StartHeartbeat { interval_ms: 20000 }
+        );
         if let VoiceGatewayAction::SendMessage(identify_str) = &actions[1] {
             let val: serde_json::Value = serde_json::from_str(identify_str).unwrap();
             assert_eq!(val["op"], 0);
@@ -1876,11 +2304,19 @@ mod tests {
                 "aead_xchacha20_poly1305_rtpsize".to_string(),
             ],
         };
-        assert_eq!(*sm.current_state(), VoiceConnectionState::Ready(expected_ready.clone()));
-        assert_eq!(actions, vec![VoiceGatewayAction::ReadyReceived(expected_ready.clone())]);
+        assert_eq!(
+            *sm.current_state(),
+            VoiceConnectionState::Ready(expected_ready.clone())
+        );
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::ReadyReceived(expected_ready.clone())]
+        );
 
         // 4. IP Discovery finishes; client selects protocol (Op 1)
-        let action = sm.select_protocol("198.51.100.99", 40000, "aead_aes256_gcm_rtpsize").unwrap();
+        let action = sm
+            .select_protocol("198.51.100.99", 40000, "aead_aes256_gcm_rtpsize")
+            .unwrap();
         assert_eq!(*sm.current_state(), VoiceConnectionState::SelectingProtocol);
         if let VoiceGatewayAction::SendMessage(sel_str) = action {
             let val: serde_json::Value = serde_json::from_str(&sel_str).unwrap();
@@ -1905,8 +2341,16 @@ mod tests {
             secret_key: secret,
             dave_protocol_version: None,
         };
-        assert_eq!(*sm.current_state(), VoiceConnectionState::Connected(expected_desc.clone()));
-        assert_eq!(actions, vec![VoiceGatewayAction::SessionDescriptionReceived(expected_desc)]);
+        assert_eq!(
+            *sm.current_state(),
+            VoiceConnectionState::Connected(expected_desc.clone())
+        );
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::SessionDescriptionReceived(
+                expected_desc
+            )]
+        );
 
         // 6. Periodic Heartbeat triggered with seq_ack = 2
         let hb_action = sm.trigger_heartbeat(Some(12345678)).unwrap();
@@ -1922,10 +2366,16 @@ mod tests {
         // 7. Server responds with Op 6 Heartbeat ACK
         let ack_json = r#"{"op": 6, "d": 12345678}"#;
         let actions = sm.handle_incoming_text(ack_json).unwrap();
-        assert_eq!(actions, vec![VoiceGatewayAction::HeartbeatAckReceived { timestamp: Some(12345678) }]);
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::HeartbeatAckReceived {
+                timestamp: Some(12345678)
+            }]
+        );
 
         // 8. Speaking update received
-        let speaking_json = r#"{"op": 5, "d": {"speaking": 1, "delay": 0, "ssrc": 5555, "user_id": "user_67890"}}"#;
+        let speaking_json =
+            r#"{"op": 5, "d": {"speaking": 1, "delay": 0, "ssrc": 5555, "user_id": "user_67890"}}"#;
         let actions = sm.handle_incoming_text(speaking_json).unwrap();
         assert_eq!(actions.len(), 1);
         if let VoiceGatewayAction::SpeakingUpdate(sp) = &actions[0] {
@@ -1971,7 +2421,10 @@ mod tests {
         let resumed_json = r#"{"op": 9, "d": null}"#;
         let actions = sm.handle_incoming_text(resumed_json).unwrap();
         assert_eq!(actions, vec![VoiceGatewayAction::Resumed]);
-        assert_eq!(*sm.current_state(), VoiceConnectionState::Connected(session_desc));
+        assert_eq!(
+            *sm.current_state(),
+            VoiceConnectionState::Connected(session_desc)
+        );
     }
 
     #[test]
@@ -1990,7 +2443,10 @@ mod tests {
             port: 1234,
             modes: vec![FALLBACK_ENCRYPTION_MODE.to_string()],
         };
-        assert_eq!(modes_fallback_only.select_best_mode(), FALLBACK_ENCRYPTION_MODE);
+        assert_eq!(
+            modes_fallback_only.select_best_mode(),
+            FALLBACK_ENCRYPTION_MODE
+        );
 
         let modes_both = VoiceReady {
             ssrc: 1,
@@ -2007,33 +2463,90 @@ mod tests {
     #[test]
     fn test_voice_close_code_classification() {
         // Resumable codes
-        assert_eq!(VoiceCloseDecision::from_close_code(4015), VoiceCloseDecision::Resume);
-        assert_eq!(VoiceCloseDecision::from_close_code(1001), VoiceCloseDecision::Resume);
-        assert_eq!(VoiceCloseDecision::from_close_code(1006), VoiceCloseDecision::Resume);
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4015),
+            VoiceCloseDecision::Resume
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(1001),
+            VoiceCloseDecision::Resume
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(1006),
+            VoiceCloseDecision::Resume
+        );
         assert!(VoiceCloseDecision::from_close_code(4015).can_resume());
         assert!(VoiceCloseDecision::from_close_code(4015).should_reconnect());
 
         // NewSession codes (must re-identify)
-        assert_eq!(VoiceCloseDecision::from_close_code(4003), VoiceCloseDecision::NewSession);
-        assert_eq!(VoiceCloseDecision::from_close_code(4005), VoiceCloseDecision::NewSession);
-        assert_eq!(VoiceCloseDecision::from_close_code(4006), VoiceCloseDecision::NewSession);
-        assert_eq!(VoiceCloseDecision::from_close_code(4009), VoiceCloseDecision::NewSession);
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4003),
+            VoiceCloseDecision::NewSession
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4005),
+            VoiceCloseDecision::NewSession
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4006),
+            VoiceCloseDecision::NewSession
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4009),
+            VoiceCloseDecision::NewSession
+        );
         assert!(!VoiceCloseDecision::from_close_code(4006).can_resume());
         assert!(VoiceCloseDecision::from_close_code(4006).should_reconnect());
 
         // Fatal codes (must NOT reconnect)
-        assert_eq!(VoiceCloseDecision::from_close_code(4001), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4002), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4004), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4011), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4012), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4014), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4016), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4017), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4020), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4022), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(1000), VoiceCloseDecision::Fatal);
-        assert_eq!(VoiceCloseDecision::from_close_code(4999), VoiceCloseDecision::Fatal);
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4001),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4002),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4004),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4011),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4012),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4014),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4016),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4017),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4020),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4022),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(1000),
+            VoiceCloseDecision::Fatal
+        );
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4999),
+            VoiceCloseDecision::Fatal
+        );
         assert!(!VoiceCloseDecision::from_close_code(4017).should_reconnect());
         assert!(!VoiceCloseDecision::from_close_code(4014).should_reconnect());
     }
@@ -2089,17 +2602,17 @@ mod tests {
         let (decision, action) = sm.handle_close_code(4006, "Session expired");
         assert_eq!(decision, VoiceCloseDecision::NewSession);
         assert_eq!(action, None);
-        assert_eq!(*sm.current_state(), VoiceConnectionState::WaitingForHello);
-        assert_eq!(sm.last_seq(), -1); // Sequence reset to force Opcode 0 Identify
+        assert!(matches!(
+            *sm.current_state(),
+            VoiceConnectionState::NeedsNewSession(_)
+        ));
+        assert_eq!(sm.last_seq(), -1);
     }
 
     #[test]
     fn test_reconnect_policy_exponential_backoff_and_ceiling() {
-        let mut policy = VoiceReconnectPolicy::new(
-            5,
-            Duration::from_secs(1),
-            Duration::from_secs(15),
-        );
+        let mut policy =
+            VoiceReconnectPolicy::new(5, Duration::from_secs(1), Duration::from_secs(15));
         assert_eq!(policy.attempts(), 0);
         assert_eq!(policy.next_delay(), Some(Duration::from_secs(1)));
         assert_eq!(policy.attempts(), 1);
@@ -2150,7 +2663,13 @@ mod tests {
             }
             s => panic!("Expected Failed state, got {:?}", s),
         }
-        assert!(matches!(action, Some(VoiceGatewayAction::CloseConnection { can_resume: false, .. })));
+        assert!(matches!(
+            action,
+            Some(VoiceGatewayAction::CloseConnection {
+                can_resume: false,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -2200,17 +2719,19 @@ mod tests {
         assert!(exec_actions.is_empty());
 
         // Test speaking mapping
-        let speaking_raw = r#"{"op": 5, "d": {"speaking": 1, "ssrc": 9999, "user_id": "123456789"}}"#;
+        let speaking_raw =
+            r#"{"op": 5, "d": {"speaking": 1, "ssrc": 9999, "user_id": "123456789"}}"#;
         sm.handle_incoming_text(speaking_raw).unwrap();
         assert_eq!(sm.dave_session().get_user_id_by_ssrc(9999), Some(123456789));
 
-        // Media passthrough test
+        // Negotiated DAVE media must fail closed while the MLS group forms.
         let frame = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let encrypted = sm.dave_session_mut().encrypt_opus_frame(&frame).unwrap();
-        assert_eq!(encrypted, frame); // In passthrough fallback while MLS group forms
-
-        let decrypted = sm.dave_session_mut().decrypt_opus_frame_by_ssrc(9999, &frame).unwrap();
-        assert_eq!(decrypted, frame);
+        assert!(sm.dave_session_mut().encrypt_opus_frame(&frame).is_err());
+        assert!(
+            sm.dave_session_mut()
+                .decrypt_opus_frame_by_ssrc(9999, &frame)
+                .is_err()
+        );
     }
 
     #[test]
@@ -2222,5 +2743,205 @@ mod tests {
         let server_bin = vec![0x00, 0x0F, 25];
         let res = sm.handle_incoming_binary(&server_bin);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_invalid_hello_interval_is_rejected_before_heartbeat_or_identify() {
+        for interval in [0.0, -1.0, 0.4, f64::NAN, f64::INFINITY] {
+            let mut sm = VoiceGatewayStateMachine::new(sample_config());
+            let raw = format!(r#"{{"op":8,"d":{{"v":8,"heartbeat_interval":{interval}}}}}"#);
+            assert!(sm.handle_incoming_text(&raw).is_err());
+            assert_eq!(*sm.current_state(), VoiceConnectionState::Disconnected);
+            assert_eq!(sm.heartbeat_interval_ms, None);
+        }
+    }
+
+    #[test]
+    fn test_heartbeat_ack_v8_object_and_legacy_scalar() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        let actions = sm
+            .handle_incoming_text(r#"{"op":6,"d":{"t":123456789}}"#)
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::HeartbeatAckReceived {
+                timestamp: Some(123456789)
+            }]
+        );
+        let actions = sm
+            .handle_incoming_text(r#"{"op":6,"d":123456789}"#)
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::HeartbeatAckReceived {
+                timestamp: Some(123456789)
+            }]
+        );
+    }
+
+    #[test]
+    fn test_clients_connect_disconnect_update_expected_users() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        let actions = sm
+            .handle_incoming_text(r#"{"op":11,"d":{"user_ids":["100","200"]}}"#)
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::ClientsConnected(
+                ClientsConnectPayload {
+                    user_ids: vec!["100".into(), "200".into()]
+                }
+            )]
+        );
+        assert_eq!(sm.dave_session().expected_user_ids(), vec![0, 100, 200]);
+
+        let actions = sm
+            .handle_incoming_text(r#"{"op":13,"d":{"user_id":"100"}}"#)
+            .unwrap();
+        assert_eq!(
+            actions,
+            vec![VoiceGatewayAction::ClientDisconnected(
+                ClientDisconnectPayload {
+                    user_id: "100".into()
+                }
+            )]
+        );
+        assert_eq!(sm.dave_session().expected_user_ids(), vec![0, 200]);
+    }
+
+    #[test]
+    fn test_external_dave_binary_is_forwarded_without_parallel_mls_processing() {
+        let mut sm = VoiceGatewayStateMachine::with_external_dave_signaling(sample_config());
+        let frame = vec![0x00, 0x2A, 25, 0xAA, 0xBB];
+        let actions = sm.handle_incoming_binary(&frame).unwrap();
+        assert_eq!(sm.last_seq(), 42);
+        assert_eq!(actions, vec![VoiceGatewayAction::DaveBinaryMessage(frame)]);
+        assert!(!sm.dave_session().is_ready());
+    }
+
+    #[test]
+    fn test_binary_announce_commit_is_the_only_opcode_29_wire_format() {
+        let mut external = VoiceGatewayStateMachine::with_external_dave_signaling(sample_config());
+        let frame = vec![0x00, 0x2A, 29, 0x12, 0x34, 0xAA, 0xBB];
+        assert_eq!(
+            external.handle_incoming_binary(&frame).unwrap(),
+            vec![VoiceGatewayAction::DaveBinaryMessage(frame.clone())]
+        );
+        assert_eq!(external.last_seq(), 42);
+        assert!(
+            external
+                .handle_incoming_text(r#"{"op":29,"d":{"transition_id":4660,"commit":"legacy"}}"#)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_new_session_codes_do_not_return_to_hello_or_reidentify() {
+        for code in [4006, 4009] {
+            let mut sm = VoiceGatewayStateMachine::new(sample_config());
+            sm.handle_incoming_text(
+                r#"{"op":2,"d":{"ssrc":1,"ip":"127.0.0.1","port":1,"modes":["aead_aes256_gcm_rtpsize"]}}"#,
+            )
+            .unwrap();
+            sm.set_last_seq(17);
+            let (decision, action) = sm.handle_close_code(code, "expired");
+            assert_eq!(decision, VoiceCloseDecision::NewSession);
+            assert_eq!(action, None);
+            assert!(matches!(
+                *sm.current_state(),
+                VoiceConnectionState::NeedsNewSession(_)
+            ));
+            assert_eq!(sm.last_seq(), -1);
+        }
+    }
+
+    #[test]
+    fn test_binary_announce_commit_failure_requests_readd_and_new_key_package() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        sm.dave_session_mut().init_session(1).unwrap();
+        let frame = vec![0x00, 0x01, 29, 0x00, 0x07, 0xAA];
+        let actions = sm.handle_incoming_binary(&frame).unwrap();
+        assert_eq!(actions.len(), 2);
+        match &actions[0] {
+            VoiceGatewayAction::SendMessage(text) => {
+                let value: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(value["op"], 31);
+                assert_eq!(value["d"]["transition_id"], 7);
+            }
+            other => panic!("Esperado Opcode 31, obtido {other:?}"),
+        }
+        match &actions[1] {
+            VoiceGatewayAction::SendBinaryMessage(frame) => {
+                assert_eq!(frame[0], 26);
+                assert!(frame.len() > 1);
+            }
+            other => panic!("Esperado Opcode 26, obtido {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_start_preserves_resuming_state_for_opcode_7() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        sm.set_last_seq(9);
+        sm.handle_disconnect(true);
+        sm.start().unwrap();
+        let actions = sm
+            .handle_incoming_text(r#"{"op":8,"d":{"v":8,"heartbeat_interval":1000}}"#)
+            .unwrap();
+        match &actions[1] {
+            VoiceGatewayAction::SendMessage(text) => {
+                let value: serde_json::Value = serde_json::from_str(text).unwrap();
+                assert_eq!(value["op"], 7);
+                assert_eq!(value["d"]["seq_ack"], 9);
+            }
+            other => panic!("Esperado Resume, obtido {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rate_limited_voice_close_is_fatal() {
+        assert_eq!(
+            VoiceCloseDecision::from_close_code(4021),
+            VoiceCloseDecision::Fatal
+        );
+    }
+
+    #[test]
+    fn test_select_protocol_cannot_be_sent_twice() {
+        let mut sm = VoiceGatewayStateMachine::new(sample_config());
+        sm.select_protocol("127.0.0.1", 50000, PREFERRED_ENCRYPTION_MODE)
+            .unwrap();
+        assert!(
+            sm.select_protocol("127.0.0.1", 50000, PREFERRED_ENCRYPTION_MODE)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gateway_media_methods_use_the_shared_dave_session() {
+        let shared = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(100, 200)));
+        shared.lock().unwrap().init_session(1).unwrap();
+        let gateway = VoiceGateway::new_with_dave_session(sample_config(), shared.clone());
+
+        assert_eq!(gateway.dave_protocol_version().await, 1);
+        assert!(!gateway.is_dave_ready().await);
+        assert!(gateway.encrypt_opus_frame(b"not ready").await.is_err());
+
+        shared.lock().unwrap().handle_prepare_transition(1, 1);
+        shared.lock().unwrap().handle_execute_transition(1).unwrap();
+        // O execute ativa o contexto de envio, mas sem grupo MLS o ratchet
+        // continua indisponível; nenhum sucesso é fabricado.
+        assert!(!gateway.is_dave_ready().await);
+    }
+
+    #[tokio::test]
+    async fn test_gateway_instance_cannot_start_two_logical_sessions() {
+        let mut config = sample_config();
+        config.endpoint = "127.0.0.1:9".to_string();
+        let gateway = VoiceGateway::new(config);
+        gateway.connect().await.unwrap();
+        assert!(gateway.connect().await.is_err());
+        gateway.disconnect().await.unwrap();
     }
 }

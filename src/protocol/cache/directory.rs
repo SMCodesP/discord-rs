@@ -11,14 +11,40 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::domain::channel::Channel;
 use crate::domain::guild::Guild;
 use crate::domain::message::Message;
 use crate::domain::user::User;
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Converte um identificador em um único segmento de caminho seguro.
+/// IDs do Discord já são seguros; a codificação existe para impedir travessia
+/// de diretório caso um payload inesperado chegue ao cache.
+fn cache_file_id(id: &str) -> String {
+    let mut encoded = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'@') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    if encoded.is_empty() {
+        encoded.push('_');
+    }
+    encoded
+}
+
+fn is_valid_sha256_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 
 /// Manifesto global do cache local
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +126,7 @@ impl CacheDirectory {
 
     /// Subpasta de mensagens de um canal específico: `<root>/messages/<channel_id>/`
     pub fn channel_messages_dir(&self, channel_id: &str) -> PathBuf {
-        self.messages_dir().join(channel_id)
+        self.messages_dir().join(cache_file_id(channel_id))
     }
 
     /// Subpasta de usuários: `<root>/users/`
@@ -115,12 +141,23 @@ impl CacheDirectory {
 
     /// Garante que toda a árvore de diretórios do cache existe
     pub fn ensure_dirs(&self) -> Result<()> {
-        fs::create_dir_all(&self.root_path).context("Failed to create cache root dir")?;
-        fs::create_dir_all(self.guilds_dir()).context("Failed to create guilds cache dir")?;
-        fs::create_dir_all(self.channels_dir()).context("Failed to create channels cache dir")?;
-        fs::create_dir_all(self.messages_dir()).context("Failed to create messages cache dir")?;
-        fs::create_dir_all(self.users_dir()).context("Failed to create users cache dir")?;
-        fs::create_dir_all(self.assets_dir()).context("Failed to create assets cache dir")?;
+        let dirs = [
+            self.root_path.clone(),
+            self.guilds_dir(),
+            self.channels_dir(),
+            self.messages_dir(),
+            self.users_dir(),
+            self.assets_dir(),
+        ];
+        for dir in &dirs {
+            fs::create_dir_all(dir)
+                .with_context(|| format!("Failed to create cache directory {:?}", dir))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+            }
+        }
         Ok(())
     }
 
@@ -133,28 +170,57 @@ impl CacheDirectory {
         }
 
         let temp_filename = format!(
-            ".tmp_{}_{}",
+            ".tmp_{}_{}_{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let temp_path = target_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(temp_filename);
 
-        {
-            let mut file = File::create(&temp_path)
+        let write_result = (|| -> Result<()> {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temp_path)
                 .with_context(|| format!("Failed to create temporary file {:?}", temp_path))?;
             file.write_all(bytes)?;
             file.sync_data()?;
+            Ok(())
+        })();
+
+        if let Err(error) = write_result {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
         }
 
-        fs::rename(&temp_path, target_path).with_context(|| {
-            format!(
-                "Failed to atomically rename {:?} to {:?}",
-                temp_path, target_path
-            )
-        })?;
+        if let Err(error) = fs::rename(&temp_path, target_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to atomically rename {:?} to {:?}",
+                    temp_path, target_path
+                )
+            });
+        }
+
+        // No Unix, sincroniza também o diretório para que o rename sobreviva
+        // a uma queda imediata após a confirmação da escrita.
+        #[cfg(unix)]
+        if let Some(parent) = target_path.parent() {
+            let directory = fs::File::open(parent)
+                .with_context(|| format!("Failed to open cache directory {:?}", parent))?;
+            directory
+                .sync_all()
+                .with_context(|| format!("Failed to fsync cache directory {:?}", parent))?;
+        }
 
         Ok(())
     }
@@ -188,7 +254,8 @@ impl CacheDirectory {
     // --- Guilds Cache ---
 
     pub fn guild_path(&self, guild_id: &str) -> PathBuf {
-        self.guilds_dir().join(format!("{}.json", guild_id))
+        self.guilds_dir()
+            .join(format!("{}.json", cache_file_id(guild_id)))
     }
 
     pub fn save_guild(&self, guild: &Guild) -> Result<()> {
@@ -208,7 +275,8 @@ impl CacheDirectory {
     // --- Channels Cache ---
 
     pub fn channel_path(&self, channel_id: &str) -> PathBuf {
-        self.channels_dir().join(format!("{}.json", channel_id))
+        self.channels_dir()
+            .join(format!("{}.json", cache_file_id(channel_id)))
     }
 
     pub fn save_channel(&self, channel: &Channel) -> Result<()> {
@@ -237,7 +305,9 @@ impl CacheDirectory {
     }
 
     pub fn load_channel_messages(&self, channel_id: &str) -> Option<Vec<Message>> {
-        let target_file = self.channel_messages_dir(channel_id).join("messages_latest.json");
+        let target_file = self
+            .channel_messages_dir(channel_id)
+            .join("messages_latest.json");
         if !target_file.exists() {
             return None;
         }
@@ -248,7 +318,8 @@ impl CacheDirectory {
     // --- Users Cache ---
 
     pub fn user_path(&self, user_id: &str) -> PathBuf {
-        self.users_dir().join(format!("{}.json", user_id))
+        self.users_dir()
+            .join(format!("{}.json", cache_file_id(user_id)))
     }
 
     pub fn save_user(&self, user: &User) -> Result<()> {
@@ -301,14 +372,15 @@ impl AssetCasStore {
 
     /// Resolve o caminho particionado do asset no disco baseado nos 2 primeiros caracteres hexadecimais
     pub fn asset_paths(&self, sha256_hash: &str) -> (PathBuf, PathBuf) {
-        let prefix = if sha256_hash.len() >= 2 {
-            &sha256_hash[..2]
+        let safe_hash = cache_file_id(sha256_hash);
+        let prefix = if safe_hash.len() >= 2 {
+            &safe_hash[..2]
         } else {
             "00"
         };
         let partition_dir = self.cache_dir.assets_dir().join(prefix);
-        let bin_path = partition_dir.join(format!("{}.bin", sha256_hash));
-        let meta_path = partition_dir.join(format!("{}.meta.json", sha256_hash));
+        let bin_path = partition_dir.join(format!("{}.bin", safe_hash));
+        let meta_path = partition_dir.join(format!("{}.meta.json", safe_hash));
         (bin_path, meta_path)
     }
 
@@ -329,8 +401,12 @@ impl AssetCasStore {
             fs::create_dir_all(parent)?;
         }
 
-        // Se o binário já existe, reaproveitamos o arquivo existente no disco (Deduplicação Global)
-        if !bin_path.exists() {
+        // Reaproveita o binário apenas se existir e passar na verificação de
+        // integridade; um arquivo corrompido é reparado atomicamente.
+        let binary_is_valid = fs::read(&bin_path)
+            .map(|existing| Self::compute_hash(&existing) == sha256_hash)
+            .unwrap_or(false);
+        if !binary_is_valid {
             self.cache_dir.atomic_write_bytes(&bin_path, bytes)?;
         }
 
@@ -354,14 +430,29 @@ impl AssetCasStore {
 
     /// Recupera os bytes e metadados de um asset pelo hash SHA-256
     pub fn load_asset(&self, sha256_hash: &str) -> Option<(Vec<u8>, AssetMetadata)> {
+        if !is_valid_sha256_hash(sha256_hash) {
+            return None;
+        }
         let (bin_path, meta_path) = self.asset_paths(sha256_hash);
         if !bin_path.exists() || !meta_path.exists() {
             return None;
         }
 
         let bytes = fs::read(&bin_path).ok()?;
+        if Self::compute_hash(&bytes) != sha256_hash {
+            return None;
+        }
         let meta_str = fs::read_to_string(&meta_path).ok()?;
         let mut meta: AssetMetadata = serde_json::from_str(&meta_str).ok()?;
+        if meta.sha256_hash != sha256_hash {
+            return None;
+        }
+        if meta
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            return None;
+        }
 
         // Atualiza last_accessed_at
         meta.last_accessed_at = Utc::now();
@@ -376,7 +467,11 @@ mod tests {
     use super::*;
 
     fn temp_cache_dir(test_name: &str) -> CacheDirectory {
-        let dir = std::env::temp_dir().join(format!("discord_rs_cache_test_{}_{}", test_name, std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "discord_rs_cache_test_{}_{}",
+            test_name,
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         CacheDirectory::with_root(dir)
     }
@@ -403,6 +498,75 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_ids_cannot_escape_their_directory() -> Result<()> {
+        let cache = temp_cache_dir("safe_ids");
+        let path = cache.guild_path("../../outside");
+        assert!(path.starts_with(cache.guilds_dir()));
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            "%2E%2E%2F%2E%2E%2Foutside.json"
+        );
+        assert!(
+            AssetCasStore::new(cache.clone())
+                .asset_paths("../../outside")
+                .0
+                .starts_with(cache.assets_dir())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_cas_rejects_expired_and_corrupted_assets() -> Result<()> {
+        let cache = temp_cache_dir("cas_integrity");
+        let cas = AssetCasStore::new(cache.clone());
+        let meta = cas.store_asset(
+            "https://cdn.discordapp.com/icons/123/icon.png",
+            b"synthetic-icon",
+            "image/png",
+            None,
+            Some(-1),
+        )?;
+        assert!(cas.load_asset(&meta.sha256_hash).is_none());
+
+        let meta = cas.store_asset(
+            "https://cdn.discordapp.com/icons/123/icon.png",
+            b"synthetic-icon",
+            "image/png",
+            None,
+            Some(3600),
+        )?;
+        let (bin_path, _) = cas.asset_paths(&meta.sha256_hash);
+        fs::write(bin_path, b"corrupted")?;
+        assert!(cas.load_asset(&meta.sha256_hash).is_none());
+        assert!(cas.load_asset("../../outside").is_none());
+
+        let repaired = cas.store_asset(
+            "https://cdn.discordapp.com/icons/123/icon.png",
+            b"synthetic-icon",
+            "image/png",
+            None,
+            Some(3600),
+        )?;
+        assert_eq!(
+            cas.load_asset(&repaired.sha256_hash).unwrap().0,
+            b"synthetic-icon"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_atomic_cache_files_are_owner_only() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let cache = temp_cache_dir("permissions");
+        let target = cache.root_path().join("private.json");
+        cache.atomic_write_bytes(&target, b"{}")?;
+        let mode = fs::metadata(target)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        Ok(())
+    }
+
+    #[test]
     fn test_cas_store_and_deduplication() -> Result<()> {
         let cache = temp_cache_dir("cas");
         let cas = AssetCasStore::new(cache.clone());
@@ -423,7 +587,10 @@ mod tests {
             .load_asset(&meta.sha256_hash)
             .expect("Asset must be loaded");
         assert_eq!(bytes, fake_icon);
-        assert_eq!(loaded_meta.source_url, "https://cdn.discordapp.com/icons/123/icon.png");
+        assert_eq!(
+            loaded_meta.source_url,
+            "https://cdn.discordapp.com/icons/123/icon.png"
+        );
 
         // Deduplication test: storing the same content from another URL reuses the hash
         let meta_dup = cas.store_asset(

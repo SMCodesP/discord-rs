@@ -82,8 +82,8 @@ pub const HEX_STATUS_OFFLINE: u32 = 0x80848e;
 /// Channel item hover (#35373c)
 pub const HEX_CHANNEL_HOVER: u32 = 0x35373c;
 
-/// Channel item active/selected (#3f4248)
-pub const HEX_CHANNEL_ACTIVE: u32 = 0x3f4248;
+/// Channel item active/selected (#404249). Source: docs/VISUAL_PARITY_DIFF.md
+pub const HEX_CHANNEL_ACTIVE: u32 = 0x404249;
 
 /// Channel item unread badge white (#ffffff)
 pub const HEX_WHITE: u32 = 0xffffff;
@@ -349,7 +349,7 @@ pub fn channel_hover() -> Rgba {
     rgb(HEX_CHANNEL_HOVER)
 }
 
-/// Channel item active/selected state (#3f4248)
+/// Channel item active/selected state (#404249)
 #[inline]
 pub fn channel_active() -> Rgba {
     rgb(HEX_CHANNEL_ACTIVE)
@@ -764,7 +764,9 @@ impl DiscordPalette {
             control_critical_primary_bg_default: rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_DEFAULT),
             control_critical_primary_bg_hover: rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_HOVER),
             control_critical_primary_bg_active: rgb(HEX_CONTROL_CRITICAL_PRIMARY_BG_ACTIVE),
-            control_critical_secondary_text_default: rgb(HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT),
+            control_critical_secondary_text_default: rgb(
+                HEX_CONTROL_CRITICAL_SECONDARY_TEXT_DEFAULT,
+            ),
             control_icon_only_icon_default: rgb(HEX_CONTROL_ICON_ONLY_ICON_DEFAULT),
             premium_tier_2_purple: rgb(HEX_PREMIUM_TIER_2_PURPLE),
             bg_animated_gradient_pink_1: rgb(HEX_BG_ANIMATED_GRADIENT_PINK_1),

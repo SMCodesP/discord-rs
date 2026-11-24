@@ -1,6 +1,6 @@
+use gpui::component::switch::Switch;
 use gpui::prelude::*;
 use gpui::*;
-use gpui::component::switch::Switch;
 
 use crate::app::state::AppState;
 use crate::components::button::IconButton;
@@ -9,15 +9,10 @@ use crate::tokens::kit_theme::DiscordTheme;
 
 use super::components::render_section_description;
 
-pub fn render_connections(
-    app_entity: Entity<AppState>,
-    app_state: &AppState,
-    cx: &App,
-) -> Div {
+pub fn render_connections(app_entity: Entity<AppState>, app_state: &AppState, cx: &App) -> Div {
     let connections = &app_state.connections;
-    let current_username = app_state.current_user.username.clone();
 
-    // 10 official third-party providers from Discord
+    // Official service list from Discord's User Resource documentation.
     let providers = [
         ("github", "GitHub"),
         ("spotify", "Spotify"),
@@ -29,6 +24,18 @@ pub fn render_connections(
         ("battlenet", "Battle.net"),
         ("reddit", "Reddit"),
         ("tiktok", "TikTok"),
+        ("bluesky", "Bluesky"),
+        ("paypal", "PayPal"),
+        ("twitter", "X"),
+        ("ebay", "eBay"),
+        ("crunchyroll", "Crunchyroll"),
+        ("amazon-music", "Amazon Music"),
+        ("epicgames", "Epic Games"),
+        ("facebook", "Facebook"),
+        ("roblox", "Roblox"),
+        ("bungie", "Bungie.net"),
+        ("domain", "Domain"),
+        ("mastodon", "Mastodon"),
     ];
 
     div()
@@ -37,9 +44,20 @@ pub fn render_connections(
         .flex_col()
         .gap(px(20.0))
         .child(render_section_description(
-            "These are accounts from other platforms. Connecting them here can unlock new features on Discord, like the ability to share what you're currently listening to, get paid safely and securely, and more.",
+            "Estas são contas de outras plataformas. Conectá-las pode desbloquear recursos no Discord, como compartilhar o que você está ouvindo.",
             cx,
         ))
+        .child(
+            div()
+                .p(px(12.0))
+                .rounded(px(6.0))
+                .bg(cx.discord().bg_channels)
+                .text_color(cx.discord().text_secondary)
+                .text_size(px(12.0))
+                .child(
+                    "Conexões só aparecem após confirmação da API. O fluxo OAuth não está disponível neste cliente; nenhuma conta é criada ao clicar em um provedor.",
+                ),
+        )
         // -------------------------------------------------------------
         // Grid of Providers (Add a new connection)
         // -------------------------------------------------------------
@@ -53,7 +71,7 @@ pub fn render_connections(
                         .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(14.0))
-                        .child("Add a new connection"),
+                        .child("Adicionar uma nova conexão"),
                 )
                 .child(
                     div()
@@ -63,8 +81,6 @@ pub fn render_connections(
                         .gap(px(10.0))
                         .children(providers.into_iter().map(|(platform, display_name)| {
                             let is_connected = connections.iter().any(|c| c.platform == platform);
-                            let entity = app_entity.clone();
-                            let default_user = current_username.clone();
 
                             let card_bg = cx.discord().bg_channels;
                             let hover_bg = cx.discord().channel_hover;
@@ -86,19 +102,7 @@ pub fn render_connections(
                                 .flex_row()
                                 .items_center()
                                 .justify_between()
-                                .cursor_pointer()
                                 .hover(move |s| s.bg(hover_bg))
-                                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                                    let def = default_user.clone();
-                                    entity.update(cx, |s, cx| {
-                                        if is_connected {
-                                            s.disconnect_platform(platform);
-                                        } else {
-                                            s.connect_platform(platform, &def);
-                                        }
-                                        cx.notify();
-                                    });
-                                })
                                 .child(
                                     div()
                                         .flex()
@@ -134,7 +138,7 @@ pub fn render_connections(
                                                         } else {
                                                             None
                                                         })
-                                                        .child(if is_connected { "Connected" } else { "Connect" }),
+                                                        .child(if is_connected { "Conectado" } else { "OAuth não disponível" }),
                                                 ),
                                         ),
                                 )
@@ -145,9 +149,12 @@ pub fn render_connections(
                                         .items_center()
                                         .justify_center()
                                         .child(if is_connected {
-                                            icon_close(px(12.0), cx.discord().text_secondary).into_any_element()
+                                            icon_check(px(12.0), cx.discord().status_online).into_any_element()
                                         } else {
-                                            icon_plus(px(12.0), cx.discord().text_secondary).into_any_element()
+                                            div()
+                                                .text_color(cx.discord().text_muted)
+                                                .child("—")
+                                                .into_any_element()
                                         }),
                                 )
                         })),
@@ -166,7 +173,7 @@ pub fn render_connections(
                         .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(14.0))
-                        .child(format!("{} connections", connections.len())),
+                        .child(format!("{} conexões", connections.len())),
                 )
                 .children(if connections.is_empty() {
                     vec![
@@ -179,7 +186,7 @@ pub fn render_connections(
                             .justify_center()
                             .text_color(cx.discord().text_secondary)
                             .text_size(px(13.0))
-                            .child("No accounts connected.")
+                            .child("Sem conexões.")
                     ]
                 } else {
                     connections.iter().map(|conn| {
@@ -228,18 +235,28 @@ pub fn render_connections(
                                                     )
                                                     .child(
                                                         div()
+                                                            .flex()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap(px(4.0))
                                                             .text_color(cx.discord().text_secondary)
                                                             .text_size(px(12.0))
-                                                            .child(conn.platform_display_name()),
+                                                            .child(conn.platform_display_name())
+                                                            .children(if conn.verified {
+                                                                Some(icon_check(px(11.0), cx.discord().status_online))
+                                                            } else {
+                                                                None
+                                                            }),
                                                     ),
                                             ),
                                     )
                                     .child(
                                         IconButton::with_icon(
-                                            ElementId::NamedInteger("btn-disc-conn".into(), conn.id.len() as u64),
+                                            ElementId::Name(format!("btn-disc-conn-{}", conn.id).into()),
                                             |size, color| icon_close(size, color).into_any_element(),
                                         )
-                                        .tooltip("Disconnect")
+                                        .tooltip("Desconectar")
+                                        .disabled(true)
                                         .on_click(move |_ev, _win, cx| {
                                             let plat = plat_for_disc.clone();
                                             entity_disc.update(cx, |s, cx| {
@@ -262,11 +279,12 @@ pub fn render_connections(
                                             .text_color(cx.discord().text_primary)
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_size(px(13.0))
-                                            .child("Display on profile"),
+                                            .child("Exibir no perfil"),
                                     )
                                     .child(
-                                        Switch::new(ElementId::NamedInteger("sw-prof".into(), conn.id.len() as u64))
+                                        Switch::new(ElementId::Name(format!("sw-prof-{}", conn.id).into()))
                                             .checked(conn.show_on_profile)
+                                            .disabled(true)
                                             .on_click(move |_checked, _win, cx| {
                                                 let plat = plat_for_prof.clone();
                                                 entity_prof.update(cx, |s, cx| {
@@ -289,11 +307,12 @@ pub fn render_connections(
                                                 .text_color(cx.discord().text_primary)
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_size(px(13.0))
-                                                .child("Display Spotify as your status"),
+                                                .child("Exibir o Spotify como seu status"),
                                         )
                                         .child(
-                                            Switch::new("sw-spotify-act")
+                                            Switch::new(ElementId::Name(format!("sw-spotify-act-{}", conn.id).into()))
                                                 .checked(conn.show_activity)
+                                                .disabled(true)
                                                 .on_click(move |_checked, _win, cx| {
                                                     let plat = plat_for_act.clone();
                                                     entity_act.update(cx, |s, cx| {

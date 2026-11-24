@@ -1,7 +1,8 @@
 //! Discord RS - Spacing & Layout Tokens
-//! Padding, margins, layout dimensions (rail 72px, channels 240px, members 240px), and border radiuses.
+//! Padding, margins, layout dimensions (rail 72px, measured channel sidebar
+//! 272px, members 240px), and border radiuses.
 
-use gpui::{px, Pixels};
+use gpui::{Pixels, px};
 
 // ============================================================================
 // Layout Dimensions (Exact Discord Desktop Layout)
@@ -10,20 +11,95 @@ use gpui::{px, Pixels};
 /// Rail: Server navigation sidebar width (72px)
 pub const RAW_RAIL_WIDTH: f32 = 72.0;
 
-/// Channels: Channel list sidebar width (240px)
+/// Channels: legacy documented channel list width (240px).
+/// Kept for compatibility with the original design-token contract; the shell
+/// uses [`RAW_CHANNEL_SIDEBAR_WIDTH`] from the measured Discord Desktop client.
 pub const RAW_CHANNELS_WIDTH: f32 = 240.0;
+
+/// Measured Discord Desktop channel sidebar width (272px).
+pub const RAW_CHANNEL_SIDEBAR_WIDTH: f32 = 272.0;
 
 /// Members: Server member list sidebar width (240px)
 pub const RAW_MEMBERS_WIDTH: f32 = 240.0;
 
-/// User bottom profile bar height (52px)
-pub const RAW_USER_BAR_HEIGHT: f32 = 52.0;
+/// Measured Discord Desktop floating user panel height (58px)
+pub const RAW_USER_BAR_HEIGHT: f32 = 58.0;
 
-/// Top channel header bar height (48px)
-pub const RAW_HEADER_HEIGHT: f32 = 48.0;
+/// Measured Discord Desktop channel header height (49px)
+pub const RAW_HEADER_HEIGHT: f32 = 49.0;
 
-/// Server icon standard dimension (48x48px)
-pub const RAW_SERVER_ICON_SIZE: f32 = 48.0;
+/// Measured Discord Desktop server icon dimension (40x40px)
+pub const RAW_SERVER_ICON_SIZE: f32 = 40.0;
+
+/// Guild rail icon/item height (40px); the rail adds an 8px step gap.
+pub const RAW_GUILD_ITEM_HEIGHT: f32 = 40.0;
+
+/// Collapsed and expanded guild folder button size (48px)
+pub const RAW_GUILD_FOLDER_SIZE: f32 = 48.0;
+
+/// Inner folder preview container size (40px)
+pub const RAW_GUILD_FOLDER_PREVIEW_CONTAINER_SIZE: f32 = 40.0;
+
+/// Four-up guild folder preview thumbnail size (19px)
+pub const RAW_GUILD_FOLDER_PREVIEW_SIZE: f32 = 19.0;
+
+/// Padding inside the four-up guild folder preview container (4px)
+pub const RAW_GUILD_FOLDER_PREVIEW_PADDING: f32 = 4.0;
+
+/// Gap inside the four-up guild folder preview grid (2px)
+pub const RAW_GUILD_FOLDER_PREVIEW_GAP: f32 = 2.0;
+
+/// Measured guild selection pill width (8px)
+pub const RAW_GUILD_PILL_WIDTH: f32 = 8.0;
+
+/// Unread guild selection pill height (8px)
+pub const RAW_GUILD_PILL_UNREAD_HEIGHT: f32 = 8.0;
+
+/// Hovered guild selection pill height (20px)
+pub const RAW_GUILD_PILL_HOVER_HEIGHT: f32 = 20.0;
+
+/// Selected guild selection pill height (40px)
+pub const RAW_GUILD_PILL_SELECTED_HEIGHT: f32 = 40.0;
+
+/// Guild rail separator width (32px)
+pub const RAW_GUILD_SEPARATOR_WIDTH: f32 = 32.0;
+
+/// Guild rail separator height (1px)
+pub const RAW_GUILD_SEPARATOR_HEIGHT: f32 = 1.0;
+
+/// Measured Discord Desktop channel row height (32px)
+pub const RAW_CHANNEL_ITEM_HEIGHT: f32 = 32.0;
+
+/// Measured unread channel indicator width (4px)
+pub const RAW_CHANNEL_UNREAD_WIDTH: f32 = 4.0;
+
+/// Voice participant row height (28px)
+pub const RAW_VOICE_USER_HEIGHT: f32 = 28.0;
+
+/// User panel audio/settings control size (32px)
+pub const RAW_USER_CONTROL_SIZE: f32 = 32.0;
+
+/// Measured floating user panel width (328px)
+pub const RAW_USER_PANEL_WIDTH: f32 = 328.0;
+
+/// Floating user panel inset from the combined rail/sidebar edges (8px)
+pub const RAW_USER_PANEL_MARGIN: f32 = 8.0;
+
+/// Guild-rail clearance for the 58px user panel plus its 8px inset (66px).
+pub const RAW_USER_PANEL_RESERVE: f32 = 66.0;
+
+/// Measured bottom clearance of the channel navigation area (50px). The
+/// floating panel is allowed to overlap this area, matching Discord Desktop.
+pub const RAW_CHANNEL_NAVIGATION_RESERVE: f32 = 50.0;
+
+/// Measured header search width (244px)
+pub const RAW_HEADER_SEARCH_WIDTH: f32 = 244.0;
+
+/// Measured header search height (32px)
+pub const RAW_HEADER_SEARCH_HEIGHT: f32 = 32.0;
+
+/// Measured header toolbar icon size (20px)
+pub const RAW_HEADER_ICON_SIZE: f32 = 20.0;
 
 /// Chat input textarea minimum height (44px)
 pub const RAW_CHAT_INPUT_HEIGHT: f32 = 44.0;
@@ -47,10 +123,16 @@ pub fn rail_width() -> Pixels {
     px(RAW_RAIL_WIDTH)
 }
 
-/// Channel list sidebar width (240px)
+/// Legacy channel list sidebar width (240px)
 #[inline]
 pub fn channels_width() -> Pixels {
     px(RAW_CHANNELS_WIDTH)
+}
+
+/// Measured Discord Desktop channel sidebar width (272px)
+#[inline]
+pub fn channel_sidebar_width() -> Pixels {
+    px(RAW_CHANNEL_SIDEBAR_WIDTH)
 }
 
 /// Server member list sidebar width (240px)
@@ -59,22 +141,160 @@ pub fn members_width() -> Pixels {
     px(RAW_MEMBERS_WIDTH)
 }
 
-/// Bottom user profile panel height (52px)
+/// Bottom user profile panel height (58px)
 #[inline]
 pub fn user_bar_height() -> Pixels {
     px(RAW_USER_BAR_HEIGHT)
 }
 
-/// Header bar height (48px)
+/// Header bar height (49px)
 #[inline]
 pub fn header_height() -> Pixels {
     px(RAW_HEADER_HEIGHT)
 }
 
-/// Server icon standard dimension (48px)
+/// Server icon standard dimension (40px)
 #[inline]
 pub fn server_icon_size() -> Pixels {
     px(RAW_SERVER_ICON_SIZE)
+}
+
+/// Guild rail item height (40px)
+#[inline]
+pub fn guild_item_height() -> Pixels {
+    px(RAW_GUILD_ITEM_HEIGHT)
+}
+
+/// Guild folder icon size (48px)
+#[inline]
+pub fn guild_folder_size() -> Pixels {
+    px(RAW_GUILD_FOLDER_SIZE)
+}
+
+/// Inner guild folder preview container size (40px)
+#[inline]
+pub fn guild_folder_preview_container_size() -> Pixels {
+    px(RAW_GUILD_FOLDER_PREVIEW_CONTAINER_SIZE)
+}
+
+/// Guild folder preview thumbnail size (19px)
+#[inline]
+pub fn guild_folder_preview_size() -> Pixels {
+    px(RAW_GUILD_FOLDER_PREVIEW_SIZE)
+}
+
+/// Guild folder preview grid padding (4px)
+#[inline]
+pub fn guild_folder_preview_padding() -> Pixels {
+    px(RAW_GUILD_FOLDER_PREVIEW_PADDING)
+}
+
+/// Guild folder preview grid gap (2px)
+#[inline]
+pub fn guild_folder_preview_gap() -> Pixels {
+    px(RAW_GUILD_FOLDER_PREVIEW_GAP)
+}
+
+/// Guild selection pill width (8px)
+#[inline]
+pub fn guild_pill_width() -> Pixels {
+    px(RAW_GUILD_PILL_WIDTH)
+}
+
+/// Unread guild pill height (8px)
+#[inline]
+pub fn guild_pill_unread_height() -> Pixels {
+    px(RAW_GUILD_PILL_UNREAD_HEIGHT)
+}
+
+/// Hovered guild pill height (20px)
+#[inline]
+pub fn guild_pill_hover_height() -> Pixels {
+    px(RAW_GUILD_PILL_HOVER_HEIGHT)
+}
+
+/// Selected guild pill height (40px)
+#[inline]
+pub fn guild_pill_selected_height() -> Pixels {
+    px(RAW_GUILD_PILL_SELECTED_HEIGHT)
+}
+
+/// Guild separator width (32px)
+#[inline]
+pub fn guild_separator_width() -> Pixels {
+    px(RAW_GUILD_SEPARATOR_WIDTH)
+}
+
+/// Guild separator height (1px)
+#[inline]
+pub fn guild_separator_height() -> Pixels {
+    px(RAW_GUILD_SEPARATOR_HEIGHT)
+}
+
+/// Channel row height (32px)
+#[inline]
+pub fn channel_item_height() -> Pixels {
+    px(RAW_CHANNEL_ITEM_HEIGHT)
+}
+
+/// Unread channel indicator width (4px)
+#[inline]
+pub fn channel_unread_width() -> Pixels {
+    px(RAW_CHANNEL_UNREAD_WIDTH)
+}
+
+/// Voice participant row height (28px)
+#[inline]
+pub fn voice_user_height() -> Pixels {
+    px(RAW_VOICE_USER_HEIGHT)
+}
+
+/// User panel control size (32px)
+#[inline]
+pub fn user_control_size() -> Pixels {
+    px(RAW_USER_CONTROL_SIZE)
+}
+
+/// Floating user panel width (328px)
+#[inline]
+pub fn user_panel_width() -> Pixels {
+    px(RAW_USER_PANEL_WIDTH)
+}
+
+/// Floating user panel edge margin (8px)
+#[inline]
+pub fn user_panel_margin() -> Pixels {
+    px(RAW_USER_PANEL_MARGIN)
+}
+
+/// Guild-rail clearance for the floating user panel (66px)
+#[inline]
+pub fn user_panel_reserve() -> Pixels {
+    px(RAW_USER_PANEL_RESERVE)
+}
+
+/// Measured channel navigation bottom clearance (50px)
+#[inline]
+pub fn channel_navigation_reserve() -> Pixels {
+    px(RAW_CHANNEL_NAVIGATION_RESERVE)
+}
+
+/// Header search width (244px)
+#[inline]
+pub fn header_search_width() -> Pixels {
+    px(RAW_HEADER_SEARCH_WIDTH)
+}
+
+/// Header search height (32px)
+#[inline]
+pub fn header_search_height() -> Pixels {
+    px(RAW_HEADER_SEARCH_HEIGHT)
+}
+
+/// Header toolbar icon size (20px)
+#[inline]
+pub fn header_icon_size() -> Pixels {
+    px(RAW_HEADER_ICON_SIZE)
 }
 
 /// Chat input standard minimum height (44px)
@@ -227,13 +447,15 @@ pub fn radius_lg() -> Pixels {
     px(RAW_RADIUS_LG)
 }
 
-/// Server icon squircle radius on hover/active (16px)
+/// Measured 40px server-icon squircle approximation (16px). The official
+/// client uses an SVG mask rather than a single CSS border radius.
 #[inline]
 pub fn radius_server_hover() -> Pixels {
     px(RAW_RADIUS_SERVER_HOVER)
 }
 
-/// Server icon default circle radius (24px for 48px circle)
+/// Legacy 48px-circle radius (24px), retained for the original design-token
+/// contract. The measured Desktop shell does not use this value.
 #[inline]
 pub fn radius_server_default() -> Pixels {
     px(RAW_RADIUS_SERVER_DEFAULT)

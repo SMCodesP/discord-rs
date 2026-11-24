@@ -59,12 +59,7 @@ pub struct CubicBezier {
 
 impl CubicBezier {
     pub const fn new(p1x: f32, p1y: f32, p2x: f32, p2y: f32) -> Self {
-        Self {
-            p1x,
-            p1y,
-            p2x,
-            p2y,
-        }
+        Self { p1x, p1y, p2x, p2y }
     }
 
     /// Returns the CSS cubic-bezier string format
@@ -102,9 +97,7 @@ impl CubicBezier {
         }
 
         // Compute B_y(u)
-        3.0 * (1.0 - u) * (1.0 - u) * u * self.p1y
-            + 3.0 * (1.0 - u) * u * u * self.p2y
-            + u * u * u
+        3.0 * (1.0 - u) * (1.0 - u) * u * self.p1y + 3.0 * (1.0 - u) * u * u * self.p2y + u * u * u
     }
 }
 
@@ -116,10 +109,10 @@ pub const EASE_OUT: CubicBezier = CubicBezier::new(0.0, 0.0, 0.2, 1.0);
 pub const EASE_IN_OUT: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
 
 // Discord Custom Bezier Curves
-/// Server icon shape morph (circle to rounded rectangle): smooth acceleration and deceleration
-pub const EASE_SERVER_ICON: CubicBezier = CubicBezier::new(0.4, 0.0, 0.2, 1.0);
+/// Measured Discord Desktop server icon transition: 150ms ease-out.
+pub const EASE_SERVER_ICON: CubicBezier = CubicBezier::new(0.0, 0.0, 0.2, 1.0);
 
-/// Server unread/selected pill transition: snappy out
+/// Measured Discord Desktop server pill transition: 200ms ease-out.
 pub const EASE_PILL: CubicBezier = CubicBezier::new(0.0, 0.0, 0.2, 1.0);
 
 /// Bouncy popups and reaction badges (subtle overshoot spring)
@@ -153,13 +146,13 @@ impl TransitionPreset {
     }
 }
 
-/// Server icon morph on hover / active (150ms ease-in-out)
+/// Server icon hover / active feedback (150ms ease-out)
 pub const TRANSITION_SERVER_ICON: TransitionPreset =
-    TransitionPreset::new(DURATION_NORMAL, EASE_SERVER_ICON, "server_icon_morph");
+    TransitionPreset::new(DURATION_NORMAL, EASE_SERVER_ICON, "server_icon_transition");
 
-/// Server pill indicator expand / collapse (150ms ease-out)
+/// Server pill indicator expand / collapse (200ms ease-out)
 pub const TRANSITION_SERVER_PILL: TransitionPreset =
-    TransitionPreset::new(DURATION_NORMAL, EASE_PILL, "server_pill_expand");
+    TransitionPreset::new(DURATION_MODERATE, EASE_PILL, "server_pill_expand");
 
 /// Interactive button background color hover (100ms ease-default)
 pub const TRANSITION_BUTTON_HOVER: TransitionPreset =

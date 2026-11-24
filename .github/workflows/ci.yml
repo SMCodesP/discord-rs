@@ -1,0 +1,99 @@
+name: Discord RS CI (Parallel Matrix)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+  RUST_MIN_STACK: "67108864"
+  DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/discord-rs-test-bus"
+
+jobs:
+  check:
+    name: Cargo Check & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux audio/UI build deps + lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            lld clang libclang-dev pkg-config \
+            libasound2-dev libopus-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Cargo Check
+        run: cargo check
+
+  test-matrix:
+    name: Tests (${{ matrix.suite.name }})
+    runs-on: ubuntu-latest
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: voice-audio
+            args: "--test audio_engine_test --test voice_gateway_test --test voice_udp_and_crypto_test --test voice_session_test --test voice_session_scall_test --test voice_stage_and_parity_test --test guild_voice_test --test video_capture_test"
+          - name: chat-search
+            args: "--test dm_messaging_test --test editor_test --test message_parity_and_member_list_test --test search_state_and_filter_test"
+          - name: profile-friends
+            args: "--test user_profile_popout_test --test avatar_decorations_and_profile_effects_test --test profile_timeline_and_quick_send_test --test friends_hub_test --test dm_presence_and_status_test --test pinned_dms_test"
+          - name: media-settings
+            args: "--test media_cache_test --test user_settings_test --test user_settings_proto_test"
+          - name: network-auth-e2e
+            args: "--test protocol_tests --test protocol_bridge_test --test cache_and_ratelimit_test --test login_authentication_test --test e2e_full_flow --test purger_hygiene_test"
+          - name: visual-lib
+            args: "--lib --test tokens_spec_test --test kit_theme_test --test guild_icon_radius_test --test telemetry_service_test"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux audio/UI build deps + lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            lld clang libclang-dev pkg-config \
+            libasound2-dev libopus-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ${{ matrix.suite.name }}
+        run: |
+          export XDG_CONFIG_HOME="$(mktemp -d)"
+          cargo test ${{ matrix.suite.args }} --no-fail-fast
+
+  build-linux:
+    name: Build Linux Binary Artifact
+    runs-on: ubuntu-latest
+    needs: check
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux audio/UI build deps + lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            lld clang libclang-dev pkg-config \
+            libasound2-dev libopus-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev libssl-dev
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build discord-rs
+        run: cargo build --bin discord-rs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: discord-rs-linux-debug
+          path: target/debug/discord-rs
+          retention-days: 7

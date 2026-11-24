@@ -2,11 +2,11 @@
 //! Coordinates the active transport (live Gateway/REST Discord API or deterministic mock),
 //! processes incoming WebSocket Gateway events, and provides thread-safe messaging.
 
+use anyhow::Result;
+use log::{error, info, warn};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, RwLock};
-use anyhow::Result;
-use log::{info, warn, error};
+use tokio::sync::{RwLock, broadcast};
 
 use crate::domain::channel::{Channel, ChannelType};
 use crate::domain::guild::Guild;
@@ -32,10 +32,14 @@ pub enum ConnectionMode {
 pub struct ClientManager {
     transport: Arc<RwLock<Arc<dyn DiscordTransport>>>,
     mode: Arc<RwLock<ConnectionMode>>,
+    audio_hardware_probe: Option<bool>,
     event_tx: broadcast::Sender<TransportEvent>,
     real_client: Arc<RwLock<Option<Arc<DiscordApiClient>>>>,
     active_voice: Arc<RwLock<Option<Arc<crate::protocol::voice_session::VoiceSession>>>>,
-    voice_state_tx: broadcast::Sender<(crate::protocol::voice_session::VoiceSessionState, Option<u32>)>,
+    voice_state_tx: broadcast::Sender<(
+        crate::protocol::voice_session::VoiceSessionState,
+        Option<u32>,
+    )>,
     voice_event_tx: broadcast::Sender<crate::protocol::voice_session::VoiceSessionEvent>,
     voice_gateway_factory: Arc<RwLock<Option<crate::protocol::voice_session::VoiceGatewayFactory>>>,
     active_dm_calls: Arc<RwLock<std::collections::HashSet<String>>>,
@@ -60,7 +64,10 @@ impl ClientManager {
 
         let manager = Self {
             transport: Arc::new(RwLock::new(idle)),
-            mode: Arc::new(RwLock::new(ConnectionMode::Disconnected("Não conectado".to_string()))),
+            mode: Arc::new(RwLock::new(ConnectionMode::Disconnected(
+                "Não conectado".to_string(),
+            ))),
+            audio_hardware_probe: None,
             event_tx,
             real_client: Arc::new(RwLock::new(None)),
             active_voice: Arc::new(RwLock::new(None)),
@@ -84,6 +91,7 @@ impl ClientManager {
         let manager = Self {
             transport: Arc::new(RwLock::new(mock)),
             mode: Arc::new(RwLock::new(ConnectionMode::Mock)),
+            audio_hardware_probe: None,
             event_tx,
             real_client: Arc::new(RwLock::new(None)),
             active_voice: Arc::new(RwLock::new(None)),
@@ -98,17 +106,30 @@ impl ClientManager {
 
     /// Somente testes: cria um ClientManager com o provedor de transporte fornecido.
     #[doc(hidden)]
-    pub fn new_with_transport(transport: Arc<dyn DiscordTransport>) -> (Self, broadcast::Receiver<TransportEvent>) {
+    pub fn new_with_transport(
+        transport: Arc<dyn DiscordTransport>,
+    ) -> (Self, broadcast::Receiver<TransportEvent>) {
+        Self::new_with_transport_with_audio_probe(transport, ConnectionMode::Mock, None)
+    }
+
+    /// Somente testes: permite exercitar Live offline e fixar a disponibilidade
+    /// de áudio sem depender do hardware da máquina.
+    #[doc(hidden)]
+    pub fn new_with_transport_with_audio_probe(
+        transport: Arc<dyn DiscordTransport>,
+        mode: ConnectionMode,
+        has_hardware_audio: Option<bool>,
+    ) -> (Self, broadcast::Receiver<TransportEvent>) {
         let (event_tx, event_rx) = broadcast::channel(256);
         let (voice_state_tx, _) = broadcast::channel(64);
         let (voice_event_tx, _) = broadcast::channel(64);
         let active_dm_calls = Arc::new(RwLock::new(std::collections::HashSet::new()));
 
         let active_calls_ref = active_dm_calls.clone();
-        let mut tr_events = transport.subscribe_events();
+        let mut transport_events = transport.subscribe_events();
         tokio::spawn(async move {
-            while let Ok(evt) = tr_events.recv().await {
-                match &evt {
+            while let Ok(event) = transport_events.recv().await {
+                match &event {
                     TransportEvent::CallCreate { channel_id, .. } => {
                         let mut calls = active_calls_ref.write().await;
                         calls.insert(channel_id.clone());
@@ -124,7 +145,8 @@ impl ClientManager {
 
         let manager = Self {
             transport: Arc::new(RwLock::new(transport)),
-            mode: Arc::new(RwLock::new(ConnectionMode::Mock)),
+            mode: Arc::new(RwLock::new(mode)),
+            audio_hardware_probe: has_hardware_audio,
             event_tx,
             real_client: Arc::new(RwLock::new(None)),
             active_voice: Arc::new(RwLock::new(None)),
@@ -137,52 +159,102 @@ impl ClientManager {
         (manager, event_rx)
     }
 
-    /// Connects to real Discord API using an AuthToken (Bot or User token)
+    /// Connects to real Discord API using an AuthToken (Bot or User token).
+    ///
+    /// A autenticação REST acontece antes de iniciar o Gateway. Nenhum estado
+    /// conectado é publicado sem uma resposta real de `/users/@me`.
     pub async fn connect_with_token(&self, token: AuthToken) -> Result<()> {
-        info!("Iniciando conexão com Discord API v10 e WebSocket Gateway...");
+        info!("Iniciando autenticação real no Discord API e WebSocket Gateway...");
+        if !token.is_valid_format() {
+            let reason = "Falha na autenticação: token inválido ou vazio.".to_string();
+            {
+                let mut mode = self.mode.write().await;
+                *mode = ConnectionMode::Disconnected(reason.clone());
+            }
+            let _ = self.event_tx.send(TransportEvent::Disconnected(reason));
+            anyhow::bail!("Token do Discord inválido ou vazio");
+        }
+
         {
             let mut mode = self.mode.write().await;
             *mode = ConnectionMode::Connecting;
         }
 
         let real_client = Arc::new(DiscordApiClient::new(token));
-        
-        // Connect gateway loop
-        if let Err(e) = real_client.connect().await {
-            error!("Falha ao conectar Gateway do Discord: {:?}", e);
+
+        // Confirma as credenciais antes de abrir o WebSocket. Erros 401/403/2FA
+        // são traduzidos pela camada REST e não geram READY ou transporte ativo.
+        let user = match real_client.verify_current_user().await {
+            Ok(user) => user,
+            Err(error) => {
+                let reason = format!("Falha na autenticação: {error:#}");
+                warn!("{}", reason);
+                let idle = Arc::new(IdleTransport::new());
+                {
+                    let mut current = self.transport.write().await;
+                    *current = idle;
+                    let mut client = self.real_client.write().await;
+                    *client = None;
+                }
+                {
+                    let mut mode = self.mode.write().await;
+                    *mode = ConnectionMode::Disconnected(reason.clone());
+                }
+                let _ = self.event_tx.send(TransportEvent::Disconnected(reason));
+                return Err(error);
+            }
+        };
+        info!("Credenciais confirmadas pela API do Discord.");
+
+        // Inscreve antes do handshake para não perder o READY inicial.
+        let mut gateway_rx = real_client.subscribe_events();
+
+        // connect() aguarda READY/RESUMED, portanto falhas fatais do Gateway
+        // também retornam aqui em vez de deixar uma task oculta reconectando.
+        if let Err(error) = real_client.connect().await {
+            let reason = format!("Falha ao conectar no Gateway: {error:#}");
+            error!("{}", reason);
             let idle = Arc::new(IdleTransport::new());
             {
                 let mut current = self.transport.write().await;
                 *current = idle;
-                let mut rc = self.real_client.write().await;
-                *rc = None;
+                let mut client = self.real_client.write().await;
+                *client = None;
             }
-            let mut mode = self.mode.write().await;
-            *mode = ConnectionMode::Disconnected(e.to_string());
-            let _ = self.event_tx.send(TransportEvent::Disconnected(e.to_string()));
-            return Err(e);
+            {
+                let mut mode = self.mode.write().await;
+                *mode = ConnectionMode::Disconnected(reason.clone());
+            }
+            let _ = self.event_tx.send(TransportEvent::Disconnected(reason));
+            return Err(error);
         }
 
-        // Bridge gateway events to global event_tx
-        let mut gateway_rx = real_client.subscribe_events();
+        // Bridge gateway events to global event_tx.
         let event_tx = self.event_tx.clone();
         let mode_ref = self.mode.clone();
         let active_calls_ref = self.active_dm_calls.clone();
 
         tokio::spawn(async move {
-            while let Ok(evt) = gateway_rx.recv().await {
-                match &evt {
+            let mut authenticated = false;
+            while let Ok(event) = gateway_rx.recv().await {
+                match &event {
                     TransportEvent::Ready { user, .. } => {
-                        let mut m = mode_ref.write().await;
-                        *m = ConnectionMode::LiveDiscord(user.username.clone());
-                        info!("Discord Gateway READY! Conectado como @{}", user.username);
+                        authenticated = true;
+                        let mut mode = mode_ref.write().await;
+                        *mode = ConnectionMode::LiveDiscord(user.username.clone());
+                        info!("Discord Gateway READY recebido.");
                     }
                     TransportEvent::Connected => {
                         info!("Discord Gateway WebSocket conectado.");
+                        if !authenticated {
+                            // Socket aberto não é login concluído. Só READY (ou
+                            // reconexão de uma sessão já autenticada) chega à UI.
+                            continue;
+                        }
                     }
                     TransportEvent::Disconnected(reason) => {
-                        let mut m = mode_ref.write().await;
-                        *m = ConnectionMode::Disconnected(reason.clone());
+                        let mut mode = mode_ref.write().await;
+                        *mode = ConnectionMode::Disconnected(reason.clone());
                         warn!("Discord Gateway desconectado: {}", reason);
                     }
                     TransportEvent::CallCreate { channel_id, .. } => {
@@ -195,130 +267,123 @@ impl ClientManager {
                     }
                     _ => {}
                 }
-                let _ = event_tx.send(evt);
+                let _ = event_tx.send(event);
             }
         });
 
-        // Swap active transport
+        // Swap active transport only after real authentication and Gateway READY.
         {
             let mut current = self.transport.write().await;
             *current = real_client.clone();
-            let mut rc = self.real_client.write().await;
-            *rc = Some(real_client.clone());
+            let mut client = self.real_client.write().await;
+            *client = Some(real_client.clone());
         }
 
-        info!("Cliente do Discord configurado com sucesso como transporte ativo.");
+        info!("Cliente autenticado configurado como transporte ativo.");
 
-        // Asynchronously fetch real initial data (user @me, guilds, channels, messages)
+        // Busca dados iniciais reais sem repetir `/users/@me`.
         let client_clone = real_client.clone();
         let event_tx_clone = self.event_tx.clone();
-        let mode_clone = self.mode.clone();
-        let transport_bg_ref = self.transport.clone();
-        let real_client_bg_ref = self.real_client.clone();
 
         tokio::spawn(async move {
-            info!("Buscando dados iniciais da API do Discord (@me, guilds, canais, mensagens)...");
+            info!("Buscando dados iniciais da API do Discord (servidores, canais e mensagens)...");
 
-            // 1. Buscar usuário autenticado via API (@me)
-            let user = match client_clone.get_current_user().await {
-                Ok(u) => {
-                    info!("Usuário autenticado obtido com sucesso: @{} ({})", u.username, u.id);
-                    let mut m = mode_clone.write().await;
-                    *m = ConnectionMode::LiveDiscord(u.username.clone());
-                    u
+            let (mut guilds, guilds_loaded) = match client_clone.list_guilds().await {
+                Ok(guilds) => {
+                    info!("Obtidos {} servidores do Discord.", guilds.len());
+                    (guilds, true)
                 }
-                Err(e) => {
-                    let err_msg = "Falha na autenticação: Token inválido ou não autorizado (401)".to_string();
-                    warn!("{}: {:?}", err_msg, e);
-                    let idle = Arc::new(IdleTransport::new());
-                    {
-                        let mut current = transport_bg_ref.write().await;
-                        *current = idle;
-                        let mut rc = real_client_bg_ref.write().await;
-                        *rc = None;
-                    }
-                    {
-                        let mut m = mode_clone.write().await;
-                        *m = ConnectionMode::Disconnected(err_msg.clone());
-                    }
-                    let _ = event_tx_clone.send(TransportEvent::Disconnected(err_msg));
-                    return;
+                Err(error) => {
+                    warn!("Falha ao listar servidores via REST: {:#}", error);
+                    (Vec::new(), false)
                 }
             };
 
-            // 2. Buscar servidores reais via API (/users/@me/guilds)
-            let mut guilds = match client_clone.list_guilds().await {
-                Ok(g) => {
-                    info!("Obtidos {} servidores do Discord.", g.len());
-                    g
-                }
-                Err(e) => {
-                    warn!("Falha ao listar servidores via REST: {:?}", e);
-                    Vec::new()
-                }
-            };
-
-            // 3. Buscar canais reais apenas do primeiro servidor para evitar sobrecarregar a API com rate-limit
             let mut first_text_channel_id: Option<String> = None;
             if let Some(first_guild) = guilds.first_mut() {
                 match client_clone.list_channels(&first_guild.id).await {
                     Ok(channels) => {
-                        info!("Servidor inicial '{}' possui {} canais.", first_guild.name, channels.len());
-                        if let Some(ch) = channels.iter().find(|c| c.channel_type == ChannelType::Text) {
-                            first_text_channel_id = Some(ch.id.clone());
-                        } else if let Some(ch) = channels.first() {
-                            first_text_channel_id = Some(ch.id.clone());
+                        info!("Servidor inicial possui {} canais.", channels.len());
+                        if let Some(channel) = channels
+                            .iter()
+                            .find(|channel| channel.channel_type == ChannelType::Text)
+                            .or_else(|| channels.first())
+                        {
+                            first_text_channel_id = Some(channel.id.clone());
                         }
                         first_guild.channels = channels;
                     }
-                    Err(e) => {
-                        warn!("Falha ao buscar canais para servidor inicial {}: {:?}", first_guild.id, e);
+                    Err(error) => {
+                        warn!("Falha ao buscar canais do servidor inicial: {:#}", error);
                     }
                 }
             }
 
-            // 4. Buscar mensagens reais do canal (/channels/{id}/messages)
             let mut initial_messages = Vec::new();
-            if let Some(ref cid) = first_text_channel_id {
-                match client_clone.get_messages(cid, 50).await {
-                    Ok(msgs) => {
-                        info!("Obtidas {} mensagens reais para o canal #{}.", msgs.len(), cid);
-                        initial_messages = msgs;
+            if let Some(channel_id) = first_text_channel_id.as_deref() {
+                match client_clone.get_messages(channel_id, 50).await {
+                    Ok(messages) => {
+                        info!(
+                            "Obtidas {} mensagens reais do canal inicial.",
+                            messages.len()
+                        );
+                        initial_messages = messages;
                     }
-                    Err(e) => {
-                        warn!("Falha ao obter mensagens para canal {}: {:?}", cid, e);
+                    Err(error) => {
+                        warn!("Falha ao obter mensagens do canal inicial: {:#}", error);
                     }
                 }
             }
 
-            // 5. Buscar pastas de servidores do usuário (/users/@me/settings)
-            let guild_folders = client_clone.get_user_guild_settings().await.unwrap_or_default();
+            let guild_folders = client_clone
+                .get_user_guild_settings()
+                .await
+                .unwrap_or_default();
 
-            // 6. Despachar os dados reais via TransportEvent::Ready para sincronizar o AppState
-            let _ = event_tx_clone.send(TransportEvent::Ready {
-                user: user.clone(),
-                guilds,
-                guild_folders,
-            });
+            // Um READY vazio só é publicado quando a lista de servidores foi
+            // confirmada. Falha transitória não apaga o snapshot real do Gateway.
+            if guilds_loaded {
+                let _ = event_tx_clone.send(TransportEvent::Ready {
+                    user: user.clone(),
+                    guilds,
+                    guild_folders,
+                });
+            }
 
-            // Despachar as mensagens reais obtidas em lote único cronológico
-            if let Some(ref cid) = first_text_channel_id {
+            if let Some(channel_id) = first_text_channel_id {
                 if !initial_messages.is_empty() {
-                    let mut msgs = initial_messages;
-                    msgs.sort_by_key(|m| m.timestamp);
+                    let mut messages = initial_messages;
+                    messages.sort_by_key(|message| message.timestamp);
                     let _ = event_tx_clone.send(TransportEvent::ChannelMessagesLoaded {
-                        channel_id: cid.clone(),
-                        messages: msgs,
+                        channel_id,
+                        messages,
                     });
                 }
             }
 
-            // 7. Buscar canais de DM e relacionamentos reais do usuário
             if let Ok(dms) = client_clone.list_dm_channels().await {
                 let _ = event_tx_clone.send(TransportEvent::DmChannelsUpdated(dms));
+            } else {
+                warn!("Falha ao listar canais de DM.");
             }
-            if let Ok(rels) = client_clone.list_relationships().await {
-                let _ = event_tx_clone.send(TransportEvent::RelationshipsUpdated(rels));
+            if let Ok(relationships) = client_clone.list_relationships().await {
+                let _ = event_tx_clone.send(TransportEvent::RelationshipsUpdated(relationships));
+            } else {
+                warn!("Falha ao listar relacionamentos.");
+            }
+
+            // settings-proto complementa o READY sem substituir um tema já
+            // recebido. O decoder é somente leitura e nunca registra o payload.
+            if let Ok(settings) = client_clone.get_user_settings_proto().await {
+                if let Some(theme) = settings.theme() {
+                    let _ = event_tx_clone.send(TransportEvent::AccountThemeUpdated {
+                        theme,
+                        client_theme_settings: settings
+                            .appearance
+                            .as_ref()
+                            .and_then(|appearance| appearance.client_theme_settings.clone()),
+                    });
+                }
             }
         });
 
@@ -332,7 +397,9 @@ impl ClientManager {
             lock.clone()
         };
         let _ = current_transport.disconnect().await;
-        crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared().clear().await;
+        crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared()
+            .clear()
+            .await;
 
         let idle = Arc::new(IdleTransport::new());
         {
@@ -345,7 +412,9 @@ impl ClientManager {
             let mut mode = self.mode.write().await;
             *mode = ConnectionMode::Disconnected("Desconectado".to_string());
         }
-        let _ = self.event_tx.send(TransportEvent::Disconnected("Desconectado".to_string()));
+        let _ = self
+            .event_tx
+            .send(TransportEvent::Disconnected("Desconectado".to_string()));
         Ok(())
     }
 
@@ -369,7 +438,10 @@ impl ClientManager {
     }
 
     /// Fetches a user profile from the active Discord API client (/users/{user_id}/profile)
-    pub async fn get_user_profile(&self, user_id: &str) -> Result<crate::domain::profile::UserProfileData> {
+    pub async fn get_user_profile(
+        &self,
+        user_id: &str,
+    ) -> Result<crate::domain::profile::UserProfileData> {
         self.get_user_profile_with_guild(user_id, None).await
     }
 
@@ -401,24 +473,25 @@ impl ClientManager {
 
     /// Sends a chat message to a text channel using the active transport
     pub async fn send_message(&self, channel_id: &str, content: &str) -> Result<Message> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => {
-                    self.emit_event(TransportEvent::DmChannelResolved {
-                        temp_id: channel_id.to_string(),
-                        channel: ch.clone(),
-                    });
-                    ch.id
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => {
+                        self.emit_event(TransportEvent::DmChannelResolved {
+                            temp_id: channel_id.to_string(),
+                            channel: ch.clone(),
+                        });
+                        ch.id
+                    }
+                    Err(e) => {
+                        log::warn!("Falha ao resolver DM para envio: {:?}", e);
+                        channel_id.to_string()
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Falha ao resolver DM para envio: {:?}", e);
-                    channel_id.to_string()
-                }
-            }
-        } else {
-            channel_id.to_string()
-        };
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
@@ -426,30 +499,33 @@ impl ClientManager {
         };
         let msg = transport.send_message(&real_channel_id, content).await?;
         // Broadcast local message creation event
-        let _ = self.event_tx.send(TransportEvent::MessageCreate(msg.clone()));
+        let _ = self
+            .event_tx
+            .send(TransportEvent::MessageCreate(msg.clone()));
         Ok(msg)
     }
 
     /// Sends a sticker message to a text channel using the active transport
     pub async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => {
-                    self.emit_event(TransportEvent::DmChannelResolved {
-                        temp_id: channel_id.to_string(),
-                        channel: ch.clone(),
-                    });
-                    ch.id
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => {
+                        self.emit_event(TransportEvent::DmChannelResolved {
+                            temp_id: channel_id.to_string(),
+                            channel: ch.clone(),
+                        });
+                        ch.id
+                    }
+                    Err(e) => {
+                        log::warn!("Falha ao resolver DM para envio de figurinha: {:?}", e);
+                        channel_id.to_string()
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Falha ao resolver DM para envio de figurinha: {:?}", e);
-                    channel_id.to_string()
-                }
-            }
-        } else {
-            channel_id.to_string()
-        };
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
@@ -457,33 +533,43 @@ impl ClientManager {
         };
         let msg = transport.send_sticker(&real_channel_id, sticker_id).await?;
         // Broadcast local message creation event
-        let _ = self.event_tx.send(TransportEvent::MessageCreate(msg.clone()));
+        let _ = self
+            .event_tx
+            .send(TransportEvent::MessageCreate(msg.clone()));
         Ok(msg)
     }
 
     /// Adds a reaction emoji to a message using the active transport
-    pub async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => {
-                    self.emit_event(TransportEvent::DmChannelResolved {
-                        temp_id: channel_id.to_string(),
-                        channel: ch.clone(),
-                    });
-                    ch.id
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => {
+                        self.emit_event(TransportEvent::DmChannelResolved {
+                            temp_id: channel_id.to_string(),
+                            channel: ch.clone(),
+                        });
+                        ch.id
+                    }
+                    Err(_) => channel_id.to_string(),
                 }
-                Err(_) => channel_id.to_string(),
-            }
-        } else {
-            channel_id.to_string()
-        };
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
         };
-        transport.add_reaction(&real_channel_id, message_id, emoji).await?;
+        transport
+            .add_reaction(&real_channel_id, message_id, emoji)
+            .await?;
         let _ = self.event_tx.send(TransportEvent::ReactionAdd {
             channel_id: real_channel_id,
             message_id: message_id.to_string(),
@@ -505,24 +591,25 @@ impl ClientManager {
 
     /// Fetches message history for a channel using the active transport
     pub async fn get_messages(&self, channel_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => {
-                    self.emit_event(TransportEvent::DmChannelResolved {
-                        temp_id: channel_id.to_string(),
-                        channel: ch.clone(),
-                    });
-                    ch.id
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => {
+                        self.emit_event(TransportEvent::DmChannelResolved {
+                            temp_id: channel_id.to_string(),
+                            channel: ch.clone(),
+                        });
+                        ch.id
+                    }
+                    Err(e) => {
+                        log::warn!("Falha ao resolver DM em get_messages: {:?}", e);
+                        channel_id.to_string()
+                    }
                 }
-                Err(e) => {
-                    log::warn!("Falha ao resolver DM em get_messages: {:?}", e);
-                    channel_id.to_string()
-                }
-            }
-        } else {
-            channel_id.to_string()
-        };
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
@@ -579,7 +666,10 @@ impl ClientManager {
     }
 
     /// Fetches all custom emojis for a guild using the active transport
-    pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<crate::protocol::media_cache::DiscordEmoji>> {
+    pub async fn get_guild_emojis(
+        &self,
+        guild_id: &str,
+    ) -> Result<Vec<crate::protocol::media_cache::DiscordEmoji>> {
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
@@ -588,7 +678,10 @@ impl ClientManager {
     }
 
     /// Fetches all custom stickers for a guild using the active transport
-    pub async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<crate::protocol::media_cache::DiscordSticker>> {
+    pub async fn get_guild_stickers(
+        &self,
+        guild_id: &str,
+    ) -> Result<Vec<crate::protocol::media_cache::DiscordSticker>> {
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
@@ -597,7 +690,11 @@ impl ClientManager {
     }
 
     /// Sends a friend request to a user (/users/@me/relationships)
-    pub async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> Result<()> {
+    pub async fn send_friend_request(
+        &self,
+        username: &str,
+        discriminator: Option<&str>,
+    ) -> Result<()> {
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
@@ -642,7 +739,9 @@ impl ClientManager {
     }
 
     /// Returns the active VoiceSession if one is currently running.
-    pub async fn active_voice_session(&self) -> Option<Arc<crate::protocol::voice_session::VoiceSession>> {
+    pub async fn active_voice_session(
+        &self,
+    ) -> Option<Arc<crate::protocol::voice_session::VoiceSession>> {
         let active = self.active_voice.read().await;
         active.clone()
     }
@@ -650,7 +749,10 @@ impl ClientManager {
     /// Subscribes to real-time voice state transitions and measured latency.
     pub fn subscribe_voice_state(
         &self,
-    ) -> broadcast::Receiver<(crate::protocol::voice_session::VoiceSessionState, Option<u32>)> {
+    ) -> broadcast::Receiver<(
+        crate::protocol::voice_session::VoiceSessionState,
+        Option<u32>,
+    )> {
         self.voice_state_tx.subscribe()
     }
 
@@ -683,6 +785,50 @@ impl ClientManager {
         Ok(())
     }
 
+    /// Bridge determinístico exclusivo do transporte Mock/testes offline.
+    fn no_op_audio_bridge() -> crate::protocol::voice_session::AudioBridge {
+        let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(64);
+        let (_audio_spk_tx, audio_spk_rx) = tokio::sync::mpsc::channel(16);
+        let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel(64);
+
+        tokio::spawn(async move {
+            while let Some(command) = audio_cmd_rx.recv().await {
+                match command {
+                    crate::protocol::voice_session::AudioBridgeCommand::StartSession {
+                        responder,
+                    } => {
+                        let _ = responder.send(Ok(()));
+                    }
+                    crate::protocol::voice_session::AudioBridgeCommand::ReceiveOpusPacket {
+                        ..
+                    } => {}
+                    crate::protocol::voice_session::AudioBridgeCommand::StopSession => {}
+                    crate::protocol::voice_session::AudioBridgeCommand::SetMuted(_) => {}
+                    crate::protocol::voice_session::AudioBridgeCommand::SetDeafened(_) => {}
+                    crate::protocol::voice_session::AudioBridgeCommand::SwitchInputDevice {
+                        responder,
+                        ..
+                    } => {
+                        let _ = responder.send(Ok(()));
+                    }
+                    crate::protocol::voice_session::AudioBridgeCommand::SwitchOutputDevice {
+                        responder,
+                        ..
+                    } => {
+                        let _ = responder.send(Ok(()));
+                    }
+                    crate::protocol::voice_session::AudioBridgeCommand::Shutdown => break,
+                }
+            }
+        });
+
+        crate::protocol::voice_session::AudioBridge::from_channels(
+            audio_out_rx,
+            audio_spk_rx,
+            audio_cmd_tx,
+        )
+    }
+
     /// Starts a real VoiceSession using client_manager transport or active live client.
     pub async fn start_voice_session(
         &self,
@@ -693,50 +839,43 @@ impl ClientManager {
         self_deaf: bool,
         ring_recipients: Option<Vec<String>>,
     ) -> Result<Arc<crate::protocol::voice_session::VoiceSession>> {
-        let device_manager = crate::media::devices::MediaDeviceManager::new();
-        let has_hardware_audio = device_manager
-            .list_input_devices()
-            .map(|d| !d.is_empty())
-            .unwrap_or(false)
-            && device_manager
-                .list_output_devices()
-                .map(|d| !d.is_empty())
-                .unwrap_or(false);
-
-        let is_mock = matches!(*self.mode.read().await, ConnectionMode::Mock);
-        let audio_bridge = if !is_mock && has_hardware_audio {
-            crate::protocol::voice_session::AudioBridge::new_thread()
+        let mode = self.mode.read().await.clone();
+        let is_mock = matches!(mode, ConnectionMode::Mock);
+        let has_hardware_audio = if is_mock {
+            false
         } else {
-            let (_audio_out_tx, audio_out_rx) = tokio::sync::mpsc::channel(64);
-            let (_audio_spk_tx, audio_spk_rx) = tokio::sync::mpsc::channel(16);
-            let (audio_cmd_tx, mut audio_cmd_rx) = tokio::sync::mpsc::channel(64);
+            self.audio_hardware_probe.unwrap_or_else(|| {
+                let device_manager = crate::media::devices::MediaDeviceManager::new();
+                device_manager
+                    .list_input_devices()
+                    .map(|devices| !devices.is_empty())
+                    .unwrap_or(false)
+                    && device_manager
+                        .list_output_devices()
+                        .map(|devices| !devices.is_empty())
+                        .unwrap_or(false)
+            })
+        };
 
-            tokio::spawn(async move {
-                while let Some(cmd) = audio_cmd_rx.recv().await {
-                    match cmd {
-                        crate::protocol::voice_session::AudioBridgeCommand::StartSession { responder } => {
-                            let _ = responder.send(Ok(()));
-                        }
-                        crate::protocol::voice_session::AudioBridgeCommand::ReceiveOpusPacket { .. } => {}
-                        crate::protocol::voice_session::AudioBridgeCommand::StopSession => {}
-                        crate::protocol::voice_session::AudioBridgeCommand::SetMuted(_) => {}
-                        crate::protocol::voice_session::AudioBridgeCommand::SetDeafened(_) => {}
-                        crate::protocol::voice_session::AudioBridgeCommand::SwitchInputDevice { responder, .. } => {
-                            let _ = responder.send(Ok(()));
-                        }
-                        crate::protocol::voice_session::AudioBridgeCommand::SwitchOutputDevice { responder, .. } => {
-                            let _ = responder.send(Ok(()));
-                        }
-                        crate::protocol::voice_session::AudioBridgeCommand::Shutdown => break,
-                    }
-                }
-            });
+        if !is_mock && !has_hardware_audio {
+            let reason =
+                "Áudio indisponível: é necessário um dispositivo de entrada e um de saída.";
+            warn!("Sessão de voz não iniciada: {}", reason);
+            let _ = self.voice_state_tx.send((
+                crate::protocol::voice_session::VoiceSessionState::Disconnected {
+                    reason: reason.to_string(),
+                },
+                None,
+            ));
+            return Err(anyhow::anyhow!(reason.to_string()));
+        }
 
-            crate::protocol::voice_session::AudioBridge::from_channels(
-                audio_out_rx,
-                audio_spk_rx,
-                audio_cmd_tx,
-            )
+        // O bridge no-op é exclusivo do transporte Mock/teste offline. Live só
+        // continua quando o bridge real confirmar o início da sessão.
+        let audio_bridge = if is_mock {
+            Self::no_op_audio_bridge()
+        } else {
+            crate::protocol::voice_session::AudioBridge::new_thread()
         };
 
         let session_config = crate::protocol::voice_session::VoiceSessionConfig {
@@ -810,13 +949,14 @@ impl ClientManager {
         let voice_tx_ack = self.voice_state_tx.clone();
         let session_ref2 = session.clone();
         tokio::spawn(async move {
-            while let Ok(evt) = events_rx.recv().await {
-                log::debug!("[ClientManager] VoiceSession event: {:?}", evt);
-                if let crate::protocol::voice_session::VoiceSessionEvent::HeartbeatAck { ping_ms } = evt {
+            while let Ok(event) = events_rx.recv().await {
+                if let crate::protocol::voice_session::VoiceSessionEvent::HeartbeatAck { ping_ms } =
+                    event
+                {
                     let current_st = session_ref2.state();
                     let _ = voice_tx_ack.send((current_st, Some(ping_ms)));
                 }
-                let _ = voice_evt_tx.send(evt);
+                let _ = voice_evt_tx.send(event);
             }
         });
 
@@ -846,15 +986,22 @@ impl ClientManager {
                         let r = recips.clone();
                         let weak = session_weak.clone();
                         async move {
-                            log::info!("[ClientManager] CALL_CREATE confirmado na chamada DM; disparando ring_call");
+                            log::info!(
+                                "[ClientManager] CALL_CREATE confirmado na chamada DM; disparando ring_call"
+                            );
                             if let Err(e) = cm.ring_call(&ch, Some(r)).await {
                                 let short_msg = "Não foi possível tocar a chamada".to_string();
-                                log::warn!("[VoiceRing] Falha ao tocar chamada (ring_call recusado): {}", e);
+                                log::warn!(
+                                    "[VoiceRing] Falha ao tocar chamada (ring_call recusado): {}",
+                                    e
+                                );
                                 if let Some(sess) = weak.upgrade() {
                                     sess.set_call_warning(Some(short_msg));
                                 }
                             } else {
-                                log::info!("[VoiceRing] ring_call enviado com sucesso para a chamada DM");
+                                log::info!(
+                                    "[VoiceRing] ring_call enviado com sucesso para a chamada DM"
+                                );
                             }
                         }
                     };
@@ -940,9 +1087,7 @@ impl ClientManager {
         if let Err(e) = session.start().await {
             let reason = format!("Falha ao iniciar sessão de voz: {}", e);
             let _ = self.voice_state_tx.send((
-                crate::protocol::voice_session::VoiceSessionState::Disconnected {
-                    reason,
-                },
+                crate::protocol::voice_session::VoiceSessionState::Disconnected { reason },
                 None,
             ));
             return Err(e);
@@ -954,15 +1099,16 @@ impl ClientManager {
 impl ClientManager {
     /// Deletes a message from a channel using the active transport
     pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => ch.id,
-                Err(_) => channel_id.to_string(),
-            }
-        } else {
-            channel_id.to_string()
-        };
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
@@ -977,7 +1123,9 @@ impl ClientManager {
             let lock = self.transport.read().await;
             lock.clone()
         };
-        transport.subscribe_guild_members(guild_id, channel_id).await
+        transport
+            .subscribe_guild_members(guild_id, channel_id)
+            .await
     }
 
     /// Edits an existing message (/channels/{channel_id}/messages/{message_id})
@@ -987,34 +1135,38 @@ impl ClientManager {
         message_id: &str,
         content: &str,
     ) -> Result<Message> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => ch.id,
-                Err(_) => channel_id.to_string(),
-            }
-        } else {
-            channel_id.to_string()
-        };
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
         };
-        transport.edit_message(&real_channel_id, message_id, content).await
+        transport
+            .edit_message(&real_channel_id, message_id, content)
+            .await
     }
 
     /// Pins a message in a channel (/channels/{channel_id}/pins/{message_id})
     pub async fn pin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => ch.id,
-                Err(_) => channel_id.to_string(),
-            }
-        } else {
-            channel_id.to_string()
-        };
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
@@ -1025,15 +1177,16 @@ impl ClientManager {
 
     /// Unpins a message in a channel (/channels/{channel_id}/pins/{message_id})
     pub async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
-        let real_channel_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => ch.id,
-                Err(_) => channel_id.to_string(),
-            }
-        } else {
-            channel_id.to_string()
-        };
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
 
         let transport = {
             let lock = self.transport.read().await;
@@ -1043,11 +1196,7 @@ impl ClientManager {
     }
 
     /// Requests guild members for message authors missing from cache (Gateway Opcode 8)
-    pub async fn request_guild_members(
-        &self,
-        guild_id: &str,
-        user_ids: Vec<String>,
-    ) -> Result<()> {
+    pub async fn request_guild_members(&self, guild_id: &str, user_ids: Vec<String>) -> Result<()> {
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
@@ -1066,7 +1215,9 @@ impl ClientManager {
             let lock = self.transport.read().await;
             lock.clone()
         };
-        transport.update_guild_member_viewport(guild_id, channel_id, ranges).await
+        transport
+            .update_guild_member_viewport(guild_id, channel_id, ranges)
+            .await
     }
 }
 
@@ -1092,7 +1243,9 @@ impl ClientManager {
         };
 
         if let Some(gid) = guild_id {
-            client.search_guild_messages(gid, query, offset, sort_order).await
+            client
+                .search_guild_messages(gid, query, offset, sort_order)
+                .await
         } else if let Some(cid) = channel_id {
             let real_cid = if cid.starts_with("dm-") && !cid.starts_with("dm-group-") {
                 let recipient_id = cid.trim_start_matches("dm-");
@@ -1103,10 +1256,11 @@ impl ClientManager {
             } else {
                 cid.to_string()
             };
-            client.search_channel_messages(&real_cid, query, offset, sort_order).await
+            client
+                .search_channel_messages(&real_cid, query, offset, sort_order)
+                .await
         } else {
             anyhow::bail!("Nenhum canal ou servidor selecionado para busca");
         }
     }
 }
-

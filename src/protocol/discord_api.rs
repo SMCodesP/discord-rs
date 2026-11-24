@@ -1,3 +1,6 @@
+use crate::domain::profile::{
+    ConnectedAccount, MutualGuild, ProfileBadge, UserProfileData, snowflake_to_datetime,
+};
 use crate::domain::{
     Activity, ActivityType, Attachment, Author, AvatarDecorationData, Channel, ChannelType,
     CustomStatus, CustomStatusEmoji, Embed, EmbedField, Guild, Message, MessageStickerItem,
@@ -9,25 +12,99 @@ use crate::protocol::media_cache::{
     DiscordEmoji, DiscordSticker, MediaCacheManager, SoundboardSound, StickerFormatType,
     StickerPack, TenorGif,
 };
-use crate::domain::profile::{
-    snowflake_to_datetime, ConnectedAccount, MutualGuild, ProfileBadge, UserProfileData,
+use crate::protocol::rate_limit::{
+    RateLimitCoordinator, RateLimitHeaders, RequestCoalescer, retry_after_from_headers,
 };
-use crate::protocol::rate_limiter::RateLimitManager;
 use crate::protocol::transport::{DiscordTransport, GuildFolder, Relationship, TransportEvent};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast, oneshot};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, WebSocketConfig};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DEFAULT_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
+const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const GATEWAY_HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const GATEWAY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_INITIAL_GATEWAY_ATTEMPTS: u32 = 5;
+const MAX_GATEWAY_BACKOFF: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayDisconnectKind {
+    Resume,
+    Identify,
+    Fatal(&'static str),
+}
+
+impl GatewayDisconnectKind {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Resume | Self::Identify => "Gateway desconectado; tentando reconectar.",
+            Self::Fatal(reason) => reason,
+        }
+    }
+}
+
+fn gateway_close_action(code: Option<u16>) -> GatewayDisconnectKind {
+    match code {
+        Some(4004) => GatewayDisconnectKind::Fatal(
+            "Falha na autenticação: token inválido ou expirado. Faça login novamente.",
+        ),
+        Some(4010) => GatewayDisconnectKind::Fatal("Gateway recusou o shard informado."),
+        Some(4011) => GatewayDisconnectKind::Fatal(
+            "Esta conta exige sharding no Gateway; a conexão foi encerrada.",
+        ),
+        Some(4012) => {
+            GatewayDisconnectKind::Fatal("A versão da API do Gateway não é aceita pelo Discord.")
+        }
+        Some(4013) => GatewayDisconnectKind::Fatal("O Discord recusou as intents do Gateway."),
+        Some(4014) => GatewayDisconnectKind::Fatal(
+            "Intents privilegiadas não habilitadas ou aprovadas no Developer Portal.",
+        ),
+        Some(4007 | 4009) => GatewayDisconnectKind::Identify,
+        _ => GatewayDisconnectKind::Resume,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GatewayReconnectPolicy {
+    failures: u32,
+    next_delay: Duration,
+}
+
+impl GatewayReconnectPolicy {
+    fn new() -> Self {
+        Self {
+            failures: 0,
+            next_delay: Duration::from_secs(1),
+        }
+    }
+
+    fn next_backoff(&mut self) -> Duration {
+        let delay = self.next_delay;
+        self.failures = self.failures.saturating_add(1);
+        self.next_delay = (self.next_delay * 2).min(MAX_GATEWAY_BACKOFF);
+        delay
+    }
+
+    fn on_authenticated(&mut self) {
+        self.failures = 0;
+        self.next_delay = Duration::from_secs(1);
+    }
+
+    fn initial_attempts_exhausted(&self) -> bool {
+        self.failures >= MAX_INITIAL_GATEWAY_ATTEMPTS
+    }
+}
 
 /// Gateway Gateway payload schema.
 #[derive(Debug, Serialize, Deserialize)]
@@ -46,11 +123,13 @@ struct GatewayPayload {
 pub struct DiscordApiClient {
     token: AuthToken,
     http_client: reqwest::Client,
-    rate_limiter: Arc<RateLimitManager>,
+    rate_limiter: Arc<RateLimitCoordinator>,
+    request_coalescer: Arc<RequestCoalescer>,
     cache_engine: Arc<DiscordCacheEngine>,
     media_cache: MediaCacheManager,
     event_sender: broadcast::Sender<TransportEvent>,
     is_connected: Arc<AtomicBool>,
+    auth_failed: Arc<AtomicBool>,
     last_sequence: Arc<AtomicI64>,
     session_id: Arc<RwLock<Option<String>>>,
     resume_gateway_url: Arc<RwLock<Option<String>>>,
@@ -74,11 +153,13 @@ impl DiscordApiClient {
         Self {
             token,
             http_client,
-            rate_limiter: Arc::new(RateLimitManager::new()),
+            rate_limiter: Arc::new(RateLimitCoordinator::new()),
+            request_coalescer: Arc::new(RequestCoalescer::new()),
             cache_engine: Arc::new(DiscordCacheEngine::new()),
             media_cache: MediaCacheManager::default_path(),
             event_sender,
             is_connected: Arc::new(AtomicBool::new(false)),
+            auth_failed: Arc::new(AtomicBool::new(false)),
             last_sequence: Arc::new(AtomicI64::new(-1)),
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
@@ -94,7 +175,7 @@ impl DiscordApiClient {
     pub fn with_cache_and_limiter(
         token: AuthToken,
         cache_engine: Arc<DiscordCacheEngine>,
-        rate_limiter: Arc<RateLimitManager>,
+        rate_limiter: Arc<RateLimitCoordinator>,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(256);
         let http_client = reqwest::Client::builder()
@@ -107,10 +188,12 @@ impl DiscordApiClient {
             token,
             http_client,
             rate_limiter,
+            request_coalescer: Arc::new(RequestCoalescer::new()),
             cache_engine,
             media_cache: MediaCacheManager::default_path(),
             event_sender,
             is_connected: Arc::new(AtomicBool::new(false)),
+            auth_failed: Arc::new(AtomicBool::new(false)),
             last_sequence: Arc::new(AtomicI64::new(-1)),
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
@@ -128,7 +211,7 @@ impl DiscordApiClient {
     }
 
     /// Reference to rate limit manager.
-    pub fn rate_limiter(&self) -> &Arc<RateLimitManager> {
+    pub fn rate_limiter(&self) -> &Arc<RateLimitCoordinator> {
         &self.rate_limiter
     }
 
@@ -159,62 +242,212 @@ impl DiscordApiClient {
             .header("Content-Type", "application/json")
     }
 
-    async fn send_request(&self, path: &str, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    async fn send_request(
+        &self,
+        path: &str,
+        req: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
         const MAX_RETRIES: usize = 3;
-        let mut retries = 0;
+        const AUTH_ERROR: &str =
+            "Falha na autenticação: token inválido ou expirado. Faça login novamente.";
+
+        if self.auth_failed.load(Ordering::SeqCst) {
+            bail!(AUTH_ERROR);
+        }
 
         let Some(template) = req.try_clone() else {
-            // Se o request não pode ser clonado, executa uma única vez
-            self.rate_limiter.acquire_permit(path).await;
-            let resp = req.send().await.context("HTTP request failed")?;
-            self.rate_limiter.update_from_headers(path, resp.headers()).await;
-            let status = resp.status();
-            if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
-                let error_text = resp.text().await.unwrap_or_default();
-                bail!("Discord API returned HTTP {}: {}", status, error_text);
-            }
-            return Ok(resp);
+            return self.execute_request_once(path, req).await;
         };
 
-        loop {
-            // 1. Adquire autorização de bucket antes de qualquer disparo HTTP (acquire_permit)
-            self.rate_limiter.acquire_permit(path).await;
+        let coalescing_key = template
+            .try_clone()
+            .and_then(|request| request.build().ok())
+            .as_ref()
+            .and_then(request_coalescing_key);
 
-            let builder = template.try_clone().context("Failed to clone request builder")?;
-            let resp = builder.send().await.context("HTTP request failed")?;
-
-            // 2. Captura cabeçalhos X-RateLimit-* de todas as respostas e atualiza o bucket
-            self.rate_limiter.update_from_headers(path, resp.headers()).await;
-
-            let status = resp.status();
-
-            // 3. Se receber 429, aguarda Retry-After e retenta automaticamente sem explodir com panic
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                retries += 1;
-                if retries > MAX_RETRIES {
-                    let error_text = resp.text().await.unwrap_or_default();
-                    bail!("Discord API returned HTTP 429 after {} retries: {}", retries, error_text);
-                }
-
-                let wait_duration = self.rate_limiter.handle_429(path, resp.headers()).await;
-                log::warn!(
-                    "[DiscordApiClient] HTTP 429 em '{}'. Aguardando {:?} antes de retentar ({}/{})",
-                    path, wait_duration, retries, MAX_RETRIES
-                );
-                tokio::time::sleep(wait_duration).await;
-                continue;
-            }
-
-            // Permite 2xx e 304 Not Modified
-            if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
-                let error_text = resp.text().await.unwrap_or_default();
-                bail!("Discord API returned HTTP {}: {}", status, error_text);
-            }
-
-            return Ok(resp);
+        if let Some(key) = coalescing_key {
+            let this = self.clone();
+            let coalescer = this.request_coalescer.clone();
+            let route = path.to_string();
+            let response = coalescer
+                .coalesce(key, move || async move {
+                    let response = this.execute_request(&route, template, MAX_RETRIES).await?;
+                    crate::protocol::rate_limit::CoalescedResponse::capture(response).await
+                })
+                .await?;
+            Ok(response.into_response())
+        } else {
+            self.execute_request(path, template, MAX_RETRIES).await
         }
     }
 
+    async fn execute_request(
+        &self,
+        path: &str,
+        template: reqwest::RequestBuilder,
+        max_retries: usize,
+    ) -> Result<reqwest::Response> {
+        for retry in 0..=max_retries {
+            if self.auth_failed.load(Ordering::SeqCst) {
+                bail!("Falha na autenticação: token inválido ou expirado. Faça login novamente.");
+            }
+
+            self.rate_limiter.pre_acquire(path).await;
+            let builder = template
+                .try_clone()
+                .context("Failed to clone request builder")?;
+            let response = self.send_http(path, builder).await?;
+            let headers = RateLimitHeaders::from_reqwest_headers(response.headers());
+            self.rate_limiter.post_response(path, &headers).await;
+
+            let status = response.status();
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let response_headers = response.headers().clone();
+                let body = response.bytes().await.unwrap_or_default();
+                let payload = serde_json::from_slice::<serde_json::Value>(&body).ok();
+                if retry == max_retries {
+                    bail!(
+                        "Discord API returned HTTP 429: Limite de requisições excedido; tente novamente."
+                    );
+                }
+
+                let retry_after = retry_after_from_headers(&response_headers)
+                    .or_else(|| {
+                        payload
+                            .as_ref()
+                            .and_then(|value| value.get("retry_after"))
+                            .and_then(serde_json::Value::as_f64)
+                            .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+                    })
+                    .unwrap_or_else(|| Duration::from_secs(1));
+                let is_global = headers.is_global
+                    || payload
+                        .as_ref()
+                        .and_then(|value| value.get("global"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                let wait = self
+                    .rate_limiter
+                    .handle_429(path, retry_after, is_global)
+                    .await;
+                log::warn!(
+                    "[DiscordApiClient] HTTP 429 em '{}'; bucket bloqueado por {:?} (tentativa {}/{}).",
+                    RateLimitCoordinator::normalize_route(path),
+                    wait,
+                    retry + 1,
+                    max_retries
+                );
+                // pre_acquire aguarda o Retry-After na próxima tentativa.
+                continue;
+            }
+
+            if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
+                let body = response.bytes().await.unwrap_or_default();
+                if status == reqwest::StatusCode::UNAUTHORIZED {
+                    self.auth_failed.store(true, Ordering::SeqCst);
+                }
+                bail!("{}", api_error_message(status, &body));
+            }
+
+            return Ok(response);
+        }
+
+        unreachable!("o laço de retry sempre retorna ou termina no último erro 429")
+    }
+
+    async fn execute_request_once(
+        &self,
+        path: &str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        self.rate_limiter.pre_acquire(path).await;
+        let response = self.send_http(path, request).await?;
+        let headers = RateLimitHeaders::from_reqwest_headers(response.headers());
+        self.rate_limiter.post_response(path, &headers).await;
+
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::NOT_MODIFIED {
+            let body = response.bytes().await.unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                self.auth_failed.store(true, Ordering::SeqCst);
+            }
+            bail!("{}", api_error_message(status, &body));
+        }
+        Ok(response)
+    }
+
+    async fn send_http(
+        &self,
+        path: &str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        request.send().await.map_err(|error| {
+            // `without_url` remove query strings e userinfo dos erros do reqwest.
+            let detail = error.without_url();
+            log::warn!(
+                "[DiscordApiClient] Falha de rede em '{}': {}",
+                RateLimitCoordinator::normalize_route(path),
+                detail
+            );
+            anyhow::anyhow!("Falha de rede ao acessar o Discord: {detail}")
+        })
+    }
+}
+
+fn request_coalescing_key(request: &reqwest::Request) -> Option<String> {
+    if request.method() != reqwest::Method::GET {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    request.url().as_str().hash(&mut hasher);
+    if let Some(etag) = request.headers().get(reqwest::header::IF_NONE_MATCH) {
+        etag.hash(&mut hasher);
+    }
+    Some(format!("{:016x}", hasher.finish()))
+}
+
+fn api_error_message(status: reqwest::StatusCode, body: &[u8]) -> String {
+    let payload = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let code = payload
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(serde_json::Value::as_u64);
+    let discord_message = payload
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let requires_2fa = code == Some(60003)
+        || discord_message.contains("two-factor")
+        || discord_message.contains("two factor")
+        || discord_message.contains("2fa")
+        || discord_message.contains("verification");
+
+    let message = match status {
+        reqwest::StatusCode::UNAUTHORIZED => {
+            "token inválido ou expirado. Faça login novamente.".to_string()
+        }
+        reqwest::StatusCode::FORBIDDEN if requires_2fa => {
+            "verificação em duas etapas (2FA) necessária. Conclua a verificação no Discord e tente novamente."
+                .to_string()
+        }
+        reqwest::StatusCode::FORBIDDEN => "acesso negado pelo Discord.".to_string(),
+        reqwest::StatusCode::NOT_FOUND => "recurso não encontrado no Discord.".to_string(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            "limite de requisições excedido; tente novamente.".to_string()
+        }
+        status if status.is_server_error() => {
+            "serviço do Discord indisponível; tente novamente.".to_string()
+        }
+        _ => "requisição recusada pelo Discord.".to_string(),
+    };
+
+    format!("Discord API returned HTTP {status}: {message}")
+}
+
+impl DiscordApiClient {
     /// Fetches the authenticated user profile from /users/@me
     pub async fn get_current_user(&self) -> Result<User> {
         let path = "/users/@me";
@@ -228,7 +461,9 @@ impl DiscordApiClient {
         let resp = self.send_request(path, req).await?;
 
         if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
-            log::debug!("[DiscordApiClient] /users/@me retornou 304 Not Modified. Carregando do cache em disco.");
+            log::debug!(
+                "[DiscordApiClient] /users/@me retornou 304 Not Modified. Carregando do cache em disco."
+            );
             if let Some(cached_user) = self.cache_engine.load_current_user() {
                 *self.current_user_id.write().await = Some(cached_user.id.clone());
                 return Ok(cached_user);
@@ -241,6 +476,28 @@ impl DiscordApiClient {
 
         let val: serde_json::Value = resp.json().await?;
         let user = parse_user_from_json(&val).context("Failed to parse user from /users/@me")?;
+        *self.current_user_id.write().await = Some(user.id.clone());
+        self.cache_engine.save_current_user(&user);
+        Ok(user)
+    }
+
+    fn credential_verification_request(&self) -> reqwest::RequestBuilder {
+        self.auth_request(reqwest::Method::GET, "/users/@me")
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+    }
+
+    /// Verifica credenciais sem depender de ETag/cache local.
+    /// Usado no commit de login: um 304 nunca é prova de autenticação.
+    pub async fn verify_current_user(&self) -> Result<User> {
+        let path = "/users/@me";
+        let request = self.credential_verification_request();
+        let response = self.send_request(path, request).await?;
+        if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+            bail!("A verificação de credenciais retornou 304 inesperadamente");
+        }
+        let value: serde_json::Value = response.json().await?;
+        let user = parse_user_from_json(&value)
+            .context("Failed to parse verified user from /users/@me")?;
         *self.current_user_id.write().await = Some(user.id.clone());
         self.cache_engine.save_current_user(&user);
         Ok(user)
@@ -322,7 +579,11 @@ impl DiscordApiClient {
     }
 
     /// Sends a friend request to a user (/users/@me/relationships)
-    pub async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> Result<()> {
+    pub async fn send_friend_request(
+        &self,
+        username: &str,
+        discriminator: Option<&str>,
+    ) -> Result<()> {
         let path = "/users/@me/relationships";
         let mut body = serde_json::json!({
             "username": username,
@@ -338,7 +599,9 @@ impl DiscordApiClient {
     /// Accepts an incoming friend request (/users/@me/relationships/{user_id})
     pub async fn accept_friend_request(&self, user_id: &str) -> Result<()> {
         let path = format!("/users/@me/relationships/{}", user_id);
-        let req = self.auth_request(reqwest::Method::PUT, &path).json(&serde_json::json!({}));
+        let req = self
+            .auth_request(reqwest::Method::PUT, &path)
+            .json(&serde_json::json!({}));
         self.send_request(&path, req).await?;
         Ok(())
     }
@@ -360,14 +623,21 @@ impl DiscordApiClient {
 
         let raw_folders = val
             .get("guild_folders")
-            .or_else(|| val.get("user_settings").and_then(|us| us.get("guild_folders")))
+            .or_else(|| {
+                val.get("user_settings")
+                    .and_then(|us| us.get("guild_folders"))
+            })
             .and_then(|v| v.as_array());
 
         let mut guild_folders = Vec::new();
         if let Some(folders) = raw_folders {
             for f in folders {
-                let id = f.get("id").and_then(|v| v.as_str().map(ToString::to_string));
-                let name = f.get("name").and_then(|v| v.as_str().map(ToString::to_string));
+                let id = f
+                    .get("id")
+                    .and_then(|v| v.as_str().map(ToString::to_string));
+                let name = f
+                    .get("name")
+                    .and_then(|v| v.as_str().map(ToString::to_string));
                 let color = f.get("color").and_then(|v| v.as_u64().map(|c| c as u32));
                 let guild_ids = f
                     .get("guild_ids")
@@ -391,6 +661,22 @@ impl DiscordApiClient {
         Ok(guild_folders)
     }
 
+    /// Lê as configurações protobuf da conta em `/users/@me/settings-proto/1`.
+    /// O payload é decodificado localmente e nunca registrado em log.
+    pub async fn get_user_settings_proto(
+        &self,
+    ) -> Result<crate::protocol::user_settings_proto::PreloadedUserSettings> {
+        let path = "/users/@me/settings-proto/1";
+        let request = self.auth_request(reqwest::Method::GET, path);
+        let response = self.send_request(path, request).await?;
+        let payload: serde_json::Value = response.json().await?;
+        let encoded = payload
+            .get("settings")
+            .and_then(serde_json::Value::as_str)
+            .context("Resposta de settings-proto sem campo settings")?;
+        crate::protocol::user_settings_proto::decode_preloaded_user_settings(encoded)
+            .context("Falha ao decodificar settings-proto do Discord")
+    }
 
     /// Fetches all custom emojis for a guild (/guilds/{guild_id}/emojis) with local disk cache
     pub async fn get_guild_emojis(&self, guild_id: &str) -> Result<Vec<DiscordEmoji>> {
@@ -404,7 +690,9 @@ impl DiscordApiClient {
         let resp = self.send_request(&path, req).await?;
         let raw_emojis: Vec<serde_json::Value> = resp.json().await?;
         let emojis = parse_emojis_from_value_array(&raw_emojis, guild_id);
-        let _ = self.media_cache.save_guild_emojis_to_disk(guild_id, &emojis);
+        let _ = self
+            .media_cache
+            .save_guild_emojis_to_disk(guild_id, &emojis);
         Ok(emojis)
     }
 
@@ -418,7 +706,9 @@ impl DiscordApiClient {
         let resp = self.send_request(&path, req).await?;
         let raw_stickers: Vec<serde_json::Value> = resp.json().await?;
         let stickers = parse_stickers_from_value_array(&raw_stickers, guild_id);
-        let _ = self.media_cache.save_guild_stickers_to_disk(guild_id, &stickers);
+        let _ = self
+            .media_cache
+            .save_guild_stickers_to_disk(guild_id, &stickers);
         Ok(stickers)
     }
 
@@ -444,11 +734,16 @@ impl DiscordApiClient {
                         }
                     }
                 }
-                log::warn!("[DiscordApiClient] get_sticker_packs returned non-success or empty, falling back to local packs");
+                log::warn!(
+                    "[DiscordApiClient] get_sticker_packs returned non-success or empty, falling back to local packs"
+                );
                 Ok(MediaCacheManager::get_default_sticker_packs())
             }
             Err(e) => {
-                log::warn!("[DiscordApiClient] get_sticker_packs failed ({}). Falling back to local packs", e);
+                log::warn!(
+                    "[DiscordApiClient] get_sticker_packs failed ({}). Falling back to local packs",
+                    e
+                );
                 Ok(MediaCacheManager::get_default_sticker_packs())
             }
         }
@@ -469,12 +764,21 @@ impl DiscordApiClient {
                         }
                     }
                 }
-                log::warn!("[DiscordApiClient] get_trending_gifs returned non-success or empty, falling back to curated GIFs");
-                Ok(MediaCacheManager::get_curated_tenor_gifs_for_category("trending"))
+                log::warn!(
+                    "[DiscordApiClient] get_trending_gifs returned non-success or empty, falling back to curated GIFs"
+                );
+                Ok(MediaCacheManager::get_curated_tenor_gifs_for_category(
+                    "trending",
+                ))
             }
             Err(e) => {
-                log::warn!("[DiscordApiClient] get_trending_gifs request failed ({}). Falling back to curated GIFs", e);
-                Ok(MediaCacheManager::get_curated_tenor_gifs_for_category("trending"))
+                log::warn!(
+                    "[DiscordApiClient] get_trending_gifs request failed ({}). Falling back to curated GIFs",
+                    e
+                );
+                Ok(MediaCacheManager::get_curated_tenor_gifs_for_category(
+                    "trending",
+                ))
             }
         }
     }
@@ -505,13 +809,18 @@ impl DiscordApiClient {
                         }
                     }
                 }
-                log::warn!("[DiscordApiClient] search_gifs returned non-success or empty, falling back to curated search");
+                log::warn!(
+                    "[DiscordApiClient] search_gifs returned non-success or empty, falling back to curated search"
+                );
                 let fallback = MediaCacheManager::curated_tenor_gifs();
                 let filtered: Vec<TenorGif> = fallback
                     .into_iter()
                     .filter(|g| {
                         g.title.to_lowercase().contains(&q.to_lowercase())
-                            || g.category.as_deref().map(|c| c.to_lowercase() == q.to_lowercase()).unwrap_or(false)
+                            || g.category
+                                .as_deref()
+                                .map(|c| c.to_lowercase() == q.to_lowercase())
+                                .unwrap_or(false)
                     })
                     .collect();
                 if filtered.is_empty() {
@@ -521,13 +830,19 @@ impl DiscordApiClient {
                 }
             }
             Err(e) => {
-                log::warn!("[DiscordApiClient] search_gifs request failed ({}). Falling back to curated search", e);
+                log::warn!(
+                    "[DiscordApiClient] search_gifs request failed ({}). Falling back to curated search",
+                    e
+                );
                 let fallback = MediaCacheManager::curated_tenor_gifs();
                 let filtered: Vec<TenorGif> = fallback
                     .into_iter()
                     .filter(|g| {
                         g.title.to_lowercase().contains(&q.to_lowercase())
-                            || g.category.as_deref().map(|c| c.to_lowercase() == q.to_lowercase()).unwrap_or(false)
+                            || g.category
+                                .as_deref()
+                                .map(|c| c.to_lowercase() == q.to_lowercase())
+                                .unwrap_or(false)
                     })
                     .collect();
                 if filtered.is_empty() {
@@ -550,14 +865,30 @@ impl DiscordApiClient {
         for val in raw_sounds {
             let sound_id = val
                 .get("sound_id")
-                .and_then(|v| v.as_str().or_else(|| v.as_i64().map(|n| Box::leak(n.to_string().into_boxed_str()) as &str)))
+                .and_then(|v| {
+                    v.as_str().or_else(|| {
+                        v.as_i64()
+                            .map(|n| Box::leak(n.to_string().into_boxed_str()) as &str)
+                    })
+                })
                 .unwrap_or("0")
                 .to_string();
-            let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("sound").to_string();
+            let name = val
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sound")
+                .to_string();
             let volume = val.get("volume").and_then(|v| v.as_f64()).unwrap_or(1.0);
-            let emoji_id = val.get("emoji_id").and_then(|v| v.as_str().map(ToString::to_string));
-            let emoji_name = val.get("emoji_name").and_then(|v| v.as_str().map(ToString::to_string));
-            let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+            let emoji_id = val
+                .get("emoji_id")
+                .and_then(|v| v.as_str().map(ToString::to_string));
+            let emoji_name = val
+                .get("emoji_name")
+                .and_then(|v| v.as_str().map(ToString::to_string));
+            let available = val
+                .get("available")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
 
             sounds.push(SoundboardSound {
                 sound_id,
@@ -573,7 +904,9 @@ impl DiscordApiClient {
     }
 
     /// Fetches the profile effects collectibles catalog (/collectibles-categories/v2)
-    pub async fn get_profile_effects_catalog(&self) -> Result<crate::components::ProfileEffectCatalog> {
+    pub async fn get_profile_effects_catalog(
+        &self,
+    ) -> Result<crate::components::ProfileEffectCatalog> {
         let path = "/collectibles-categories/v2?include_bundles=true&variants_return_style=2";
         let req = self.auth_request(reqwest::Method::GET, path);
         let resp = self.send_request(path, req).await?;
@@ -582,13 +915,17 @@ impl DiscordApiClient {
     }
 
     /// Sends a sticker message to a text channel (/channels/{channel_id}/messages)
-    pub async fn send_sticker_message(&self, channel_id: &str, sticker_id: &str) -> Result<Message> {
+    pub async fn send_sticker_message(
+        &self,
+        channel_id: &str,
+        sticker_id: &str,
+    ) -> Result<Message> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");
             match self.create_or_get_dm_channel(recipient_id).await {
                 Ok(ch) => ch.id,
                 Err(e) => {
-                    log::warn!("Falha ao resolver DM para envio de figurinha {}: {:?}", recipient_id, e);
+                    log::warn!("Falha ao resolver DM para envio de figurinha: {}", e);
                     channel_id.to_string()
                 }
             }
@@ -658,12 +995,20 @@ impl DiscordApiClient {
         let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
         match self.send_request(&path, req).await {
             Ok(resp) => {
-                log::info!("[VoiceDiag] Status HTTP do toque: status={}", resp.status().as_u16());
+                log::info!(
+                    "[VoiceDiag] Status HTTP do toque: status={}",
+                    resp.status().as_u16()
+                );
                 Ok(())
             }
             Err(e) => {
                 let err_str = e.to_string();
-                if let Some(code) = err_str.split("HTTP ").nth(1).and_then(|s| s.split_whitespace().next()).and_then(|c| c.parse::<u16>().ok()) {
+                if let Some(code) = err_str
+                    .split("HTTP ")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|c| c.parse::<u16>().ok())
+                {
                     log::info!("[VoiceDiag] Status HTTP do toque: status={}", code);
                 } else {
                     log::info!("[VoiceDiag] Status HTTP do toque: status=falha");
@@ -674,7 +1019,11 @@ impl DiscordApiClient {
     }
 
     /// Stop ringing participants in a DM / private channel via POST /channels/{id}/call/stop-ringing
-    pub async fn stop_ringing_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
+    pub async fn stop_ringing_call(
+        &self,
+        channel_id: &str,
+        recipients: Option<Vec<String>>,
+    ) -> Result<()> {
         let path = format!("/channels/{}/call/stop-ringing", channel_id);
         let body = if let Some(recips) = recipients {
             json!({ "recipients": recips })
@@ -721,7 +1070,9 @@ impl DiscordApiClient {
     pub async fn subscribe_guild_members(&self, guild_id: &str, channel_id: &str) -> Result<()> {
         if self.token.token_type == TokenType::User {
             let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
-            let payload = coordinator.focus_guild_and_channel(guild_id, channel_id).await;
+            let payload = coordinator
+                .focus_guild_and_channel(guild_id, channel_id)
+                .await;
             self.send_gateway_payload(&payload).await
         } else {
             // For Bot token, Opcode 14 does not exist; send Opcode 8 (Request Guild Members)
@@ -744,55 +1095,93 @@ impl DiscordTransport for DiscordApiClient {
         if self.is_connected.load(Ordering::SeqCst) {
             return Ok(());
         }
+        if self.auth_failed.load(Ordering::SeqCst) {
+            bail!("Falha na autenticação: token inválido ou expirado. Faça login novamente.");
+        }
 
-        let token_clone = self.token.clone();
-        let event_tx = self.event_sender.clone();
-        let is_connected = self.is_connected.clone();
-        let last_sequence = self.last_sequence.clone();
-        let session_id_lock = self.session_id.clone();
-        let resume_gateway_lock = self.resume_gateway_url.clone();
-        let cache_engine_clone = self.cache_engine.clone();
-        let outbound_tx_lock = self.outbound_gateway_tx.clone();
-        let current_user_id_lock = self.current_user_id.clone();
-        let voice_session_id_lock = self.last_voice_session_id.clone();
-        let voice_server_lock = self.last_voice_server.clone();
+        // Garante que exista apenas um loop de Gateway por cliente.
+        {
+            let mut tasks = self.gateway_task.lock().await;
+            if let Some(previous) = tasks.take() {
+                previous.abort();
+            }
+        }
 
-        let handle = tokio::spawn(async move {
-            run_gateway_loop(
-                token_clone,
-                event_tx,
-                is_connected,
-                last_sequence,
-                session_id_lock,
-                resume_gateway_lock,
-                cache_engine_clone,
-                outbound_tx_lock,
-                current_user_id_lock,
-                voice_session_id_lock,
-                voice_server_lock,
-            )
-            .await;
+        let (handshake_tx, handshake_rx) = oneshot::channel();
+        let handle = tokio::spawn({
+            let token = self.token.clone();
+            let event_tx = self.event_sender.clone();
+            let is_connected = self.is_connected.clone();
+            let auth_failed = self.auth_failed.clone();
+            let last_sequence = self.last_sequence.clone();
+            let session_id = self.session_id.clone();
+            let resume_gateway_url = self.resume_gateway_url.clone();
+            let cache_engine = self.cache_engine.clone();
+            let outbound_gateway_tx = self.outbound_gateway_tx.clone();
+            let current_user_id = self.current_user_id.clone();
+            let last_voice_session_id = self.last_voice_session_id.clone();
+            let last_voice_server = self.last_voice_server.clone();
+
+            async move {
+                run_gateway_loop(
+                    token,
+                    event_tx,
+                    is_connected,
+                    auth_failed,
+                    last_sequence,
+                    session_id,
+                    resume_gateway_url,
+                    cache_engine,
+                    outbound_gateway_tx,
+                    current_user_id,
+                    last_voice_session_id,
+                    last_voice_server,
+                    Some(handshake_tx),
+                )
+                .await;
+            }
         });
+        *self.gateway_task.lock().await = Some(handle);
 
-        let mut lock = self.gateway_task.lock().await;
-        *lock = Some(handle);
+        let handshake = tokio::time::timeout(GATEWAY_HANDSHAKE_TIMEOUT, handshake_rx).await;
+        let result = match handshake {
+            Ok(Ok(Ok(()))) => return Ok(()),
+            Ok(Ok(Err(reason))) => reason,
+            Ok(Err(_)) => "O loop do Gateway foi encerrado durante o handshake.".to_string(),
+            Err(_) => "Tempo esgotado ao autenticar no Gateway do Discord.".to_string(),
+        };
 
-        Ok(())
+        if let Some(task) = self.gateway_task.lock().await.take() {
+            task.abort();
+        }
+        *self.outbound_gateway_tx.write().await = None;
+        self.is_connected.store(false, Ordering::SeqCst);
+        *self.session_id.write().await = None;
+        *self.resume_gateway_url.write().await = None;
+        self.last_sequence.store(-1, Ordering::SeqCst);
+        bail!(result)
     }
 
     async fn disconnect(&self) -> Result<()> {
         self.is_connected.store(false, Ordering::SeqCst);
+        self.auth_failed.store(false, Ordering::SeqCst);
         let mut lock = self.gateway_task.lock().await;
         if let Some(task) = lock.take() {
             task.abort();
         }
+        drop(lock);
         *self.outbound_gateway_tx.write().await = None;
-        crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared().clear().await;
+        *self.session_id.write().await = None;
+        *self.resume_gateway_url.write().await = None;
+        self.last_sequence.store(-1, Ordering::SeqCst);
+        crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared()
+            .clear()
+            .await;
         *self.last_voice_session_id.write().await = None;
         *self.last_voice_server.write().await = None;
-        let _ = self
-            .event_sender
-            .send(TransportEvent::Disconnected("Disconnected by client".to_string()));
+        let _ = self.event_sender.send(TransportEvent::Disconnected(
+            "Disconnected by client".to_string(),
+        ));
         Ok(())
     }
 
@@ -812,7 +1201,9 @@ impl DiscordTransport for DiscordApiClient {
         let resp = self.send_request(path, req).await?;
 
         if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
-            log::debug!("[DiscordApiClient] /users/@me/guilds retornou 304 Not Modified. Carregando do cache em disco.");
+            log::debug!(
+                "[DiscordApiClient] /users/@me/guilds retornou 304 Not Modified. Carregando do cache em disco."
+            );
             if let Some(cached_guilds) = self.cache_engine.load_guilds() {
                 return Ok(cached_guilds);
             }
@@ -832,7 +1223,10 @@ impl DiscordTransport for DiscordApiClient {
                 if hash.starts_with("http://") || hash.starts_with("https://") {
                     hash.to_string()
                 } else {
-                    format!("https://cdn.discordapp.com/icons/{}/{}.png?size=96", id, hash)
+                    format!(
+                        "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
+                        id, hash
+                    )
                 }
             });
             let owner = val.get("owner").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -876,13 +1270,22 @@ impl DiscordTransport for DiscordApiClient {
         let roles = parse_roles_from_json(&val);
 
         let id = val.get("id").and_then(|v| v.as_str()).unwrap_or(guild_id);
-        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Unknown Guild");
-        let owner_id = val.get("owner_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let name = val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Guild");
+        let owner_id = val
+            .get("owner_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         let icon = val.get("icon").and_then(|v| v.as_str()).map(|hash| {
             if hash.starts_with("http://") || hash.starts_with("https://") {
                 hash.to_string()
             } else {
-                format!("https://cdn.discordapp.com/icons/{}/{}.png?size=96", id, hash)
+                format!(
+                    "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
+                    id, hash
+                )
             }
         });
 
@@ -937,7 +1340,11 @@ impl DiscordTransport for DiscordApiClient {
         self.list_relationships().await
     }
 
-    async fn send_friend_request(&self, username: &str, discriminator: Option<&str>) -> anyhow::Result<()> {
+    async fn send_friend_request(
+        &self,
+        username: &str,
+        discriminator: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.send_friend_request(username, discriminator).await
     }
 
@@ -955,7 +1362,7 @@ impl DiscordTransport for DiscordApiClient {
             match self.create_or_get_dm_channel(recipient_id).await {
                 Ok(ch) => ch.id,
                 Err(e) => {
-                    log::warn!("Falha ao resolver DM para {}: {:?}", recipient_id, e);
+                    log::warn!("Falha ao resolver DM: {}", e);
                     channel_id.to_string()
                 }
             }
@@ -963,7 +1370,11 @@ impl DiscordTransport for DiscordApiClient {
             channel_id.to_string()
         };
 
-        let path = format!("/channels/{}/messages?limit={}", resolved_id, limit.min(100));
+        let path = format!(
+            "/channels/{}/messages?limit={}",
+            resolved_id,
+            limit.min(100)
+        );
         let endpoint_key = format!("/channels/{}/messages", resolved_id);
         let etag = self.cache_engine.get_etag(&endpoint_key).await;
 
@@ -976,8 +1387,7 @@ impl DiscordTransport for DiscordApiClient {
 
         if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
             log::debug!(
-                "[DiscordApiClient] Mensagens do canal {} retornaram 304 Not Modified. Carregando do cache em disco.",
-                resolved_id
+                "[DiscordApiClient] Mensagens retornaram 304 Not Modified. Carregando do cache em disco."
             );
             let cached = self.cache_engine.get_channel_messages(&resolved_id).await;
             if !cached.is_empty() {
@@ -993,7 +1403,11 @@ impl DiscordTransport for DiscordApiClient {
 
         let mut messages = Vec::new();
         for val in raw_messages.into_iter().rev() {
-            if let Some(author_id) = val.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()) {
+            if let Some(author_id) = val
+                .get("author")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+            {
                 let guild_id = val.get("guild_id").and_then(|v| v.as_str());
                 if let (Some(gid), Some(member_obj)) = (guild_id, val.get("member")) {
                     if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
@@ -1001,7 +1415,9 @@ impl DiscordTransport for DiscordApiClient {
                             .iter()
                             .filter_map(|r| r.as_str().map(ToString::to_string))
                             .collect();
-                        crate::protocol::cache::lazy_guilds::cache_author_roles(gid, author_id, role_ids);
+                        crate::protocol::cache::lazy_guilds::cache_author_roles(
+                            gid, author_id, role_ids,
+                        );
                     }
                 }
             }
@@ -1010,7 +1426,9 @@ impl DiscordTransport for DiscordApiClient {
             }
         }
 
-        self.cache_engine.save_channel_messages(&resolved_id, &messages).await;
+        self.cache_engine
+            .save_channel_messages(&resolved_id, &messages)
+            .await;
 
         Ok(messages)
     }
@@ -1021,7 +1439,7 @@ impl DiscordTransport for DiscordApiClient {
             match self.create_or_get_dm_channel(recipient_id).await {
                 Ok(ch) => ch.id,
                 Err(e) => {
-                    log::warn!("Falha ao resolver DM para envio {}: {:?}", recipient_id, e);
+                    log::warn!("Falha ao resolver DM para envio: {}", e);
                     channel_id.to_string()
                 }
             }
@@ -1047,12 +1465,7 @@ impl DiscordTransport for DiscordApiClient {
         self.send_sticker_message(channel_id, sticker_id).await
     }
 
-    async fn add_reaction(
-        &self,
-        channel_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<()> {
+    async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");
             match self.create_or_get_dm_channel(recipient_id).await {
@@ -1073,12 +1486,7 @@ impl DiscordTransport for DiscordApiClient {
         Ok(())
     }
 
-    async fn remove_reaction(
-        &self,
-        channel_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<()> {
+    async fn remove_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");
             match self.create_or_get_dm_channel(recipient_id).await {
@@ -1134,7 +1542,8 @@ impl DiscordTransport for DiscordApiClient {
         channel_id: &str,
         ranges: Vec<[usize; 2]>,
     ) -> anyhow::Result<()> {
-        self.update_guild_member_viewport(guild_id, channel_id, ranges).await
+        self.update_guild_member_viewport(guild_id, channel_id, ranges)
+            .await
     }
 
     async fn subscribe_guild_members(
@@ -1152,7 +1561,8 @@ impl DiscordTransport for DiscordApiClient {
         self_mute: bool,
         self_deaf: bool,
     ) -> anyhow::Result<()> {
-        self.send_voice_state_update(guild_id, channel_id, self_mute, self_deaf).await
+        self.send_voice_state_update(guild_id, channel_id, self_mute, self_deaf)
+            .await
     }
 
     async fn ring_call(
@@ -1170,10 +1580,414 @@ impl DiscordTransport for DiscordApiClient {
 
 // --- Background Gateway WebSocket Loop ---
 
+fn sanitize_gateway_url(raw: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return "URL de Gateway inválida".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "URL de Gateway sem host".to_string();
+    };
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    format!("{}://{host}{port}{}", url.scheme(), url.path())
+}
+
+fn websocket_error_kind(error: &tokio_tungstenite::tungstenite::Error) -> String {
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    match error {
+        WsError::Io(_) => "I/O".to_string(),
+        WsError::Tls(_) => "TLS".to_string(),
+        WsError::Capacity(_) => "limite de capacidade".to_string(),
+        WsError::Protocol(_) => "protocolo WebSocket".to_string(),
+        WsError::WriteBufferFull(_) => "buffer de escrita cheio".to_string(),
+        WsError::Utf8(_) => "UTF-8 inválido".to_string(),
+        WsError::AttackAttempt => "tentativa de ataque detectada".to_string(),
+        WsError::ConnectionClosed | WsError::AlreadyClosed => "conexão fechada".to_string(),
+        WsError::Url(_) => "URL inválida".to_string(),
+        WsError::Http(response) => format!("HTTP {}", response.status()),
+        WsError::HttpFormat(_) => "formato HTTP inválido".to_string(),
+    }
+}
+
+fn heartbeat_initial_delay(interval: Duration, seed: u64) -> Duration {
+    let interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    if interval_ms == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(seed % interval_ms)
+    }
+}
+
+fn identify_or_resume_payload(
+    token: &AuthToken,
+    session_id: Option<&str>,
+    sequence: i64,
+) -> serde_json::Value {
+    if let (Some(session_id), true) = (session_id, sequence >= 0) {
+        return json!({
+            "op": 6,
+            "d": {
+                "token": token.secret(),
+                "session_id": session_id,
+                "seq": sequence
+            }
+        });
+    }
+
+    if token.token_type == TokenType::User {
+        json!({
+            "op": 2,
+            "d": {
+                "token": token.secret(),
+                "capabilities": 30717,
+                "properties": {
+                    "os": "Linux",
+                    "browser": "Discord Client",
+                    "release_channel": "stable",
+                    "client_version": "1.0.9168",
+                    "os_version": "6.6.0",
+                    "os_arch": "x64",
+                    "app_arch": "x64",
+                    "system_locale": "pt-BR",
+                    "browser_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9168 Chrome/128.0.6613.186 Electron/32.2.0 Safari/537.36",
+                    "browser_version": "32.2.0",
+                    "client_build_number": 331705,
+                    "native_build_number": null,
+                    "client_event_source": null
+                },
+                "presence": {
+                    "status": "online",
+                    "since": 0,
+                    "activities": [],
+                    "afk": false
+                },
+                "compress": false,
+                "client_state": {
+                    "guild_versions": {},
+                    "highest_last_message_id": "0",
+                    "read_state_version": 0,
+                    "user_guild_settings_version": -1,
+                    "user_settings_version": -1,
+                    "private_channels_version": "0",
+                    "api_code_version": 0
+                }
+            }
+        })
+    } else {
+        let intents = 1 | 512 | 32768 | 128;
+        json!({
+            "op": 2,
+            "d": {
+                "token": token.secret(),
+                "intents": intents,
+                "properties": {
+                    "os": "linux",
+                    "browser": "discord-rs",
+                    "device": "discord-rs"
+                }
+            }
+        })
+    }
+}
+
+struct GatewayConnectionOutcome {
+    kind: GatewayDisconnectKind,
+    authenticated: bool,
+    connected_for: Duration,
+}
+
+async fn run_gateway_connection<S>(
+    ws_stream: tokio_tungstenite::WebSocketStream<S>,
+    token: &AuthToken,
+    event_tx: &broadcast::Sender<TransportEvent>,
+    is_connected: &AtomicBool,
+    auth_failed: &AtomicBool,
+    last_sequence: &AtomicI64,
+    session_id: &RwLock<Option<String>>,
+    resume_gateway_url: &RwLock<Option<String>>,
+    cache_engine: &Arc<DiscordCacheEngine>,
+    outbound_gateway_tx: &RwLock<Option<tokio::sync::mpsc::Sender<WsMessage>>>,
+    current_user_id: &RwLock<Option<String>>,
+    last_voice_session_id: &RwLock<Option<String>>,
+    last_voice_server: &RwLock<Option<crate::protocol::VoiceServerData>>,
+    handshake_tx: &mut Option<oneshot::Sender<Result<(), String>>>,
+) -> GatewayConnectionOutcome
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use tokio::time::{Instant as TokioInstant, MissedTickBehavior, interval_at};
+
+    let connected_at = std::time::Instant::now();
+    let mut authenticated = false;
+    #[allow(unused_assignments)]
+    let mut disconnect_kind = GatewayDisconnectKind::Resume;
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+
+    // Op 10 Hello é obrigatório antes de Identify/Resume. Não utiliza mais
+    // um único `next()` sem timeout nem intervalo default fabricado.
+    let hello = tokio::time::timeout(GATEWAY_HELLO_TIMEOUT, async {
+        loop {
+            match ws_read.next().await {
+                Some(Ok(WsMessage::Text(text))) => {
+                    if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) {
+                        if payload.op == 10 {
+                            return payload
+                                .d
+                                .as_ref()
+                                .and_then(|data| data.get("heartbeat_interval"))
+                                .and_then(serde_json::Value::as_u64)
+                                .and_then(|millis| {
+                                    let interval = Duration::from_millis(millis);
+                                    (!interval.is_zero()).then_some(interval)
+                                })
+                                .filter(|interval| {
+                                    TokioInstant::now().checked_add(*interval).is_some()
+                                });
+                        }
+                    }
+                }
+                Some(Ok(WsMessage::Ping(_))) => continue,
+                _ => return None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+
+    let Some(heartbeat_interval) = hello else {
+        log::warn!("Gateway não enviou Op 10 Hello válido dentro do tempo limite.");
+        *outbound_gateway_tx.write().await = None;
+        is_connected.store(false, Ordering::SeqCst);
+        return GatewayConnectionOutcome {
+            kind: GatewayDisconnectKind::Identify,
+            authenticated,
+            connected_for: connected_at.elapsed(),
+        };
+    };
+
+    let session = session_id.read().await.clone();
+    let sequence = last_sequence.load(Ordering::SeqCst);
+    let has_resume_url = resume_gateway_url.read().await.is_some();
+    let can_resume = session.is_some() && sequence >= 0 && has_resume_url;
+    let resume_session = if can_resume { session.as_deref() } else { None };
+    let payload = identify_or_resume_payload(token, resume_session, sequence);
+    if ws_write
+        .send(WsMessage::Text(payload.to_string().into()))
+        .await
+        .is_err()
+    {
+        *outbound_gateway_tx.write().await = None;
+        is_connected.store(false, Ordering::SeqCst);
+        return GatewayConnectionOutcome {
+            kind: GatewayDisconnectKind::Identify,
+            authenticated,
+            connected_for: connected_at.elapsed(),
+        };
+    }
+
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<WsMessage>(64);
+    *outbound_gateway_tx.write().await = Some(command_tx);
+    is_connected.store(true, Ordering::SeqCst);
+    let _ = event_tx.send(TransportEvent::Connected);
+    log::info!(
+        "Gateway WebSocket conectado; {}.",
+        if can_resume {
+            "RESUME enviado"
+        } else {
+            "IDENTIFY enviado"
+        }
+    );
+
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (sequence.max(0) as u64);
+    let mut heartbeat = interval_at(
+        TokioInstant::now() + heartbeat_initial_delay(heartbeat_interval, seed),
+        heartbeat_interval,
+    );
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut heartbeat_ack_timeout: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if heartbeat_ack_timeout.is_some() {
+                    log::warn!("Heartbeat ACK não recebido entre tentativas; encerrando conexão zumbi.");
+                    disconnect_kind = GatewayDisconnectKind::Resume;
+                    break;
+                }
+                let seq = last_sequence.load(Ordering::SeqCst);
+                let data = if seq >= 0 { json!(seq) } else { json!(null) };
+                let heartbeat_payload = json!({ "op": 1, "d": data });
+                if ws_write.send(WsMessage::Text(heartbeat_payload.to_string().into())).await.is_err() {
+                    disconnect_kind = GatewayDisconnectKind::Resume;
+                    break;
+                }
+                heartbeat_ack_timeout = Some(Box::pin(tokio::time::sleep(heartbeat_interval)));
+            }
+            Some(message) = command_rx.recv() => {
+                if ws_write.send(message).await.is_err() {
+                    disconnect_kind = GatewayDisconnectKind::Resume;
+                    break;
+                }
+            }
+            incoming = ws_read.next() => {
+                match incoming {
+                    Some(Ok(WsMessage::Text(text))) => {
+                        let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) else {
+                            log::warn!("Payload JSON inválido recebido do Gateway; reconectando.");
+                            disconnect_kind = GatewayDisconnectKind::Resume;
+                            break;
+                        };
+                        if let Some(seq) = payload.s {
+                            last_sequence.store(seq, Ordering::SeqCst);
+                        }
+
+                        match payload.op {
+                            0 => {
+                                if payload.t.as_deref() == Some("RESUMED") {
+                                    authenticated = true;
+                                    log::info!("Gateway RESUME aceito (RESUMED).");
+                                    if let Some(tx) = handshake_tx.take() {
+                                        let _ = tx.send(Ok(()));
+                                    }
+                                } else if let (Some(event_name), Some(data)) = (payload.t.as_deref(), payload.d) {
+                                    if let Err(error) = handle_dispatch(
+                                        event_name,
+                                        data,
+                                        event_tx,
+                                        session_id,
+                                        resume_gateway_url,
+                                        cache_engine,
+                                        current_user_id,
+                                        last_voice_session_id,
+                                        last_voice_server,
+                                    ).await {
+                                        log::warn!("Evento Gateway '{}' inválido: {:#}", event_name, error);
+                                        // Um READY inválido pode ter gravado session_id
+                                        // antes de falhar ao validar o usuário. Não retome
+                                        // uma sessão que nunca chegou a autenticar.
+                                        *session_id.write().await = None;
+                                        *resume_gateway_url.write().await = None;
+                                        last_sequence.store(-1, Ordering::SeqCst);
+                                        disconnect_kind = GatewayDisconnectKind::Identify;
+                                        break;
+                                    }
+                                    if event_name == "READY" {
+                                        authenticated = true;
+                                        log::info!("Gateway IDENTIFY aceito (READY).");
+                                        if let Some(tx) = handshake_tx.take() {
+                                            let _ = tx.send(Ok(()));
+                                        }
+                                    }
+                                }
+                            }
+                            1 => {
+                                let seq = last_sequence.load(Ordering::SeqCst);
+                                let data = if seq >= 0 { json!(seq) } else { json!(null) };
+                                let heartbeat_payload = json!({ "op": 1, "d": data });
+                                if ws_write.send(WsMessage::Text(heartbeat_payload.to_string().into())).await.is_err() {
+                                    disconnect_kind = GatewayDisconnectKind::Resume;
+                                    break;
+                                }
+                                heartbeat_ack_timeout = Some(Box::pin(tokio::time::sleep(heartbeat_interval)));
+                            }
+                            7 => {
+                                log::info!("Gateway solicitou reconexão (Op 7).");
+                                disconnect_kind = GatewayDisconnectKind::Resume;
+                                break;
+                            }
+                            9 => {
+                                let resumable = payload.d.as_ref().and_then(serde_json::Value::as_bool) == Some(true);
+                                if resumable {
+                                    log::warn!("Gateway retornou Invalid Session ressumível (Op 9).");
+                                    disconnect_kind = GatewayDisconnectKind::Resume;
+                                } else {
+                                    log::warn!("Gateway invalidou a sessão (Op 9); será necessário IDENTIFY.");
+                                    *session_id.write().await = None;
+                                    *resume_gateway_url.write().await = None;
+                                    last_sequence.store(-1, Ordering::SeqCst);
+                                    disconnect_kind = GatewayDisconnectKind::Identify;
+                                }
+                                break;
+                            }
+                            11 => {
+                                heartbeat_ack_timeout = None;
+                                log::trace!("Heartbeat ACK recebido.");
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some(Ok(WsMessage::Ping(payload))) => {
+                        if ws_write.send(WsMessage::Pong(payload)).await.is_err() {
+                            disconnect_kind = GatewayDisconnectKind::Resume;
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        let code = frame.as_ref().map(|frame| u16::from(frame.code));
+                        log::warn!("Gateway fechou a conexão: código {:?}.", code);
+                        disconnect_kind = gateway_close_action(code);
+                        if disconnect_kind == GatewayDisconnectKind::Identify {
+                            *session_id.write().await = None;
+                            *resume_gateway_url.write().await = None;
+                            last_sequence.store(-1, Ordering::SeqCst);
+                        }
+                        if code == Some(4004) {
+                            auth_failed.store(true, Ordering::SeqCst);
+                        }
+                        break;
+                    }
+                    Some(Err(error)) => {
+                        log::error!("Erro de leitura do Gateway: {}.", websocket_error_kind(&error));
+                        disconnect_kind = GatewayDisconnectKind::Resume;
+                        break;
+                    }
+                    None => {
+                        log::warn!("Stream do Gateway encerrada.");
+                        disconnect_kind = GatewayDisconnectKind::Resume;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            _ = async {
+                match heartbeat_ack_timeout.as_mut() {
+                    Some(timeout) => timeout.await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                log::warn!("Timeout de Heartbeat ACK; reconectando para retomar a sessão.");
+                disconnect_kind = GatewayDisconnectKind::Resume;
+                break;
+            }
+        }
+    }
+
+    *outbound_gateway_tx.write().await = None;
+    is_connected.store(false, Ordering::SeqCst);
+    GatewayConnectionOutcome {
+        kind: disconnect_kind,
+        authenticated,
+        connected_for: connected_at.elapsed(),
+    }
+}
+
 async fn run_gateway_loop(
     token: AuthToken,
     event_tx: broadcast::Sender<TransportEvent>,
     is_connected: Arc<AtomicBool>,
+    auth_failed: Arc<AtomicBool>,
     last_sequence: Arc<AtomicI64>,
     session_id: Arc<RwLock<Option<String>>>,
     resume_gateway_url: Arc<RwLock<Option<String>>>,
@@ -1182,270 +1996,161 @@ async fn run_gateway_loop(
     current_user_id: Arc<RwLock<Option<String>>>,
     last_voice_session_id: Arc<RwLock<Option<String>>>,
     last_voice_server: Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
+    mut handshake_tx: Option<oneshot::Sender<Result<(), String>>>,
 ) {
-    let mut backoff_seconds = 1;
+    let mut reconnect_policy = GatewayReconnectPolicy::new();
 
     loop {
+        if auth_failed.load(Ordering::SeqCst) {
+            let reason = "Falha na autenticação: token inválido ou expirado. Faça login novamente.";
+            let _ = event_tx.send(TransportEvent::Disconnected(reason.to_string()));
+            if let Some(tx) = handshake_tx.take() {
+                let _ = tx.send(Err(reason.to_string()));
+            }
+            break;
+        }
+
         let gateway_url = {
-            let resume_url = resume_gateway_url.read().await;
-            resume_url
+            let guard = resume_gateway_url.read().await;
+            guard
                 .clone()
                 .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string())
         };
-
-        log::info!("Connecting to Discord Gateway: {}", gateway_url);
+        log::info!(
+            "Conectando ao Discord Gateway: {}",
+            sanitize_gateway_url(&gateway_url)
+        );
 
         let mut ws_config = WebSocketConfig::default();
         ws_config.max_message_size = None;
         ws_config.max_frame_size = None;
 
-        match connect_async_with_config(&gateway_url, Some(ws_config), false).await {
-            Ok((ws_stream, _)) => {
-                log::info!("Connected to Discord Gateway WebSocket");
-                is_connected.store(true, Ordering::SeqCst);
-                let _ = event_tx.send(TransportEvent::Connected);
-                backoff_seconds = 1;
+        let connection = tokio::time::timeout(
+            GATEWAY_CONNECT_TIMEOUT,
+            connect_async_with_config(&gateway_url, Some(ws_config), false),
+        )
+        .await;
 
-                let (mut ws_write, mut ws_read) = ws_stream.split();
+        match connection {
+            Ok(Ok((ws_stream, _))) => {
+                let outcome = run_gateway_connection(
+                    ws_stream,
+                    &token,
+                    &event_tx,
+                    &is_connected,
+                    &auth_failed,
+                    &last_sequence,
+                    &session_id,
+                    &resume_gateway_url,
+                    &cache_engine,
+                    &outbound_gateway_tx,
+                    &current_user_id,
+                    &last_voice_session_id,
+                    &last_voice_server,
+                    &mut handshake_tx,
+                )
+                .await;
 
-                // Wait for Op 10 Hello
-                let mut heartbeat_interval_ms = 41250u64;
-                if let Some(Ok(WsMessage::Text(text))) = ws_read.next().await {
-                    if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) {
-                        if payload.op == 10 {
-                            if let Some(d) = payload.d {
-                                if let Some(interval) = d.get("heartbeat_interval").and_then(|v| v.as_u64()) {
-                                    heartbeat_interval_ms = interval;
-                                }
-                            }
-                        }
-                    }
+                // Só zera o backoff depois de uma sessão estável; READY/RESUMED
+                // seguido imediatamente de desconexão não deve criar loop de 1s.
+                if outcome.authenticated && outcome.connected_for >= Duration::from_secs(30) {
+                    reconnect_policy.on_authenticated();
                 }
 
-                // Send Op 2 Identify (or Op 6 Resume if session exists)
-                let sess = session_id.read().await.clone();
-                let seq = last_sequence.load(Ordering::SeqCst);
+                let reason = outcome.kind.reason().to_string();
+                let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
 
-                let identify_payload = if let (Some(sid), true) = (&sess, seq >= 0) {
-                    // Op 6 Resume
-                    json!({
-                        "op": 6,
-                        "d": {
-                            "token": token.secret(),
-                            "session_id": sid,
-                            "seq": seq
-                        }
-                    })
-                } else if token.token_type == TokenType::User {
-                    // Op 2 Identify para User Token: NUNCA enviar intents! Enviar propriedades canônicas do Discord Desktop
-                    json!({
-                        "op": 2,
-                        "d": {
-                            "token": token.secret(),
-                            "capabilities": 30717,
-                            "properties": {
-                                "os": "Linux",
-                                "browser": "Discord Client",
-                                "release_channel": "stable",
-                                "client_version": "1.0.9168",
-                                "os_version": "6.6.0",
-                                "os_arch": "x64",
-                                "app_arch": "x64",
-                                "system_locale": "pt-BR",
-                                "browser_user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9168 Chrome/128.0.6613.186 Electron/32.2.0 Safari/537.36",
-                                "browser_version": "32.2.0",
-                                "client_build_number": 331705,
-                                "native_build_number": null,
-                                "client_event_source": null
-                            },
-                            "presence": {
-                                "status": "online",
-                                "since": 0,
-                                "activities": [],
-                                "afk": false
-                            },
-                            "compress": false,
-                            "client_state": {
-                                "guild_versions": {},
-                                "highest_last_message_id": "0",
-                                "read_state_version": 0,
-                                "user_guild_settings_version": -1,
-                                "user_settings_version": -1,
-                                "private_channels_version": "0",
-                                "api_code_version": 0
-                            }
-                        }
-                    })
-                } else {
-                    // Op 2 Identify para Bot Token
-                    // Intents: GUILDS (1) | GUILD_MESSAGES (512) | MESSAGE_CONTENT (32768) | GUILD_VOICE_STATES (128)
-                    let intents = 1 | 512 | 32768 | 128;
-                    json!({
-                        "op": 2,
-                        "d": {
-                            "token": token.secret(),
-                            "intents": intents,
-                            "properties": {
-                                "os": "linux",
-                                "browser": "discord-rs",
-                                "device": "discord-rs"
-                            }
-                        }
-                    })
-                };
-
-                let _ = ws_write
-                    .send(WsMessage::Text(identify_payload.to_string().into()))
-                    .await;
-
-                // Spawn Heartbeat Task
-                let (heartbeat_stop_tx, mut heartbeat_stop_rx) = tokio::sync::oneshot::channel();
-                let seq_tracker = last_sequence.clone();
-                let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<WsMessage>(64);
-                *outbound_gateway_tx.write().await = Some(cmd_tx.clone());
-
-                let hb_tx_clone = cmd_tx.clone();
-                tokio::spawn(async move {
-                    let mut interval = tokio::time::interval(Duration::from_millis(heartbeat_interval_ms));
-                    loop {
-                        tokio::select! {
-                            _ = interval.tick() => {
-                                let s = seq_tracker.load(Ordering::SeqCst);
-                                let d = if s >= 0 { json!(s) } else { json!(null) };
-                                let hb_msg = json!({ "op": 1, "d": d });
-                                if hb_tx_clone.send(WsMessage::Text(hb_msg.to_string().into())).await.is_err() {
-                                    break;
-                                }
-                            }
-                            _ = &mut heartbeat_stop_rx => {
-                                break;
-                            }
-                        }
+                if let GatewayDisconnectKind::Fatal(_) = outcome.kind {
+                    if let Some(tx) = handshake_tx.take() {
+                        let _ = tx.send(Err(reason));
                     }
-                });
-
-                // WebSocket Processing Loop
-                loop {
-                    tokio::select! {
-                        Some(msg_to_send) = cmd_rx.recv() => {
-                            if ws_write.send(msg_to_send).await.is_err() {
-                                break;
-                            }
-                        }
-                        incoming = ws_read.next() => {
-                            match incoming {
-                                Some(Ok(WsMessage::Text(text))) => {
-                                    if let Ok(payload) = serde_json::from_str::<GatewayPayload>(&text) {
-                                        if let Some(s) = payload.s {
-                                             last_sequence.store(s, Ordering::SeqCst);
-                                        }
-
-                                        match payload.op {
-                                            0 => {
-                                                // Dispatch
-                                                if let (Some(event_name), Some(data)) = (payload.t.as_deref(), payload.d) {
-                                                    handle_dispatch(
-                                                        event_name,
-                                                        data,
-                                                        &event_tx,
-                                                        &session_id,
-                                                        &resume_gateway_url,
-                                                        &cache_engine,
-                                                        &current_user_id,
-                                                        &last_voice_session_id,
-                                                        &last_voice_server,
-                                                    ).await;
-                                                }
-                                            }
-                                            1 => {
-                                                // Heartbeat requested by server
-                                                let s = last_sequence.load(Ordering::SeqCst);
-                                                let d = if s >= 0 { json!(s) } else { json!(null) };
-                                                let hb = json!({ "op": 1, "d": d });
-                                                let _ = ws_write.send(WsMessage::Text(hb.to_string().into())).await;
-                                            }
-                                            7 => {
-                                                // Reconnect
-                                                log::info!("Gateway requested reconnect (Op 7)");
-                                                break;
-                                            }
-                                            9 => {
-                                                // Invalid session
-                                                log::warn!("Gateway invalid session (Op 9)");
-                                                *session_id.write().await = None;
-                                                last_sequence.store(-1, Ordering::SeqCst);
-                                                break;
-                                            }
-                                            11 => {
-                                                // Heartbeat ACK
-                                                log::trace!("Heartbeat ACK received");
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                                Some(Ok(WsMessage::Close(frame))) => {
-                                    log::warn!("Gateway connection closed: {:?}", frame);
-                                    break;
-                                }
-                                Some(Err(e)) => {
-                                    log::error!("Gateway read error: {}", e);
-                                    break;
-                                }
-                                None => {
-                                    log::warn!("Gateway stream ended");
-                                    break;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
+                    break;
                 }
 
-                let _ = heartbeat_stop_tx.send(());
-                *outbound_gateway_tx.write().await = None;
-                is_connected.store(false, Ordering::SeqCst);
-                let _ = event_tx.send(TransportEvent::Disconnected("Gateway disconnected".to_string()));
+                if handshake_tx.is_some() {
+                    if let Some(tx) = handshake_tx.take() {
+                        let _ = tx.send(Err(reason));
+                    }
+                    break;
+                }
             }
-            Err(err) => {
-                log::error!("Failed to connect to Discord gateway: {}", err);
+            Ok(Err(error)) => {
+                let reason = format!(
+                    "Falha ao conectar no Gateway do Discord ({}).",
+                    websocket_error_kind(&error)
+                );
+                log::error!("{}", reason);
                 *outbound_gateway_tx.write().await = None;
                 is_connected.store(false, Ordering::SeqCst);
-                let _ = event_tx.send(TransportEvent::Disconnected(format!("Falha ao conectar no Gateway: {}", err)));
+                let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
+                if let Some(tx) = handshake_tx.take() {
+                    let _ = tx.send(Err(reason));
+                    break;
+                }
+            }
+            Err(_) => {
+                let reason = "Tempo esgotado ao conectar no Gateway do Discord.".to_string();
+                log::error!("{}", reason);
+                *outbound_gateway_tx.write().await = None;
+                is_connected.store(false, Ordering::SeqCst);
+                let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
+                if let Some(tx) = handshake_tx.take() {
+                    let _ = tx.send(Err(reason));
+                    break;
+                }
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(backoff_seconds)).await;
-        backoff_seconds = (backoff_seconds * 2).min(30);
+        let delay = reconnect_policy.next_backoff();
+        if reconnect_policy.initial_attempts_exhausted() {
+            let reason =
+                "Não foi possível restabelecer o Gateway após várias tentativas.".to_string();
+            log::error!("{}", reason);
+            let _ = event_tx.send(TransportEvent::Disconnected(reason));
+            break;
+        }
+        log::info!("Próxima reconexão do Gateway em {:?}.", delay);
+        tokio::time::sleep(delay).await;
     }
+
+    *outbound_gateway_tx.write().await = None;
+    is_connected.store(false, Ordering::SeqCst);
 }
 
 async fn handle_dispatch(
     event_name: &str,
     data: serde_json::Value,
     event_tx: &broadcast::Sender<TransportEvent>,
-    session_id: &Arc<RwLock<Option<String>>>,
-    resume_gateway_url: &Arc<RwLock<Option<String>>>,
+    session_id: &RwLock<Option<String>>,
+    resume_gateway_url: &RwLock<Option<String>>,
     cache_engine: &Arc<DiscordCacheEngine>,
-    current_user_id: &Arc<RwLock<Option<String>>>,
-    last_voice_session_id: &Arc<RwLock<Option<String>>>,
-    last_voice_server: &Arc<RwLock<Option<crate::protocol::VoiceServerData>>>,
-) {
+    current_user_id: &RwLock<Option<String>>,
+    last_voice_session_id: &RwLock<Option<String>>,
+    last_voice_server: &RwLock<Option<crate::protocol::VoiceServerData>>,
+) -> Result<()> {
     let media_cache = MediaCacheManager::default_path();
     match event_name {
         "READY" => {
-            if let Some(sid) = data.get("session_id").and_then(|v| v.as_str()) {
-                *session_id.write().await = Some(sid.to_string());
-            }
-            if let Some(r_url) = data.get("resume_gateway_url").and_then(|v| v.as_str()) {
-                *resume_gateway_url.write().await = Some(r_url.to_string());
-            }
-            *last_voice_server.write().await = None;
-
+            let session = data
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("READY do Gateway sem session_id")?;
+            let resume_url = data
+                .get("resume_gateway_url")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .context("READY do Gateway sem resume_gateway_url")?;
             let user = data
                 .get("user")
                 .and_then(parse_user_from_json)
-                .unwrap_or_else(|| User::new("me", "Authenticated User"));
+                .context("READY do Gateway sem usuário válido")?;
+
+            // Só publica metadados de resumo depois que o READY inteiro foi
+            // validado. Um usuário inválido não pode criar uma sessão resumível.
+            *session_id.write().await = Some(session.to_string());
+            *resume_gateway_url.write().await = Some(resume_url.to_string());
+            *last_voice_server.write().await = None;
 
             *current_user_id.write().await = Some(user.id.clone());
 
@@ -1458,7 +2163,10 @@ async fn handle_dispatch(
                         if hash.starts_with("http://") || hash.starts_with("https://") {
                             hash.to_string()
                         } else {
-                            format!("https://cdn.discordapp.com/icons/{}/{}.png?size=96", id, hash)
+                            format!(
+                                "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
+                                id, hash
+                            )
                         }
                     });
                     let mut guild = Guild::new(id, name, "");
@@ -1485,8 +2193,12 @@ async fn handle_dispatch(
             let mut guild_folders = Vec::new();
             if let Some(folders) = raw_folders {
                 for f in folders {
-                    let id = f.get("id").and_then(|v| v.as_str().map(ToString::to_string));
-                    let name = f.get("name").and_then(|v| v.as_str().map(ToString::to_string));
+                    let id = f
+                        .get("id")
+                        .and_then(|v| v.as_str().map(ToString::to_string));
+                    let name = f
+                        .get("name")
+                        .and_then(|v| v.as_str().map(ToString::to_string));
                     let color = f.get("color").and_then(|v| v.as_u64().map(|c| c as u32));
                     let guild_ids = f
                         .get("guild_ids")
@@ -1533,9 +2245,19 @@ async fn handle_dispatch(
             let mut account_theme = None;
             let mut client_theme = None;
             if let Some(proto_b64) = data.get("user_settings_proto").and_then(|v| v.as_str()) {
-                if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(proto_b64) {
-                    account_theme = settings.theme();
-                    client_theme = settings.appearance.as_ref().and_then(|a| a.client_theme_settings.clone());
+                match crate::protocol::user_settings_proto::decode_preloaded_user_settings(
+                    proto_b64,
+                ) {
+                    Ok(settings) => {
+                        account_theme = settings.theme();
+                        client_theme = settings
+                            .appearance
+                            .as_ref()
+                            .and_then(|appearance| appearance.client_theme_settings.clone());
+                    }
+                    Err(_) => {
+                        log::warn!("READY continha user_settings_proto inválido; ignorado.");
+                    }
                 }
             }
 
@@ -1610,13 +2332,22 @@ async fn handle_dispatch(
         }
         "GUILD_CREATE" => {
             if let Some(id) = data.get("id").and_then(|v| v.as_str()) {
-                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("Server");
-                let owner_id = data.get("owner_id").and_then(|v| v.as_str()).unwrap_or_default();
+                let name = data
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Server");
+                let owner_id = data
+                    .get("owner_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 let icon = data.get("icon").and_then(|v| v.as_str()).map(|hash| {
                     if hash.starts_with("http://") || hash.starts_with("https://") {
                         hash.to_string()
                     } else {
-                        format!("https://cdn.discordapp.com/icons/{}/{}.png?size=96", id, hash)
+                        format!(
+                            "https://cdn.discordapp.com/icons/{}/{}.png?size=96",
+                            id, hash
+                        )
                     }
                 });
 
@@ -1644,13 +2375,20 @@ async fn handle_dispatch(
 
                 // Popula voice_states a partir do snapshot inicial de GUILD_CREATE
                 if let Some(raw_states) = data.get("voice_states").and_then(|v| v.as_array()) {
-                    let mut guild_members: std::collections::HashMap<String, (Option<String>, Option<String>, Option<AvatarDecorationData>)> = std::collections::HashMap::new();
+                    let mut guild_members: std::collections::HashMap<
+                        String,
+                        (Option<String>, Option<String>, Option<AvatarDecorationData>),
+                    > = std::collections::HashMap::new();
                     if let Some(raw_members) = data.get("members").and_then(|v| v.as_array()) {
                         for m in raw_members {
                             if let Some(user) = m.get("user") {
                                 if let Some(uid) = user.get("id").and_then(|v| v.as_str()) {
-                                    let name = m.get("nick").and_then(|v| v.as_str())
-                                        .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
+                                    let name = m
+                                        .get("nick")
+                                        .and_then(|v| v.as_str())
+                                        .or_else(|| {
+                                            user.get("global_name").and_then(|v| v.as_str())
+                                        })
                                         .or_else(|| user.get("username").and_then(|v| v.as_str()))
                                         .map(ToString::to_string);
                                     let avatar = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
@@ -1671,7 +2409,9 @@ async fn handle_dispatch(
                     for vs_val in raw_states {
                         if let Some(mut state) = parse_voice_state_from_json(vs_val, Some(id)) {
                             if state.user_name.is_none() {
-                                if let Some((name, avatar, decor)) = guild_members.get(&state.user_id) {
+                                if let Some((name, avatar, decor)) =
+                                    guild_members.get(&state.user_id)
+                                {
                                     state.user_name = name.clone();
                                     if state.avatar_url.is_none() {
                                         state.avatar_url = avatar.clone();
@@ -1716,7 +2456,9 @@ async fn handle_dispatch(
             }
         }
         "GUILD_MEMBER_LIST_UPDATE" => {
-            if let Some(update) = crate::protocol::cache::lazy_guilds::parse_guild_member_list_update(&data) {
+            if let Some(update) =
+                crate::protocol::cache::lazy_guilds::parse_guild_member_list_update(&data)
+            {
                 let _ = event_tx.send(TransportEvent::GuildMemberListUpdate(update));
             }
         }
@@ -1724,7 +2466,11 @@ async fn handle_dispatch(
             handle_guild_members_chunk_dispatch(&data, event_tx);
         }
         "MESSAGE_CREATE" => {
-            if let Some(author_id) = data.get("author").and_then(|a| a.get("id")).and_then(|v| v.as_str()) {
+            if let Some(author_id) = data
+                .get("author")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+            {
                 let guild_id = data.get("guild_id").and_then(|v| v.as_str());
                 if let (Some(gid), Some(member_obj)) = (guild_id, data.get("member")) {
                     if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
@@ -1732,29 +2478,27 @@ async fn handle_dispatch(
                             .iter()
                             .filter_map(|r| r.as_str().map(ToString::to_string))
                             .collect();
-                        crate::protocol::cache::lazy_guilds::cache_author_roles(gid, author_id, role_ids);
+                        crate::protocol::cache::lazy_guilds::cache_author_roles(
+                            gid, author_id, role_ids,
+                        );
                     }
                 }
             }
-            if let Some(msg) = parse_message_from_json(&data) {
-                let cache = cache_engine.clone();
-                let msg_clone = msg.clone();
-                tokio::spawn(async move {
-                    cache.apply_gateway_message_create(&msg_clone).await;
-                });
-                let _ = event_tx.send(TransportEvent::MessageCreate(msg));
+            if let Some(message) = parse_message_from_json(&data) {
+                cache_engine.apply_gateway_message_create(&message).await;
+                let _ = event_tx.send(TransportEvent::MessageCreate(message));
             }
         }
         "MESSAGE_UPDATE" => {
-            if let Some(msg) = parse_message_from_json(&data) {
-                let cache = cache_engine.clone();
-                let c_id = msg.channel_id.clone();
-                let m_id = msg.id.clone();
-                let content = msg.content.clone();
-                tokio::spawn(async move {
-                    cache.apply_gateway_message_update(&c_id, &m_id, &content).await;
-                });
-                let _ = event_tx.send(TransportEvent::MessageUpdate(msg));
+            if let Some(message) = parse_message_from_json(&data) {
+                cache_engine
+                    .apply_gateway_message_update(
+                        &message.channel_id,
+                        &message.id,
+                        &message.content,
+                    )
+                    .await;
+                let _ = event_tx.send(TransportEvent::MessageUpdate(message));
             }
         }
         "MESSAGE_DELETE" => {
@@ -1762,12 +2506,7 @@ async fn handle_dispatch(
                 data.get("id").and_then(|v| v.as_str()),
                 data.get("channel_id").and_then(|v| v.as_str()),
             ) {
-                let cache = cache_engine.clone();
-                let c_id = ch_id.to_string();
-                let m_id = id.to_string();
-                tokio::spawn(async move {
-                    cache.apply_gateway_message_delete(&c_id, &m_id).await;
-                });
+                cache_engine.apply_gateway_message_delete(ch_id, id).await;
                 let _ = event_tx.send(TransportEvent::MessageDelete {
                     message_id: id.to_string(),
                     channel_id: ch_id.to_string(),
@@ -1820,7 +2559,9 @@ async fn handle_dispatch(
             if let Some(state) = parse_voice_state_from_json(&data, None) {
                 {
                     let my_id = current_user_id.read().await;
-                    if my_id.as_deref() == Some(state.user_id.as_str()) && !state.session_id.is_empty() {
+                    if my_id.as_deref() == Some(state.user_id.as_str())
+                        && !state.session_id.is_empty()
+                    {
                         *last_voice_session_id.write().await = Some(state.session_id.clone());
                     }
                 }
@@ -1829,10 +2570,23 @@ async fn handle_dispatch(
             }
         }
         "VOICE_SERVER_UPDATE" => {
-            let token = data.get("token").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let guild_id = data.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
-            let channel_id = data.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
-            let endpoint = data.get("endpoint").and_then(|v| v.as_str()).map(ToString::to_string);
+            let token = data
+                .get("token")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let guild_id = data
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let channel_id = data
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let endpoint = data
+                .get("endpoint")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
 
             let server_data = crate::protocol::VoiceServerData {
                 token: token.clone(),
@@ -1851,10 +2605,23 @@ async fn handle_dispatch(
         }
         "CALL_CREATE" => {
             if let Some(ch_id) = data.get("channel_id").and_then(|v| v.as_str()) {
-                let message_id = data.get("message_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                let region = data.get("region").and_then(|v| v.as_str()).map(ToString::to_string);
-                let ringing = data.get("ringing").and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|x| x.as_str()).map(ToString::to_string).collect())
+                let message_id = data
+                    .get("message_id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let region = data
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let ringing = data
+                    .get("ringing")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str())
+                            .map(ToString::to_string)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let _ = event_tx.send(TransportEvent::CallCreate {
                     channel_id: ch_id.to_string(),
@@ -1866,9 +2633,19 @@ async fn handle_dispatch(
         }
         "CALL_UPDATE" => {
             if let Some(ch_id) = data.get("channel_id").and_then(|v| v.as_str()) {
-                let region = data.get("region").and_then(|v| v.as_str()).map(ToString::to_string);
-                let ringing = data.get("ringing").and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|x| x.as_str()).map(ToString::to_string).collect())
+                let region = data
+                    .get("region")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let ringing = data
+                    .get("ringing")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|x| x.as_str())
+                            .map(ToString::to_string)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let _ = event_tx.send(TransportEvent::CallUpdate {
                     channel_id: ch_id.to_string(),
@@ -1906,7 +2683,11 @@ async fn handle_dispatch(
             let id = data
                 .get("id")
                 .and_then(|v| v.as_str())
-                .or_else(|| data.get("user").and_then(|u| u.get("id")).and_then(|v| v.as_str()))
+                .or_else(|| {
+                    data.get("user")
+                        .and_then(|u| u.get("id"))
+                        .and_then(|v| v.as_str())
+                })
                 .unwrap_or_default()
                 .to_string();
             if !id.is_empty() {
@@ -1932,18 +2713,33 @@ async fn handle_dispatch(
             // Live protobuf user settings update from Discord Gateway:
             // payload contains { "settings": "<base64_string>", "partial": bool }
             if let Some(settings_b64) = data.get("settings").and_then(|v| v.as_str()) {
-                if let Ok(settings) = crate::protocol::user_settings_proto::decode_preloaded_user_settings(settings_b64) {
-                    if let Some(theme) = settings.theme() {
-                        let _ = event_tx.send(TransportEvent::AccountThemeUpdated {
-                            theme,
-                            client_theme_settings: settings.appearance.as_ref().and_then(|a| a.client_theme_settings.clone()),
-                        });
+                match crate::protocol::user_settings_proto::decode_preloaded_user_settings(
+                    settings_b64,
+                ) {
+                    Ok(settings) => {
+                        let theme = settings.theme();
+                        let client_theme = settings
+                            .appearance
+                            .as_ref()
+                            .and_then(|appearance| appearance.client_theme_settings.clone());
+                        if theme.is_some() || client_theme.is_some() {
+                            let _ = event_tx.send(TransportEvent::AccountThemeUpdated {
+                                theme: theme
+                                    .unwrap_or(crate::protocol::user_settings_proto::Theme::Unset),
+                                client_theme_settings: client_theme,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!("USER_SETTINGS_PROTO_UPDATE inválido; ignorado.");
                     }
                 }
             }
         }
         _ => {}
     }
+
+    Ok(())
 }
 
 // --- JSON Parsers for Discord Data Models ---
@@ -1953,7 +2749,11 @@ pub fn parse_relationship_from_json(r: &serde_json::Value) -> Option<Relationshi
     let id = r
         .get("id")
         .and_then(|v| v.as_str())
-        .or_else(|| r.get("user").and_then(|u| u.get("id")).and_then(|v| v.as_str()))?
+        .or_else(|| {
+            r.get("user")
+                .and_then(|u| u.get("id"))
+                .and_then(|v| v.as_str())
+        })?
         .to_string();
     let rel_type = r.get("type").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
@@ -1977,7 +2777,10 @@ pub fn parse_relationship_from_json(r: &serde_json::Value) -> Option<Relationshi
         if hash.starts_with("http://") || hash.starts_with("https://") {
             hash.to_string()
         } else {
-            format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=96", id, hash)
+            format!(
+                "https://cdn.discordapp.com/avatars/{}/{}.png?size=96",
+                id, hash
+            )
         }
     });
 
@@ -2001,9 +2804,18 @@ fn parse_user_from_json(val: &serde_json::Value) -> Option<User> {
     let id = val.get("id")?.as_str()?;
     let username = val.get("username")?.as_str()?;
     let mut user = User::new(id, username);
-    user.discriminator = val.get("discriminator").and_then(|v| v.as_str()).map(ToString::to_string);
-    user.global_name = val.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
-    user.avatar = val.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
+    user.discriminator = val
+        .get("discriminator")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    user.global_name = val
+        .get("global_name")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    user.avatar = val
+        .get("avatar")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
     user.bot = val.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
     user.avatar_decoration_data = parse_avatar_decoration_data(val);
     Some(user)
@@ -2076,7 +2888,10 @@ pub fn parse_user_profile_from_json(val: &serde_json::Value) -> Option<UserProfi
                     id: id.to_string(),
                     description: desc.to_string(),
                     icon: icon.to_string(),
-                    link: b.get("link").and_then(|v| v.as_str()).map(ToString::to_string),
+                    link: b
+                        .get("link")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
                 });
             }
         }
@@ -2094,7 +2909,10 @@ pub fn parse_user_profile_from_json(val: &serde_json::Value) -> Option<UserProfi
                     account_type: t.to_string(),
                     id: id.to_string(),
                     name: name.to_string(),
-                    verified: ca.get("verified").and_then(|v| v.as_bool()).unwrap_or(false),
+                    verified: ca
+                        .get("verified")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 });
             }
         }
@@ -2106,7 +2924,10 @@ pub fn parse_user_profile_from_json(val: &serde_json::Value) -> Option<UserProfi
             if let Some(id) = mg.get("id").and_then(|v| v.as_str()) {
                 mutual_guilds.push(MutualGuild {
                     id: id.to_string(),
-                    nick: mg.get("nick").and_then(|v| v.as_str()).map(ToString::to_string),
+                    nick: mg
+                        .get("nick")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
                 });
             }
         }
@@ -2151,23 +2972,53 @@ pub fn parse_user_profile_from_json(val: &serde_json::Value) -> Option<UserProfi
     })
 }
 
-pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<VoiceState> {
+pub(crate) fn parse_voice_state_from_json(
+    val: &serde_json::Value,
+    default_guild_id: Option<&str>,
+) -> Option<VoiceState> {
     let user_id = val.get("user_id")?.as_str()?;
-    let session_id = val.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+    let session_id = val
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let mut state = VoiceState::new(user_id, session_id);
-    state.guild_id = val.get("guild_id").and_then(|v| v.as_str()).or(default_guild_id).map(ToString::to_string);
-    state.channel_id = val.get("channel_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    state.guild_id = val
+        .get("guild_id")
+        .and_then(|v| v.as_str())
+        .or(default_guild_id)
+        .map(ToString::to_string);
+    state.channel_id = val
+        .get("channel_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
     state.mute = val.get("mute").and_then(|v| v.as_bool()).unwrap_or(false);
     state.deaf = val.get("deaf").and_then(|v| v.as_bool()).unwrap_or(false);
-    state.self_mute = val.get("self_mute").and_then(|v| v.as_bool()).unwrap_or(false);
-    state.self_deaf = val.get("self_deaf").and_then(|v| v.as_bool()).unwrap_or(false);
-    state.self_video = val.get("self_video").and_then(|v| v.as_bool()).unwrap_or(false);
-    state.self_stream = val.get("self_stream").and_then(|v| v.as_bool()).unwrap_or(false);
-    state.suppress = val.get("suppress").and_then(|v| v.as_bool()).unwrap_or(false);
+    state.self_mute = val
+        .get("self_mute")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    state.self_deaf = val
+        .get("self_deaf")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    state.self_video = val
+        .get("self_video")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    state.self_stream = val
+        .get("self_stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    state.suppress = val
+        .get("suppress")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     if let Some(member) = val.get("member") {
         if let Some(user) = member.get("user") {
-            state.user_name = member.get("nick").and_then(|v| v.as_str())
+            state.user_name = member
+                .get("nick")
+                .and_then(|v| v.as_str())
                 .or_else(|| user.get("global_name").and_then(|v| v.as_str()))
                 .or_else(|| user.get("username").and_then(|v| v.as_str()))
                 .map(ToString::to_string);
@@ -2175,26 +3026,34 @@ pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild
                 if hash.starts_with("http") {
                     hash.to_string()
                 } else {
-                    format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+                    format!(
+                        "https://cdn.discordapp.com/avatars/{}/{}.png?size=64",
+                        user_id, hash
+                    )
                 }
             });
             // Guild-level decoration overrides the global user one in guild context
             // (see Guild Member Structure: `avatar_decoration_data` is "data for the
             // member's guild avatar decoration").
-            state.avatar_decoration_data = parse_avatar_decoration_data(member)
-                .or_else(|| parse_avatar_decoration_data(user));
+            state.avatar_decoration_data =
+                parse_avatar_decoration_data(member).or_else(|| parse_avatar_decoration_data(user));
         } else {
             state.avatar_decoration_data = parse_avatar_decoration_data(member);
         }
     } else if let Some(user) = val.get("user") {
-        state.user_name = user.get("global_name").and_then(|v| v.as_str())
+        state.user_name = user
+            .get("global_name")
+            .and_then(|v| v.as_str())
             .or_else(|| user.get("username").and_then(|v| v.as_str()))
             .map(ToString::to_string);
         state.avatar_url = user.get("avatar").and_then(|v| v.as_str()).map(|hash| {
             if hash.starts_with("http") {
                 hash.to_string()
             } else {
-                format!("https://cdn.discordapp.com/avatars/{}/{}.png?size=64", user_id, hash)
+                format!(
+                    "https://cdn.discordapp.com/avatars/{}/{}.png?size=64",
+                    user_id, hash
+                )
             }
         });
         state.avatar_decoration_data = parse_avatar_decoration_data(user);
@@ -2202,7 +3061,10 @@ pub(crate) fn parse_voice_state_from_json(val: &serde_json::Value, default_guild
     Some(state)
 }
 
-fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&str>) -> Option<Channel> {
+fn parse_channel_from_json(
+    val: &serde_json::Value,
+    default_guild_id: Option<&str>,
+) -> Option<Channel> {
     let id = val.get("id")?.as_str()?;
     let raw_type = val.get("type")?.as_u64()?;
     let channel_type = ChannelType::from_discord_code(raw_type)?;
@@ -2244,11 +3106,23 @@ fn parse_channel_from_json(val: &serde_json::Value, default_guild_id: Option<&st
         .and_then(|v| v.as_str())
         .or(default_guild_id)
         .map(ToString::to_string);
-    ch.category_id = val.get("parent_id").and_then(|v| v.as_str()).map(ToString::to_string);
-    ch.topic = val.get("topic").and_then(|v| v.as_str()).map(ToString::to_string);
+    ch.category_id = val
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    ch.topic = val
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
     ch.position = val.get("position").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-    ch.last_message_id = val.get("last_message_id").and_then(|v| v.as_str()).map(ToString::to_string);
-    ch.user_limit = val.get("user_limit").and_then(|v| v.as_u64()).map(|l| l as u32);
+    ch.last_message_id = val
+        .get("last_message_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    ch.user_limit = val
+        .get("user_limit")
+        .and_then(|v| v.as_u64())
+        .map(|l| l as u32);
     ch.is_pinned = val
         .get("is_pinned")
         .and_then(|v| v.as_bool())
@@ -2308,17 +3182,37 @@ fn parse_roles_from_json(guild_val: &serde_json::Value) -> Vec<Role> {
     roles
 }
 
-fn parse_emojis_from_value_array(raw_emojis: &[serde_json::Value], guild_id: &str) -> Vec<DiscordEmoji> {
+fn parse_emojis_from_value_array(
+    raw_emojis: &[serde_json::Value],
+    guild_id: &str,
+) -> Vec<DiscordEmoji> {
     let mut emojis = Vec::new();
     for val in raw_emojis {
-        let id = val.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
-        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("emoji").to_string();
-        let animated = val.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
-        let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+        let id = val
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let name = val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("emoji")
+            .to_string();
+        let animated = val
+            .get("animated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let available = val
+            .get("available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let roles = val
             .get("roles")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|r| r.as_str().map(ToString::to_string)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.as_str().map(ToString::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
 
         emojis.push(DiscordEmoji {
@@ -2326,8 +3220,14 @@ fn parse_emojis_from_value_array(raw_emojis: &[serde_json::Value], guild_id: &st
             name,
             roles,
             user: val.get("user").cloned(),
-            require_colons: val.get("require_colons").and_then(|v| v.as_bool()).unwrap_or(true),
-            managed: val.get("managed").and_then(|v| v.as_bool()).unwrap_or(false),
+            require_colons: val
+                .get("require_colons")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            managed: val
+                .get("managed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             animated,
             available,
             guild_id: Some(guild_id.to_string()),
@@ -2336,14 +3236,34 @@ fn parse_emojis_from_value_array(raw_emojis: &[serde_json::Value], guild_id: &st
     emojis
 }
 
-fn parse_stickers_from_value_array(raw_stickers: &[serde_json::Value], guild_id: &str) -> Vec<DiscordSticker> {
+fn parse_stickers_from_value_array(
+    raw_stickers: &[serde_json::Value],
+    guild_id: &str,
+) -> Vec<DiscordSticker> {
     let mut stickers = Vec::new();
     for val in raw_stickers {
-        let id = val.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("sticker").to_string();
-        let description = val.get("description").and_then(|v| v.as_str().map(ToString::to_string));
-        let tags = val.get("tags").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let pack_id = val.get("pack_id").and_then(|v| v.as_str()).map(ToString::to_string);
+        let id = val
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let name = val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sticker")
+            .to_string();
+        let description = val
+            .get("description")
+            .and_then(|v| v.as_str().map(ToString::to_string));
+        let tags = val
+            .get("tags")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let pack_id = val
+            .get("pack_id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
         let fmt_code = val.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1);
         let format_type = match fmt_code {
             2 => StickerFormatType::Apng,
@@ -2351,7 +3271,10 @@ fn parse_stickers_from_value_array(raw_stickers: &[serde_json::Value], guild_id:
             4 => StickerFormatType::Gif,
             _ => StickerFormatType::Png,
         };
-        let available = val.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
+        let available = val
+            .get("available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         stickers.push(DiscordSticker {
             id,
@@ -2369,19 +3292,53 @@ fn parse_stickers_from_value_array(raw_stickers: &[serde_json::Value], guild_id:
 
 fn parse_sticker_pack_from_json(val: &serde_json::Value) -> Option<StickerPack> {
     let id = val.get("id").and_then(|v| v.as_str())?.to_string();
-    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Sticker Pack").to_string();
-    let sku_id = val.get("sku_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let description = val.get("description").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let banner_asset_id = val.get("banner_asset_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    let name = val
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Sticker Pack")
+        .to_string();
+    let sku_id = val
+        .get("sku_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let description = val
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let banner_asset_id = val
+        .get("banner_asset_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
 
     let mut stickers = Vec::new();
     if let Some(arr) = val.get("stickers").and_then(|v| v.as_array()) {
         for s in arr {
-            let s_id = s.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let s_name = s.get("name").and_then(|v| v.as_str()).unwrap_or("sticker").to_string();
-            let s_desc = s.get("description").and_then(|v| v.as_str()).map(ToString::to_string);
-            let s_tags = s.get("tags").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let s_pack_id = s.get("pack_id").and_then(|v| v.as_str()).map(ToString::to_string).or_else(|| Some(id.clone()));
+            let s_id = s
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let s_name = s
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sticker")
+                .to_string();
+            let s_desc = s
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let s_tags = s
+                .get("tags")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let s_pack_id = s
+                .get("pack_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+                .or_else(|| Some(id.clone()));
             let fmt_code = s.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1);
             let format_type = match fmt_code {
                 2 => StickerFormatType::Apng,
@@ -2423,13 +3380,25 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
     let author_id = author_val.get("id")?.as_str()?;
     let author_username = author_val.get("username")?.as_str()?;
     let mut author = Author::new(author_id, author_username);
-    author.global_name = author_val.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
-    author.avatar = author_val.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
-    author.bot = author_val.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
+    author.global_name = author_val
+        .get("global_name")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    author.avatar = author_val
+        .get("avatar")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    author.bot = author_val
+        .get("bot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     author.avatar_decoration_data = parse_avatar_decoration_data(author_val);
 
     let mut message = Message::new(id, channel_id, author, content);
-    message.guild_id = val.get("guild_id").and_then(|v| v.as_str()).map(ToString::to_string);
+    message.guild_id = val
+        .get("guild_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
     message.pinned = val.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false);
 
     if let Some(ts_str) = val.get("timestamp").and_then(|v| v.as_str()) {
@@ -2450,8 +3419,14 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                     filename: filename.to_string(),
                     size: a.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
                     url: url.to_string(),
-                    proxy_url: a.get("proxy_url").and_then(|v| v.as_str()).map(ToString::to_string),
-                    content_type: a.get("content_type").and_then(|v| v.as_str()).map(ToString::to_string),
+                    proxy_url: a
+                        .get("proxy_url")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                    content_type: a
+                        .get("content_type")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
                     width: a.get("width").and_then(|v| v.as_u64()).map(|w| w as u32),
                     height: a.get("height").and_then(|v| v.as_u64()).map(|h| h as u32),
                 });
@@ -2474,9 +3449,18 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
 
     if let Some(raw_embeds) = val.get("embeds").and_then(|v| v.as_array()) {
         for e in raw_embeds {
-            let title = e.get("title").and_then(|v| v.as_str()).map(ToString::to_string);
-            let description = e.get("description").and_then(|v| v.as_str()).map(ToString::to_string);
-            let url = e.get("url").and_then(|v| v.as_str()).map(ToString::to_string);
+            let title = e
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let description = e
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let url = e
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
             let color = e.get("color").and_then(|v| v.as_u64()).map(|c| c as u32);
 
             let mut fields = Vec::new();
@@ -2504,8 +3488,16 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                 author: None,
                 fields,
                 footer: None,
-                image_url: e.get("image").and_then(|img| img.get("url")).and_then(|v| v.as_str()).map(ToString::to_string),
-                thumbnail_url: e.get("thumbnail").and_then(|th| th.get("url")).and_then(|v| v.as_str()).map(ToString::to_string),
+                image_url: e
+                    .get("image")
+                    .and_then(|img| img.get("url"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
+                thumbnail_url: e
+                    .get("thumbnail")
+                    .and_then(|th| th.get("url"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string),
                 timestamp: None,
             });
         }
@@ -2518,8 +3510,16 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                 s.get("name").and_then(|v| v.as_str()),
             ) {
                 let fmt = s.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1) as u8;
-                message.sticker_items.push(MessageStickerItem::new(s_id, s_name, fmt));
+                message
+                    .sticker_items
+                    .push(MessageStickerItem::new(s_id, s_name, fmt));
             }
+        }
+    }
+
+    if let Some(poll_val) = val.get("poll") {
+        if !poll_val.is_null() {
+            message.poll = crate::chat::polls::parse_poll_from_json(poll_val);
         }
     }
 
@@ -2553,9 +3553,16 @@ pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<Transp
                 None
             }
         })
-        .or_else(|| val.get("user_id").and_then(|v| v.as_str()).map(ToString::to_string))?;
+        .or_else(|| {
+            val.get("user_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+        })?;
 
-    let status_str = val.get("status").and_then(|v| v.as_str()).unwrap_or("offline");
+    let status_str = val
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("offline");
     let status = match status_str.to_lowercase().as_str() {
         "online" => PresenceStatus::Online,
         "idle" => PresenceStatus::Idle,
@@ -2574,10 +3581,16 @@ pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<Transp
             // Discord Activity Type 4 is Custom Status
             let is_custom = type_num == Some(4) || name.eq_ignore_ascii_case("Custom Status");
             if is_custom {
-                let state_text = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                let state_text = act
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
                 let emoji = act.get("emoji").and_then(|e| {
                     let emoji_name = e.get("name").and_then(|v| v.as_str())?;
-                    let emoji_id = e.get("id").and_then(|v| v.as_str()).map(ToString::to_string);
+                    let emoji_id = e
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
                     let animated = e.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
                     Some(CustomStatusEmoji {
                         name: emoji_name.to_string(),
@@ -2602,26 +3615,55 @@ pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<Transp
                     _ => ActivityType::Playing,
                 };
                 let mut activity = Activity::new(name, act_type);
-                activity.details = act.get("details").and_then(|v| v.as_str()).map(ToString::to_string);
-                activity.state = act.get("state").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.details = act
+                    .get("details")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                activity.state = act
+                    .get("state")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
                 activity.created_at = act.get("created_at").and_then(|v| v.as_i64());
-                activity.application_id = act.get("application_id").and_then(|v| v.as_str()).map(ToString::to_string);
-                activity.sync_id = act.get("sync_id").and_then(|v| v.as_str()).map(ToString::to_string);
+                activity.application_id = act
+                    .get("application_id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                activity.sync_id = act
+                    .get("sync_id")
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
 
                 if let Some(ts) = act.get("timestamps") {
                     let start = ts.get("start").and_then(|v| v.as_i64());
                     let end = ts.get("end").and_then(|v| v.as_i64());
                     if start.is_some() || end.is_some() {
-                        activity.timestamps = Some(crate::domain::user::ActivityTimestamps { start, end });
+                        activity.timestamps =
+                            Some(crate::domain::user::ActivityTimestamps { start, end });
                     }
                 }
 
                 if let Some(assets) = act.get("assets") {
-                    let large_image = assets.get("large_image").and_then(|v| v.as_str()).map(ToString::to_string);
-                    let large_text = assets.get("large_text").and_then(|v| v.as_str()).map(ToString::to_string);
-                    let small_image = assets.get("small_image").and_then(|v| v.as_str()).map(ToString::to_string);
-                    let small_text = assets.get("small_text").and_then(|v| v.as_str()).map(ToString::to_string);
-                    if large_image.is_some() || large_text.is_some() || small_image.is_some() || small_text.is_some() {
+                    let large_image = assets
+                        .get("large_image")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    let large_text = assets
+                        .get("large_text")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    let small_image = assets
+                        .get("small_image")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    let small_text = assets
+                        .get("small_text")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string);
+                    if large_image.is_some()
+                        || large_text.is_some()
+                        || small_image.is_some()
+                        || small_text.is_some()
+                    {
                         activity.assets = Some(crate::domain::user::ActivityAssets {
                             large_image,
                             large_text,
@@ -2641,6 +3683,162 @@ pub(crate) fn parse_presence_from_json(val: &serde_json::Value) -> Option<Transp
         activity: primary_activity,
         custom_status,
     })
+}
+
+#[cfg(test)]
+mod network_hardening_tests {
+    use super::*;
+
+    #[test]
+    fn test_reconnect_backoff_is_exponential_capped_and_resettable() {
+        let mut policy = GatewayReconnectPolicy::new();
+        let delays: Vec<Duration> = (0..7).map(|_| policy.next_backoff()).collect();
+        assert_eq!(
+            delays,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+                Duration::from_secs(16),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+            ]
+        );
+        assert!(policy.initial_attempts_exhausted());
+        policy.on_authenticated();
+        assert!(!policy.initial_attempts_exhausted());
+        assert_eq!(policy.next_backoff(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_gateway_close_codes_stop_fatal_reconnect_loops() {
+        assert!(matches!(
+            gateway_close_action(Some(4004)),
+            GatewayDisconnectKind::Fatal(_)
+        ));
+        assert!(matches!(
+            gateway_close_action(Some(4014)),
+            GatewayDisconnectKind::Fatal(_)
+        ));
+        assert_eq!(
+            gateway_close_action(Some(4009)),
+            GatewayDisconnectKind::Identify
+        );
+        assert_eq!(gateway_close_action(None), GatewayDisconnectKind::Resume);
+    }
+
+    #[test]
+    fn test_identify_and_resume_payloads() {
+        let token = AuthToken::user("synthetic.user.token.for-test-only");
+        let identify = identify_or_resume_payload(&token, None, -1);
+        assert_eq!(identify["op"], 2);
+        assert!(identify["d"].get("intents").is_none());
+
+        let resume = identify_or_resume_payload(&token, Some("synthetic-session"), 42);
+        assert_eq!(resume["op"], 6);
+        assert_eq!(resume["d"]["session_id"], "synthetic-session");
+        assert_eq!(resume["d"]["seq"], 42);
+
+        let bot = AuthToken::bot("synthetic.bot.token.for-test-only");
+        let identify = identify_or_resume_payload(&bot, None, -1);
+        assert_eq!(identify["op"], 2);
+        assert_eq!(identify["d"]["intents"], 1 | 512 | 32768 | 128);
+    }
+
+    #[test]
+    fn test_gateway_url_logging_removes_query_and_credentials() {
+        let safe = sanitize_gateway_url("wss://user:secret@gateway.example/path?token=secret&v=10");
+        assert_eq!(safe, "wss://gateway.example/path");
+        assert!(!safe.contains("secret"));
+        assert!(!safe.contains("token"));
+    }
+
+    #[test]
+    fn test_auth_errors_are_clear_and_do_not_echo_response_body() {
+        let invalid = api_error_message(
+            reqwest::StatusCode::UNAUTHORIZED,
+            br#"{"message":"secret personal detail","code":50014}"#,
+        );
+        assert!(invalid.contains("token inválido ou expirado"));
+        assert!(!invalid.contains("secret personal detail"));
+
+        let two_factor = api_error_message(
+            reqwest::StatusCode::FORBIDDEN,
+            br#"{"message":"Two factor is required","code":60003}"#,
+        );
+        assert!(two_factor.contains("2FA"));
+    }
+
+    #[test]
+    fn test_credential_verification_bypasses_etag_cache() {
+        let client = DiscordApiClient::new(AuthToken::bot("synthetic.bot.token.for-test-only"));
+        let request = client
+            .credential_verification_request()
+            .build()
+            .expect("synthetic verification request");
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-cache"
+        );
+        assert!(
+            !request
+                .headers()
+                .contains_key(reqwest::header::IF_NONE_MATCH)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_ready_does_not_publish_resume_state() {
+        let client = DiscordApiClient::new(AuthToken::bot("synthetic.bot.token.for-test-only"));
+        let (events, _) = broadcast::channel(8);
+        let cache = Arc::new(DiscordCacheEngine::new());
+        let current_user_id = RwLock::new(None);
+        let voice_session_id = RwLock::new(None);
+        let voice_server = RwLock::new(None);
+
+        let result = handle_dispatch(
+            "READY",
+            json!({
+                "session_id": "synthetic-session",
+                "resume_gateway_url": "wss://gateway.example/?token=synthetic",
+                "user": { "id": "900000000000000001", "username": 42 }
+            }),
+            &events,
+            &client.session_id,
+            &client.resume_gateway_url,
+            &cache,
+            &current_user_id,
+            &voice_session_id,
+            &voice_server,
+        )
+        .await;
+
+        assert!(result.is_err(), "READY inválido deve falhar");
+        assert!(client.session_id.read().await.is_none());
+        assert!(client.resume_gateway_url.read().await.is_none());
+        assert!(current_user_id.read().await.is_none());
+    }
+
+    #[test]
+    fn test_request_coalescing_key_ignores_non_get_and_includes_etag() {
+        let request = reqwest::Request::new(
+            reqwest::Method::GET,
+            "https://discord.com/api/v10/users/@me".parse().unwrap(),
+        );
+        assert!(request_coalescing_key(&request).is_some());
+
+        let post = reqwest::Request::new(
+            reqwest::Method::POST,
+            "https://discord.com/api/v10/channels/1/messages"
+                .parse()
+                .unwrap(),
+        );
+        assert!(request_coalescing_key(&post).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -2672,7 +3870,12 @@ mod presence_tests {
 
         let event = parse_presence_from_json(&json).expect("should parse presence");
         match event {
-            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+            TransportEvent::PresenceUpdate {
+                user_id,
+                status,
+                activity,
+                custom_status,
+            } => {
                 assert_eq!(user_id, "100000000000000001");
                 assert_eq!(status, PresenceStatus::Online);
                 let cs = custom_status.expect("custom status should be present");
@@ -2706,7 +3909,12 @@ mod presence_tests {
 
         let event = parse_presence_from_json(&json).expect("should parse presence");
         match event {
-            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+            TransportEvent::PresenceUpdate {
+                user_id,
+                status,
+                activity,
+                custom_status,
+            } => {
                 assert_eq!(user_id, "999888777");
                 assert_eq!(status, PresenceStatus::Idle);
                 assert!(activity.is_none());
@@ -2752,7 +3960,12 @@ mod presence_tests {
 
         let event = parse_presence_from_json(&json).expect("should parse presence");
         match event {
-            TransportEvent::PresenceUpdate { user_id, status, activity, custom_status } => {
+            TransportEvent::PresenceUpdate {
+                user_id,
+                status,
+                activity,
+                custom_status,
+            } => {
                 assert_eq!(user_id, "888777666");
                 assert_eq!(status, PresenceStatus::Online);
                 assert!(custom_status.is_none());
@@ -2761,11 +3974,17 @@ mod presence_tests {
                 assert_eq!(act.details.as_deref(), Some("Song Title"));
                 assert_eq!(act.state.as_deref(), Some("Artist Name"));
                 assert_eq!(act.sync_id.as_deref(), Some("track_123"));
-                let ts = act.timestamps.as_ref().expect("timestamps should be present");
+                let ts = act
+                    .timestamps
+                    .as_ref()
+                    .expect("timestamps should be present");
                 assert_eq!(ts.start, Some(1712850000000));
                 assert_eq!(ts.end, Some(1712850230000));
                 let assets = act.assets.as_ref().expect("assets should be present");
-                assert_eq!(assets.large_image.as_deref(), Some("spotify:ab67616d0000b273abcdef"));
+                assert_eq!(
+                    assets.large_image.as_deref(),
+                    Some("spotify:ab67616d0000b273abcdef")
+                );
                 assert_eq!(
                     act.large_image_url(),
                     Some("https://i.scdn.co/image/ab67616d0000b273abcdef".to_string())
@@ -2788,7 +4007,10 @@ mod avatar_decoration_parsing_tests {
             "avatar_decoration_data": { "asset": "a_synth_user_deco", "sku_id": "111" }
         });
         let user = parse_user_from_json(&with).expect("should parse user");
-        let decor = user.avatar_decoration_data.as_ref().expect("decoration must be present");
+        let decor = user
+            .avatar_decoration_data
+            .as_ref()
+            .expect("decoration must be present");
         assert_eq!(decor.asset, "a_synth_user_deco");
         assert_eq!(decor.sku_id.as_deref(), Some("111"));
 
@@ -2819,7 +4041,11 @@ mod avatar_decoration_parsing_tests {
             }
         });
         let msg = parse_message_from_json(&payload).expect("should parse message");
-        let decor = msg.author.avatar_decoration_data.as_ref().expect("author decoration must be present");
+        let decor = msg
+            .author
+            .avatar_decoration_data
+            .as_ref()
+            .expect("author decoration must be present");
         assert_eq!(decor.asset, "a_synth_msg_deco");
         assert_eq!(decor.sku_id.as_deref(), Some("114"));
 
@@ -2848,7 +4074,9 @@ mod avatar_decoration_parsing_tests {
         });
         let ch = parse_channel_from_json(&payload, None).expect("should parse DM channel");
         assert_eq!(ch.recipient_avatar_decorations.len(), 1);
-        let decor = ch.recipient_avatar_decorations[0].as_ref().expect("recipient decoration must be present");
+        let decor = ch.recipient_avatar_decorations[0]
+            .as_ref()
+            .expect("recipient decoration must be present");
         assert_eq!(decor.asset, "a_synth_dm_deco");
 
         let bare = serde_json::json!({
@@ -2881,7 +4109,10 @@ mod avatar_decoration_parsing_tests {
         });
         let state = parse_voice_state_from_json(&payload, Some("500000000000000051"))
             .expect("should parse voice state");
-        let decor = state.avatar_decoration_data.as_ref().expect("voice decoration must be present");
+        let decor = state
+            .avatar_decoration_data
+            .as_ref()
+            .expect("voice decoration must be present");
         assert_eq!(decor.asset, "a_synth_guild_deco");
 
         // Falls back to the nested user object when the member has no guild decoration.
@@ -2907,7 +4138,8 @@ mod avatar_decoration_parsing_tests {
             "user_id": "100000000000000020",
             "session_id": "sess-synth-3"
         });
-        let bare_state = parse_voice_state_from_json(&bare, None).expect("should parse voice state");
+        let bare_state =
+            parse_voice_state_from_json(&bare, None).expect("should parse voice state");
         assert_eq!(bare_state.avatar_decoration_data, None);
     }
 }
@@ -2935,13 +4167,16 @@ impl DiscordApiClient {
             if !qs.is_empty() {
                 qs.push('&');
             }
-            let encoded: String = v.chars().flat_map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                    vec![c]
-                } else {
-                    format!("%{:02X}", c as u8).chars().collect()
-                }
-            }).collect();
+            let encoded: String = v
+                .chars()
+                .flat_map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                        vec![c]
+                    } else {
+                        format!("%{:02X}", c as u8).chars().collect()
+                    }
+                })
+                .collect();
             qs.push_str(k);
             qs.push('=');
             qs.push_str(&encoded);
@@ -2959,7 +4194,10 @@ impl DiscordApiClient {
                 #[serde(default)]
                 retry_after: Option<f64>,
             }
-            let body: IndexingBody = resp.json().await.unwrap_or(IndexingBody { retry_after: None });
+            let body: IndexingBody = resp
+                .json()
+                .await
+                .unwrap_or(IndexingBody { retry_after: None });
             let retry = body.retry_after.unwrap_or(2.5);
             Ok(crate::chat::search::SearchApiResponse::Indexing { retry_after: retry })
         } else {
@@ -2990,13 +4228,16 @@ impl DiscordApiClient {
             if !qs.is_empty() {
                 qs.push('&');
             }
-            let encoded: String = v.chars().flat_map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
-                    vec![c]
-                } else {
-                    format!("%{:02X}", c as u8).chars().collect()
-                }
-            }).collect();
+            let encoded: String = v
+                .chars()
+                .flat_map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '~' {
+                        vec![c]
+                    } else {
+                        format!("%{:02X}", c as u8).chars().collect()
+                    }
+                })
+                .collect();
             qs.push_str(k);
             qs.push('=');
             qs.push_str(&encoded);
@@ -3014,7 +4255,10 @@ impl DiscordApiClient {
                 #[serde(default)]
                 retry_after: Option<f64>,
             }
-            let body: IndexingBody = resp.json().await.unwrap_or(IndexingBody { retry_after: None });
+            let body: IndexingBody = resp
+                .json()
+                .await
+                .unwrap_or(IndexingBody { retry_after: None });
             let retry = body.retry_after.unwrap_or(2.5);
             Ok(crate::chat::search::SearchApiResponse::Indexing { retry_after: retry })
         } else {
@@ -3039,7 +4283,9 @@ impl DiscordApiClient {
         let msg = parse_message_from_json(&val)
             .context("Failed to deserialize edited message response from Discord API")?;
 
-        self.cache_engine.apply_gateway_message_update(channel_id, message_id, content).await;
+        self.cache_engine
+            .apply_gateway_message_update(channel_id, message_id, content)
+            .await;
 
         Ok(msg)
     }
@@ -3061,11 +4307,7 @@ impl DiscordApiClient {
     }
 
     /// Requests guild members for message authors via Gateway Opcode 8 (chunks of <= 100)
-    pub async fn request_guild_members(
-        &self,
-        guild_id: &str,
-        user_ids: Vec<String>,
-    ) -> Result<()> {
+    pub async fn request_guild_members(&self, guild_id: &str, user_ids: Vec<String>) -> Result<()> {
         for chunk in user_ids.chunks(100) {
             let payload = json!({
                 "op": 8,
@@ -3088,8 +4330,17 @@ impl DiscordApiClient {
     ) -> Result<()> {
         if self.token.token_type == TokenType::User {
             let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
-            let payload = coordinator.update_viewport_ranges(guild_id, channel_id, ranges).await;
-            self.send_gateway_payload(&payload).await
+            let client = self.clone();
+            match coordinator
+                .try_update_viewport_ranges_and_send(guild_id, channel_id, ranges, move |payload| {
+                    let client = client.clone();
+                    async move { client.send_gateway_payload(&payload).await }
+                })
+                .await
+            {
+                Some(result) => result,
+                None => Ok(()),
+            }
         } else {
             Ok(())
         }
@@ -3142,13 +4393,22 @@ fn handle_guild_members_chunk_dispatch(
             Some(id) => id,
             None => continue,
         };
-        let username = user.get("username").and_then(|v| v.as_str()).map(ToString::to_string);
-        let global_name = user.get("global_name").and_then(|v| v.as_str()).map(ToString::to_string);
-        let avatar = user.get("avatar").and_then(|v| v.as_str()).map(ToString::to_string);
+        let username = user
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let global_name = user
+            .get("global_name")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let avatar = user
+            .get("avatar")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
         let is_bot = user.get("bot").and_then(|v| v.as_bool()).unwrap_or(false);
-        let avatar_decoration_data = user.get("avatar_decoration_data").and_then(|v| {
-            serde_json::from_value(v.clone()).ok()
-        });
+        let avatar_decoration_data = user
+            .get("avatar_decoration_data")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
 
         let roles: Vec<String> = m
             .get("roles")
@@ -3165,9 +4425,14 @@ fn handle_guild_members_chunk_dispatch(
 
         let mut role_color = 0;
         if !guild_roles.is_empty() {
-            role_color = crate::protocol::cache::lazy_guilds::resolve_member_role_color(&roles, &guild_roles);
+            role_color = crate::protocol::cache::lazy_guilds::resolve_member_role_color(
+                &roles,
+                &guild_roles,
+            );
             if role_color != 0 {
-                crate::protocol::cache::lazy_guilds::cache_author_role_color(guild_id, user_id, role_color);
+                crate::protocol::cache::lazy_guilds::cache_author_role_color(
+                    guild_id, user_id, role_color,
+                );
             }
         }
 

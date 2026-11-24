@@ -21,3 +21,17 @@ pub use profile_effect::{
 pub use text_input::{
     TextInput, TextInputActionCallback, TextInputChangeCallback, TextInputMaskCallback,
 };
+
+pub mod media_viewer;
+
+pub use media_viewer::{
+    browser_open_command, collect_media_items, render_media_viewer, MediaDownloadTarget,
+    MediaViewerCallbacks, MediaViewerItem, MediaViewerKind, MediaViewerState,
+    MEDIA_VIEWER_MAX_ZOOM, MEDIA_VIEWER_MIN_ZOOM, MEDIA_VIEWER_ZOOM_STEP,
+};
+
+pub mod context_menus;
+pub use context_menus::{
+    apply_entries_to_popup_menu, build_menu_entries, build_popup_menu, ContextMenuContext,
+    MenuAction, MenuCallbacks, MenuEntry, MenuPermissions, MenuTargetKind,
+};

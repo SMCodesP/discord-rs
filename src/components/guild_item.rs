@@ -1,8 +1,7 @@
 //! Discord RS - Guild Item Component
-//! Server icon in vertical rail (72px) with white indicator pill on left and squircle morph on hover.
-//! Visual reference (guild-rail.md):
-//! - guild-rail (nav): rect x0/y32 72x718 | bg oklab(0.160983 0.00995666 -0.0217937)
-//! - icone de servidor (IMG): 40x40
+//! Server icon in the 72px vertical rail with the measured 40px squircle and
+//! an 8px indicator pill on the left.
+//! Visual source: /tmp/opencode/discord-shell-measurements.md (Discord Desktop).
 
 use gpui::component::tooltip::Tooltip;
 use gpui::prelude::*;
@@ -10,7 +9,7 @@ use gpui::*;
 use std::sync::Arc;
 
 use crate::components::badge::MentionBadge;
-use crate::tokens::colors::*;
+use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
@@ -56,6 +55,15 @@ impl GuildItem {
     /// Sets optional icon image URL
     pub fn opt_icon_url(mut self, url: Option<impl Into<SharedString>>) -> Self {
         self.icon_url = url.map(|u| u.into());
+        self
+    }
+
+    /// Uses the acronym supplied by the guild payload for the no-image state.
+    pub fn initials(mut self, initials: impl Into<SharedString>) -> Self {
+        let initials: SharedString = initials.into();
+        if !initials.trim().is_empty() {
+            self.initials = initials;
+        }
         self
     }
 
@@ -134,7 +142,11 @@ impl GuildItem {
             let s: String = words[0].chars().take(3).collect();
             return s.into();
         }
-        let initials: String = words.iter().filter_map(|w| w.chars().next()).take(3).collect();
+        let initials: String = words
+            .iter()
+            .filter_map(|w| w.chars().next())
+            .take(3)
+            .collect();
         initials.into()
     }
 }
@@ -155,28 +167,64 @@ fn guild_icon_image_source(url: &str) -> gpui::ImageSource {
     }
 }
 
-fn render_guild_item(item: GuildItem) -> AnyElement {
-    // Measured border radius from Discord DOM (.theme-dark visual-refresh):
-    // In rest, hover, and selected, the guild icon is a 40x40 squircle (radius_server_hover 16px).
-    let icon_radius = radius_server_hover();
+fn guild_initials(initials: SharedString, text_size: Pixels) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(text_size)
+        .font_weight(WEIGHT_MEDIUM)
+        .line_height(line_height_sm())
+        .text_color(white())
+        .child(initials)
+        .into_any_element()
+}
 
-    let icon_bg = if item.selected {
-        blurple()
+fn guild_icon_radius(_selected: bool) -> Pixels {
+    // The measured client uses the same 40px SVG squircle mask in every
+    // state. GPUI has no equivalent image mask here, so 16px is the explicit
+    // rounded-rectangle approximation already used by this component.
+    radius_server_hover()
+}
+
+fn guild_pill_height(selected: bool, unread: bool) -> Pixels {
+    if selected {
+        guild_pill_selected_height()
+    } else if unread {
+        guild_pill_unread_height()
     } else {
-        bg_chat()
-    };
+        px(0.0)
+    }
+}
 
+fn resolved_guild_pill_hover_height(selected: bool) -> Pixels {
+    if selected {
+        guild_pill_selected_height()
+    } else {
+        guild_pill_hover_height()
+    }
+}
+
+fn render_guild_item(item: GuildItem) -> AnyElement {
+    // Measured Discord Desktop: 40px server icon with the same squircle mask
+    // at rest, hover and selected. Each item needs its own hover group so one
+    // hovered server never changes every server in the rail.
+    let icon_radius = guild_icon_radius(item.selected);
+    let icon_bg = if item.selected { blurple() } else { bg_chat() };
     let tooltip_name = item.name.clone();
+    let group_name: SharedString = format!("guild-item-{:?}", item.id).into();
+    let image_id = format!("guild-icon-image-{:?}", item.id);
 
     let mut item_container = div()
         .id(item.id.clone())
-        .group("guild-item")
+        .group(group_name.clone())
         .relative()
         .flex()
         .items_center()
         .justify_center()
-        .w(rail_width()) // 72px
-        .h(px(48.0))
+        .w(rail_width())
+        .h(guild_item_height())
         .cursor_pointer()
         .tooltip(move |window, cx| Tooltip::new(tooltip_name.clone()).build(window, cx));
 
@@ -186,87 +234,70 @@ fn render_guild_item(item: GuildItem) -> AnyElement {
         });
     }
 
-    // Left white indicator pill
-    let mut pill = div()
+    // Measured Discord Desktop indicator: 8px wide, right corners rounded,
+    // 8px unread, 20px hovered and 40px selected. The measured CSS offset is
+    // normalized to the rail's left edge because the rail clips overflow.
+    let pill = div()
         .absolute()
         .left_0()
-        .w(px(4.0))
-        .bg(crate::tokens::colors::white())
-        .rounded_r(radius_sm());
+        .w(guild_pill_width())
+        .h(guild_pill_height(
+            item.selected,
+            item.unread || item.mention_count > 0,
+        ))
+        .bg(white())
+        .rounded_r(radius_sm())
+        .group_hover(group_name.clone(), |style| {
+            style.h(resolved_guild_pill_hover_height(item.selected))
+        });
+    item_container = item_container.child(pill);
 
-    if item.selected {
-        pill = pill.h(px(40.0));
-        item_container = item_container.child(pill);
-    } else if item.unread {
-        pill = pill.h(px(8.0)).group_hover("guild-item", |s| s.h(px(20.0)));
-        item_container = item_container.child(pill);
-    } else {
-        pill = pill.h(px(0.0)).group_hover("guild-item", |s| s.h(px(20.0)));
-        item_container = item_container.child(pill);
-    }
-
-    // Server Icon container (40x40px per guild-rail.md) with Squircle Morph on hover
     let mut icon_box = div()
         .flex()
         .items_center()
         .justify_center()
-        .w(px(40.0))
-        .h(px(40.0))
+        .w(server_icon_size())
+        .h(server_icon_size())
         .rounded(icon_radius)
         .bg(icon_bg)
         .overflow_hidden()
         .flex_shrink_0();
 
     if !item.selected {
-        icon_box = icon_box
-            .group_hover("guild-item", |s| s.rounded(radius_server_hover()).bg(blurple()))
-            .hover(move |s| s.rounded(radius_server_hover()).bg(blurple()));
+        icon_box = icon_box.group_hover(group_name.clone(), |style| {
+            style.rounded(radius_server_hover()).bg(blurple())
+        });
     }
 
-    // Icon contents: Home Discord icon, server image, or initials text
     if item.is_home {
-        icon_box = icon_box.child(
-            icon_gamepad(px(20.0), crate::tokens::colors::white()),
-        );
+        icon_box = icon_box.child(icon_discord_logo(px(24.0), white()));
     } else if let Some(url) = &item.icon_url {
         if !url.is_empty() {
-            let img_src = guild_icon_image_source(url);
-            let mut icon_img = img(img_src)
+            let fallback = item.initials.clone();
+            let loading_fallback = fallback.clone();
+            let mut icon_img = img(guild_icon_image_source(url))
+                .id(image_id)
                 .size_full()
                 .object_fit(ObjectFit::Cover)
-                .rounded(icon_radius);
+                .rounded(icon_radius)
+                .with_loading(move || guild_initials(loading_fallback.clone(), font_size_sm()))
+                .with_fallback(move || guild_initials(fallback.clone(), font_size_sm()));
 
             if !item.selected {
-                icon_img = icon_img
-                    .group_hover("guild-item", |s| s.rounded(radius_server_hover()))
-                    .hover(|s| s.rounded(radius_server_hover()));
+                icon_img = icon_img.group_hover(group_name.clone(), |style| {
+                    style.rounded(radius_server_hover())
+                });
             }
-
             icon_box = icon_box.child(icon_img);
         } else {
-            icon_box = icon_box.child(
-                div()
-                    .text_size(font_size_sm())
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(crate::tokens::colors::white())
-                    .child(item.initials.clone()),
-            );
+            icon_box = icon_box.child(guild_initials(item.initials.clone(), font_size_sm()));
         }
     } else {
-        icon_box = icon_box.child(
-            div()
-                .text_size(font_size_sm())
-                .font_weight(FontWeight::BOLD)
-                .text_color(crate::tokens::colors::white())
-                .child(item.initials.clone()),
-        );
+        icon_box = icon_box.child(guild_initials(item.initials.clone(), font_size_sm()));
     }
 
-    let mut icon_wrapper = div()
-        .relative()
-        .child(icon_box);
+    let mut icon_wrapper = div().relative().child(icon_box);
 
-    // Floating mention badge on bottom-right corner
     if item.mention_count > 0 {
         icon_wrapper = icon_wrapper.child(
             div()
@@ -438,14 +469,16 @@ impl GuildFolderItem {
     }
 
     pub fn is_unread(&self) -> bool {
-        self.unread || self.guilds.iter().any(|g| g.unread)
+        self.unread || self.guilds.iter().any(|g| g.unread || g.mention_count > 0)
     }
 
     pub fn get_mention_count(&self) -> u32 {
         if self.mention_count > 0 {
             self.mention_count
         } else {
-            self.guilds.iter().map(|g| g.mention_count).sum()
+            self.guilds.iter().fold(0u32, |total, guild| {
+                total.saturating_add(guild.mention_count)
+            })
         }
     }
 }
@@ -460,12 +493,25 @@ impl RenderOnce for GuildFolderItem {
     }
 }
 
+fn folder_preview_initials(letter: SharedString) -> AnyElement {
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(9.0))
+        .font_weight(WEIGHT_MEDIUM)
+        .text_color(white())
+        .child(letter)
+        .into_any_element()
+}
+
 fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
     let has_selected_child = folder.guilds.iter().any(|g| g.selected);
     let has_unread_child = folder.is_unread();
     let total_mentions = folder.get_mention_count();
 
-    let base_color = folder.color.unwrap_or_else(blurple);
+    let base_color = folder.color.unwrap_or_else(bg_channels);
     let folder_bg = Rgba {
         r: base_color.r,
         g: base_color.g,
@@ -473,26 +519,23 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
         a: 0.40,
     };
 
-    let tooltip_text = folder.name.clone();
-
-    let (pill_height, pill_visible) = if has_selected_child {
-        (px(40.0), true)
-    } else if has_unread_child {
-        (px(8.0), true)
-    } else {
-        (px(0.0), false)
-    };
-
+    let group_name: SharedString = format!("guild-folder-{:?}", folder.id).into();
     let mut container = div()
         .id(folder.id.clone())
+        .group(group_name.clone())
         .relative()
         .flex()
         .items_center()
         .justify_center()
-        .w(rail_width()) // 72px
-        .h(px(48.0))
-        .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+        .w(rail_width())
+        .h(guild_folder_size())
+        .cursor_pointer();
+
+    if !folder.name.is_empty() {
+        let tooltip_text = folder.name.clone();
+        container = container
+            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+    }
 
     if let Some(on_toggle) = folder.on_toggle {
         container = container.on_click(move |ev, window, cx| {
@@ -500,16 +543,17 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
         });
     }
 
-    if pill_visible {
-        let pill = div()
-            .absolute()
-            .left_0()
-            .w(px(4.0))
-            .bg(crate::tokens::colors::white())
-            .rounded_r(radius_sm())
-            .h(pill_height);
-        container = container.child(pill);
-    }
+    let pill = div()
+        .absolute()
+        .left_0()
+        .w(guild_pill_width())
+        .h(guild_pill_height(has_selected_child, has_unread_child))
+        .bg(white())
+        .rounded_r(radius_sm())
+        .group_hover(group_name, |style| {
+            style.h(resolved_guild_pill_hover_height(has_selected_child))
+        });
+    container = container.child(pill);
 
     let mut folder_box = div()
         .flex()
@@ -517,43 +561,47 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
         .items_center()
         .justify_center()
         .content_center()
-        .w(px(40.0))
-        .h(px(40.0))
-        .p(px(3.0))
-        .gap(px(2.0))
-        .rounded(radius_server_hover())
+        .w(guild_folder_size())
+        .h(guild_folder_size())
+        .rounded(radius_lg())
         .bg(folder_bg)
-        .border_1()
-        .border_color(Rgba {
-            r: base_color.r,
-            g: base_color.g,
-            b: base_color.b,
-            a: 0.60,
-        })
         .overflow_hidden()
         .hover(move |s| {
-            s.rounded(radius_server_hover())
-                .bg(Rgba {
-                    r: base_color.r,
-                    g: base_color.g,
-                    b: base_color.b,
-                    a: 0.60,
-                })
+            s.rounded(radius_lg()).bg(Rgba {
+                r: base_color.r,
+                g: base_color.g,
+                b: base_color.b,
+                a: 0.60,
+            })
         });
+
+    // 4px padding + 19px thumbnail + 2px gap + 19px thumbnail + 4px
+    // padding = 48px. Using the 40px inner icon size here clipped the second
+    // row and column of the measured four-up preview.
+    let mut preview = div()
+        .grid()
+        .grid_cols(2)
+        .grid_rows(2)
+        .w(guild_folder_size())
+        .h(guild_folder_size())
+        .p(guild_folder_preview_padding())
+        .gap(guild_folder_preview_gap())
+        .rounded(radius_lg())
+        .overflow_hidden();
 
     for (idx, child) in folder.guilds.iter().take(4).enumerate() {
         // Measured asymmetric corner radii from Discord DOM (.folderPreviewGuildIcon__48112)
         // Top-left, top-right, bottom-left, bottom-right corners
         let (tl, tr, bl, br) = match idx {
-            0 => (px(10.0), px(3.0), px(3.0), px(3.0)),
-            1 => (px(3.0), px(10.0), px(3.0), px(3.0)),
-            2 => (px(3.0), px(3.0), px(10.0), px(3.0)),
-            _ => (px(3.0), px(3.0), px(3.0), px(10.0)),
+            0 => (px(13.0), px(4.0), px(4.0), px(4.0)),
+            1 => (px(4.0), px(13.0), px(4.0), px(4.0)),
+            2 => (px(4.0), px(4.0), px(4.0), px(13.0)),
+            _ => (px(4.0), px(4.0), px(13.0), px(4.0)),
         };
 
         let mut thumb = div()
-            .w(px(15.0))
-            .h(px(15.0))
+            .w(guild_folder_preview_size())
+            .h(guild_folder_preview_size())
             .rounded_tl(tl)
             .rounded_tr(tr)
             .rounded_bl(bl)
@@ -564,41 +612,34 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
             .items_center()
             .justify_center();
 
+        let single_letter: SharedString = child.initials.chars().take(1).collect::<String>().into();
         if let Some(ref url) = child.icon_url {
             if !url.is_empty() {
+                let loading_fallback = single_letter.clone();
+                let error_fallback = single_letter.clone();
                 thumb = thumb.child(
                     img(guild_icon_image_source(url))
+                        .id(format!("folder-preview-{:?}-{idx}", folder.id))
                         .size_full()
                         .object_fit(ObjectFit::Cover)
                         .rounded_tl(tl)
                         .rounded_tr(tr)
                         .rounded_bl(bl)
-                        .rounded_br(br),
+                        .rounded_br(br)
+                        .with_loading(move || folder_preview_initials(loading_fallback.clone()))
+                        .with_fallback(move || folder_preview_initials(error_fallback.clone())),
                 );
             } else {
-                let single_letter: String = child.initials.chars().take(1).collect();
-                thumb = thumb.child(
-                    div()
-                        .text_size(px(9.0))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(crate::tokens::colors::white())
-                        .child(single_letter),
-                );
+                thumb = thumb.child(folder_preview_initials(single_letter));
             }
         } else {
-            let single_letter: String = child.initials.chars().take(1).collect();
-            thumb = thumb.child(
-                div()
-                    .text_size(px(9.0))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(crate::tokens::colors::white())
-                    .child(single_letter),
-            );
+            thumb = thumb.child(folder_preview_initials(single_letter));
         }
 
-        folder_box = folder_box.child(thumb);
+        preview = preview.child(thumb);
     }
 
+    folder_box = folder_box.child(preview);
     let mut wrapper = div().relative().child(folder_box);
 
     if total_mentions > 0 {
@@ -615,7 +656,7 @@ fn render_folder_collapsed(folder: GuildFolderItem) -> AnyElement {
 }
 
 fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
-    let base_color = folder.color.unwrap_or_else(blurple);
+    let base_color = folder.color.unwrap_or_else(bg_channels);
     let folder_bg = Rgba {
         r: base_color.r,
         g: base_color.g,
@@ -631,29 +672,61 @@ fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
 
     let mut expanded_container = div()
         .id(folder.id.clone())
+        .relative()
         .flex()
         .flex_col()
         .items_center()
         .w(rail_width())
-        .py(px(4.0))
-        .gap(px(6.0))
+        .py(space_2())
+        .gap(space_3());
+
+    // The expanded folder track is 48px wide and centered inside the 72px
+    // rail. Child items remain 72px wide so their selection pills stay at x=0.
+    let track = div()
+        .absolute()
+        .left(px((RAW_RAIL_WIDTH - RAW_GUILD_FOLDER_SIZE) * 0.5))
+        .top(space_2())
+        .bottom(space_2())
+        .w(guild_folder_size())
         .rounded(radius_server_hover())
+        .border_1()
+        .border_color(border_subtle())
         .bg(folder_track_bg);
 
-    let mut folder_header = div()
-        .id(ElementId::Name(format!("{}-header", folder.id).into()))
+    let folder_icon = div()
+        .w(guild_folder_preview_container_size())
+        .h(guild_folder_preview_container_size())
         .flex()
         .items_center()
         .justify_center()
-        .w(px(40.0))
-        .h(px(28.0))
-        .rounded(px(12.0))
+        .rounded(radius_lg())
         .bg(folder_bg)
+        .hover(move |style| {
+            style.bg(Rgba {
+                r: base_color.r,
+                g: base_color.g,
+                b: base_color.b,
+                a: 0.60,
+            })
+        })
+        .child(icon_folder(px(24.0), white()));
+
+    let mut folder_header = div()
+        .id(ElementId::Name(format!("{:?}-header", folder.id).into()))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .w(guild_folder_size())
+        .h(guild_folder_size())
         .cursor_pointer()
-        .hover(|s| s.bg(channel_hover()))
-        .child(
-            icon_folder(px(16.0), crate::tokens::colors::white()),
-        );
+        .child(folder_icon);
+
+    if !folder.name.is_empty() {
+        let tooltip_text = folder.name.clone();
+        folder_header = folder_header
+            .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+    }
 
     if let Some(on_toggle) = folder.on_toggle {
         folder_header = folder_header.on_click(move |ev, window, cx| {
@@ -661,14 +734,15 @@ fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
         });
     }
 
-    expanded_container = expanded_container.child(folder_header);
+    expanded_container = expanded_container.child(track).child(folder_header);
 
     let on_child_click = folder.on_child_click.map(Arc::new);
     for (idx, child) in folder.guilds.into_iter().enumerate() {
         let mut child_item = GuildItem::new(child.id, child.name)
             .selected(child.selected)
             .unread(child.unread)
-            .mention_count(child.mention_count);
+            .mention_count(child.mention_count)
+            .initials(child.initials);
 
         if let Some(url) = child.icon_url {
             child_item = child_item.icon_url(url);
@@ -690,6 +764,30 @@ fn render_folder_expanded(folder: GuildFolderItem) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn test_guild_icon_radius_and_pill_states() {
+        assert_eq!(guild_icon_radius(false), radius_server_hover());
+        assert_eq!(guild_icon_radius(true), radius_server_hover());
+        assert_eq!(guild_pill_height(false, false), px(0.0));
+        assert_eq!(guild_pill_height(false, true), guild_pill_unread_height());
+        assert_eq!(guild_pill_height(true, true), guild_pill_selected_height());
+        assert_eq!(guild_pill_width(), px(8.0));
+        assert_eq!(guild_pill_hover_height(), px(20.0));
+        assert_eq!(resolved_guild_pill_hover_height(false), px(20.0));
+        assert_eq!(resolved_guild_pill_hover_height(true), px(40.0));
+        assert_eq!(server_icon_size(), px(40.0));
+        assert_eq!(guild_folder_size(), px(48.0));
+        assert_eq!(guild_folder_preview_container_size(), px(40.0));
+        assert_eq!(guild_folder_preview_size(), px(19.0));
+        assert_eq!(guild_separator_height(), px(1.0));
+        assert_eq!(
+            guild_folder_preview_padding() * 2.0
+                + guild_folder_preview_size() * 2.0
+                + guild_folder_preview_gap(),
+            guild_folder_size(),
+        );
+    }
 
     #[::core::prelude::v1::test]
     fn test_compute_initials() {
@@ -751,5 +849,14 @@ mod tests {
             .child_guild(child1);
 
         assert_eq!(folder.get_mention_count(), 10);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mentions_imply_unread_for_guild_and_folder_pills() {
+        let child = GuildFolderChild::new("c1", "G1").mention_count(1);
+        let folder = GuildFolderItem::new("f1", "Folder").child_guild(child);
+
+        assert!(folder.is_unread());
+        assert_eq!(guild_pill_height(false, true), guild_pill_unread_height());
     }
 }

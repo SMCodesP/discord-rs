@@ -2,12 +2,15 @@ use gpui::prelude::*;
 use gpui::*;
 
 use crate::app::state::CurrentUserProfile;
+use crate::components::TextInput;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::tokens::icons::*;
 use crate::tokens::kit_theme::DiscordTheme;
 
-use super::components::{render_section_description, render_section_header};
 use super::UserSettingsModal;
+use super::components::{render_section_description, render_section_header};
+use super::settings::SettingsSaveState;
 
 pub fn render_profiles(
     modal: Entity<UserSettingsModal>,
@@ -16,18 +19,24 @@ pub fn render_profiles(
     has_nitro: bool,
     cx: &App,
 ) -> Div {
-    let modal_read = modal_state;
-    let display_name = modal_read.profile_display_name.clone();
-    let username = user.username.clone();
-    let pronouns = modal_read.profile_pronouns.clone();
-    let bio = modal_read.profile_bio.clone();
+    let draft = &modal_state.profile_edit.draft;
+    let display_name = draft.display_name.clone().unwrap_or_default();
+    let pronouns = draft.pronouns.clone().unwrap_or_default();
+    let bio = draft.bio.clone().unwrap_or_default();
+    let save_modal = modal.clone();
+    let discard_modal = modal;
+    let is_saving = matches!(
+        modal_state.profile_edit.save_state,
+        SettingsSaveState::Saving
+    );
+    let has_changes = !modal_state.profile_edit.dirty.is_empty();
 
     div()
         .flex()
         .flex_col()
         .gap(px(16.0))
         .child(render_section_description(
-            "Personalize a forma como você é visto em todos os servidores do Discord RS.",
+            "Personalize a forma como você é visto em todos os servidores do Discord.",
             cx,
         ))
         .child(
@@ -35,16 +44,12 @@ pub fn render_profiles(
                 .flex()
                 .flex_row()
                 .gap(px(28.0))
-                // ---------------------------------------------------------
-                // LEFT COLUMN: Profile Form Fields (w = 340px)
-                // ---------------------------------------------------------
                 .child(
                     div()
                         .w(px(340.0))
                         .flex()
                         .flex_col()
                         .gap(px(16.0))
-                        // Display Name Box
                         .child(
                             div()
                                 .flex()
@@ -52,19 +57,24 @@ pub fn render_profiles(
                                 .gap(px(6.0))
                                 .child(render_section_header("NOME DE EXIBIÇÃO", cx))
                                 .child(
-                                    div()
-                                        .h(px(38.0))
-                                        .px(px(12.0))
-                                        .rounded(px(4.0))
-                                        .bg(cx.discord().bg_server)
-                                        .flex()
-                                        .items_center()
-                                        .text_color(cx.discord().text_titles)
-                                        .text_size(px(13.0))
-                                        .child(display_name.clone()),
+                                    modal_state
+                                        .profile_display_input
+                                        .as_ref()
+                                        .map(|input| {
+                                            TextInput::new("settings-profile-display-name", input)
+                                                .placeholder("Nome de exibição")
+                                                .show_clear(false)
+                                                .show_paste(false)
+                                                .into_any_element()
+                                        })
+                                        .unwrap_or_else(|| {
+                                            div()
+                                                .h(px(40.0))
+                                                .child(display_name.clone())
+                                                .into_any_element()
+                                        }),
                                 ),
                         )
-                        // Pronouns Row
                         .child(
                             div()
                                 .flex()
@@ -72,17 +82,24 @@ pub fn render_profiles(
                                 .gap(px(6.0))
                                 .child(render_section_header("PRONOMES", cx))
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .gap(px(6.0))
-                                        .child(render_pronoun_pill(modal.clone(), "ele/dele", &pronouns, cx))
-                                        .child(render_pronoun_pill(modal.clone(), "ela/dela", &pronouns, cx))
-                                        .child(render_pronoun_pill(modal.clone(), "they/them", &pronouns, cx))
-                                        .child(render_pronoun_pill(modal.clone(), "elu/delu", &pronouns, cx)),
+                                    modal_state
+                                        .profile_pronouns_input
+                                        .as_ref()
+                                        .map(|input| {
+                                            TextInput::new("settings-profile-pronouns", input)
+                                                .placeholder("Adicione seus pronomes")
+                                                .show_clear(false)
+                                                .show_paste(false)
+                                                .into_any_element()
+                                        })
+                                        .unwrap_or_else(|| {
+                                            div()
+                                                .h(px(40.0))
+                                                .child(pronouns.clone())
+                                                .into_any_element()
+                                        }),
                                 ),
                         )
-                        // Bio (About Me)
                         .child(
                             div()
                                 .flex()
@@ -90,31 +107,92 @@ pub fn render_profiles(
                                 .gap(px(6.0))
                                 .child(render_section_header("SOBRE MIM", cx))
                                 .child(
-                                    div()
-                                        .min_h(px(60.0))
-                                        .p(px(10.0))
-                                        .rounded(px(4.0))
-                                        .bg(cx.discord().bg_server)
-                                        .text_color(cx.discord().text_primary)
-                                        .text_size(px(12.0))
-                                        .child(if bio.is_empty() {
-                                            "Escreva algo sobre você...".to_string()
-                                        } else {
-                                            bio.clone()
+                                    modal_state
+                                        .profile_bio_input
+                                        .as_ref()
+                                        .map(|input| {
+                                            div()
+                                                .min_h(px(96.0))
+                                                .p(px(10.0))
+                                                .rounded(px(4.0))
+                                                .bg(cx.discord().bg_server)
+                                                .border_1()
+                                                .border_color(cx.discord().borders)
+                                                .child(
+                                                    gpui::component::input::Textarea::new(input)
+                                                        .text_size(px(13.0))
+                                                        .text_color(cx.discord().text_primary)
+                                                        .placeholder("Escreva algo sobre você..."),
+                                                )
+                                        })
+                                        .unwrap_or_else(|| {
+                                            div()
+                                                .min_h(px(96.0))
+                                                .p(px(10.0))
+                                                .rounded(px(4.0))
+                                                .bg(cx.discord().bg_server)
+                                                .child(if bio.is_empty() {
+                                                    "Biografia não sincronizada."
+                                                } else {
+                                                    bio.clone()
+                                                })
                                         }),
                                 ),
-                        ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(8.0))
+                                .child(
+                                    Button::new("settings-profile-save", "Salvar alterações")
+                                        .variant(ButtonVariant::Blurple)
+                                        .size(ButtonSize::Sm)
+                                        .disabled(!has_changes || is_saving)
+                                        .on_click(move |_event, _window, cx| {
+                                            save_modal.update(cx, |this, cx| this.save_profile(cx));
+                                        }),
+                                )
+                                .child(
+                                    Button::new("settings-profile-discard", "Descartar")
+                                        .variant(ButtonVariant::Gray)
+                                        .size(ButtonSize::Sm)
+                                        .disabled(!has_changes || is_saving)
+                                        .on_click(move |_event, _window, cx| {
+                                            discard_modal
+                                                .update(cx, |this, cx| this.discard_profile(cx));
+                                        }),
+                                ),
+                        )
+                        .children(match &modal_state.profile_edit.save_state {
+                            SettingsSaveState::Saving => Some(
+                                div()
+                                    .text_color(cx.discord().text_secondary)
+                                    .text_size(px(12.0))
+                                    .child("Salvando na conta..."),
+                            ),
+                            SettingsSaveState::Saved => Some(
+                                div()
+                                    .text_color(cx.discord().status_online)
+                                    .text_size(px(12.0))
+                                    .child("Alterações salvas."),
+                            ),
+                            SettingsSaveState::Failed(error) => Some(
+                                div()
+                                    .text_color(cx.discord().status_dnd)
+                                    .text_size(px(12.0))
+                                    .child(error.clone()),
+                            ),
+                            SettingsSaveState::Idle => None,
+                        }),
                 )
-                // ---------------------------------------------------------
-                // RIGHT COLUMN: Discord Live Preview Profile Card (w = 300px)
-                // ---------------------------------------------------------
                 .child(
                     div()
                         .w(px(300.0))
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
-                        .child(render_section_header("PRÉ-VISUALIZAÇÃO EM TEMPO REAL", cx))
+                        .child(render_section_header("PRÉ-VISUALIZAÇÃO", cx))
                         .child(
                             div()
                                 .rounded(px(8.0))
@@ -124,21 +202,24 @@ pub fn render_profiles(
                                 .overflow_hidden()
                                 .flex()
                                 .flex_col()
-                                // Live Banner
                                 .child(
                                     div()
                                         .h(px(90.0))
                                         .w_full()
-                                        .bg(cx.discord().bg_server),
+                                        .bg(cx.discord().bg_channels)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(cx.discord().text_muted)
+                                        .text_size(px(11.0))
+                                        .child("Banner não disponível neste cliente"),
                                 )
-                                // Profile Body
                                 .child(
                                     div()
                                         .px(px(14.0))
                                         .pb(px(14.0))
                                         .flex()
                                         .flex_col()
-                                        // Avatar using crate::components::Avatar
                                         .child(
                                             div()
                                                 .flex()
@@ -150,11 +231,12 @@ pub fn render_profiles(
                                                     Avatar::new(user.avatar_text.clone())
                                                         .size(AvatarSize::Px80)
                                                         .opt_src(user.avatar_url.clone())
-                                                        .opt_decoration(user.avatar_decoration_data.clone())
+                                                        .opt_decoration(
+                                                            user.avatar_decoration_data.clone(),
+                                                        )
                                                         .status(user.presence.into())
-                                                        .cutout_color(cx.discord().bg_server)
+                                                        .cutout_color(cx.discord().bg_server),
                                                 )
-                                                // Badges pill container
                                                 .child(
                                                     div()
                                                         .flex()
@@ -168,14 +250,16 @@ pub fn render_profiles(
                                                                     .py(px(2.0))
                                                                     .rounded(px(4.0))
                                                                     .bg(cx.discord().bg_channels)
-                                                                    .child(icon_sparkles(px(13.0), cx.discord().role_purple)),
+                                                                    .child(icon_sparkles(
+                                                                        px(13.0),
+                                                                        cx.discord().role_purple,
+                                                                    )),
                                                             )
                                                         } else {
                                                             None
                                                         }),
                                                 ),
                                         )
-                                        // Names
                                         .child(
                                             div()
                                                 .pt(px(10.0))
@@ -185,7 +269,7 @@ pub fn render_profiles(
                                                         .font_weight(FontWeight::BOLD)
                                                         .text_size(px(16.0))
                                                         .child(if display_name.is_empty() {
-                                                            user.display_name.clone()
+                                                            "Sem nome de exibição".to_string()
                                                         } else {
                                                             display_name
                                                         }),
@@ -194,10 +278,9 @@ pub fn render_profiles(
                                                     div()
                                                         .text_color(cx.discord().text_secondary)
                                                         .text_size(px(12.0))
-                                                        .child(format!("@{}", username)),
+                                                        .child(format!("@{}", user.username)),
                                                 ),
                                         )
-                                        // Pronouns Tag (if present)
                                         .children(if !pronouns.is_empty() {
                                             Some(
                                                 div()
@@ -209,7 +292,13 @@ pub fn render_profiles(
                                         } else {
                                             None
                                         })
-                                        // Divider
+                                        .children(user.custom_status.as_ref().map(|status| {
+                                            div()
+                                                .pt(px(6.0))
+                                                .text_color(cx.discord().text_primary)
+                                                .text_size(px(12.0))
+                                                .child(status.clone())
+                                        }))
                                         .child(
                                             div()
                                                 .w_full()
@@ -217,7 +306,6 @@ pub fn render_profiles(
                                                 .my(px(10.0))
                                                 .bg(cx.discord().neutral_67),
                                         )
-                                        // About Me Section
                                         .child(
                                             div()
                                                 .flex()
@@ -235,7 +323,8 @@ pub fn render_profiles(
                                                         .text_color(cx.discord().text_primary)
                                                         .text_size(px(12.0))
                                                         .child(if bio.is_empty() {
-                                                            "Nenhuma biografia adicionada.".to_string()
+                                                            "Nenhuma biografia adicionada."
+                                                                .to_string()
                                                         } else {
                                                             bio
                                                         }),
@@ -245,44 +334,4 @@ pub fn render_profiles(
                         ),
                 ),
         )
-}
-
-fn render_pronoun_pill(
-    modal: Entity<UserSettingsModal>,
-    pronoun: &'static str,
-    current_pronouns: &str,
-    cx: &App,
-) -> Div {
-    let is_selected = current_pronouns == pronoun;
-    let bg_col = if is_selected {
-        cx.discord().blurple
-    } else {
-        cx.discord().bg_channels
-    };
-    let text_col = if is_selected {
-        cx.discord().white
-    } else {
-        cx.discord().text_secondary
-    };
-
-    div()
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(px(4.0))
-        .bg(bg_col)
-        .text_color(text_col)
-        .text_size(px(11.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-            modal.update(cx, |this, cx| {
-                if this.profile_pronouns == pronoun {
-                    this.profile_pronouns.clear();
-                } else {
-                    this.profile_pronouns = pronoun.to_string();
-                }
-                cx.notify();
-            });
-        })
-        .child(pronoun)
 }

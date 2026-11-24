@@ -1,8 +1,11 @@
-use gpui::component::menu::{ContextMenuExt, PopupMenuItem, PopupMenu};
+use gpui::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui::prelude::*;
 use gpui::*;
 
-use super::state::{ActiveModal, ActiveVoiceCall, AppState, ChannelItemState, ChannelKind, CurrentUserProfile, FriendsTab};
+use super::state::{
+    ActiveModal, ActiveVoiceCall, AppState, ChannelItemState, ChannelKind, CurrentUserProfile,
+    FriendsTab,
+};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::badge::MentionBadge;
 use crate::components::button::IconButton;
@@ -10,6 +13,7 @@ use crate::domain::user::{ActivityType, PresenceStatus};
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
+use crate::tokens::typography::*;
 
 #[inline]
 fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
@@ -20,7 +24,7 @@ fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
 /// - Server header / DM header
 /// - Collapsible categories & channel lists / DM list
 /// - Active voice status bar (when connected)
-/// - Bottom user profile & audio controls panel (359x58px, 32x32 buttons)
+/// - Floating bottom user profile & audio controls panel (328x58px, 32x32 buttons)
 pub struct ChannelSidebar {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
@@ -66,7 +70,13 @@ impl Render for ChannelSidebar {
         let scroll_content: Vec<AnyElement> = if is_dm {
             render_dm_section(state, selected_channel_id.as_deref(), &app_entity)
         } else if let Some(ref guild) = selected_guild {
-            render_guild_channels_section(state, guild, selected_channel_id.as_deref(), &app_entity, &current_user)
+            render_guild_channels_section(
+                state,
+                guild,
+                selected_channel_id.as_deref(),
+                &app_entity,
+                &current_user,
+            )
         } else {
             Vec::new()
         };
@@ -77,7 +87,7 @@ impl Render for ChannelSidebar {
             .relative()
             .flex()
             .flex_col()
-            .w(px(240.0))
+            .w(channel_sidebar_width())
             .h_full()
             .min_h(px(0.0))
             .bg(bg_channels())
@@ -101,7 +111,10 @@ impl Render for ChannelSidebar {
                             .min_h(px(0.0))
                             .id("channels-scroll-area")
                             .overflow_y_scroll()
-                            .p(px(8.0))
+                            .pt(space_4())
+                            .pb(space_4())
+                            .pl(space_4())
+                            .pr(px(9.0)) // 272 - 8 - 9 = measured 255px row
                             .gap(px(2.0))
                             .children(scroll_content),
                     ),
@@ -111,10 +124,14 @@ impl Render for ChannelSidebar {
             // =========================================================================
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .flex_shrink_0()
                     .children(active_voice.map(|v| render_voice_bar(&v, &app_entity)))
+                    // Discord measures 50px of channel-navigation clearance;
+                    // the 58px panel floats over the final 16px of that area.
+                    .child(div().h(channel_navigation_reserve()))
                     .child(render_user_panel(&current_user, &app_entity)),
             )
     }
@@ -125,34 +142,30 @@ impl Render for ChannelSidebar {
 // ============================================================================
 
 fn render_server_header(guild_name: &str) -> AnyElement {
+    let typography = typo_server_header();
     div()
-        .h(px(49.0)) // 303x49 per channel-sidebar.md
-        .px(px(16.0))
+        .h(header_height())
+        .px(space_4())
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
+        .rounded_tl(radius_lg())
         .border_b_1()
         .border_color(border_subtle())
         .cursor_pointer()
-        .hover(|s| s.bg(channel_hover()))
+        .hover(|style| style.bg(channel_hover()))
         .child(
             div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.0))
+                .flex_1()
+                .min_w(px(0.0))
                 .overflow_hidden()
-                .child(
-                    div()
-                        .text_color(text_header())
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(15.0))
-                        .child(guild_name.to_string()),
-                )
-                .child(
-                    div().child(icon_check(px(14.0), blurple())),
-                ),
+                .text_color(text_header())
+                .font_weight(typography.weight)
+                .text_size(typography.size)
+                .line_height(typography.line_height)
+                .truncate()
+                .child(guild_name.to_string()),
         )
         .child(
             svg()
@@ -165,7 +178,7 @@ fn render_server_header(guild_name: &str) -> AnyElement {
 
 fn render_dm_search_header() -> AnyElement {
     div()
-        .h(px(48.0))
+        .h(header_height())
         .px(px(12.0))
         .flex()
         .flex_row()
@@ -202,14 +215,23 @@ fn render_dm_section(
     selected_channel_id: Option<&str>,
     app_entity: &Entity<AppState>,
 ) -> Vec<AnyElement> {
-    let is_amigos_active = selected_channel_id.is_none() && state.friends_tab != FriendsTab::MessageRequests;
-    let is_msg_requests_active = selected_channel_id.is_none() && state.friends_tab == FriendsTab::MessageRequests;
+    let is_amigos_active =
+        selected_channel_id.is_none() && state.friends_tab != FriendsTab::MessageRequests;
+    let is_msg_requests_active =
+        selected_channel_id.is_none() && state.friends_tab == FriendsTab::MessageRequests;
     let pending_req_count = state.message_requests.iter().filter(|r| !r.is_spam).count();
 
     let mut items = vec![
         render_dm_nav_button(
             "Amigos",
-            icon_friends(px(20.0), if is_amigos_active { white() } else { text_muted() }),
+            icon_friends(
+                px(20.0),
+                if is_amigos_active {
+                    white()
+                } else {
+                    text_muted()
+                },
+            ),
             is_amigos_active,
             None,
             {
@@ -225,9 +247,20 @@ fn render_dm_section(
         ),
         render_dm_nav_button(
             "Solicitações de mensagens",
-            icon_inbox(px(20.0), if is_msg_requests_active { white() } else { text_muted() }),
+            icon_inbox(
+                px(20.0),
+                if is_msg_requests_active {
+                    white()
+                } else {
+                    text_muted()
+                },
+            ),
             is_msg_requests_active,
-            if pending_req_count > 0 { Some(pending_req_count) } else { None },
+            if pending_req_count > 0 {
+                Some(pending_req_count)
+            } else {
+                None
+            },
             {
                 let entity = app_entity.clone();
                 move |_ev, _win, cx| {
@@ -311,11 +344,7 @@ fn render_dm_nav_button(
                 .min_w(px(0.0))
                 .overflow_hidden()
                 .child(icon)
-                .child(
-                    div()
-                        .truncate()
-                        .child(label),
-                ),
+                .child(div().truncate().child(label)),
         );
 
     if let Some(count) = badge_count {
@@ -337,8 +366,9 @@ fn render_dm_section_header(app_entity: &Entity<AppState>) -> AnyElement {
         .child(
             div()
                 .text_color(text_muted())
-                .font_weight(FontWeight::BOLD)
-                .text_size(px(11.0))
+                .font_weight(WEIGHT_BOLD)
+                .text_size(font_size_xs())
+                .line_height(line_height_xs())
                 .child("MENSAGENS DIRETAS"),
         )
         .child(
@@ -401,9 +431,10 @@ fn render_dm_item(
         })
     };
 
-    let game_activity = presence_info
-        .and_then(|p| p.activity.as_ref())
-        .filter(|a| a.activity_type == ActivityType::Playing || (!a.name.is_empty() && a.name != "Custom Status"));
+    let game_activity = presence_info.and_then(|p| p.activity.as_ref()).filter(|a| {
+        a.activity_type == ActivityType::Playing
+            || (!a.name.is_empty() && a.name != "Custom Status")
+    });
 
     let avatar_el = render_dm_avatar(
         is_group,
@@ -418,10 +449,18 @@ fn render_dm_item(
     let subtitle_el = if is_group {
         None
     } else {
-        render_dm_subtitle(custom_status.as_ref(), game_activity, presence_status == PresenceStatus::Offline)
+        render_dm_subtitle(
+            custom_status.as_ref(),
+            game_activity,
+            presence_status == PresenceStatus::Offline,
+        )
     };
 
-    let is_pinned = dm.is_pinned || dm.topic.as_deref().map_or(false, |t| t.contains("pin") || t.contains("fixad"));
+    let is_pinned = dm.is_pinned
+        || dm
+            .topic
+            .as_deref()
+            .map_or(false, |t| t.contains("pin") || t.contains("fixad"));
     let text_col_el = render_dm_text_column(dm_name, is_selected, unread, is_pinned, subtitle_el);
 
     let click_entity = entity.clone();
@@ -522,7 +561,11 @@ fn render_dm_item(
     // Context menu via gpui-kit ContextMenuExt & PopupMenu
     let pin_entity = entity.clone();
     let pin_cid = dm_id.clone();
-    let pin_label = if is_pinned { "Desafixar conversa" } else { "Fixar conversa" };
+    let pin_label = if is_pinned {
+        "Desafixar conversa"
+    } else {
+        "Fixar conversa"
+    };
 
     row.context_menu(move |menu: PopupMenu, _window, _cx| {
         let p_app = pin_entity.clone();
@@ -557,11 +600,22 @@ fn render_guild_channels_section(
         let cat_name = category.name.clone();
         let is_collapsed = state.is_category_collapsed(&cat_id);
 
-        category_elements.push(render_category_header(&cat_id, &cat_name, is_collapsed, app_entity));
+        category_elements.push(render_category_header(
+            &cat_id,
+            &cat_name,
+            is_collapsed,
+            app_entity,
+        ));
 
         if !is_collapsed {
             for channel in &category.channels {
-                category_elements.push(render_channel_entry(channel, state, selected_channel_id, app_entity, current_user));
+                category_elements.push(render_channel_entry(
+                    channel,
+                    state,
+                    selected_channel_id,
+                    app_entity,
+                    current_user,
+                ));
             }
         }
     }
@@ -580,6 +634,7 @@ fn render_category_header(
 
     let toggle_entity = app_entity.clone();
     let toggle_cid = cid.clone();
+    let typography = typo_category_header();
 
     let chevron_btn = IconButton::with_icon(format!("cat-chevron-{}", cat_id), move |sz, col| {
         let path = if is_collapsed {
@@ -627,11 +682,36 @@ fn render_category_header(
                             });
                         })
                         .text_color(text_muted())
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(11.0))
-                        .child(cat_name.to_string()),
+                        .font_weight(typography.weight)
+                        .text_size(typography.size)
+                        .line_height(typography.line_height)
+                        .child(cat_name.to_uppercase()),
                 ),
         )
+        .into_any_element()
+}
+
+fn render_channel_icon(
+    kind: ChannelKind,
+    color: Rgba,
+    group_name: SharedString,
+    hover_color: Option<Rgba>,
+) -> AnyElement {
+    let mut glyph = svg()
+        .path(kind.discord_icon().asset_path())
+        .size(px(20.0))
+        .text_color(color);
+    if let Some(hover_color) = hover_color {
+        glyph = glyph.group_hover(group_name, move |style| style.text_color(hover_color));
+    }
+
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(20.0))
+        .flex_shrink_0()
+        .child(glyph)
         .into_any_element()
 }
 
@@ -649,6 +729,7 @@ fn render_channel_entry(
     let is_unread = channel.unread;
     let mention_count = channel.mention_count;
     let entity = app_entity.clone();
+    let typography = typo_channel_item();
 
     let is_voice = ch_kind == ChannelKind::Voice;
     let voice_states = if is_voice {
@@ -672,8 +753,16 @@ fn render_channel_entry(
                     .items_center()
                     .justify_center()
                     .text_size(px(11.0))
-                    .font_weight(if is_full { FontWeight::BOLD } else { FontWeight::MEDIUM })
-                    .text_color(if is_full { white() } else { interactive_normal() })
+                    .font_weight(if is_full {
+                        FontWeight::BOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(if is_full {
+                        white()
+                    } else {
+                        interactive_normal()
+                    })
                     .child(format!("{}/{}", count, limit)),
             )
         } else if count > 0 {
@@ -700,14 +789,18 @@ fn render_channel_entry(
 
     let click_cid = ch_id.clone();
     let click_entity = entity.clone();
+    let group_name: SharedString = format!("channel-row-{ch_id}").into();
 
-    // Channel line geometry: 286x32 r8 per channel-sidebar.md
+    // Measured Discord Desktop channel row: 32px high, 8px radius, 20px icon
+    // and 16px/500/24px channel name.
     let mut row = div()
         .id(ElementId::Name(format!("channel-row-{}", ch_id).into()))
-        .h(px(32.0)) // 32px per channel-sidebar.md
-        .px(px(8.0))
-        .py(px(4.0))
-        .rounded(radius_md()) // 8px per channel-sidebar.md
+        .group(group_name.clone())
+        .relative()
+        .h(channel_item_height())
+        .px(space_4())
+        .py(space_2())
+        .rounded(radius_md())
         .flex()
         .flex_row()
         .items_center()
@@ -717,7 +810,19 @@ fn render_channel_entry(
     if is_selected {
         row = row.bg(channel_active());
     } else {
-        row = row.hover(|s| s.bg(channel_hover()));
+        row = row.hover(|style| style.bg(channel_hover()));
+    }
+
+    if is_unread {
+        row = row.child(
+            div()
+                .absolute()
+                .left_0()
+                .w(channel_unread_width())
+                .h(guild_pill_unread_height())
+                .rounded_r(radius_sm())
+                .bg(channels_default()),
+        );
     }
 
     let channel_icon_color = if is_selected {
@@ -727,6 +832,24 @@ fn render_channel_entry(
     } else {
         channels_default()
     };
+
+    let mut channel_name = div()
+        .text_size(typography.size)
+        .font_weight(typography.weight)
+        .line_height(typography.line_height)
+        .text_color(if is_selected {
+            white()
+        } else if is_unread {
+            text_header()
+        } else {
+            channels_default()
+        })
+        .truncate()
+        .child(ch_name);
+    if !is_selected && !is_unread {
+        channel_name =
+            channel_name.group_hover(group_name.clone(), |style| style.text_color(text_header()));
+    }
 
     row = row
         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
@@ -741,26 +864,24 @@ fn render_channel_entry(
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(6.0))
+                .gap(space_4())
                 .flex_1()
                 .min_w(px(0.0))
                 .overflow_hidden()
-                .child(render_icon(ch_kind.discord_icon(), px(18.0), channel_icon_color))
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .font_weight(if is_selected || is_unread { FontWeight::BOLD } else { FontWeight::NORMAL })
-                        .text_color(if is_selected { white() } else if is_unread { text_header() } else { text_muted() })
-                        .truncate()
-                        .child(ch_name),
-                ),
+                .child(render_channel_icon(
+                    ch_kind,
+                    channel_icon_color,
+                    group_name.clone(),
+                    (!is_selected).then_some(text_header()),
+                ))
+                .child(channel_name),
         )
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(4.0))
+                .gap(space_2())
                 .children(capacity_badge)
                 .children(if mention_count > 0 {
                     Some(MentionBadge::new(mention_count).into_any_element())
@@ -770,23 +891,22 @@ fn render_channel_entry(
         );
 
     // Context menu via gpui-kit ContextMenuExt
-    let mut channel_container = div()
-        .flex()
-        .flex_col()
-        .child(
-            row.context_menu(|menu: PopupMenu, _window, _cx| {
-                menu
-                    .item(PopupMenuItem::new("Marcar como lido"))
+    let mut channel_container =
+        div()
+            .flex()
+            .flex_col()
+            .child(row.context_menu(|menu: PopupMenu, _window, _cx| {
+                menu.item(PopupMenuItem::new("Marcar como lido"))
                     .item(PopupMenuItem::new("Silenciar canal"))
                     .separator()
                     .item(PopupMenuItem::new("Copiar link do canal"))
-            })
-        );
+            }));
 
     // Voice participants under channel
     if is_voice && !voice_states.is_empty() {
         for vs in voice_states {
-            channel_container = channel_container.child(render_voice_user_row(vs, state, current_user));
+            channel_container =
+                channel_container.child(render_voice_user_row(vs, state, current_user));
         }
     }
 
@@ -815,7 +935,11 @@ fn render_voice_user_row(
         if vs_uid == current_user.id {
             current_user.avatar_url.clone()
         } else {
-            state.friends.iter().find(|f| f.id == vs_uid).and_then(|f| f.avatar_url.clone())
+            state
+                .friends
+                .iter()
+                .find(|f| f.id == vs_uid)
+                .and_then(|f| f.avatar_url.clone())
         }
     });
 
@@ -832,7 +956,7 @@ fn render_voice_user_row(
         .opt_decoration(vs.avatar_decoration_data.clone());
 
     div()
-        .h(px(28.0))
+        .h(voice_user_height())
         .pl(px(32.0))
         .pr(px(8.0))
         .rounded(radius_sm())
@@ -849,20 +973,34 @@ fn render_voice_user_row(
                 .items_center()
                 .gap(px(8.0))
                 .overflow_hidden()
-                .child(
-                    div()
+                .child({
+                    let mut avatar_wrapper = div()
+                        .relative()
                         .size(px(24.0))
                         .rounded(radius_full())
-                        .border(if is_speaking { px(2.0) } else { px(0.0) })
-                        .border_color(status_online())
-                        .child(avatar_el),
-                )
+                        .child(avatar_el);
+                    if is_speaking {
+                        avatar_wrapper = avatar_wrapper.child(
+                            div()
+                                .absolute()
+                                .top(px(-2.0))
+                                .left(px(-2.0))
+                                .size(px(28.0))
+                                .rounded(radius_full())
+                                .border_2()
+                                .border_color(status_online()),
+                        );
+                    }
+                    avatar_wrapper
+                })
                 .child(
                     div()
-                        .text_size(px(13.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_size(font_size_sm())
+                        .font_weight(WEIGHT_MEDIUM)
+                        .line_height(line_height_sm())
                         .text_color(interactive_normal())
                         .overflow_hidden()
+                        .truncate()
                         .child(display_name),
                 ),
         )
@@ -1000,7 +1138,10 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
         .into_any_element()
 }
 
-fn render_user_panel(current_user: &CurrentUserProfile, app_entity: &Entity<AppState>) -> AnyElement {
+fn render_user_panel(
+    current_user: &CurrentUserProfile,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
     let entity = app_entity.clone();
     let is_muted = current_user.is_muted;
     let is_deafened = current_user.is_deafened;
@@ -1015,27 +1156,38 @@ fn render_user_panel(current_user: &CurrentUserProfile, app_entity: &Entity<AppS
         format!("@{}", current_user.username)
     };
 
-    // User Panel (359x58px r8 per user-panel.md)
+    let name_typography = typo_user_bar_name();
+    let subtext_typography = typo_user_bar_subtext();
+
+    // Measured Discord Desktop: 328x58 floating panel, 8px from the combined
+    // rail/sidebar edges. The sidebar root begins at x=72, so -64 places the
+    // panel's left edge at the measured app x=8.
     div()
-        .h(px(58.0)) // 58px per user-panel.md
-        .px(px(8.0))
+        .absolute()
+        .left(px(RAW_SPACE_4 - RAW_RAIL_WIDTH))
+        .bottom(user_panel_margin())
+        .w(user_panel_width())
+        .h(user_bar_height())
+        .px(user_panel_margin())
         .bg(bg_user_bar())
-        .rounded(radius_md()) // 8px per user-panel.md
+        .rounded(radius_md())
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        // User Profile (Avatar + Name)
         .child(
             div()
+                .flex_1()
+                .min_w(px(0.0))
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
-                .p(px(4.0))
+                .gap(space_4())
+                .py(px(5.0))
+                .px(space_2())
                 .rounded(radius_sm())
                 .cursor_pointer()
-                .hover(|s| s.bg(channel_hover()))
+                .hover(|style| style.bg(channel_hover()))
                 .on_mouse_down(MouseButton::Left, {
                     let entity = entity.clone();
                     move |_event, _window, cx| {
@@ -1057,22 +1209,28 @@ fn render_user_panel(current_user: &CurrentUserProfile, app_entity: &Entity<AppS
                     div()
                         .flex()
                         .flex_col()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
                         .child(
                             div()
                                 .text_color(text_header())
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(13.0))
+                                .font_weight(name_typography.weight)
+                                .text_size(name_typography.size)
+                                .line_height(name_typography.line_height)
+                                .truncate()
                                 .child(current_user.display_name.clone()),
                         )
                         .child(
                             div()
                                 .text_color(interactive_normal())
-                                .text_size(px(11.0))
+                                .font_weight(subtext_typography.weight)
+                                .text_size(subtext_typography.size)
+                                .line_height(subtext_typography.line_height)
+                                .truncate()
                                 .child(user_tag),
                         ),
                 ),
         )
-        // 32x32 Action Buttons (per user-panel.md)
         .child(render_user_audio_buttons(is_muted, is_deafened, app_entity))
         .into_any_element()
 }
@@ -1087,19 +1245,23 @@ fn render_user_audio_buttons(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(2.0))
+        .gap(space_4())
         // Mute Button (32x32)
         .child({
             let entity = entity.clone();
-            let mute_tooltip = if is_muted { "Ativar microfone" } else { "Desativar microfone" };
+            let mute_tooltip = if is_muted {
+                "Ativar microfone"
+            } else {
+                "Desativar microfone"
+            };
             IconButton::with_icon("user-panel-mute-btn", move |sz, _col| {
                 if is_muted {
                     icon_mic_off(sz, status_dnd()).into_any_element()
                 } else {
-                    icon_mic(sz, text_normal()).into_any_element()
+                    icon_mic(sz, interactive_normal()).into_any_element()
                 }
             })
-            .size(px(32.0))
+            .size(user_control_size())
             .icon_size(px(18.0))
             .rounded(radius_md())
             .danger(is_muted)
@@ -1114,15 +1276,19 @@ fn render_user_audio_buttons(
         // Deafen Button (32x32)
         .child({
             let entity = entity.clone();
-            let deafen_tooltip = if is_deafened { "Desativar áudio" } else { "Ensordecer" };
+            let deafen_tooltip = if is_deafened {
+                "Desativar áudio"
+            } else {
+                "Ensordecer"
+            };
             IconButton::with_icon("user-panel-deafen-btn", move |sz, _col| {
                 if is_deafened {
                     icon_headphones_off(sz, status_dnd()).into_any_element()
                 } else {
-                    icon_headphones(sz, text_normal()).into_any_element()
+                    icon_headphones(sz, interactive_normal()).into_any_element()
                 }
             })
-            .size(px(32.0))
+            .size(user_control_size())
             .icon_size(px(18.0))
             .rounded(radius_md())
             .danger(is_deafened)
@@ -1138,9 +1304,9 @@ fn render_user_audio_buttons(
         .child({
             let entity = entity.clone();
             IconButton::with_icon("user-panel-settings-btn", |sz, _col| {
-                icon_gear(sz, text_normal()).into_any_element()
+                icon_gear(sz, interactive_normal()).into_any_element()
             })
-            .size(px(32.0))
+            .size(user_control_size())
             .icon_size(px(18.0))
             .rounded(radius_md())
             .tooltip("Configurações de Usuário")
@@ -1265,11 +1431,7 @@ fn render_dm_subtitle(
 
             if let Some(ref emoji) = cs.emoji {
                 if let Some(url) = emoji.image_url() {
-                    sub_div = sub_div.child(
-                        img(url)
-                            .size(px(14.0))
-                            .flex_shrink_0(),
-                    );
+                    sub_div = sub_div.child(img(url).size(px(14.0)).flex_shrink_0());
                 } else if !emoji.name.is_empty() {
                     sub_div = sub_div.child(
                         div()
@@ -1344,17 +1506,13 @@ fn render_dm_text_column(
         FontWeight::NORMAL
     };
 
-    let mut title_row = div()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(
-            div()
-                .text_color(title_color)
-                .font_weight(font_weight)
-                .text_size(px(14.0))
-                .child(dm_name),
-        );
+    let mut title_row = div().flex().items_center().gap(px(6.0)).child(
+        div()
+            .text_color(title_color)
+            .font_weight(font_weight)
+            .text_size(px(14.0))
+            .child(dm_name),
+    );
 
     if is_pinned {
         title_row = title_row.child(icon_pin(px(12.0), text_muted()));
@@ -1389,5 +1547,22 @@ mod tests {
     fn test_server_header_creation() {
         let el = render_server_header("Rust Server");
         let _ = el;
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_channel_icons_build_with_hover_color() {
+        let text = render_channel_icon(
+            ChannelKind::Text,
+            channels_default(),
+            "test-text-channel".into(),
+            Some(text_header()),
+        );
+        let voice = render_channel_icon(
+            ChannelKind::Voice,
+            channels_default(),
+            "test-voice-channel".into(),
+            Some(text_header()),
+        );
+        let _ = (text, voice);
     }
 }

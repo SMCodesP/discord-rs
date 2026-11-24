@@ -15,7 +15,7 @@
 //! `GET /api/v10/channels/{channel_id}/messages/search`
 //! `GET /api/v10/guilds/{guild_id}/messages/search`
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use gpui::*;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,7 @@ use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::domain::Message;
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
+use crate::tokens::typography::{font_size_sm, font_size_xxs};
 
 /// Filter for presence of attachments, links, or media types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -166,6 +167,18 @@ fn parse_search_date(val: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(val, "%Y-%m-%d")
         .or_else(|_| NaiveDate::parse_from_str(val, "%Y/%m/%d"))
         .ok()
+}
+
+/// Discord's epoch in Unix milliseconds (2015-01-01T00:00:00Z).
+const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+
+/// Converts the start of a UTC date to the Discord Snowflake used by the search
+/// API's `min_id` / `max_id` bounds.
+fn snowflake_at_date_start(date: NaiveDate) -> Option<String> {
+    let midnight = date.and_hms_opt(0, 0, 0)?;
+    let unix_ms = Utc.from_utc_datetime(&midnight).timestamp_millis();
+    let discord_ms = unix_ms.checked_sub(DISCORD_EPOCH_MS)?;
+    discord_ms.checked_shl(22).map(|snowflake| snowflake.to_string())
 }
 
 impl SearchQuery {
@@ -320,6 +333,25 @@ impl SearchQuery {
                 HasFilter::Sticker => "sticker",
             };
             params.push(("has", s.to_string()));
+        }
+
+        // Date facets are inclusive/exclusive in the local matcher. Express the
+        // same intersection to the REST API as a half-open Snowflake interval.
+        let min_date = self.after.max(self.during);
+        let max_date_exclusive = self.before.min(self.during.and_then(|date| date.succ_opt()));
+        if let Some(date) = min_date {
+            if let Some(min_id) = snowflake_at_date_start(date) {
+                params.push(("min_id", min_id));
+            }
+        }
+        if let Some(date) = max_date_exclusive {
+            if let Some(start_id) = snowflake_at_date_start(date) {
+                if let Ok(start) = start_id.parse::<i64>() {
+                    if let Some(max_id) = start.checked_sub(1) {
+                        params.push(("max_id", max_id.to_string()));
+                    }
+                }
+            }
         }
         if let Some(pinned) = self.pinned {
             params.push(("pinned", pinned.to_string()));
@@ -601,53 +633,76 @@ pub const DISCORD_SEARCH_CHIPS: &[(&str, &str)] = &[
     ("pinned:", "true/false"),
 ];
 
-/// Renders message text highlighting search query matches with Discord yellow (#fee75c) and dark text (#1e1f22)
-pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
-    let terms: Vec<String> = query
-        .text_terms
-        .iter()
-        .map(|t| t.to_lowercase())
-        .filter(|t| !t.is_empty())
-        .collect();
+/// Lowercases text while retaining a map from each lowercase byte boundary
+/// back to a UTF-8 boundary in the original string. Unicode case conversion can
+/// expand a character (for example `İ`), so raw lowercase byte offsets cannot be
+/// used to slice the original message safely.
+fn lowercase_with_original_boundaries(content: &str) -> (String, Vec<usize>) {
+    let mut lowercase = String::with_capacity(content.len());
+    let mut boundaries = Vec::with_capacity(content.len() + 1);
+    for (offset, ch) in content.char_indices() {
+        let lowered: String = ch.to_lowercase().collect();
+        for _ in 0..lowered.len() {
+            boundaries.push(offset);
+        }
+        lowercase.push_str(&lowered);
+    }
+    boundaries.push(content.len());
+    (lowercase, boundaries)
+}
 
+/// Returns merged, non-overlapping highlight ranges in original UTF-8 offsets.
+fn highlight_ranges(content: &str, terms: &[String]) -> Vec<(usize, usize)> {
+    let terms: Vec<String> = terms
+        .iter()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
     if terms.is_empty() || content.is_empty() {
-        return div()
-            .text_color(text_primary())
-            .text_size(px(14.0))
-            .child(content.to_string());
+        return Vec::new();
     }
 
-    let content_lower = content.to_lowercase();
+    let (content_lower, boundaries) = lowercase_with_original_boundaries(content);
     let mut matches = Vec::new();
     for term in &terms {
         let mut start = 0;
         while let Some(pos) = content_lower[start..].find(term.as_str()) {
-            let s = start + pos;
-            let e = s + term.len();
-            matches.push((s, e));
-            start = e;
+            let lower_start = start + pos;
+            let lower_end = lower_start + term.len();
+            if let (Some(s), Some(e)) = (
+                boundaries.get(lower_start).copied(),
+                boundaries.get(lower_end).copied(),
+            ) {
+                if s < e {
+                    matches.push((s, e));
+                }
+            }
+            start = lower_end;
         }
     }
 
-    if matches.is_empty() {
+    matches.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in matches {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+/// Renders message text highlighting search query matches with Discord yellow (#fee75c) and dark text (#1e1f22)
+pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
+    let ranges = highlight_ranges(content, &query.text_terms);
+    if ranges.is_empty() || content.is_empty() {
         return div()
             .text_color(text_primary())
             .text_size(px(14.0))
             .child(content.to_string());
-    }
-
-    matches.sort_by_key(|&(s, _)| s);
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (s, e) in matches {
-        if let Some(last) = merged.last_mut() {
-            if s <= last.1 {
-                last.1 = last.1.max(e);
-            } else {
-                merged.push((s, e));
-            }
-        } else {
-            merged.push((s, e));
-        }
     }
 
     let mut container = div()
@@ -659,9 +714,9 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
         .text_size(px(14.0));
 
     let mut last_idx = 0;
-    for (s, e) in merged {
-        if s > last_idx && s <= content.len() {
-            if let Some(sub) = content.get(last_idx..s) {
+    for (start, end) in ranges {
+        if start > last_idx {
+            if let Some(sub) = content.get(last_idx..start) {
                 container = container.child(
                     div()
                         .text_color(text_primary())
@@ -669,7 +724,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
                 );
             }
         }
-        if let Some(sub) = content.get(s..e) {
+        if let Some(sub) = content.get(start..end) {
             container = container.child(
                 div()
                     // COR ANTIGA SEM ORIGEM: legacy_fee75c (0xfee75c)
@@ -681,7 +736,7 @@ pub fn render_highlighted_text(content: &str, query: &SearchQuery) -> Div {
                     .child(sub.to_string()),
             );
         }
-        last_idx = e;
+        last_idx = end;
     }
     if last_idx < content.len() {
         if let Some(sub) = content.get(last_idx..) {
@@ -713,6 +768,7 @@ pub fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement
 
     div()
         .w(px(356.0))
+        .h(px(335.0))
         .p(px(8.0))
         .py(px(12.0))
         .rounded(px(8.0))
@@ -1144,24 +1200,203 @@ fn render_no_results_state() -> Vec<AnyElement> {
     ]
 }
 
-/// Renders a single search result hit message card
+/// Returns displayable text from fields actually present in the Discord
+/// payload. Media-only messages use their real filename/title; no mock content
+/// is introduced.
+fn search_message_preview(message: &Message) -> Option<String> {
+    let content = message.content.trim();
+    if !content.is_empty() {
+        return Some(content.to_string());
+    }
+    if let Some(attachment) = message.attachments.first() {
+        return Some(attachment.filename.clone());
+    }
+    if let Some(sticker) = message.sticker_items.first() {
+        return Some(sticker.name.clone());
+    }
+    message
+        .embeds
+        .iter()
+        .find_map(|embed| embed.title.clone())
+}
+
+/// Resolves a channel label from the same real state used by the sidebars.
+fn search_channel_label(state: &AppState, channel_id: &str) -> String {
+    if let Some(channel) = state
+        .guilds
+        .iter()
+        .flat_map(|guild| &guild.categories)
+        .flat_map(|category| &category.channels)
+        .find(|channel| channel.id == channel_id)
+    {
+        return channel.name.clone();
+    }
+    if let Some(channel) = state
+        .dm_channels
+        .iter()
+        .find(|channel| channel.id == channel_id)
+    {
+        if !channel.name.trim().is_empty() {
+            return channel.name.clone();
+        }
+        if !channel.recipient_names.is_empty() {
+            return channel.recipient_names.join(", ");
+        }
+    }
+    channel_id.to_string()
+}
+
+fn render_search_context_message(message: &Message) -> AnyElement {
+    let author_name = message.author.display_name().to_string();
+    let timestamp_str = message.timestamp.format("%d/%m/%Y %H:%M").to_string();
+    let preview = search_message_preview(message);
+
+    let mut content = div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(6.0))
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(font_size_sm())
+                        .truncate()
+                        .child(author_name),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(font_size_xxs())
+                        .flex_shrink_0()
+                        .child(timestamp_str),
+                ),
+        );
+
+    if let Some(preview) = preview {
+        content = content.child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_sm())
+                .line_height(crate::tokens::typography::line_height_sm())
+                .w_full()
+                .min_w(px(0.0))
+                .truncate()
+                .child(preview),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
+        .child(
+            Avatar::new(message.author.display_name().to_string())
+                .size(AvatarSize::Px24)
+                .opt_src(message.author.avatar_url())
+                .opt_decoration(message.author.avatar_decoration_data.clone()),
+        )
+        .child(content)
+        .into_any_element()
+}
+
+fn render_search_hit_message(message: &Message, parsed_query: &SearchQuery) -> AnyElement {
+    let author_name = message.author.display_name().to_string();
+    let timestamp_str = message.timestamp.format("%d/%m/%Y %H:%M").to_string();
+    let preview = search_message_preview(message);
+
+    let mut content = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(8.0))
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(13.0))
+                        .truncate()
+                        .child(author_name),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(11.0))
+                        .flex_shrink_0()
+                        .child(timestamp_str),
+                ),
+        );
+
+    if let Some(preview) = preview {
+        content = content.child(render_highlighted_text(&preview, parsed_query));
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
+        .child(
+            Avatar::new(message.author.display_name().to_string())
+                .size(AvatarSize::Px24)
+                .opt_src(message.author.avatar_url())
+                .opt_decoration(message.author.avatar_decoration_data.clone()),
+        )
+        .child(content)
+        .into_any_element()
+}
+
+fn render_search_context(messages: &[Message]) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
+        .children(
+            messages
+                .iter()
+                .map(|message| render_search_context_message(message)),
+        )
+        .into_any_element()
+}
+
+/// Renders a single search result card with the context returned by Discord.
 fn render_search_result_card(
     app_entity: Entity<AppState>,
     hit: &SearchResultGroup,
     parsed_query: &SearchQuery,
+    channel_label: &str,
 ) -> AnyElement {
-    let entity = app_entity.clone();
-    let channel_id = hit.channel_id.clone();
     let message_id = hit.hit_message.id.clone();
-    let channel_label = hit.channel_name.clone().unwrap_or_else(|| hit.channel_id.clone());
-    let author_name = hit.hit_message.author.display_name().to_string();
-    let timestamp_str = hit.hit_message.timestamp.format("%d/%m/%Y %H:%M").to_string();
-
-    let jump_cid = channel_id.clone();
+    let jump_cid = hit.channel_id.clone();
     let jump_mid = message_id.clone();
-    let jump_entity = entity.clone();
+    let jump_entity = app_entity;
 
-    div()
+    let mut card = div()
         .p(px(12.0))
         .rounded(px(8.0))
         .bg(bg_user_bar())
@@ -1171,73 +1406,56 @@ fn render_search_result_card(
         .flex()
         .flex_col()
         .gap(px(8.0))
-        // Top Row: Origin Channel + "Ir para mensagem" Button via crate::components::Button
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
+                .gap(px(8.0))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(4.0))
+                        .min_w(px(0.0))
                         .child(icon_hash(px(14.0), blurple()))
                         .child(
                             div()
                                 .text_color(channels_default())
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
-                                .child(channel_label),
+                                .truncate()
+                                .child(channel_label.to_string()),
                         ),
                 )
                 .child(
                     Button::new(
                         SharedString::from(format!("jump-to-msg-{}", message_id)),
-                        "Ir para mensagem",
+                        "Pular",
                     )
                     .size(ButtonSize::Sm)
                     .variant(ButtonVariant::Gray)
                     .on_click(move |_ev, _window, cx| {
                         jump_entity.update(cx, |state, cx| {
                             state.jump_to_message(&jump_cid, &jump_mid);
+                            state.close_search();
                             cx.notify();
                         });
                     }),
                 ),
-        )
-        // Author & Timestamp Row: using Avatar component!
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    Avatar::new(author_name.clone())
-                        .size(AvatarSize::Px24)
-                        .opt_src(hit.hit_message.author.avatar_url())
-                        .opt_decoration(hit.hit_message.author.avatar_decoration_data.clone()),
-                )
-                .child(
-                    div()
-                        .text_color(text_titles())
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(13.0))
-                        .child(author_name),
-                )
-                .child(
-                    div()
-                        .text_color(text_muted())
-                        .text_size(px(11.0))
-                        .child(timestamp_str),
-                ),
-        )
-        // Matched Hit Content (with Highlighted Terms in #fee75c / dark text)
-        .child(render_highlighted_text(&hit.hit_message.content, parsed_query))
-        .into_any_element()
+        );
+
+    if !hit.context_before.is_empty() {
+        card = card.child(render_search_context(&hit.context_before));
+    }
+    card = card.child(render_search_hit_message(&hit.hit_message, parsed_query));
+    if !hit.context_after.is_empty() {
+        card = card.child(render_search_context(&hit.context_after));
+    }
+
+    card.into_any_element()
 }
 
 /// Renders the scrollable results area or empty states
@@ -1265,7 +1483,20 @@ fn render_search_results_scroll_area(
         state
             .search_results
             .iter()
-            .map(|hit| render_search_result_card(app_entity.clone(), hit, parsed_query))
+            .map(|hit| {
+                let channel_label = hit
+                    .channel_name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| search_channel_label(state, &hit.channel_id));
+                render_search_result_card(
+                    app_entity.clone(),
+                    hit,
+                    parsed_query,
+                    &channel_label,
+                )
+            })
             .collect()
     };
 
@@ -1327,7 +1558,7 @@ fn render_search_pagination_dock(
                         Button::new("search-prev-page", "Anterior")
                             .size(ButtonSize::Sm)
                             .variant(ButtonVariant::Gray)
-                            .disabled(!can_prev)
+                            .disabled(state.is_searching || !can_prev)
                             .on_click(move |_ev, _window, cx| {
                                 let maybe_req = prev_entity.update(cx, |state, cx| {
                                     let new_offset = state.search_offset().saturating_sub(25);
@@ -1353,7 +1584,7 @@ fn render_search_pagination_dock(
                         Button::new("search-next-page", "Próxima")
                             .size(ButtonSize::Sm)
                             .variant(ButtonVariant::Gray)
-                            .disabled(!can_next)
+                            .disabled(state.is_searching || !can_next)
                             .on_click(move |_ev, _window, cx| {
                                 let maybe_req = next_entity.update(cx, |state, cx| {
                                     let new_offset = state.search_offset() + 25;
@@ -1639,6 +1870,43 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
+    fn test_date_filters_serialize_to_discord_snowflake_bounds() {
+        assert_eq!(
+            snowflake_at_date_start(NaiveDate::from_ymd_opt(2015, 1, 1).unwrap()),
+            Some("0".to_string())
+        );
+        assert_eq!(
+            snowflake_at_date_start(NaiveDate::from_ymd_opt(2015, 1, 2).unwrap()),
+            Some("362387865600000".to_string())
+        );
+
+        let before = SearchQuery::parse("before:2015-01-02").to_api_query_params();
+        assert!(before.contains(&("max_id", "362387865599999".to_string())));
+
+        let during = SearchQuery::parse("during:2015-01-01").to_api_query_params();
+        assert!(during.contains(&("min_id", "0".to_string())));
+        assert!(during.contains(&("max_id", "362387865599999".to_string())));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_highlight_ranges_are_utf8_safe_and_merge_overlaps() {
+        let dotted_i = "i\u{307}".to_string();
+        assert_eq!(highlight_ranges("İ X", &[dotted_i]), vec![(0, 2)]);
+        assert_eq!(highlight_ranges("İ X", &["x".to_string()]), vec![(3, 4)]);
+        assert_eq!(
+            highlight_ranges(
+                "alpha",
+                &["al".to_string(), "alp".to_string(), "ha".to_string()],
+            ),
+            vec![(0, 5)]
+        );
+        drop(render_highlighted_text(
+            "İ X",
+            &SearchQuery::parse("i\u{307} x"),
+        ));
+    }
+
+    #[::core::prelude::v1::test]
     fn test_to_api_query_params() {
         let q = SearchQuery::parse("from:123 has:link in:456 pinned:true bug");
         let params = q.to_api_query_params();
@@ -1647,5 +1915,42 @@ mod tests {
         assert!(params.contains(&("has", "link".to_string())));
         assert!(params.contains(&("pinned", "true".to_string())));
         assert!(params.contains(&("content", "bug".to_string())));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_result_context_uses_only_real_payload_text() {
+        let author = Author::new("u1", "user1");
+        let context = Message::new("context-1", "c1", author.clone(), "contexto real");
+        let mut hit = Message::new("hit-1", "c1", author.clone(), "resultado real");
+        let group = SearchResultGroup {
+            channel_id: "c1".into(),
+            channel_name: Some("geral".into()),
+            hit_message: hit.clone(),
+            context_before: vec![context.clone()],
+            context_after: vec![Message::new("after-1", "c1", author, "depois")],
+        };
+        let query = SearchQuery::parse("resultado");
+
+        assert_eq!(search_message_preview(&context).as_deref(), Some("contexto real"));
+        assert_eq!(search_message_preview(&hit).as_deref(), Some("resultado real"));
+        drop(render_search_context(&group.context_before));
+        drop(render_search_hit_message(&group.hit_message, &query));
+        drop(render_search_context(&group.context_after));
+
+        hit.content.clear();
+        hit.attachments.push(crate::domain::message::Attachment {
+            id: "att-1".into(),
+            filename: "arquivo-real.png".into(),
+            size: 10,
+            url: "https://example.invalid/arquivo-real.png".into(),
+            proxy_url: None,
+            content_type: Some("image/png".into()),
+            width: None,
+            height: None,
+        });
+        assert_eq!(
+            search_message_preview(&hit).as_deref(),
+            Some("arquivo-real.png")
+        );
     }
 }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::components::button::IconButton;
 use crate::domain::message::Reaction;
+use crate::protocol::media_cache::DiscordEmoji;
 use crate::tokens::colors::*;
 use crate::tokens::icons::icon_smile;
 use crate::tokens::spacing::*;
@@ -16,7 +17,8 @@ use crate::tokens::typography::*;
 // Callback Type Aliases
 // ============================================================================
 
-pub type ReactionActionCallback = Arc<dyn Fn(&str, &str, &mut Window, &mut App) + Send + Sync + 'static>;
+pub type ReactionActionCallback =
+    Arc<dyn Fn(&str, &str, &mut Window, &mut App) + Send + Sync + 'static>;
 pub type AddReactionCallback = Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
 
 // ============================================================================
@@ -28,6 +30,21 @@ pub const DEFAULT_REACTION_EMOJIS: &[&str] = &["👍", "❤️", "🔥", "🎉",
 // ============================================================================
 // Reaction Badge Component
 // ============================================================================
+
+fn render_reaction_emoji(emoji: &str) -> AnyElement {
+    if let Some(custom) = DiscordEmoji::from_tag(emoji) {
+        if let Some(url) = custom.cdn_url() {
+            return img(url)
+                .size(px(14.0))
+                .rounded(radius_xs())
+                .into_any_element();
+        }
+    }
+    div()
+        .text_size(px(14.0))
+        .child(emoji.to_string())
+        .into_any_element()
+}
 
 /// Renders an individual reaction badge with emoji, count, and active (me) state.
 pub fn render_reaction_badge(
@@ -72,11 +89,7 @@ pub fn render_reaction_badge(
         .rounded(px(8.0))
         .cursor_pointer()
         .hover(move |s| s.bg(hover_bg).border_color(hover_border))
-        .child(
-            div()
-                .text_size(px(14.0))
-                .child(emoji.clone()),
-        )
+        .child(render_reaction_emoji(&emoji))
         .child(
             div()
                 .text_size(font_size_xs())
@@ -105,10 +118,9 @@ pub fn render_add_reaction_button(
 ) -> AnyElement {
     let msg_id = message_id.to_string();
 
-    let mut btn = IconButton::with_icon(
-        format!("add-reaction-{}", message_id),
-        |sz, col| icon_smile(sz, col).into_any_element(),
-    )
+    let mut btn = IconButton::with_icon(format!("add-reaction-{}", message_id), |sz, col| {
+        icon_smile(sz, col).into_any_element()
+    })
     .size(px(26.0))
     .icon_size(px(14.0))
     .rounded(radius_md())
@@ -147,7 +159,11 @@ pub fn render_reaction_bar(
         .mt(space_2());
 
     for rx in reactions {
-        bar = bar.child(render_reaction_badge(rx, message_id, on_reaction_click.clone()));
+        bar = bar.child(render_reaction_badge(
+            rx,
+            message_id,
+            on_reaction_click.clone(),
+        ));
     }
 
     bar = bar.child(render_add_reaction_button(message_id, on_add_click));
@@ -206,6 +222,18 @@ mod tests {
     fn test_reaction_emojis_available() {
         assert_eq!(DEFAULT_REACTION_EMOJIS.len(), 8);
         assert!(DEFAULT_REACTION_EMOJIS.contains(&"🦀"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_custom_reaction_identity_uses_cdn_image() {
+        let emoji = DiscordEmoji::from_tag("<a:party:9002>").expect("valid custom emoji tag");
+        assert_eq!(emoji.to_tag(), "<a:party:9002>");
+        assert_eq!(
+            emoji.cdn_url().as_deref(),
+            Some("https://cdn.discordapp.com/emojis/9002.gif?size=64&quality=lossless")
+        );
+        let _rendered = render_reaction_emoji("<a:party:9002>");
+        let _unicode = render_reaction_emoji("👍");
     }
 
     #[::core::prelude::v1::test]

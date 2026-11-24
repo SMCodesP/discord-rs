@@ -1,0 +1,157 @@
+name: OpenCode Cloud Swarm (5-6 Agents per VM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      swarm_id:
+        description: "Swarm batch ID (e.g. wave2-batch1)"
+        required: true
+        type: string
+      tasks_json:
+        description: 'JSON array of up to 6 tasks: [{"id":"T-XXX","title":"...","prompt":"...","test_args":"--test ...","model":"opencode/..."}]'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+  RUST_MIN_STACK: "67108864"
+  DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/discord-rs-test-bus"
+
+jobs:
+  swarm-vm:
+    name: Swarm (${{ github.event.inputs.swarm_id }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux build deps + lld + jq + OpenCode CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            lld clang libclang-dev pkg-config curl git jq \
+            libasound2-dev libopus-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev libssl-dev
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Setup OpenCode Auth (if secret provided)
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          mkdir -p "$HOME/.local/share/opencode"
+          if [ -n "$OPENCODE_AUTH_JSON" ]; then
+            printf "%s" "$OPENCODE_AUTH_JSON" > "$HOME/.local/share/opencode/auth.json"
+            chmod 600 "$HOME/.local/share/opencode/auth.json"
+          fi
+
+      - name: Run N OpenCode Agents in Parallel Worktrees
+        env:
+          TASKS_JSON: ${{ github.event.inputs.tasks_json }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/swarm /tmp/swarm-logs
+          echo "$TASKS_JSON" > /tmp/swarm/tasks.json
+          COUNT=$(jq 'length' /tmp/swarm/tasks.json)
+          echo "Launching $COUNT parallel OpenCode agents inside this VM..."
+
+          PIDS=()
+          for i in $(seq 0 $((COUNT - 1))); do
+            TID=$(jq -r ".[$i].id" /tmp/swarm/tasks.json)
+            SLUG=$(echo "$TID" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-_')
+            MODEL=$(jq -r ".[$i].model // \"opencode/deepseek-v4.1-flash-free\"" /tmp/swarm/tasks.json)
+            PROMPT=$(jq -r ".[$i].prompt" /tmp/swarm/tasks.json)
+            BRANCH="swarm/${SLUG}-${GITHUB_RUN_ID}-${i}"
+            WT="/tmp/swarm/${SLUG}-${i}"
+
+            git worktree add -b "$BRANCH" "$WT" HEAD
+            echo "$BRANCH" > "/tmp/swarm-logs/${i}.branch"
+            echo "$WT" > "/tmp/swarm-logs/${i}.wt"
+
+            (
+              cd "$WT"
+              export XDG_CONFIG_HOME="/tmp/swarm-xdg-${i}"
+              mkdir -p "$XDG_CONFIG_HOME/opencode"
+              printf '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.json"
+              echo "=== [$TID] Starting opencode ($MODEL) in $WT (max 15m) ==="
+              timeout 900 opencode run -m "$MODEL" "Voce esta em uma VM Linux headless do GitHub Actions SEM navegador/Chrome. NAO tente ler ~/.config ou abrir Chrome; use apenas os arquivos do repositorio atual. $PROMPT"
+            ) > "/tmp/swarm-logs/${i}.log" 2>&1 &
+            PIDS+=($!)
+          done
+
+          for idx in "${!PIDS[@]}"; do
+            if wait "${PIDS[$idx]}"; then
+              echo "Agent #$idx finished OK"
+            else
+              echo "Agent #$idx exited non-zero (will still inspect worktree)"
+            fi
+          done
+
+      - name: Verify, Commit & Open Separate PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          set -u
+          COUNT=$(jq 'length' /tmp/swarm/tasks.json)
+          echo "## Swarm Summary (${{ github.event.inputs.swarm_id }})" >> "$GITHUB_STEP_SUMMARY"
+
+          for i in $(seq 0 $((COUNT - 1))); do
+            TID=$(jq -r ".[$i].id" /tmp/swarm/tasks.json)
+            TITLE=$(jq -r ".[$i].title" /tmp/swarm/tasks.json)
+            TEST_ARGS=$(jq -r ".[$i].test_args // \"\"" /tmp/swarm/tasks.json)
+            BRANCH=$(cat "/tmp/swarm-logs/${i}.branch")
+            WT=$(cat "/tmp/swarm-logs/${i}.wt")
+
+            echo "=== Verifying $TID in $WT ==="
+            (
+              cd "$WT"
+              git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md 2>/dev/null || true
+              if [ -z "$(git status --porcelain)" ]; then
+                echo "- **$TID**: no changes produced" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+
+              if ! cargo check; then
+                echo "- **$TID**: FAILED cargo check" >> "$GITHUB_STEP_SUMMARY"
+                tail -n 30 "/tmp/swarm-logs/${i}.log" || true
+                exit 0
+              fi
+
+              if [ -n "$TEST_ARGS" ]; then
+                export XDG_CONFIG_HOME="$(mktemp -d)"
+                if ! cargo test $TEST_ARGS --no-fail-fast; then
+                  echo "- **$TID**: FAILED cargo test ($TEST_ARGS)" >> "$GITHUB_STEP_SUMMARY"
+                  exit 0
+                fi
+              fi
+
+              git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md 2>/dev/null || true
+              git config user.name "opencode-cloud-swarm[bot]"
+              git config user.email "opencode-cloud-swarm[bot]@users.noreply.github.com"
+              git add -A
+              git commit -m "[$TID] $TITLE"
+              git fetch origin main
+              git rebase origin/main || git rebase --abort
+              git push -u origin "$BRANCH"
+              PR_URL=$(gh pr create --base main --head "$BRANCH" --title "[$TID] $TITLE" --body "PR gerado pelo OpenCode Cloud Swarm (${{ github.event.inputs.swarm_id }}, Run #${{ github.run_id }}).")
+              echo "- **$TID**: PR opened -> $PR_URL" >> "$GITHUB_STEP_SUMMARY"
+            )
+          done

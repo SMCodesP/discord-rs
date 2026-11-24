@@ -1,0 +1,153 @@
+name: OpenCode Cloud Worker
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Task ID (e.g. T-082)"
+        required: true
+        type: string
+      title:
+        description: "Short PR title"
+        required: true
+        type: string
+      prompt:
+        description: "Detailed task instructions & allowed files"
+        required: true
+        type: string
+      test_args:
+        description: "Optional cargo test args (e.g. --test quick_switcher_test)"
+        required: false
+        default: ""
+        type: string
+      model:
+        description: "OpenCode model ID (e.g. opencode/deepseek-v4.1-flash-free or opencode-go/hungerg-free)"
+        required: false
+        default: "opencode/deepseek-v4.1-flash-free"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+  RUST_MIN_STACK: "67108864"
+  DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/discord-rs-test-bus"
+
+jobs:
+  opencode-agent:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'agent-ready'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Linux build deps + lld + OpenCode CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            lld clang libclang-dev pkg-config curl git \
+            libasound2-dev libopus-dev libpipewire-0.3-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev \
+            libfontconfig1-dev libfreetype-dev libssl-dev
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Prepare task branch & prompt
+        id: prep
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          INPUT_TASK_ID: ${{ github.event.inputs.task_id }}
+          INPUT_TITLE: ${{ github.event.inputs.title }}
+          INPUT_PROMPT: ${{ github.event.inputs.prompt }}
+          INPUT_TEST_ARGS: ${{ github.event.inputs.test_args }}
+          INPUT_MODEL: ${{ github.event.inputs.model }}
+        run: |
+          if [ "$EVENT_NAME" = "issues" ]; then
+            TASK_ID="issue-${ISSUE_NUMBER}"
+            PR_TITLE="$ISSUE_TITLE"
+            PROMPT_FILE="/tmp/opencode-prompt.txt"
+            printf "Implemente a Issue #%s (%s) do discord-rs seguindo estritamente AGENTS.md (zero mocks, zero dados pessoais).\n\n%s\n\nAo terminar, rode cargo check e os testes relevantes." \
+              "$ISSUE_NUMBER" "$ISSUE_TITLE" "$ISSUE_BODY" > "$PROMPT_FILE"
+            MODEL="opencode/deepseek-v4.1-flash-free"
+            TEST_ARGS=""
+          else
+            TASK_ID="$(echo "$INPUT_TASK_ID" | tr '[:upper:] ' '[:lower:]-' | tr -cd 'a-z0-9-_')"
+            PR_TITLE="[${INPUT_TASK_ID}] ${INPUT_TITLE}"
+            PROMPT_FILE="/tmp/opencode-prompt.txt"
+            printf "%s\n" "$INPUT_PROMPT" > "$PROMPT_FILE"
+            MODEL="$INPUT_MODEL"
+            TEST_ARGS="$INPUT_TEST_ARGS"
+          fi
+          BRANCH="agent/${TASK_ID}-${GITHUB_RUN_ID}"
+          git checkout -b "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "pr_title=$PR_TITLE" >> "$GITHUB_OUTPUT"
+          echo "model=$MODEL" >> "$GITHUB_OUTPUT"
+          echo "test_args=$TEST_ARGS" >> "$GITHUB_OUTPUT"
+
+      - name: Run OpenCode Headless Agent
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XDG_CONFIG_HOME: /tmp/discord-rs-xdg
+        run: |
+          mkdir -p "$XDG_CONFIG_HOME/opencode" "$HOME/.local/share/opencode"
+          printf '{"$schema":"https://opencode.ai/config.json","permission":{"*":"allow"}}\n' > "$XDG_CONFIG_HOME/opencode/opencode.json"
+          if [ -n "$OPENCODE_AUTH_JSON" ]; then
+            printf "%s" "$OPENCODE_AUTH_JSON" > "$HOME/.local/share/opencode/auth.json"
+            chmod 600 "$HOME/.local/share/opencode/auth.json"
+          fi
+          opencode run -m "${{ steps.prep.outputs.model }}" "$(cat /tmp/opencode-prompt.txt)"
+
+      - name: Verify compilation & targeted tests
+        run: |
+          git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md 2>/dev/null || true
+          cargo check
+          if [ -n "${{ steps.prep.outputs.test_args }}" ]; then
+            export XDG_CONFIG_HOME="$(mktemp -d)"
+            cargo test ${{ steps.prep.outputs.test_args }} --no-fail-fast
+          fi
+
+      - name: Commit, Push & Open Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git checkout -- docs/PARITY_AUDIT.md docs/VISUAL_PARITY_DIFF.md 2>/dev/null || true
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes produced by OpenCode worker."
+            exit 0
+          fi
+          git config user.name "opencode-cloud-worker[bot]"
+          git config user.email "opencode-cloud-worker[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "${{ steps.prep.outputs.pr_title }}"
+          git fetch origin main
+          git rebase origin/main || git rebase --abort
+          git push -u origin "${{ steps.prep.outputs.branch }}"
+          BODY="PR gerado automaticamente pelo OpenCode Cloud Worker (Run #${{ github.run_id }})."
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            BODY="${BODY}\n\nCloses #${{ github.event.issue.number }}"
+          fi
+          gh pr create \
+            --base main \
+            --head "${{ steps.prep.outputs.branch }}" \
+            --title "${{ steps.prep.outputs.pr_title }}" \
+            --body "$(printf "%b" "$BODY")"
