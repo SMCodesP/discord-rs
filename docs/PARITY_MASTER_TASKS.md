@@ -61,38 +61,35 @@
   - **Suspeitas iniciais**: Nonce/AAD do `aead_xchacha20_poly1305_rtpsize` ou `aead_aes256_gcm_rtpsize`, extensão de header RTP (RFC 5285 / one-byte header stripping), integração com `davey` (transição de epoch / encrypt & decrypt de frames Opus, passthrough de frames de silêncio `0xF8 0xFF 0xFE`), SSRC mapping para participantes, speaking op 5.
   - **Critério de pronto**: Interoperabilidade RTP + AEAD + DAVE verificada nos mínimos detalhes da spec oficial do Discord Voice v8, testes cobrindo pacotes com/sem RTP header extension e DAVE frames.
 
-- [ ] **T-003** `[Voice-Stage]` — **Revisar Palco de Chamada, Controles de Voz/Vídeo, DM Ring e Estado Real**
-  - **Escopo**: `src/app/voice_call_panel.rs`, `src/app/header_bar.rs`, `src/app/state/voice.rs`, `src/app/channel_sidebar.rs`, `src/app/root_view.rs`.
-  - **Foco**: Latência real (RTT), anel verde ao falar, troca de dispositivo de entrada/saída em tempo real, mute/deafen sincronizados com Gateway (op 4), desconexão limpa sem vazamento de threads, paridade visual com o palco do Discord Oficial.
+- [x] **T-003** `[Voice-Stage]` — **Revisar Palco de Chamada, Controles de Voz/Vídeo, DM Ring e Estado Real**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `v-stage`, commit `ec7ff9b`): estado real de participantes/fala/`self_stream`, sincronização mute/deafen e dispatch único (`T-020`), RTT sem valor fixo, erros visíveis, seletores reais de microfone/saída/câmera, montagem de voz no `RootView`. Testes: `guild_voice` 7/7, `voice_stage_and_parity` 13/13, suíte de voz 71/71, unitários 10/10. Pipeline de transmissão remota de vídeo/tela segue em `T-023`.
 
-- [ ] **T-004** `[QA-Voice]` — **Suíte dedicada de testes de Voz & Análise de Logs Live**
-  - **Escopo**: `tests/audio_engine_test.rs`, `tests/voice_gateway_test.rs`, `tests/voice_udp_and_crypto_test.rs`, `tests/voice_session_test.rs`, `tests/voice_session_scall_test.rs`, `tests/voice_stage_and_parity_test.rs`, `tests/guild_voice_test.rs`.
-  - **Foco**: Rodar todos os testes de voz, adicionar testes de regressão para cada bug encontrado em `T-001`/`T-002`/`T-003`, e inspecionar `/tmp/discord-rs-logs/*.log` quando chamadas de teste forem realizadas entre `SMCodes` e `xinxyl_`.
+- [x] **T-004** `[QA-Voice]` — **Suíte dedicada de testes de Voz & Análise de Logs Live**
+  - **Concluído em 2026-11-24** (layer `qa-voice`, commit `22c78af`): suíte existente 77/77 e lib 175/175 passaram; adicionou 10 testes de regressão (4/10 passaram, **6 falharam expondo bugs reais**: IP Discovery sem validação, DAVE sem propagação, `NewSession` sem rebind UDP/chave, heartbeat não positivo aceito). Mantido na layer `qa-voice` até correção em `Voice-Proto`/`Voice-Audio`.
 
 ### P1 — Mensagens, Chat e Interações
 - [ ] **T-005** `[Chat-Msgs]` — **Revisar ciclo completo de Mensagens (DM e Guilda)**
   - **Escopo**: `src/chat/chat_view.rs`, `src/chat/message_list.rs`, `src/chat/editor.rs`, `src/chat/markdown.rs`, `src/chat/reactions.rs`, `src/app/state/messages.rs`.
   - **Foco**: Envio otimista + confirmação REST/Gateway (sem duplicação!), edição inline, exclusão com confirmação, reply/menção, fixar/desfixar, anexos/imagens, embeds, markdown completo (code blocks, spoilers, quotes, links, timestamps `<t:...>`), scroll infinito / paginação para cima, indicador de digitação (`TYPING_START`).
 
-- [ ] **T-006** `[QA-Msgs]` — **Suíte dedicada de testes de Mensagens & Fluxo Multi-Conta**
-  - **Escopo**: `tests/dm_messaging_test.rs`, `tests/editor_test.rs`, `tests/message_parity_and_member_list_test.rs`, `tests/search_state_and_filter_test.rs`.
-  - **Foco**: Cobrir todos os edge cases de envio/edição/deleção/reações/busca e validar contra os logs das instâncias `DiscordRS-SMCodes` e `DiscordRS-xinxyl`.
+- [x] **T-006** `[QA-Msgs]` — **Suíte dedicada de testes de Mensagens & Fluxo Multi-Conta**
+  - **Concluído em 2026-11-24** (layer `qa-msgs`, commit `a72a2ff`): adicionou **25 novos testes de QA** (11 chat + 14 render/search) reproduzindo **14 defeitos reais**. Suítes originais 56/56, E2E 9/9, `cargo check` OK. Mantido na layer `qa-msgs` para guiar correções.
 
 ### P1 — Perfil, Decorações e Efeitos
 - [ ] **T-007** `[Profile-Decor]` — **Paridade total de Perfil (Popout + Modal), Decorações de Avatar e Efeitos de Perfil**
   - **Escopo**: `src/app/user_profile_popout.rs`, `src/app/state/profile.rs`, `src/components/avatar.rs`, `src/components/profile_effect.rs`.
   - **Foco**: Popout ancorado fiel ao Discord, transição para modal completo, decorações de avatar visíveis em TODOS os lugares (DM list, chat, member sidebar, voice, friends hub, active now, user panel, popout, modal), efeitos de perfil com animação temporal real (`start`, `duration`, `loop`, `loopDelay`), banners, badges, cargos, notas, envio rápido de mensagem.
 
-- [ ] **T-008** `[QA-Profile]` — **Suíte dedicada de testes de Perfil & Decorações**
-  - **Escopo**: `tests/user_profile_popout_test.rs`, `tests/avatar_decorations_and_profile_effects_test.rs`, `tests/profile_timeline_and_quick_send_test.rs`.
+- [x] **T-008** `[QA-Profile]` — **Suíte dedicada de testes de Perfil & Decorações**
+  - **Concluído em 2026-11-24** (layer `qa-profile`, commit `56d7327`): +16 novos testes (`44/52` passaram, **8 falhas expondo bugs reais**: 6 em propagação/renderização de decoração + 4 pontos de `Avatar` omitindo dados/decoração, e **2 no quick-send onde resposta antiga fecha o popout atual**). Confirmado: nenhum avatar de usuário desenhado fora do componente `Avatar`. Mantido na layer `qa-profile` até correção por `Profile-Decor`.
 
 ### P1 — GIFs, Stickers e Emojis
 - [ ] **T-009** `[Media-Gifs]` — **Paridade total de GIFs, Stickers, Emojis e Reações**
   - **Escopo**: `src/chat/media_picker.rs`, `src/chat/reactions.rs`, `src/protocol/discord_api.rs` (rotas de GIF/Tenor, stickers, emojis), `src/protocol/media_cache.rs`.
   - **Foco**: Busca e trending de GIFs funcionando de verdade via API, renderização animada/preview de GIFs no picker e no chat, stickers padrão + guilda, emojis unicode + customizados (incluindo animados), favoritos/recentes, envio real ao clicar.
 
-- [ ] **T-010** `[QA-Media]` — **Suíte dedicada de testes de GIFs, Stickers, Emojis e Cache de Mídia**
-  - **Escopo**: `tests/media_cache_test.rs` + novos testes para `media_picker` e `reactions`.
+- [x] **T-010** `[QA-Media]` — **Suíte dedicada de testes de GIFs, Stickers, Emojis e Cache de Mídia**
+  - **Concluído em 2026-11-24** (layer `qa-media`, commit `555b2c6`): adicionou `tests/media_picker_and_reactions_test.rs` (1066 linhas, 34 testes). `media_cache_test`: 5/5 passaram; nova suíte: 23 passaram e **11 falharam expondo regressões reais** (parsing GIF/Tenor, URLs de stickers, recentes customizados, disponibilidade, cache HTTP/refresh e reações add/remove). Mantido na layer `qa-media` até correção em `T-009`/`T-018` para manter `main` verde.
 
 ### P1 — Design & Paridade Visual Pixel-a-Pixel
 - [ ] **T-011** `[Design-Shell]` — **Paridade visual: Guild Rail, Channel Sidebar, Header Bar, User Panel**
@@ -155,7 +152,8 @@
   - **O que falta/corrigir:** buffer por SSRC com ordenação por sequência/timestamp, tolerância a wrap, política adaptativa de atraso, PLC em lacunas e métricas de perda/jitter.
   - **Critério de pronto:** testes com fora de ordem, duplicado, perda isolada, burst loss e wrap de `u16/u32` produzem ordem correta, sem duplicação audível, com PLC acionado; teste de carga mantém latência dentro do orçamento documentado.
 
-- [ ] **T-020** — **P1** — **Voz/Estado** — **Corrigir semântica deafen→mute e eliminar dispatch duplicado**
+- [x] **T-020** — **P1** — **Voz/Estado** — **Corrigir semântica deafen→mute e eliminar dispatch duplicado**
+  - **Concluído em 2026-11-24** junto com `T-003` (`Voice-Stage`, commit `ec7ff9b`, 71/71 testes de voz verdes).
   - **Arquivos:** `src/protocol/voice_session.rs:806-831`, `src/media/audio.rs:104-121`, `src/app/state/voice.rs:410-471`.
   - **Evidência:** `set_deafened(true)` silencia apenas a saída e envia Opcode 4 com `self_mute` atual, que pode ser `false`; o capturador continua transmitindo. `AppState` corrige `current_user.is_muted`, mas chama apenas `set_deafened`. Além disso, mute/deafen/device switch são despachados duas vezes: uma pela sessão guardada na chamada e outra pelo `ClientManager`, que retorna a mesma sessão.
   - **O que falta/corrigir:** tornar `VoiceSession` a única autoridade; deafen deve implicar mute local e remoto, e undeafen deve restaurar o estado anterior de mute; remover caminhos duplicados de `AppState`.
@@ -292,3 +290,28 @@
   - **Evidência:** os logs atuais contêm nome de usuário, Snowflakes de usuário/guilda/canal/mensagem e nomes de servidor. Isso contraria a política de não vazar dados da conta e torna relatórios/diagnósticos perigosos. A divisão `VoiceDiag` já redige alguns campos, mas o restante da pilha não.
   - **O que falta/corrigir:** helper estruturado de redação, IDs sintéticos/parciais, remover conteúdo e nomes de contas, mascarar URLs com IDs e garantir que erros HTTP não incluam payload sensível.
   - **Critério de pronto:** teste com sentinels sintéticos varre todos os logs e falha se encontrar Snowflake, username, nome de servidor, conteúdo ou token; relatórios de suporte podem ser gerados sem dado pessoal.
+
+- [ ] **T-043** — **P1** — **Mídia/GIFs/Reações (Fase 2)** — **Corrigir 11 regressões reais de GIFs/Tenor, Stickers, Emojis, Cache HTTP e Reações + ligar `chat_view.rs` à API real**
+  - **Arquivos:** `src/chat/chat_view.rs`, `src/app/state/messages.rs`, `src/app/state/gateway_events.rs`, `src/protocol/client_manager.rs`, `src/protocol/transport.rs`, `src/protocol/discord_api.rs`, `src/chat/media_picker.rs`, `src/chat/reactions.rs`, `src/protocol/media_cache.rs`.
+  - **Evidência:** `Media-Gifs` (`hub-task-2914`) + `QA-Media` (`commit 555b2c6`, `tests/media_picker_and_reactions_test.rs` com 11 falhas reais).
+  - **Critério de pronto:** os 34/34 testes de `tests/media_picker_and_reactions_test.rs` passam e `chat_view.rs` busca GIFs trending/search e stickers reais.
+
+- [x] **T-044** `[QA-Media]` — **P1** — **QA/Mídia & Chat** — **Suíte dedicada de testes para Anexos, Imagens, Embeds Ricos e Markdown de Mídia**
+  - **Concluído em 2026-11-24** (layer `qa-media`, commit `37e8b5a`): adicionou `tests/attachments_embeds_markdown_test.rs` com 28 testes isolados (15 passaram, **13 falharam expondo gaps reais**: spoiler em anexos, schema de embeds, cache `MESSAGE_UPDATE`, timestamps, menções fabricadas/email, links, escapes, code blocks e emoji Unicode jumbo).
+
+- [ ] **T-048** — **P1** — **Chat/Mídia** — **Corrigir 13 gaps reais de Anexos, Embeds e Markdown expostos por `QA-Media`**
+  - **Arquivos:** `src/chat/markdown.rs`, `src/chat/message_list.rs`, `src/domain/message.rs`, `src/protocol/discord_api.rs`, `src/app/state/gateway_events.rs`.
+  - **Evidência:** `QA-Media` (`commit 37e8b5a`, `tests/attachments_embeds_markdown_test.rs`, 13 falhas reais).
+  - **Critério de pronto:** 28/28 testes de `tests/attachments_embeds_markdown_test.rs` passando.
+
+- [ ] **T-049** `[QA-Media]` — **P1** — **QA/Notificações & Presença** — **Suíte de regressão para Notificações, Badges de Unread/Menção, Contadores e Presença em Tempo Real**
+  - **Arquivos:** `tests/notifications_badges_and_presence_test.rs` (novo).
+  - **Status:** Em execução por `QA-Media`.
+
+- [ ] **T-045** `[QA-Voice]` — **P0** — **QA/Áudio** — **Testes de regressão para PCM/resampling 44.1↔48kHz, jitter/underrun, Opus PLC, mixer multi-speaker e transições mute/deafen/speaking**
+  - **Arquivos:** `tests/audio_engine_regression_test.rs` (novo).
+  - **Status:** Em execução por `QA-Voice`.
+
+- [ ] **T-046** `[QA-Msgs]` — **P1** — **QA/UX & Menus** — **Testes de regressão para botões/menus inertes (`T-033`, `T-034`), atalhos anunciados (`T-035`) e layout Friends Hub**
+  - **Arquivos:** `tests/ux_menus_keybinds_regression_test.rs` (novo).
+  - **Status:** Em execução por `QA-Msgs`.
