@@ -1,14 +1,16 @@
+use gpui::component::input::{InputEvent, InputState};
 use gpui::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui::prelude::*;
 use gpui::*;
 
 use super::state::{
     ActiveModal, ActiveVoiceCall, AppState, ChannelItemState, ChannelKind, CurrentUserProfile,
-    FriendsTab,
+    FriendsTab, SettingsTab,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::badge::MentionBadge;
 use crate::components::button::IconButton;
+use crate::components::text_input::TextInput;
 use crate::domain::user::{ActivityType, PresenceStatus};
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
@@ -28,6 +30,9 @@ fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
 pub struct ChannelSidebar {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
+    dm_search_state: Option<Entity<InputState>>,
+    dm_search_sub: Option<Subscription>,
+    dm_search_query: String,
 }
 
 impl ChannelSidebar {
@@ -47,12 +52,37 @@ impl ChannelSidebar {
         Self {
             state,
             focus_handle: cx.focus_handle(),
+            dm_search_state: None,
+            dm_search_sub: None,
+            dm_search_query: String::new(),
         }
+    }
+
+    fn ensure_dm_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dm_search_state.is_some() {
+            return;
+        }
+        let st = cx.new(|cx| InputState::new(window, cx));
+        let sub = cx.subscribe_in(&st, window, |this, st, event: &InputEvent, _window, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.dm_search_query = st.read(cx).value().to_string();
+                cx.notify();
+            }
+        });
+        self.dm_search_state = Some(st);
+        self.dm_search_sub = Some(sub);
     }
 }
 
 impl Render for ChannelSidebar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_dm_search_input(window, cx);
+        let dm_search_state = self
+            .dm_search_state
+            .as_ref()
+            .expect("dm_search_state must be initialized")
+            .clone();
+        let dm_query = self.dm_search_query.clone();
         let state = self.state.read(cx);
         let selected_guild = state.get_selected_guild().cloned();
         let selected_channel_id = state.selected_channel_id.clone();
@@ -64,11 +94,11 @@ impl Render for ChannelSidebar {
         let header_el = if let Some(ref guild) = selected_guild {
             render_server_header(&guild.name)
         } else {
-            render_dm_search_header()
+            render_dm_search_header(&dm_search_state)
         };
 
         let scroll_content: Vec<AnyElement> = if is_dm {
-            render_dm_section(state, selected_channel_id.as_deref(), &app_entity)
+            render_dm_section(state, selected_channel_id.as_deref(), &dm_query, &app_entity)
         } else if let Some(ref guild) = selected_guild {
             render_guild_channels_section(
                 state,
@@ -176,7 +206,7 @@ fn render_server_header(guild_name: &str) -> AnyElement {
         .into_any_element()
 }
 
-fn render_dm_search_header() -> AnyElement {
+fn render_dm_search_header(search_state: &Entity<InputState>) -> AnyElement {
     div()
         .h(header_height())
         .px(px(12.0))
@@ -188,19 +218,11 @@ fn render_dm_search_header() -> AnyElement {
         .child(
             div()
                 .w_full()
-                .h(px(28.0))
-                .px(px(8.0))
-                .rounded(radius_sm())
-                .bg(bg_server())
-                .flex()
-                .items_center()
-                .justify_between()
-                .cursor_pointer()
                 .child(
-                    div()
-                        .text_color(text_muted())
-                        .text_size(px(12.0))
-                        .child("Encontre ou comece uma conversa"),
+                    TextInput::new("dm-search-input", search_state)
+                        .placeholder("Encontre ou comece uma conversa")
+                        .show_paste(false)
+                        .show_clear(true),
                 ),
         )
         .into_any_element()
@@ -213,6 +235,7 @@ fn render_dm_search_header() -> AnyElement {
 fn render_dm_section(
     state: &AppState,
     selected_channel_id: Option<&str>,
+    search_query: &str,
     app_entity: &Entity<AppState>,
 ) -> Vec<AnyElement> {
     let is_amigos_active =
@@ -277,35 +300,137 @@ fn render_dm_section(
             icon_sparkles(px(20.0), text_muted()),
             false,
             None,
-            |_ev, _win, _cx| {},
+            {
+                let entity = app_entity.clone();
+                move |_ev, _win, cx| {
+                    entity.update(cx, |s, cx| {
+                        open_nitro_settings(s);
+                        cx.notify();
+                    });
+                }
+            },
         ),
         render_dm_nav_button(
             "Loja",
             icon_gift(px(20.0), text_muted()),
             false,
             None,
-            |_ev, _win, _cx| {},
+            move |_ev, _win, cx| {
+                cx.open_url("https://discord.com/shop");
+            },
         ),
         render_dm_section_header(app_entity),
     ];
 
-    if state.dm_channels.is_empty() {
+    let query = search_query.trim().to_lowercase();
+    let visible_dms: Vec<&ChannelItemState> = state
+        .dm_channels
+        .iter()
+        .filter(|dm| {
+            if query.is_empty() {
+                return true;
+            }
+            dm.name.to_lowercase().contains(&query)
+                || dm
+                    .recipient_names
+                    .iter()
+                    .any(|name| name.to_lowercase().contains(&query))
+        })
+        .collect();
+
+    if visible_dms.is_empty() {
+        let empty_text = if query.is_empty() {
+            "Nenhuma conversa direta aberta."
+        } else {
+            "Nenhuma conversa encontrada."
+        };
         items.push(
             div()
                 .px(px(8.0))
                 .py(px(12.0))
                 .text_color(text_muted())
                 .text_size(px(12.0))
-                .child("Nenhuma conversa direta aberta.")
+                .child(empty_text)
                 .into_any_element(),
         );
     } else {
-        for dm in &state.dm_channels {
+        for dm in visible_dms {
             items.push(render_dm_item(dm, state, selected_channel_id, app_entity));
         }
     }
 
     items
+}
+
+/// Opens the official Nitro settings tab through the existing User Settings modal.
+pub fn open_nitro_settings(state: &mut AppState) {
+    state.set_settings_tab(SettingsTab::Nitro);
+    state.open_modal(ActiveModal::UserSettings);
+}
+
+/// Closes a DM locally: removes it from the sidebar and pinned list, and leaves
+/// the Friends Hub selected when the closed DM was open.
+pub fn close_dm_channel(state: &mut AppState, channel_id: &str) -> bool {
+    let before = state.dm_channels.len();
+    state.dm_channels.retain(|dm| dm.id != channel_id);
+    state.pinned_dms.retain(|id| id != channel_id);
+    if state.selected_channel_id.as_deref() == Some(channel_id) {
+        state.selected_channel_id = None;
+        state.friends_tab = FriendsTab::Online;
+    }
+    state.dm_channels.len() != before
+}
+
+/// Marks a guild channel or DM as read, clearing unread and mention badges.
+pub fn mark_channel_read(state: &mut AppState, channel_id: &str) -> bool {
+    let mut changed = false;
+    for guild in &mut state.guilds {
+        let mut touched = false;
+        for category in &mut guild.categories {
+            for channel in &mut category.channels {
+                if channel.id == channel_id {
+                    changed |= channel.unread || channel.mention_count > 0;
+                    channel.unread = false;
+                    channel.mention_count = 0;
+                    touched = true;
+                }
+            }
+        }
+        if touched {
+            guild.mention_count = guild
+                .categories
+                .iter()
+                .flat_map(|category| category.channels.iter())
+                .map(|channel| channel.mention_count)
+                .sum();
+            guild.unread = guild
+                .categories
+                .iter()
+                .flat_map(|category| category.channels.iter())
+                .any(|channel| channel.unread);
+        }
+    }
+    if let Some(dm) = state.dm_channels.iter_mut().find(|dm| dm.id == channel_id) {
+        changed |= dm.unread || dm.mention_count > 0;
+        dm.unread = false;
+        dm.mention_count = 0;
+    }
+    changed
+}
+
+/// Toggles local mute for a channel and returns the new muted state.
+pub fn toggle_channel_mute(state: &mut AppState, channel_id: &str) -> bool {
+    if state.muted_channels.remove(channel_id) {
+        false
+    } else {
+        state.muted_channels.insert(channel_id.to_string());
+        true
+    }
+}
+
+/// Whether the channel is locally muted.
+pub fn is_channel_muted(state: &AppState, channel_id: &str) -> bool {
+    state.muted_channels.contains(channel_id)
 }
 
 fn render_dm_nav_button(
@@ -525,6 +650,8 @@ fn render_dm_item(
     // Action icons
     let add_entity = entity.clone();
     let add_cid = dm_id.clone();
+    let close_entity = entity.clone();
+    let close_cid = dm_id.clone();
 
     row = row.child(
         div()
@@ -554,7 +681,14 @@ fn render_dm_item(
                 .size(px(16.0))
                 .icon_size(px(12.0))
                 .rounded(radius_full())
-                .tooltip("Fechar DM"),
+                .tooltip("Fechar DM")
+                .on_click(move |_event, _window, cx| {
+                    let cid = close_cid.clone();
+                    close_entity.update(cx, |s, cx| {
+                        close_dm_channel(s, &cid);
+                        cx.notify();
+                    });
+                }),
             ),
     );
 
@@ -610,6 +744,7 @@ fn render_guild_channels_section(
         if !is_collapsed {
             for channel in &category.channels {
                 category_elements.push(render_channel_entry(
+                    &guild.id,
                     channel,
                     state,
                     selected_channel_id,
@@ -716,6 +851,7 @@ fn render_channel_icon(
 }
 
 fn render_channel_entry(
+    guild_id: &str,
     channel: &ChannelItemState,
     state: &AppState,
     selected_channel_id: Option<&str>,
@@ -728,6 +864,7 @@ fn render_channel_entry(
     let is_selected = selected_channel_id == Some(&ch_id);
     let is_unread = channel.unread;
     let mention_count = channel.mention_count;
+    let is_muted = is_channel_muted(state, &ch_id);
     let entity = app_entity.clone();
     let typography = typo_channel_item();
 
@@ -891,15 +1028,50 @@ fn render_channel_entry(
         );
 
     // Context menu via gpui-kit ContextMenuExt
+    let read_entity = entity.clone();
+    let read_id = ch_id.clone();
+    let mute_entity = entity.clone();
+    let mute_id = ch_id.clone();
+    let mute_label = if is_muted {
+        "Reativar canal"
+    } else {
+        "Silenciar canal"
+    };
+    let channel_link = format!("https://discord.com/channels/{}/{}", guild_id, ch_id);
     let mut channel_container =
         div()
             .flex()
             .flex_col()
-            .child(row.context_menu(|menu: PopupMenu, _window, _cx| {
-                menu.item(PopupMenuItem::new("Marcar como lido"))
-                    .item(PopupMenuItem::new("Silenciar canal"))
-                    .separator()
-                    .item(PopupMenuItem::new("Copiar link do canal"))
+            .child(row.context_menu(move |menu: PopupMenu, _window, _cx| {
+                let link = channel_link.clone();
+                let cid_read = read_id.clone();
+                let ent_read = read_entity.clone();
+                let cid_mute = mute_id.clone();
+                let ent_mute = mute_entity.clone();
+                menu.item(
+                    PopupMenuItem::new("Marcar como lido").on_click(move |_ev, _win, cx| {
+                        let cid = cid_read.clone();
+                        ent_read.update(cx, |state, cx| {
+                            mark_channel_read(state, &cid);
+                            cx.notify();
+                        });
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new(mute_label).on_click(move |_ev, _win, cx| {
+                        let cid = cid_mute.clone();
+                        ent_mute.update(cx, |state, cx| {
+                            toggle_channel_mute(state, &cid);
+                            cx.notify();
+                        });
+                    }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Copiar link do canal").on_click(move |_ev, _win, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                    }),
+                )
             }));
 
     // Voice participants under channel

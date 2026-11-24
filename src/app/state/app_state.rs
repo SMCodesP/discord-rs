@@ -31,6 +31,8 @@ pub struct AppState {
     pub user_settings_tab: SettingsTab,
     /// Set of collapsed category IDs
     pub collapsed_categories: HashSet<String>,
+    /// Channel IDs muted locally from the sidebar context menu
+    pub muted_channels: HashSet<String>,
     /// Logged in user profile
     pub current_user: CurrentUserProfile,
     /// List of user's guilds
@@ -210,6 +212,7 @@ impl AppState {
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
             collapsed_categories: HashSet::new(),
+            muted_channels: HashSet::new(),
             current_user: CurrentUserProfile {
                 id: String::new(),
                 username: String::new(),

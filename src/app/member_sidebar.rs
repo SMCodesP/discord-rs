@@ -318,6 +318,7 @@ fn render_member_row(
     let entity_profile = app_entity.clone();
     let entity_menu = app_entity.clone();
     let menu_uid = member.id.clone();
+    let menu_name = member.name.clone();
 
     let mut row = div()
         .id(ElementId::Name(format!("member-row-{}", member.id).into()))
@@ -407,12 +408,18 @@ fn render_member_row(
     let uid1 = menu_uid.clone();
     let app2 = entity_menu.clone();
     let uid2 = menu_uid.clone();
+    let name2 = menu_name.clone();
+    let app3 = entity_menu.clone();
+    let uid3 = menu_uid.clone();
 
     row.context_menu(move |menu: PopupMenu, _window, _cx| {
         let a1 = app1.clone();
         let u1 = uid1.clone();
         let a2 = app2.clone();
         let u2 = uid2.clone();
+        let n2 = name2.clone();
+        let a3 = app3.clone();
+        let u3 = uid3.clone();
         menu
             .item(
                 gpui::component::menu::PopupMenuItem::new("Perfil").on_click(move |ev, _win, cx| {
@@ -425,18 +432,43 @@ fn render_member_row(
                 }),
             )
             .item(
-                gpui::component::menu::PopupMenuItem::new("Mensagem").on_click(move |ev, _win, cx| {
-                    let pos = ev.position();
+                gpui::component::menu::PopupMenuItem::new("Mensagem").on_click(move |_ev, _win, cx| {
                     a2.update(cx, |s, cx| {
-                        s.open_user_profile(&u2, Some(pos));
+                        open_member_dm(s, &u2, &n2);
                         cx.notify();
                     });
                 }),
             )
             .separator()
-            .item(gpui::component::menu::PopupMenuItem::new("Mencionar"))
+            .item(
+                gpui::component::menu::PopupMenuItem::new("Mencionar").on_click(move |_ev, _win, cx| {
+                    a3.update(cx, |s, cx| {
+                        mention_member(s, &u3);
+                        cx.notify();
+                    });
+                }),
+            )
     })
     .into_any_element()
+}
+
+/// Opens (or reuses) the 1:1 DM with a guild member.
+pub fn open_member_dm(state: &mut AppState, user_id: &str, display_name: &str) {
+    if !user_id.is_empty() {
+        state.open_dm_with_user(user_id, display_name);
+    }
+}
+
+/// Inserts a real Discord mention token for the member into the composer draft.
+pub fn mention_member(state: &mut AppState, user_id: &str) {
+    if user_id.is_empty() {
+        return;
+    }
+    let token = format!("<@{}>", user_id);
+    if !state.active_draft.is_empty() && !state.active_draft.ends_with(' ') {
+        state.active_draft.push(' ');
+    }
+    state.active_draft.push_str(&token);
 }
 
 fn render_bot_tag() -> AnyElement {
