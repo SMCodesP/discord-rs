@@ -76,14 +76,30 @@ pub enum TransportEvent {
         channel_id: String,
         message_id: String,
         user_id: String,
-        emoji: String,
+        emoji_name: String,
+        emoji_id: Option<String>,
+        emoji_animated: bool,
     },
     /// A reaction emoji was removed from a message.
     ReactionRemove {
         channel_id: String,
         message_id: String,
         user_id: String,
-        emoji: String,
+        emoji_name: String,
+        emoji_id: Option<String>,
+        emoji_animated: bool,
+    },
+    /// Authoritative reaction state after API reconciliation.
+    ReactionReconcile {
+        channel_id: String,
+        message_id: String,
+        reaction: crate::domain::message::Reaction,
+    },
+    /// Roll back optimistic reaction changes after API failure.
+    ReactionRollback {
+        channel_id: String,
+        message_id: String,
+        reactions: Vec<crate::domain::message::Reaction>,
     },
     /// Presence status or activity for a user changed.
     PresenceUpdate {
@@ -295,6 +311,15 @@ pub trait DiscordTransport: Send + Sync {
 
     /// Post a sticker message to a text channel.
     async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> anyhow::Result<Message>;
+
+    /// Fetch a single message by ID. Default: unsupported.
+    async fn get_message(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+    ) -> anyhow::Result<Option<Message>> {
+        Ok(None)
+    }
 
     /// Add an emoji reaction to a message.
     async fn add_reaction(

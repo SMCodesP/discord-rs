@@ -98,8 +98,15 @@ impl Attachment {
 /// A reaction applied to a message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reaction {
-    /// Unicode emoji character (e.g. "🦀", "👍") or custom emoji name/id.
-    pub emoji: String,
+    /// Unicode emoji character or custom emoji name.
+    #[serde(alias = "emoji", default)]
+    pub emoji_name: String,
+    /// Custom emoji snowflake ID. None for unicode reactions.
+    #[serde(default)]
+    pub emoji_id: Option<String>,
+    /// Whether the custom emoji is animated.
+    #[serde(default)]
+    pub emoji_animated: bool,
     /// Total count of users who reacted with this emoji.
     pub count: u32,
     /// Whether the current authenticated user has reacted with this emoji.
@@ -107,13 +114,81 @@ pub struct Reaction {
 }
 
 impl Reaction {
+    /// Creates a unicode reaction.
     pub fn new(emoji: impl Into<String>, count: u32, me: bool) -> Self {
         Self {
-            emoji: emoji.into(),
+            emoji_name: emoji.into(),
+            emoji_id: None,
+            emoji_animated: false,
             count,
             me,
         }
     }
+
+    /// Creates a reaction with full emoji identity.
+    pub fn from_parts(
+        emoji_name: impl Into<String>,
+        emoji_id: Option<String>,
+        emoji_animated: bool,
+        count: u32,
+        me: bool,
+    ) -> Self {
+        Self {
+            emoji_name: emoji_name.into(),
+            emoji_id,
+            emoji_animated,
+            count,
+            me,
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.emoji_id.is_some()
+    }
+
+    /// Canonical identity key: `name:id` for custom, `name` for unicode.
+    pub fn reaction_key(&self) -> String {
+        reaction_key(&self.emoji_name, self.emoji_id.as_deref())
+    }
+
+    /// API path component for PUT/DELETE reaction endpoints.
+    pub fn api_emoji(&self) -> String {
+        self.reaction_key()
+    }
+
+    pub fn cdn_url(&self) -> Option<String> {
+        self.emoji_id.as_ref().map(|id| {
+            if self.emoji_animated {
+                format!(
+                    "https://cdn.discordapp.com/emojis/{}.gif?size=64&quality=lossless",
+                    id
+                )
+            } else {
+                format!(
+                    "https://cdn.discordapp.com/emojis/{}.png?size=64&quality=lossless",
+                    id
+                )
+            }
+        })
+    }
+}
+
+/// Canonical reaction identity key: `name:id` for custom, `name` for unicode.
+pub fn reaction_key(emoji_name: &str, emoji_id: Option<&str>) -> String {
+    match emoji_id {
+        Some(id) if !id.is_empty() => format!("{}:{}", emoji_name, id),
+        _ => emoji_name.to_string(),
+    }
+}
+
+/// Parses a canonical reaction key into `(name, id)`.
+pub fn parse_reaction_key(key: &str) -> (String, Option<String>) {
+    if let Some((name, id)) = key.rsplit_once(':') {
+        if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+            return (name.to_string(), Some(id.to_string()));
+        }
+    }
+    (key.to_string(), None)
 }
 
 /// Author field inside a rich embed.
@@ -322,25 +397,23 @@ impl Message {
         self
     }
 
-    /// Adds a reaction to the message. If emoji already exists, increments count.
-    pub fn add_reaction(&mut self, emoji: &str, is_me: bool) {
-        if let Some(existing) = self.reactions.iter_mut().find(|r| r.emoji == emoji) {
-            existing.count += 1;
+    /// Adds a reaction to the message by canonical reaction key.
+    pub fn add_reaction(&mut self, key: &str, is_me: bool) {
+        if let Some(existing) = self.reactions.iter_mut().find(|r| r.reaction_key() == key) {
+            existing.count = existing.count.saturating_add(1);
             if is_me {
                 existing.me = true;
             }
-        } else {
-            self.reactions.push(Reaction {
-                emoji: emoji.to_string(),
-                count: 1,
-                me: is_me,
-            });
+            return;
         }
+        let (name, id) = parse_reaction_key(key);
+        let animated = id.is_some() && key.starts_with("<a:");
+        self.reactions.push(Reaction::from_parts(name, id, animated, 1, is_me));
     }
 
-    /// Removes a reaction from the message. If count hits zero, reaction is removed.
-    pub fn remove_reaction(&mut self, emoji: &str, is_me: bool) {
-        if let Some(pos) = self.reactions.iter().position(|r| r.emoji == emoji) {
+    /// Removes a reaction from the message by canonical reaction key.
+    pub fn remove_reaction(&mut self, key: &str, is_me: bool) {
+        if let Some(pos) = self.reactions.iter().position(|r| r.reaction_key() == key) {
             let reaction = &mut self.reactions[pos];
             if reaction.count > 1 {
                 reaction.count -= 1;
@@ -350,6 +423,39 @@ impl Message {
             } else {
                 self.reactions.remove(pos);
             }
+        }
+    }
+
+    /// Toggles reaction by key. Returns `Some(true)` if added, `Some(false)` if removed.
+    pub fn toggle_reaction(&mut self, key: &str) -> Option<bool> {
+        let pos = self.reactions.iter().position(|r| r.reaction_key() == key)?;
+        let reaction = &mut self.reactions[pos];
+        if reaction.me {
+            if reaction.count > 1 {
+                reaction.count -= 1;
+                reaction.me = false;
+            } else {
+                self.reactions.remove(pos);
+            }
+            Some(false)
+        } else {
+            reaction.count = reaction.count.saturating_add(1);
+            reaction.me = true;
+            Some(true)
+        }
+    }
+
+    /// Applies authoritative reaction state from transport/API.
+    pub fn set_reaction(&mut self, reaction: Reaction) {
+        let key = reaction.reaction_key();
+        if reaction.count == 0 {
+            self.reactions.retain(|r| r.reaction_key() != key);
+            return;
+        }
+        if let Some(existing) = self.reactions.iter_mut().find(|r| r.reaction_key() == key) {
+            *existing = reaction;
+        } else {
+            self.reactions.push(reaction);
         }
     }
 }

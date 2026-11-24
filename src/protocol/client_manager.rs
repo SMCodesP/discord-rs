@@ -581,13 +581,82 @@ impl ClientManager {
         transport
             .add_reaction(&real_channel_id, message_id, emoji)
             .await?;
+        let (emoji_name, emoji_id) = crate::domain::message::parse_reaction_key(emoji);
         let _ = self.event_tx.send(TransportEvent::ReactionAdd {
             channel_id: real_channel_id,
             message_id: message_id.to_string(),
             user_id: "me".to_string(),
-            emoji: emoji.to_string(),
+            emoji_name,
+            emoji_id,
+            emoji_animated: false,
         });
         Ok(())
+    }
+
+    /// Removes a reaction emoji from a message using the active transport
+    pub async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => {
+                        self.emit_event(TransportEvent::DmChannelResolved {
+                            temp_id: channel_id.to_string(),
+                            channel: ch.clone(),
+                        });
+                        ch.id
+                    }
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport
+            .remove_reaction(&real_channel_id, message_id, emoji)
+            .await?;
+        let (emoji_name, emoji_id) = crate::domain::message::parse_reaction_key(emoji);
+        let _ = self.event_tx.send(TransportEvent::ReactionRemove {
+            channel_id: real_channel_id,
+            message_id: message_id.to_string(),
+            user_id: "me".to_string(),
+            emoji_name,
+            emoji_id,
+            emoji_animated: false,
+        });
+        Ok(())
+    }
+
+    /// Fetches a single message by ID from a channel.
+    pub async fn get_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<Option<Message>> {
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.get_message(&real_channel_id, message_id).await
     }
 
     /// Subscribes to events from the active transport

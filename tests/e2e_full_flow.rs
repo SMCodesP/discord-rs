@@ -408,19 +408,19 @@ fn test_e2e_message_reactions_and_replies() {
     }
 
     // 6.1 Add reaction to existing message
-    state.add_reaction_to_message(channel_id, target_msg_id, "🦀");
+    state.add_reaction_to_message(channel_id, target_msg_id, Reaction::new("🦀", 0, true));
 
     let messages = state.messages_by_channel.get(channel_id).unwrap();
     let msg = messages.iter().find(|m| m.id == target_msg_id).expect("Target message must exist");
-    let crab_rx = msg.reactions.iter().find(|r| r.emoji == "🦀").expect("Reaction 🦀 must exist");
+    let crab_rx = msg.reactions.iter().find(|r| r.reaction_key() == "🦀").expect("Reaction 🦀 must exist");
     assert!(crab_rx.count >= 1);
     assert!(crab_rx.me, "Current user must be marked as reacted");
 
     // Add a second distinct reaction emoji
-    state.add_reaction_to_message(channel_id, target_msg_id, "⚡");
+    state.add_reaction_to_message(channel_id, target_msg_id, Reaction::new("⚡", 0, true));
     let messages = state.messages_by_channel.get(channel_id).unwrap();
     let msg = messages.iter().find(|m| m.id == target_msg_id).unwrap();
-    let lightning_rx = msg.reactions.iter().find(|r| r.emoji == "⚡").expect("Reaction ⚡ must exist");
+    let lightning_rx = msg.reactions.iter().find(|r| r.reaction_key() == "⚡").expect("Reaction ⚡ must exist");
     assert_eq!(lightning_rx.count, 1);
     assert!(lightning_rx.me);
 
@@ -429,12 +429,14 @@ fn test_e2e_message_reactions_and_replies() {
         channel_id: channel_id.to_string(),
         message_id: target_msg_id.to_string(),
         user_id: "user-remote-42".to_string(),
-        emoji: "🔥".to_string(),
+        emoji_name: "🔥".to_string(),
+        emoji_id: None,
+        emoji_animated: false,
     });
 
     let messages = state.messages_by_channel.get(channel_id).unwrap();
     let msg = messages.iter().find(|m| m.id == target_msg_id).unwrap();
-    assert!(msg.reactions.iter().any(|r| r.emoji == "🔥"));
+    assert!(msg.reactions.iter().any(|r| r.reaction_key() == "🔥"));
 
     // 6.3 Message replies lifecycle
     let reply_target = msg.clone();

@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain::channel::ChannelType;
 use crate::protocol::ConnectionMode;
+use crate::domain::message::Reaction;
 use crate::protocol::TransportEvent;
 use std::collections::HashMap;
 
@@ -385,10 +386,44 @@ impl AppState {
             TransportEvent::ReactionAdd {
                 channel_id,
                 message_id,
-                emoji,
+                user_id,
+                emoji_name,
+                emoji_id,
+                emoji_animated,
+            } => {
+                let is_me = user_id == self.current_user.id;
+                let rx = Reaction::from_parts(emoji_name, emoji_id, emoji_animated, 1, is_me);
+                self.add_reaction_to_message(&channel_id, &message_id, rx);
+            }
+            TransportEvent::ReactionRemove {
+                channel_id,
+                message_id,
+                user_id,
+                emoji_name,
+                emoji_id,
                 ..
             } => {
-                self.add_reaction_to_message(&channel_id, &message_id, &emoji);
+                let is_me = user_id == self.current_user.id;
+                let key = crate::domain::message::reaction_key(&emoji_name, emoji_id.as_deref());
+                self.remove_reaction_from_message(&channel_id, &message_id, &key, is_me);
+            }
+            TransportEvent::ReactionReconcile {
+                channel_id,
+                message_id,
+                reaction,
+            } => {
+                self.reconcile_reaction(&channel_id, &message_id, reaction);
+            }
+            TransportEvent::ReactionRollback {
+                channel_id,
+                message_id,
+                reactions,
+            } => {
+                if let Some(messages) = self.messages_by_channel.get_mut(&channel_id) {
+                    if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                        msg.reactions = reactions;
+                    }
+                }
             }
             TransportEvent::TypingStart {
                 channel_id,

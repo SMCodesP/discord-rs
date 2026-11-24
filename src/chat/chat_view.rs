@@ -890,15 +890,13 @@ impl Render for ChatView {
         ));
 
         // 3. Reaction Click: toggle/add specific emoji
-        let cid_for_rx_click = channel_id.clone();
         let app_for_rx_click = app_entity.clone();
         let on_reaction_click: Option<ReactionActionCallback> = Some(Arc::new(
             move |message_id: &str, emoji: &str, _window: &mut Window, cx: &mut App| {
                 let msg_id = message_id.to_string();
                 let em = emoji.to_string();
-                let cid = cid_for_rx_click.clone();
                 app_for_rx_click.update(cx, |state, cx| {
-                    state.add_reaction_to_message(&cid, &msg_id, &em);
+                    state.toggle_reaction(&msg_id, &em);
                     cx.notify();
                 });
             },
@@ -1275,7 +1273,7 @@ impl Render for ChatView {
                             let target_id = target_msg_id.clone();
                             let em_clone = em.clone();
                             app_emoji.update(cx, |state, cx| {
-                                state.add_reaction(&target_id, &em_clone);
+                                state.toggle_reaction(&target_id, &em_clone);
                                 state.record_emoji_usage(&em_clone);
                                 cx.notify();
                             });

@@ -828,6 +828,7 @@ impl DiscordTransport for MockDiscordProvider {
     ) -> anyhow::Result<()> {
         let mut state = self.state.write().await;
         let current_user_id = state.current_user.id.clone();
+        let (emoji_name, emoji_id) = crate::domain::message::parse_reaction_key(emoji);
 
         if let Some(list) = state.messages.get_mut(channel_id) {
             if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
@@ -837,7 +838,9 @@ impl DiscordTransport for MockDiscordProvider {
                     channel_id: channel_id.to_string(),
                     message_id: message_id.to_string(),
                     user_id: current_user_id,
-                    emoji: emoji.to_string(),
+                    emoji_name,
+                    emoji_id,
+                    emoji_animated: false,
                 });
                 return Ok(());
             }
@@ -853,6 +856,7 @@ impl DiscordTransport for MockDiscordProvider {
     ) -> anyhow::Result<()> {
         let mut state = self.state.write().await;
         let current_user_id = state.current_user.id.clone();
+        let (emoji_name, emoji_id) = crate::domain::message::parse_reaction_key(emoji);
 
         if let Some(list) = state.messages.get_mut(channel_id) {
             if let Some(msg) = list.iter_mut().find(|m| m.id == message_id) {
@@ -862,7 +866,9 @@ impl DiscordTransport for MockDiscordProvider {
                     channel_id: channel_id.to_string(),
                     message_id: message_id.to_string(),
                     user_id: current_user_id,
-                    emoji: emoji.to_string(),
+                    emoji_name,
+                    emoji_id,
+                    emoji_animated: false,
                 });
                 return Ok(());
             }

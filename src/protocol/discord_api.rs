@@ -1532,6 +1532,23 @@ impl DiscordTransport for DiscordApiClient {
         self.send_sticker_message(channel_id, sticker_id).await
     }
 
+    async fn get_message(&self, channel_id: &str, message_id: &str) -> Result<Option<Message>> {
+        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(_) => channel_id.to_string(),
+            }
+        } else {
+            channel_id.to_string()
+        };
+        let path = format!("/channels/{}/messages/{}", resolved_id, message_id);
+        let req = self.auth_request(reqwest::Method::GET, &path);
+        let resp = self.send_request(&path, req).await?;
+        let val: serde_json::Value = resp.json().await?;
+        Ok(parse_message_from_json(&val))
+    }
+
     async fn add_reaction(&self, channel_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");
@@ -2572,18 +2589,28 @@ async fn handle_dispatch(
                 data.get("message_id").and_then(|v| v.as_str()),
                 data.get("user_id").and_then(|v| v.as_str()),
             ) {
-                let emoji = data
-                    .get("emoji")
+                let emoji_obj = data.get("emoji");
+                let emoji_name = emoji_obj
                     .and_then(|e| e.get("name"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("👍")
+                    .unwrap_or("")
                     .to_string();
+                let emoji_id = emoji_obj
+                    .and_then(|e| e.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let emoji_animated = emoji_obj
+                    .and_then(|e| e.get("animated"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 let _ = event_tx.send(TransportEvent::ReactionAdd {
                     channel_id: ch_id.to_string(),
                     message_id: msg_id.to_string(),
                     user_id: user_id.to_string(),
-                    emoji,
+                    emoji_name,
+                    emoji_id,
+                    emoji_animated,
                 });
             }
         }
@@ -2593,18 +2620,28 @@ async fn handle_dispatch(
                 data.get("message_id").and_then(|v| v.as_str()),
                 data.get("user_id").and_then(|v| v.as_str()),
             ) {
-                let emoji = data
-                    .get("emoji")
+                let emoji_obj = data.get("emoji");
+                let emoji_name = emoji_obj
                     .and_then(|e| e.get("name"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("👍")
+                    .unwrap_or("")
                     .to_string();
+                let emoji_id = emoji_obj
+                    .and_then(|e| e.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string);
+                let emoji_animated = emoji_obj
+                    .and_then(|e| e.get("animated"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 let _ = event_tx.send(TransportEvent::ReactionRemove {
                     channel_id: ch_id.to_string(),
                     message_id: msg_id.to_string(),
                     user_id: user_id.to_string(),
-                    emoji,
+                    emoji_name,
+                    emoji_id,
+                    emoji_animated,
                 });
             }
         }
@@ -3489,14 +3526,32 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
 
     if let Some(raw_reactions) = val.get("reactions").and_then(|v| v.as_array()) {
         for r in raw_reactions {
-            let emoji_name = r
-                .get("emoji")
+            let emoji_obj = r.get("emoji");
+            let emoji_name = emoji_obj
                 .and_then(|e| e.get("name"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("👍");
-            let count = r.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                .unwrap_or("")
+                .to_string();
+            let emoji_id = emoji_obj
+                .and_then(|e| e.get("id"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            let emoji_animated = emoji_obj
+                .and_then(|e| e.get("animated"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let count = r.get("count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let me = r.get("me").and_then(|v| v.as_bool()).unwrap_or(false);
-            message.reactions.push(Reaction::new(emoji_name, count, me));
+            if count == 0 {
+                continue;
+            }
+            message.reactions.push(Reaction::from_parts(
+                emoji_name,
+                emoji_id,
+                emoji_animated,
+                count,
+                me,
+            ));
         }
     }
 
