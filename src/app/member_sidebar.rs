@@ -13,7 +13,11 @@ use crate::tokens::spacing::*;
 #[derive(Clone)]
 enum MemberSidebarItem {
     Header { title: SharedString, count: usize },
-    Member(MemberItemState),
+    Member {
+        member: MemberItemState,
+        avatar_url: Option<String>,
+        subtitle: Option<String>,
+    },
 }
 
 /// Server member list sidebar (240px wide) with role groupings and virtual list
@@ -50,6 +54,12 @@ impl MemberSidebar {
             self.last_requested_ranges = None;
         }
         let members = state.members.clone();
+        let avatar_urls = cached_member_avatar_urls(state);
+        let member_item = |member: MemberItemState| MemberSidebarItem::Member {
+            avatar_url: avatar_urls.get(&member.id).cloned(),
+            subtitle: member_subtitle(&member, state),
+            member,
+        };
 
         let has_server_groups = members.iter().any(|m| m.id.starts_with("group:"));
 
@@ -70,7 +80,7 @@ impl MemberSidebar {
                         count,
                     });
                 } else {
-                    items.push(MemberSidebarItem::Member(m));
+                    items.push(member_item(m));
                 }
             }
             self.items = items;
@@ -112,7 +122,7 @@ impl MemberSidebar {
                         count: list.len(),
                     });
                     for member in list {
-                        items.push(MemberSidebarItem::Member(member.clone()));
+                        items.push(member_item(member.clone()));
                     }
                 }
             }
@@ -124,7 +134,7 @@ impl MemberSidebar {
                 count: offline_list.len(),
             });
             for member in offline_list {
-                items.push(MemberSidebarItem::Member(member));
+                items.push(member_item(member));
             }
         }
 
@@ -140,8 +150,10 @@ impl Render for MemberSidebar {
             self.items
                 .iter()
                 .map(|item| match item {
-                    MemberSidebarItem::Header { .. } => size(px(224.0), px(40.0)),
-                    MemberSidebarItem::Member(_) => size(px(224.0), px(44.0)),
+                    MemberSidebarItem::Header { .. } => size(px(224.0), px(42.0)),
+                    MemberSidebarItem::Member { subtitle, .. } => {
+                        size(px(224.0), if subtitle.is_some() { px(44.0) } else { px(42.0) })
+                    }
                 })
                 .collect(),
         );
@@ -189,9 +201,16 @@ impl Render for MemberSidebar {
                                 MemberSidebarItem::Header { title, count } => {
                                     render_group_header(title.clone(), *count)
                                 }
-                                MemberSidebarItem::Member(member) => {
-                                    render_member_row(member, &app)
-                                }
+                                MemberSidebarItem::Member {
+                                    member,
+                                    avatar_url,
+                                    subtitle,
+                                } => render_member_row(
+                                    member,
+                                    avatar_url.as_deref(),
+                                    subtitle.as_deref(),
+                                    &app,
+                                ),
                             })
                             .collect::<Vec<_>>()
                     },
@@ -200,22 +219,91 @@ impl Render for MemberSidebar {
     }
 }
 
+/// Resolves avatar URLs only from real cached Discord payloads. The lazy member
+/// list does not include avatar hashes, so no URL or fallback identity is
+/// invented here.
+fn cached_member_avatar_urls(state: &AppState) -> std::collections::HashMap<String, String> {
+    let mut urls = std::collections::HashMap::new();
+
+    if !state.current_user.id.is_empty() {
+        if let Some(url) = state.current_user.avatar_url.clone() {
+            urls.insert(state.current_user.id.clone(), url);
+        }
+    }
+    for friend in &state.friends {
+        if let Some(url) = friend.avatar_url.clone() {
+            urls.entry(friend.id.clone()).or_insert(url);
+        }
+    }
+    for message in state.messages_by_channel.values().flatten() {
+        if let Some(url) = message.author.avatar_url() {
+            urls.entry(message.author.id.clone()).or_insert(url);
+        }
+    }
+
+    urls
+}
+
+/// Prefers the user's real custom status, then the activity already carried by
+/// the member payload. Offline rows do not show stale presence text.
+fn member_subtitle(member: &MemberItemState, state: &AppState) -> Option<String> {
+    if member.presence == PresenceStatus::Offline {
+        return None;
+    }
+
+    state
+        .presences_by_user
+        .get(&member.id)
+        .and_then(|presence| presence.custom_status.as_ref())
+        .and_then(|status| status.text.as_ref())
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            member
+                .activity
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string)
+        })
+        .or_else(|| {
+            state
+                .presences_by_user
+                .get(&member.id)
+                .and_then(|presence| presence.activity.as_ref())
+                .map(|activity| activity.name.trim())
+                .filter(|name| !name.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn group_header_text(title: &str, count: usize) -> String {
+    format!("{} — {}", title.to_uppercase(), count)
+}
+
 fn render_group_header(title: SharedString, count: usize) -> AnyElement {
     div()
         .w_full()
         .min_w(px(0.0))
-        .h(px(40.0))
+        .h(px(42.0))
         .pt(px(20.0))
         .pb(px(4.0))
         .px(px(16.0))
         .text_color(text_muted())
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_size(px(12.0))
-        .child(format!("{} — {}", title, count))
+        .font_weight(FontWeight::MEDIUM)
+        .text_size(crate::tokens::typography::font_size_sm())
+        .line_height(crate::tokens::typography::line_height_sm())
+        .child(group_header_text(&title, count))
         .into_any_element()
 }
 
-fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) -> AnyElement {
+fn render_member_row(
+    member: &MemberItemState,
+    avatar_url: Option<&str>,
+    subtitle: Option<&str>,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
     let role_color = if member.role_color != 0 {
         rgb(member.role_color)
     } else if member.presence == PresenceStatus::Offline {
@@ -234,14 +322,14 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
         .w_full()
         .min_w(px(0.0))
         .overflow_hidden()
-        .h(px(44.0))
+        .h(if subtitle.is_some() { px(44.0) } else { px(42.0) })
         .px(px(8.0))
         .py(px(1.0))
         .rounded(radius_md()) // 8px per member-sidebar.md
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(10.0))
+        .gap(px(12.0))
         .cursor_pointer()
         .hover(|s| s.bg(channel_hover()))
         .on_mouse_down(MouseButton::Left, move |ev, _win, cx| {
@@ -259,6 +347,7 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
         .size(AvatarSize::Px32)
         .status(member.presence.into())
         .cutout_color(bg_channels())
+        .opt_src(avatar_url.map(str::to_string))
         .opt_decoration(member.avatar_decoration_data.clone());
 
     row = row.child(avatar);
@@ -281,8 +370,11 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
         .child(
             div()
                 .text_color(role_color)
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(14.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_size(crate::tokens::typography::font_size_sm())
+                .line_height(px(20.0))
+                .flex_1()
+                .min_w(px(0.0))
                 .truncate()
                 .child(member.name.clone()),
         );
@@ -293,15 +385,16 @@ fn render_member_row(member: &MemberItemState, app_entity: &Entity<AppState>) ->
 
     text_col = text_col.child(name_line);
 
-    if let Some(ref act) = member.activity {
+    if let Some(subtitle) = subtitle {
         text_col = text_col.child(
             div()
                 .text_color(text_muted())
                 .text_size(px(11.0))
+                .line_height(crate::tokens::typography::line_height_tight())
                 .w_full()
                 .min_w(px(0.0))
                 .truncate()
-                .child(act.clone()),
+                .child(subtitle.to_string()),
         );
     }
 
@@ -355,6 +448,68 @@ fn render_bot_tag() -> AnyElement {
         .text_color(crate::tokens::colors::white())
         .text_size(px(9.0))
         .font_weight(FontWeight::BOLD)
+        .flex_shrink_0()
         .child("BOT")
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::message::{Author, Message};
+    use crate::domain::user::{CustomStatus, Presence};
+
+    fn member(presence: PresenceStatus) -> MemberItemState {
+        MemberItemState {
+            id: "member-1".into(),
+            name: "Member".into(),
+            avatar_text: "M".into(),
+            presence,
+            role_group: "ONLINE".into(),
+            role_color: 0,
+            is_bot: false,
+            activity: Some("Atividade real".into()),
+            avatar_decoration_data: None,
+        }
+    }
+
+    #[test]
+    fn group_headers_are_uppercase_and_keep_server_count() {
+        assert_eq!(group_header_text("staff", 3), "STAFF — 3");
+        assert_eq!(group_header_text("offline", 0), "OFFLINE — 0");
+    }
+
+    #[test]
+    fn subtitle_prefers_custom_status_and_hides_offline_stale_activity() {
+        let mut state = AppState::default();
+        let online = member(PresenceStatus::Online);
+        state.presences_by_user.insert(
+            online.id.clone(),
+            Presence::new(&online.id, crate::domain::user::PresenceStatus::Online)
+                .with_custom_status(CustomStatus::from_text("Status real")),
+        );
+
+        assert_eq!(member_subtitle(&online, &state).as_deref(), Some("Status real"));
+        assert_eq!(
+            member_subtitle(&member(PresenceStatus::Offline), &state),
+            None
+        );
+    }
+
+    #[test]
+    fn avatar_urls_come_only_from_cached_real_payloads() {
+        let mut state = AppState::default();
+        let mut author = Author::new("member-1", "member");
+        author.avatar = Some("a_real_hash".into());
+        state.messages_by_channel.insert(
+            "channel-1".into(),
+            vec![Message::new("message-1", "channel-1", author, "conteúdo")],
+        );
+
+        assert_eq!(
+            cached_member_avatar_urls(&state).get("member-1").map(String::as_str),
+            Some("https://cdn.discordapp.com/avatars/member-1/a_real_hash.png")
+        );
+        assert!(!cached_member_avatar_urls(&state).contains_key("unknown-member"));
+    }
 }

@@ -25,6 +25,7 @@ use crate::components::button::{Button, ButtonSize, ButtonVariant};
 use crate::domain::Message;
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
+use crate::tokens::typography::{font_size_sm, font_size_xxs};
 
 /// Filter for presence of attachments, links, or media types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -713,6 +714,7 @@ pub fn render_search_popover_content(app_entity: Entity<AppState>) -> AnyElement
 
     div()
         .w(px(356.0))
+        .h(px(335.0))
         .p(px(8.0))
         .py(px(12.0))
         .rounded(px(8.0))
@@ -1144,24 +1146,203 @@ fn render_no_results_state() -> Vec<AnyElement> {
     ]
 }
 
-/// Renders a single search result hit message card
+/// Returns displayable text from fields actually present in the Discord
+/// payload. Media-only messages use their real filename/title; no mock content
+/// is introduced.
+fn search_message_preview(message: &Message) -> Option<String> {
+    let content = message.content.trim();
+    if !content.is_empty() {
+        return Some(content.to_string());
+    }
+    if let Some(attachment) = message.attachments.first() {
+        return Some(attachment.filename.clone());
+    }
+    if let Some(sticker) = message.sticker_items.first() {
+        return Some(sticker.name.clone());
+    }
+    message
+        .embeds
+        .iter()
+        .find_map(|embed| embed.title.clone())
+}
+
+/// Resolves a channel label from the same real state used by the sidebars.
+fn search_channel_label(state: &AppState, channel_id: &str) -> String {
+    if let Some(channel) = state
+        .guilds
+        .iter()
+        .flat_map(|guild| &guild.categories)
+        .flat_map(|category| &category.channels)
+        .find(|channel| channel.id == channel_id)
+    {
+        return channel.name.clone();
+    }
+    if let Some(channel) = state
+        .dm_channels
+        .iter()
+        .find(|channel| channel.id == channel_id)
+    {
+        if !channel.name.trim().is_empty() {
+            return channel.name.clone();
+        }
+        if !channel.recipient_names.is_empty() {
+            return channel.recipient_names.join(", ");
+        }
+    }
+    channel_id.to_string()
+}
+
+fn render_search_context_message(message: &Message) -> AnyElement {
+    let author_name = message.author.display_name().to_string();
+    let timestamp_str = message.timestamp.format("%d/%m/%Y %H:%M").to_string();
+    let preview = search_message_preview(message);
+
+    let mut content = div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(6.0))
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(font_size_sm())
+                        .truncate()
+                        .child(author_name),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(font_size_xxs())
+                        .flex_shrink_0()
+                        .child(timestamp_str),
+                ),
+        );
+
+    if let Some(preview) = preview {
+        content = content.child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_sm())
+                .line_height(crate::tokens::typography::line_height_sm())
+                .w_full()
+                .min_w(px(0.0))
+                .truncate()
+                .child(preview),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
+        .child(
+            Avatar::new(message.author.display_name().to_string())
+                .size(AvatarSize::Px24)
+                .opt_src(message.author.avatar_url())
+                .opt_decoration(message.author.avatar_decoration_data.clone()),
+        )
+        .child(content)
+        .into_any_element()
+}
+
+fn render_search_hit_message(message: &Message, parsed_query: &SearchQuery) -> AnyElement {
+    let author_name = message.author.display_name().to_string();
+    let timestamp_str = message.timestamp.format("%d/%m/%Y %H:%M").to_string();
+    let preview = search_message_preview(message);
+
+    let mut content = div()
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(8.0))
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(13.0))
+                        .truncate()
+                        .child(author_name),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(11.0))
+                        .flex_shrink_0()
+                        .child(timestamp_str),
+                ),
+        );
+
+    if let Some(preview) = preview {
+        content = content.child(render_highlighted_text(&preview, parsed_query));
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
+        .child(
+            Avatar::new(message.author.display_name().to_string())
+                .size(AvatarSize::Px24)
+                .opt_src(message.author.avatar_url())
+                .opt_decoration(message.author.avatar_decoration_data.clone()),
+        )
+        .child(content)
+        .into_any_element()
+}
+
+fn render_search_context(messages: &[Message]) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .w_full()
+        .min_w(px(0.0))
+        .children(
+            messages
+                .iter()
+                .map(|message| render_search_context_message(message)),
+        )
+        .into_any_element()
+}
+
+/// Renders a single search result card with the context returned by Discord.
 fn render_search_result_card(
     app_entity: Entity<AppState>,
     hit: &SearchResultGroup,
     parsed_query: &SearchQuery,
+    channel_label: &str,
 ) -> AnyElement {
-    let entity = app_entity.clone();
-    let channel_id = hit.channel_id.clone();
     let message_id = hit.hit_message.id.clone();
-    let channel_label = hit.channel_name.clone().unwrap_or_else(|| hit.channel_id.clone());
-    let author_name = hit.hit_message.author.display_name().to_string();
-    let timestamp_str = hit.hit_message.timestamp.format("%d/%m/%Y %H:%M").to_string();
-
-    let jump_cid = channel_id.clone();
+    let jump_cid = hit.channel_id.clone();
     let jump_mid = message_id.clone();
-    let jump_entity = entity.clone();
+    let jump_entity = app_entity;
 
-    div()
+    let mut card = div()
         .p(px(12.0))
         .rounded(px(8.0))
         .bg(bg_user_bar())
@@ -1171,73 +1352,56 @@ fn render_search_result_card(
         .flex()
         .flex_col()
         .gap(px(8.0))
-        // Top Row: Origin Channel + "Ir para mensagem" Button via crate::components::Button
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
+                .gap(px(8.0))
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(4.0))
+                        .min_w(px(0.0))
                         .child(icon_hash(px(14.0), blurple()))
                         .child(
                             div()
                                 .text_color(channels_default())
                                 .font_weight(FontWeight::BOLD)
                                 .text_size(px(12.0))
-                                .child(channel_label),
+                                .truncate()
+                                .child(channel_label.to_string()),
                         ),
                 )
                 .child(
                     Button::new(
                         SharedString::from(format!("jump-to-msg-{}", message_id)),
-                        "Ir para mensagem",
+                        "Pular",
                     )
                     .size(ButtonSize::Sm)
                     .variant(ButtonVariant::Gray)
                     .on_click(move |_ev, _window, cx| {
                         jump_entity.update(cx, |state, cx| {
                             state.jump_to_message(&jump_cid, &jump_mid);
+                            state.close_search();
                             cx.notify();
                         });
                     }),
                 ),
-        )
-        // Author & Timestamp Row: using Avatar component!
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    Avatar::new(author_name.clone())
-                        .size(AvatarSize::Px24)
-                        .opt_src(hit.hit_message.author.avatar_url())
-                        .opt_decoration(hit.hit_message.author.avatar_decoration_data.clone()),
-                )
-                .child(
-                    div()
-                        .text_color(text_titles())
-                        .font_weight(FontWeight::BOLD)
-                        .text_size(px(13.0))
-                        .child(author_name),
-                )
-                .child(
-                    div()
-                        .text_color(text_muted())
-                        .text_size(px(11.0))
-                        .child(timestamp_str),
-                ),
-        )
-        // Matched Hit Content (with Highlighted Terms in #fee75c / dark text)
-        .child(render_highlighted_text(&hit.hit_message.content, parsed_query))
-        .into_any_element()
+        );
+
+    if !hit.context_before.is_empty() {
+        card = card.child(render_search_context(&hit.context_before));
+    }
+    card = card.child(render_search_hit_message(&hit.hit_message, parsed_query));
+    if !hit.context_after.is_empty() {
+        card = card.child(render_search_context(&hit.context_after));
+    }
+
+    card.into_any_element()
 }
 
 /// Renders the scrollable results area or empty states
@@ -1265,7 +1429,20 @@ fn render_search_results_scroll_area(
         state
             .search_results
             .iter()
-            .map(|hit| render_search_result_card(app_entity.clone(), hit, parsed_query))
+            .map(|hit| {
+                let channel_label = hit
+                    .channel_name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| search_channel_label(state, &hit.channel_id));
+                render_search_result_card(
+                    app_entity.clone(),
+                    hit,
+                    parsed_query,
+                    &channel_label,
+                )
+            })
             .collect()
     };
 
@@ -1327,7 +1504,7 @@ fn render_search_pagination_dock(
                         Button::new("search-prev-page", "Anterior")
                             .size(ButtonSize::Sm)
                             .variant(ButtonVariant::Gray)
-                            .disabled(!can_prev)
+                            .disabled(state.is_searching || !can_prev)
                             .on_click(move |_ev, _window, cx| {
                                 let maybe_req = prev_entity.update(cx, |state, cx| {
                                     let new_offset = state.search_offset().saturating_sub(25);
@@ -1353,7 +1530,7 @@ fn render_search_pagination_dock(
                         Button::new("search-next-page", "Próxima")
                             .size(ButtonSize::Sm)
                             .variant(ButtonVariant::Gray)
-                            .disabled(!can_next)
+                            .disabled(state.is_searching || !can_next)
                             .on_click(move |_ev, _window, cx| {
                                 let maybe_req = next_entity.update(cx, |state, cx| {
                                     let new_offset = state.search_offset() + 25;
@@ -1647,5 +1824,42 @@ mod tests {
         assert!(params.contains(&("has", "link".to_string())));
         assert!(params.contains(&("pinned", "true".to_string())));
         assert!(params.contains(&("content", "bug".to_string())));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_result_context_uses_only_real_payload_text() {
+        let author = Author::new("u1", "user1");
+        let context = Message::new("context-1", "c1", author.clone(), "contexto real");
+        let mut hit = Message::new("hit-1", "c1", author.clone(), "resultado real");
+        let group = SearchResultGroup {
+            channel_id: "c1".into(),
+            channel_name: Some("geral".into()),
+            hit_message: hit.clone(),
+            context_before: vec![context.clone()],
+            context_after: vec![Message::new("after-1", "c1", author, "depois")],
+        };
+        let query = SearchQuery::parse("resultado");
+
+        assert_eq!(search_message_preview(&context).as_deref(), Some("contexto real"));
+        assert_eq!(search_message_preview(&hit).as_deref(), Some("resultado real"));
+        drop(render_search_context(&group.context_before));
+        drop(render_search_hit_message(&group.hit_message, &query));
+        drop(render_search_context(&group.context_after));
+
+        hit.content.clear();
+        hit.attachments.push(crate::domain::message::Attachment {
+            id: "att-1".into(),
+            filename: "arquivo-real.png".into(),
+            size: 10,
+            url: "https://example.invalid/arquivo-real.png".into(),
+            proxy_url: None,
+            content_type: Some("image/png".into()),
+            width: None,
+            height: None,
+        });
+        assert_eq!(
+            search_message_preview(&hit).as_deref(),
+            Some("arquivo-real.png")
+        );
     }
 }
