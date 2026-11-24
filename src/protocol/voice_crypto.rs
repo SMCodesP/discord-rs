@@ -13,10 +13,10 @@
 //! - A carga útil da extensão (se presente) é cifrada juntamente com o áudio Opus e removida na decifração.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit, Payload},
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 
 /// Modos de criptografia de transporte suportados pelo Discord Voice.
@@ -60,21 +60,30 @@ pub struct RtpAadInfo {
     pub payload_type: u8,
     /// Indicador se há extensão de cabeçalho.
     pub has_extension: bool,
+    /// Indicador de padding RTP (`P`), removido depois da decifração.
+    pub has_padding: bool,
 }
 
 /// Parser de cabeçalho RTP estritamente compatível com RFC 3550 e RFC 3711 (SRTP / Discord rtpsize).
 pub fn parse_rtp_aad_and_ext(buf: &[u8]) -> Result<RtpAadInfo> {
     if buf.len() < 12 {
-        bail!("Pacote RTP menor que o cabeçalho base de 12 bytes (tamanho: {})", buf.len());
+        bail!(
+            "Pacote RTP menor que o cabeçalho base de 12 bytes (tamanho: {})",
+            buf.len()
+        );
     }
 
     let b0 = buf[0];
     let version = (b0 >> 6) & 0x03;
     if version != 2 {
-        bail!("Versão de cabeçalho RTP inválida: esperada 2 (0x80), encontrada {}", version);
+        bail!(
+            "Versão de cabeçalho RTP inválida: esperada 2 (0x80), encontrada {}",
+            version
+        );
     }
 
     let has_extension = (b0 & 0x10) != 0;
+    let has_padding = (b0 & 0x20) != 0;
     let cc = (b0 & 0x0F) as usize;
     let base_header_len = 12 + (4 * cc);
 
@@ -99,10 +108,21 @@ pub fn parse_rtp_aad_and_ext(buf: &[u8]) -> Result<RtpAadInfo> {
             bail!("Pacote RTP truncado antes do preâmbulo da extensão de 4 bytes");
         }
         // Preâmbulo da extensão: [profile: 2 bytes, length_in_32bit_words: 2 bytes]
-        let ext_words = u16::from_be_bytes([buf[base_header_len + 2], buf[base_header_len + 3]]) as usize;
+        let ext_words =
+            u16::from_be_bytes([buf[base_header_len + 2], buf[base_header_len + 3]]) as usize;
         ext_payload_bytes = ext_words * 4;
         // No modo rtpsize do Discord/SRTP, o preâmbulo de 4 bytes é incluído no AAD não cifrado.
         aad_len = base_header_len + 4;
+        let declared_end = aad_len
+            .checked_add(ext_payload_bytes)
+            .context("Tamanho de extensão RTP excede o limite de endereçamento")?;
+        if buf.len() < declared_end {
+            bail!(
+                "Pacote RTP truncado antes do fim da extensão declarada (requer {}, recebido {})",
+                declared_end,
+                buf.len()
+            );
+        }
     }
 
     Ok(RtpAadInfo {
@@ -113,6 +133,7 @@ pub fn parse_rtp_aad_and_ext(buf: &[u8]) -> Result<RtpAadInfo> {
         timestamp,
         payload_type,
         has_extension,
+        has_padding,
     })
 }
 
@@ -126,6 +147,7 @@ pub struct RtpCrypto {
     mode: EncryptionMode,
     engine: CipherEngine,
     nonce_counter: u32,
+    nonce_exhausted: bool,
 }
 
 impl RtpCrypto {
@@ -157,6 +179,7 @@ impl RtpCrypto {
             mode: enc_mode,
             engine,
             nonce_counter: 0,
+            nonce_exhausted: false,
         })
     }
 
@@ -170,15 +193,25 @@ impl RtpCrypto {
         self.nonce_counter
     }
 
-    /// Define manualmente o contador de nonce (útil para testes ou sincronização).
+    /// Define manualmente o contador de nonce exclusivamente para testes.
+    #[cfg(test)]
     pub fn set_nonce_counter(&mut self, val: u32) {
         self.nonce_counter = val;
+        self.nonce_exhausted = false;
     }
 
-    fn next_nonce_bytes(&mut self) -> (u32, [u8; 4]) {
+    fn next_nonce_bytes(&mut self) -> Result<(u32, [u8; 4])> {
+        if self.nonce_exhausted {
+            bail!("Contador de nonce RTP esgotado; reconecte a sessão para obter uma nova chave");
+        }
+
         let val = self.nonce_counter;
-        self.nonce_counter = self.nonce_counter.wrapping_add(1);
-        (val, val.to_be_bytes())
+        if val == u32::MAX {
+            self.nonce_exhausted = true;
+        } else {
+            self.nonce_counter += 1;
+        }
+        Ok((val, val.to_be_bytes()))
     }
 
     fn make_aes_nonce(nonce_bytes: [u8; 4]) -> [u8; 12] {
@@ -198,7 +231,7 @@ impl RtpCrypto {
     /// Anexa o nonce de 32 bits (4 bytes) ao final do pacote.
     /// Retorna o pacote completo pronto para envio UDP: `[ header ] + [ ciphertext + tag ] + [ nonce ]`.
     pub fn encrypt(&mut self, header: &[u8], payload: &[u8]) -> Result<Vec<u8>> {
-        let (_, nonce_bytes) = self.next_nonce_bytes();
+        let (_, nonce_bytes) = self.next_nonce_bytes()?;
 
         let ciphertext = match &self.engine {
             CipherEngine::Aes256Gcm(c) => {
@@ -235,6 +268,28 @@ impl RtpCrypto {
     /// Criptografa um pacote RTP não criptografado completo contendo cabeçalho e áudio Opus.
     pub fn encrypt_packet(&mut self, unencrypted_packet: &[u8]) -> Result<Vec<u8>> {
         let info = parse_rtp_aad_and_ext(unencrypted_packet)?;
+        let encrypted_payload_start = info
+            .aad_len
+            .checked_add(info.ext_payload_bytes)
+            .context("Tamanho de extensão RTP excede o limite de endereçamento")?;
+        if unencrypted_packet.len() < encrypted_payload_start {
+            bail!(
+                "Pacote RTP truncado antes do fim da extensão declarada (requer {}, recebido {})",
+                encrypted_payload_start,
+                unencrypted_packet.len()
+            );
+        }
+        if info.has_padding {
+            let media_and_padding = &unencrypted_packet[info.aad_len + info.ext_payload_bytes..];
+            let padding = *media_and_padding
+                .last()
+                .context("Pacote RTP com padding não contém o octeto de contagem")?
+                as usize;
+            if padding == 0 || padding > media_and_padding.len() {
+                bail!("Contador de padding RTP inválido: {padding}");
+            }
+        }
+
         let aad = &unencrypted_packet[..info.aad_len];
         let payload = &unencrypted_packet[info.aad_len..];
         self.encrypt(aad, payload)
@@ -259,8 +314,10 @@ impl RtpCrypto {
     pub fn decrypt_full(&self, packet: &[u8]) -> Result<(RtpAadInfo, Vec<u8>)> {
         let info = parse_rtp_aad_and_ext(packet)?;
 
-        // Tamanho mínimo: AAD + 16 bytes (tag AEAD) + 4 bytes (nonce counter)
-        let min_required = info.aad_len + 16 + 4;
+        // Tamanho mínimo: AAD + extensão cifrada + tag AEAD + sufixo de nonce.
+        // Pacotes com padding precisam de pelo menos um octeto para o contador P.
+        let min_required =
+            info.aad_len + info.ext_payload_bytes + 16 + 4 + usize::from(info.has_padding);
         if packet.len() < min_required {
             bail!(
                 "Pacote truncado: tamanho {} menor que o mínimo necessário ({})",
@@ -286,7 +343,11 @@ impl RtpCrypto {
                         aad,
                     },
                 )
-                .map_err(|e| anyhow!("Falha na decifração AES-256-GCM (pacote adulterado ou tag inválida): {e}"))?
+                .map_err(|e| {
+                    anyhow!(
+                        "Falha na decifração AES-256-GCM (pacote adulterado ou tag inválida): {e}"
+                    )
+                })?
             }
             CipherEngine::XChaCha20Poly1305(c) => {
                 let n = Self::make_xchacha_nonce(nonce_bytes);
@@ -303,9 +364,9 @@ impl RtpCrypto {
             }
         };
 
-        // No modo rtpsize com extensão de cabeçalho, a carga da extensão cifrada fica no início
-        // do payload e precisa ser descartada para entregar apenas o áudio Opus.
-        if info.ext_payload_bytes > 0 {
+        // No modo rtpsize, o preâmbulo da extensão é AAD e o corpo RFC 5285
+        // (incluindo cabeçalhos one-byte/two-byte) é cifrado no início do payload.
+        let mut opus = if info.ext_payload_bytes > 0 {
             if plain.len() < info.ext_payload_bytes {
                 bail!(
                     "Payload decifrado menor que a carga de extensão declarada ({} < {})",
@@ -313,11 +374,28 @@ impl RtpCrypto {
                     info.ext_payload_bytes
                 );
             }
-            let opus = plain[info.ext_payload_bytes..].to_vec();
-            Ok((info, opus))
+            &plain[info.ext_payload_bytes..]
         } else {
-            Ok((info, plain))
+            plain.as_slice()
+        };
+
+        // RFC 3550: o último octeto do payload decifrado contém a quantidade de
+        // bytes de padding, incluindo ele próprio. O padding não vai ao Opus/DAVE.
+        if info.has_padding {
+            let padding = *opus
+                .last()
+                .context("Pacote RTP com padding não contém o octeto de contagem")?
+                as usize;
+            if padding == 0 || padding > opus.len() {
+                bail!(
+                    "Contador de padding RTP inválido: {padding} para {} bytes",
+                    opus.len()
+                );
+            }
+            opus = &opus[..opus.len() - padding];
         }
+
+        Ok((info, opus.to_vec()))
     }
 }
 
@@ -462,5 +540,119 @@ mod tests {
         let (ssrc, decrypted_opus) = crypto.decrypt_packet(&encrypted).unwrap();
         assert_eq!(ssrc, 789);
         assert_eq!(decrypted_opus, raw_opus);
+    }
+
+    #[test]
+    fn test_aes_gcm_matches_independent_nonce_and_aad_vector() {
+        // Vetor gerado fora deste crate com Python/cryptography AESGCM:
+        // nonce completo = 0A0B0C0D || 00..00 (12 bytes), AAD = cabeçalho RTP.
+        let key: Vec<u8> = (0..32).collect();
+        let header = [
+            0x80, 0x78, 0x01, 0x02, 0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+        ];
+        let plaintext = b"opus-regression-frame";
+        let expected = hex::decode(
+            "b92ca6f0954d17358ad81eb3dc70278dd0604d5366cd5b33ddeedab96b4da31c08d368d61c",
+        )
+        .unwrap();
+
+        let mut crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        crypto.set_nonce_counter(0x0A0B0C0D);
+        let packet = crypto.encrypt(&header, plaintext).unwrap();
+
+        assert_eq!(&packet[..12], &header);
+        assert_eq!(&packet[12..packet.len() - 4], expected.as_slice());
+        assert_eq!(&packet[packet.len() - 4..], &[0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(crypto.decrypt(&packet).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_xchacha20_matches_independent_nonce_and_aad_vector() {
+        // Vetor gerado fora deste crate por HChaCha20 + ChaCha20Poly1305:
+        // nonce completo = 0A0B0C0D || 00..00 (24 bytes), AAD = cabeçalho RTP.
+        let key: Vec<u8> = (0..32).collect();
+        let header = [
+            0x80, 0x78, 0x01, 0x02, 0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+        ];
+        let plaintext = b"opus-regression-frame";
+        let expected = hex::decode(
+            "1240aa350a87378c929eb1c6e12db4c8fa41511aa02fcd0e4a47ca29b64dbffaf77092ada4",
+        )
+        .unwrap();
+
+        let mut crypto = RtpCrypto::new("aead_xchacha20_poly1305_rtpsize", &key).unwrap();
+        crypto.set_nonce_counter(0x0A0B0C0D);
+        let packet = crypto.encrypt(&header, plaintext).unwrap();
+
+        assert_eq!(&packet[..12], &header);
+        assert_eq!(&packet[12..packet.len() - 4], expected.as_slice());
+        assert_eq!(&packet[packet.len() - 4..], &[0x0A, 0x0B, 0x0C, 0x0D]);
+        assert_eq!(crypto.decrypt(&packet).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn test_csrc_one_byte_extension_and_rtp_padding_are_stripped() {
+        let key = test_secret_key();
+        let mut crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let mut packet = Vec::new();
+
+        // V=2, P=1, X=1, CC=3. AAD = 12 + 3*4 CSRC + 4 preâmbulo = 28 bytes.
+        packet.push(0xB3);
+        packet.push(0x78);
+        packet.extend_from_slice(&7u16.to_be_bytes());
+        packet.extend_from_slice(&960u32.to_be_bytes());
+        packet.extend_from_slice(&0x12345678u32.to_be_bytes());
+        for csrc in [0xAAAAAAAAu32, 0xBBBBBBBB, 0xCCCCCCCC] {
+            packet.extend_from_slice(&csrc.to_be_bytes());
+        }
+        packet.extend_from_slice(&0xBEDEu16.to_be_bytes());
+        packet.extend_from_slice(&2u16.to_be_bytes());
+
+        // RFC 5285 one-byte header: ID=1, len=(0x2+1)=3 bytes, seguido de
+        // três dados e um octeto de alinhamento. O corpo inteiro é cifrado.
+        packet.extend_from_slice(&[0x12, 0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x00, 0x00]);
+        packet.extend_from_slice(&[0xF8, 0xFF, 0xFE]);
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x04]); // P: quatro bytes, incluindo este
+
+        let encrypted = crypto.encrypt_packet(&packet).unwrap();
+        assert_eq!(&encrypted[..28], &packet[..28]);
+        let (info, opus) = crypto.decrypt_full(&encrypted).unwrap();
+        assert_eq!(info.aad_len, 28);
+        assert_eq!(info.ext_payload_bytes, 8);
+        assert!(info.has_padding);
+        assert_eq!(opus, [0xF8, 0xFF, 0xFE]);
+    }
+
+    #[test]
+    fn test_truncated_extension_and_invalid_padding_are_rejected() {
+        let key = test_secret_key();
+        let mut crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let mut truncated = sample_rtp_header(1, 0, 1).to_vec();
+        truncated[0] = 0x90;
+        truncated.extend_from_slice(&0xBEDEu16.to_be_bytes());
+        truncated.extend_from_slice(&1u16.to_be_bytes());
+        assert!(crypto.encrypt_packet(&truncated).is_err());
+
+        let mut padded_header = sample_rtp_header(2, 960, 1);
+        padded_header[0] |= 0x20;
+        let encrypted = crypto
+            .encrypt(&padded_header, &[0xF8, 0xFF, 0xFE, 0x00])
+            .unwrap();
+        assert!(crypto.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn test_nonce_counter_never_wraps_and_reuses_a_nonce() {
+        let key = test_secret_key();
+        let mut crypto = RtpCrypto::new("aead_aes256_gcm_rtpsize", &key).unwrap();
+        let header = sample_rtp_header(1, 0, 1);
+        crypto.set_nonce_counter(u32::MAX);
+
+        let last = crypto.encrypt(&header, b"last frame").unwrap();
+        assert_eq!(&last[last.len() - 4..], &[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(crypto.encrypt(&header, b"must not reuse nonce").is_err());
+
+        crypto.set_nonce_counter(0);
+        assert!(crypto.encrypt(&header, b"new session").is_ok());
     }
 }

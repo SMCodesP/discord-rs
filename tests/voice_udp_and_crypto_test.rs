@@ -61,7 +61,8 @@ fn test_ip_discovery_response_parsing() {
 
     response[72..74].copy_from_slice(&65432u16.to_be_bytes());
 
-    let (parsed_ip, parsed_port) = parse_ip_discovery_response(&response).expect("parsing válido");
+    let (parsed_ip, parsed_port) = parse_ip_discovery_response(&response, 0xCAFEBABE)
+        .expect("parsing válido");
     assert_eq!(parsed_ip, "177.136.240.12");
     assert_eq!(parsed_port, 65432);
 }
@@ -198,6 +199,7 @@ fn test_rtp_header_with_csrc_and_extension() {
 
     raw.extend_from_slice(&0xBEDEu16.to_be_bytes());
     raw.extend_from_slice(&2u16.to_be_bytes());
+    raw.extend_from_slice(&[0x12, 0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x00, 0x00]);
 
     let info = parse_rtp_aad_and_ext(&raw).expect("parsing de extensão e CSRC");
     assert_eq!(info.aad_len, 20);
