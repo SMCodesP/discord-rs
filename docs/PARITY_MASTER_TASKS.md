@@ -66,7 +66,8 @@
   - **Concluído em 2026-11-24** (layer `qa-voice`, commit `22c78af`): suíte existente 77/77 e lib 175/175 passaram; adicionou 10 testes de regressão (4/10 passaram, **6 falharam expondo bugs reais**: IP Discovery sem validação, DAVE sem propagação, `NewSession` sem rebind UDP/chave, heartbeat não positivo aceito). Mantido na layer `qa-voice` até correção em `Voice-Proto`/`Voice-Audio`.
 
 ### P1 — Mensagens, Chat e Interações
-- [ ] **T-005** `[Chat-Msgs]` — **Revisar ciclo completo de Mensagens (DM e Guilda)**
+- [x] **T-005** `[Chat-Msgs]` — **Revisar ciclo completo de Mensagens (DM e Guilda)**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `chat-msgs`, commit `17b28be`, merge `ec6694ae`, +3.154/-791 linhas): composer, markdown, mensagens e estado; validado com `dm_messaging_test` 6/6, `editor_test` 12/12, `message_parity_and_member_list_test` 24/24 (**42/42 verdes**).
   - **Escopo**: `src/chat/chat_view.rs`, `src/chat/message_list.rs`, `src/chat/editor.rs`, `src/chat/markdown.rs`, `src/chat/reactions.rs`, `src/app/state/messages.rs`.
   - **Foco**: Envio otimista + confirmação REST/Gateway (sem duplicação!), edição inline, exclusão com confirmação, reply/menção, fixar/desfixar, anexos/imagens, embeds, markdown completo (code blocks, spoilers, quotes, links, timestamps `<t:...>`), scroll infinito / paginação para cima, indicador de digitação (`TYPING_START`).
 
@@ -81,7 +82,8 @@
   - **Concluído em 2026-11-24** (layer `qa-profile`, commit `56d7327`): +16 novos testes (`44/52` passaram, **8 falhas expondo bugs reais**: 6 em propagação/renderização de decoração + 4 pontos de `Avatar` omitindo dados/decoração, e **2 no quick-send onde resposta antiga fecha o popout atual**). Confirmado: nenhum avatar de usuário desenhado fora do componente `Avatar`. Mantido na layer `qa-profile` até correção por `Profile-Decor`.
 
 ### P1 — GIFs, Stickers e Emojis
-- [ ] **T-009** `[Media-Gifs]` — **Paridade total de GIFs, Stickers, Emojis e Reações**
+- [x] **T-009** `[Media-Gifs]` — **Paridade total de GIFs, Stickers, Emojis e Reações**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `media-gifs`, commit `1187f7d`, merge `3b8908f4`, +3.042/-556 linhas): Media Picker, Reactions e CAS Media Cache; validado com `media_cache_test` 5/5 e `media_picker` 17/17 (**22/22 verdes**).
   - **Escopo**: `src/chat/media_picker.rs`, `src/chat/reactions.rs`, `src/protocol/discord_api.rs` (rotas de GIF/Tenor, stickers, emojis), `src/protocol/media_cache.rs`.
   - **Foco**: Busca e trending de GIFs funcionando de verdade via API, renderização animada/preview de GIFs no picker e no chat, stickers padrão + guilda, emojis unicode + customizados (incluindo animados), favoritos/recentes, envio real ao clicar.
 
@@ -96,7 +98,8 @@
   - **Concluído e integrado na `main` em 2026-11-24** (layer `design-chat`, commit `6fd21bc`, merge `220cece7`): +764/-100 em `src/app/member_sidebar.rs`, `src/chat/message_list.rs` e `src/chat/search.rs` usando as medições reais do `Discord-Desktop` (Cozy/member geometry 264px, hover bar, busca real). Validado na `main`: `cargo check` limpo, `message_parity_and_member_list_test` **24/24** e `search_state_and_filter_test` **14/14** verdes.
   - **Evidência CDP do Ciclo 2:** `/tmp/opencode/discord-composer-friends-measurements.md` mediu composer **658.5×58/r8**, textarea 56px (máx. 50vh), editor 16px/400/22px com padding `17px 0 17px 10px`, botão `+` efetivo 32×32/r8/ícone 20px e ações mínimas 32×32. O RS usa `+` 24×24/r16/ícone 16px (`src/chat/editor.rs:105-122`) e input sem o gradiente/altura medidos (`src/chat/editor.rs:589-612`).
 
-- [ ] **T-013** `[Design-Friends]` — **Paridade visual & funcional: Friends Hub, Active Now, DMs Fixadas, Presença**
+- [x] **T-013** `[Design-Friends]` — **Paridade visual & funcional: Friends Hub, Active Now, DMs Fixadas, Presença**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `design-friends`, commit `0a39d4a`, merge `9027a8a7`, +1.017/-417 linhas): Friends Hub, Active Now com assets reais e tooltips, DM List e Pinned DMs; validado com `dm_presence_and_status_test` 6/6, `friends_hub_test` 14/14, `pinned_dms_test` 7/7 (**27/27 verdes**).
   - **Escopo**: `src/app/friends_hub.rs`, `src/app/state/friends_dms.rs`, `src/protocol/pinned_dms.rs`.
   - **Foco**: Abas Online/Todos/Pendentes/Bloqueados/Adicionar Amigo, cartões "Ativo Agora" com imagens reais de atividade e barra de progresso Spotify, presença (online/idle/dnd/offline/custom status).
 
@@ -147,7 +150,8 @@
   - **O que falta/corrigir:** tornar o handshake de mídia reentrante e orientado por geração de sessão; reconstruir transporte após `Ready`/`SessionDescription` novo, preservando buffers apenas quando o protocolo permitir resume.
   - **Critério de pronto:** teste determinístico injeta fechamento resumível e `4006/4009` após Ready, verifica novo SSRC/chave/IP/porta/Select Protocol e comprova que nenhum pacote é enviado com metadados da sessão anterior; reconexão real em canal de teste é observada pelo dono.
 
-- [ ] **T-019** — **P0** — **Voz/Áudio** — **Implementar jitter buffer, reordenação e PLC por SSRC**
+- [x] **T-019** — **P0** — **Voz/Áudio** — **Implementar jitter buffer, reordenação e PLC por SSRC**
+  - **Concluído e integrado na `main` em 2026-11-24** (layer `v-audio`, commit `5dd199e`, merge `4a1177ac`, +1.762/-262 linhas): ordenação por `sequence`/`timestamp` no `AudioBridge` + mixer, ganho real de entrada/saída e medidor RMS (`T-039b`); `audio_engine_test` **6/6 verdes** e `cargo check --lib` limpo.
   - **Arquivos:** `src/protocol/voice_session.rs:1261-1288`, `src/protocol/voice_session.rs:435-436`, `src/media/mixer.rs:37-75`, `src/media/mixer.rs:80-108`, `src/media/codec.rs:73-82`.
   - **Evidência:** `sequence` e `timestamp` chegam ao bridge e são descartados (`..` no match). O mixer decodifica e enfileira imediatamente, sem ordenação, deduplicação, detecção de lacuna ou alvo de jitter; underrun vira silêncio e overflow descarta o quadro mais antigo. `decode_loss()` existe, mas não é chamado.
   - **O que falta/corrigir:** buffer por SSRC com ordenação por sequência/timestamp, tolerância a wrap, política adaptativa de atraso, PLC em lacunas e métricas de perda/jitter.
