@@ -4,6 +4,8 @@ use crate::domain::settings::AccountConnection;
 use crate::domain::settings::MessageDisplayMode;
 use crate::domain::settings::NitroTier;
 use crate::domain::settings::ThemeChoice;
+use crate::i18n::{self, Locale};
+use crate::media::{AudioError, MediaDeviceInfo, MediaDeviceManager};
 
 impl AppState {
     /// Sets the active settings tab
@@ -82,6 +84,47 @@ impl AppState {
     /// Sets the Discord visual theme choice
     pub fn set_theme_choice(&mut self, theme: ThemeChoice) {
         self.theme_choice = theme;
+    }
+
+    /// Applies a UI language understood by the bundled i18n dictionaries.
+    ///
+    /// Returns `false` (and leaves the current locale untouched) for languages
+    /// that this client does not ship yet, so the UI never claims a switch that
+    /// did not happen (Zero Mocks).
+    pub fn set_language(&mut self, code: &str) -> bool {
+        let locale = match code {
+            "pt-BR" => Locale::PtBr,
+            "en-US" => Locale::EnUs,
+            _ => return false,
+        };
+        i18n::set_locale(locale);
+        true
+    }
+
+    /// Current UI language code, derived from the real i18n locale.
+    pub fn current_language(&self) -> &'static str {
+        match i18n::current_locale() {
+            Locale::PtBr => "pt-BR",
+            Locale::EnUs => "en-US",
+        }
+    }
+
+    /// Enumerates the real system audio input devices (microphones).
+    ///
+    /// Returns an empty list when the host exposes no device; it never invents
+    /// hardware options.
+    pub fn list_audio_input_devices(&self) -> Result<Vec<MediaDeviceInfo>, AudioError> {
+        MediaDeviceManager::new().list_input_devices()
+    }
+
+    /// Enumerates the real system audio output devices (speakers/headphones).
+    pub fn list_audio_output_devices(&self) -> Result<Vec<MediaDeviceInfo>, AudioError> {
+        MediaDeviceManager::new().list_output_devices()
+    }
+
+    /// Enumerates the real system cameras exposed through V4L2.
+    pub fn list_camera_devices(&self) -> Result<Vec<crate::capture::CameraInfo>, crate::capture::CaptureError> {
+        crate::capture::CameraManager::list_devices()
     }
 
     /// Sets chat message display mode (Cozy vs Compact)

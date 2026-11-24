@@ -8,14 +8,16 @@ use crate::tokens::icons::*;
 use crate::tokens::kit_theme::DiscordTheme;
 
 use super::components::render_section_description;
+use super::UserSettingsModal;
 
 pub fn render_connections(
     app_entity: Entity<AppState>,
+    modal: Entity<UserSettingsModal>,
     app_state: &AppState,
     cx: &App,
 ) -> Div {
     let connections = &app_state.connections;
-    let current_username = app_state.current_user.username.clone();
+    let feedback = modal.read(cx).connections_feedback.clone();
 
     // 10 official third-party providers from Discord
     let providers = [
@@ -40,6 +42,17 @@ pub fn render_connections(
             "These are accounts from other platforms. Connecting them here can unlock new features on Discord, like the ability to share what you're currently listening to, get paid safely and securely, and more.",
             cx,
         ))
+        .children(feedback.map(|msg| {
+            div()
+                .p(px(10.0))
+                .rounded(px(6.0))
+                .bg(cx.discord().bg_channels)
+                .border_1()
+                .border_color(cx.discord().borders)
+                .text_color(cx.discord().text_secondary)
+                .text_size(px(12.0))
+                .child(msg)
+        }))
         // -------------------------------------------------------------
         // Grid of Providers (Add a new connection)
         // -------------------------------------------------------------
@@ -64,7 +77,7 @@ pub fn render_connections(
                         .children(providers.into_iter().map(|(platform, display_name)| {
                             let is_connected = connections.iter().any(|c| c.platform == platform);
                             let entity = app_entity.clone();
-                            let default_user = current_username.clone();
+                            let feedback_modal = modal.clone();
 
                             let card_bg = cx.discord().bg_channels;
                             let hover_bg = cx.discord().channel_hover;
@@ -89,15 +102,23 @@ pub fn render_connections(
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(hover_bg))
                                 .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
-                                    let def = default_user.clone();
-                                    entity.update(cx, |s, cx| {
-                                        if is_connected {
+                                    if is_connected {
+                                        entity.update(cx, |s, cx| {
                                             s.disconnect_platform(platform);
-                                        } else {
-                                            s.connect_platform(platform, &def);
-                                        }
-                                        cx.notify();
-                                    });
+                                            cx.notify();
+                                        });
+                                    } else {
+                                        // Zero Mocks: platform links require a real OAuth2
+                                        // authorization round-trip. Never fabricate a
+                                        // "Connected" account from the local username.
+                                        feedback_modal.update(cx, |this, cx| {
+                                            this.connections_feedback = Some(format!(
+                                                "Conectar {} exige concluir a autorização OAuth2 no navegador. Este cliente ainda não inicia esse fluxo.",
+                                                display_name
+                                            ));
+                                            cx.notify();
+                                        });
+                                    }
                                 })
                                 .child(
                                     div()

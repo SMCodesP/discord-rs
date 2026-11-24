@@ -53,11 +53,36 @@ pub struct UserSettingsModal {
     pub video_resolution: u32, // 720 or 1080
     pub video_fps: u32,        // 30 or 60
 
+    // --- Real Hardware Devices (audio & camera) ---
+    pub input_devices: Vec<crate::media::MediaDeviceInfo>,
+    pub output_devices: Vec<crate::media::MediaDeviceInfo>,
+    pub camera_devices: Vec<crate::capture::CameraInfo>,
+    pub devices_error: Option<String>,
+    pub input_device_menu_open: bool,
+    pub output_device_menu_open: bool,
+    pub camera_device_menu_open: bool,
+    pub selected_input_device: Option<String>,
+    pub selected_output_device: Option<String>,
+    pub selected_camera_device: Option<String>,
+
+    // --- Connections State ---
+    pub connections_feedback: Option<String>,
+
+    // --- Privacy Expanded State ---
+    pub personalize_sponsored_content: bool,
+    pub allow_voice_recording_in_clips: bool,
+
     // --- Notifications State ---
     pub desktop_notifications: bool,
     pub unread_badge: bool,
     pub flash_taskbar: bool,
     pub notification_scope: u8, // 0: Todas, 1: @Menções, 2: Nada
+    pub notify_streams: bool,
+    pub notify_anniversaries: bool,
+    pub notify_friends_online: bool,
+    pub notify_server_events: bool,
+    pub notify_profile_updates: bool,
+    pub notify_reactions: u8, // 0: Todas, 1: @Menções, 2: Nada
     pub sound_message: bool,
     pub sound_voice_join: bool,
     pub sound_mute_toggle: bool,
@@ -77,25 +102,33 @@ impl UserSettingsModal {
         })
         .detach();
 
-        let (display_name, custom_status) = {
+        let (display_name, selected_input, selected_output, selected_camera, language) = {
             let s = state.read(cx);
+            let call = s.active_voice_call.as_ref();
             (
                 s.current_user.display_name.clone(),
-                s.current_user.custom_status.clone().unwrap_or_default(),
+                call.and_then(|call| call.selected_input_device.clone()),
+                call.and_then(|call| call.selected_output_device.clone()),
+                call.and_then(|call| call.selected_camera_device.clone()),
+                s.current_language().to_string(),
             )
         };
+        let (input_devices, output_devices, camera_devices, devices_error) = enumerate_hardware();
 
         Self {
             state,
             profile_display_name: display_name,
             profile_pronouns: String::new(),
-            profile_bio: custom_status,
+            // A custom status is not an "About Me" bio: never reuse it as profile data.
+            profile_bio: String::new(),
 
             allow_dm_from_members: true,
             allow_friend_requests_from_members: true,
             explicit_filter: 1, // Meus amigos são legais (padrão)
             telemetry_improve: false,
             telemetry_personalize: true,
+            personalize_sponsored_content: true,
+            allow_voice_recording_in_clips: true,
 
             input_volume: 85,
             output_volume: 100,
@@ -106,19 +139,88 @@ impl UserSettingsModal {
             video_resolution: 1080,
             video_fps: 60,
 
+            input_devices,
+            output_devices,
+            camera_devices,
+            devices_error,
+            input_device_menu_open: false,
+            output_device_menu_open: false,
+            camera_device_menu_open: false,
+            selected_input_device: selected_input,
+            selected_output_device: selected_output,
+            selected_camera_device: selected_camera,
+
+            connections_feedback: None,
+
             desktop_notifications: true,
             unread_badge: true,
             flash_taskbar: true,
             notification_scope: 1, // @Menções
+            notify_streams: true,
+            notify_anniversaries: true,
+            notify_friends_online: true,
+            notify_server_events: true,
+            notify_profile_updates: true,
+            notify_reactions: 0, // Todas as mensagens
             sound_message: true,
             sound_voice_join: true,
             sound_mute_toggle: true,
             sound_deafen_toggle: true,
 
             is_recording_keybind: false,
-            selected_language: "pt-BR".to_string(),
+            selected_language: language,
         }
     }
+
+    /// Re-enumerates real audio and camera hardware without inventing entries.
+    pub fn refresh_devices(&mut self) {
+        let (input_devices, output_devices, camera_devices, devices_error) = enumerate_hardware();
+        self.input_devices = input_devices;
+        self.output_devices = output_devices;
+        self.camera_devices = camera_devices;
+        self.devices_error = devices_error;
+    }
+}
+
+/// Enumerates every real audio input/output and camera exposed by the host.
+/// Errors are collected as user-facing text; empty lists stay empty.
+fn enumerate_hardware() -> (
+    Vec<crate::media::MediaDeviceInfo>,
+    Vec<crate::media::MediaDeviceInfo>,
+    Vec<crate::capture::CameraInfo>,
+    Option<String>,
+) {
+    let manager = crate::media::MediaDeviceManager::new();
+    let mut errors = Vec::new();
+
+    let input_devices = match manager.list_input_devices() {
+        Ok(devices) => devices,
+        Err(err) => {
+            errors.push(format!("Microfones: {err}"));
+            Vec::new()
+        }
+    };
+    let output_devices = match manager.list_output_devices() {
+        Ok(devices) => devices,
+        Err(err) => {
+            errors.push(format!("Saídas de áudio: {err}"));
+            Vec::new()
+        }
+    };
+    let camera_devices = match crate::capture::CameraManager::list_devices() {
+        Ok(devices) => devices,
+        Err(err) => {
+            errors.push(format!("Câmeras: {err}"));
+            Vec::new()
+        }
+    };
+
+    let devices_error = if errors.is_empty() {
+        None
+    } else {
+        Some(errors.join(" | "))
+    };
+    (input_devices, output_devices, camera_devices, devices_error)
 }
 
 impl Render for UserSettingsModal {
@@ -357,7 +459,7 @@ impl Render for UserSettingsModal {
                                 SettingsTab::Profiles => profiles::render_profiles(modal_entity.clone(), self, &current_user, state.nitro_tier != NitroTier::None, cx).into_any_element(),
                                 SettingsTab::Privacy => privacy::render_privacy(modal_entity.clone(), self, cx).into_any_element(),
                                 SettingsTab::AuthorizedApps => authorized_apps::render_authorized_apps(app_entity.clone(), state, cx).into_any_element(),
-                                SettingsTab::Connections => connections::render_connections(app_entity.clone(), state, cx).into_any_element(),
+                                SettingsTab::Connections => connections::render_connections(app_entity.clone(), modal_entity.clone(), state, cx).into_any_element(),
                                 SettingsTab::FamilyCenter => family_center::render_family_center(app_entity.clone(), state, cx).into_any_element(),
                                 SettingsTab::Nitro => billing::render_nitro(app_entity.clone(), state, cx).into_any_element(),
                                 SettingsTab::ServerBoost => billing::render_server_boost(app_entity.clone(), state, cx).into_any_element(),
@@ -366,7 +468,7 @@ impl Render for UserSettingsModal {
                                 SettingsTab::VoiceVideo => voice_video::render_voice_video_expanded(modal_entity.clone(), self, cx).into_any_element(),
                                 SettingsTab::Notifications => notifications::render_notifications(modal_entity.clone(), self, cx).into_any_element(),
                                 SettingsTab::Keybinds => keybinds::render_keybinds(modal_entity.clone(), self, cx).into_any_element(),
-                                SettingsTab::Language => language::render_language(modal_entity.clone(), self, cx).into_any_element(),
+                                SettingsTab::Language => language::render_language(app_entity.clone(), state, cx).into_any_element(),
                             }),
                     )
                     // Floating ESC Close Button

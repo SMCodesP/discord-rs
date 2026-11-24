@@ -96,7 +96,10 @@ pub fn render_authorized_apps(
                                                         div()
                                                             .text_color(cx.discord().text_secondary)
                                                             .text_size(px(12.0))
-                                                            .child("Autorizado via OAuth2 • Conexão Segura"),
+                                                            .child(format!(
+                                                                "Autorizado em {}",
+                                                                app.authorized_at.format("%d/%m/%Y")
+                                                            )),
                                                     ),
                                             ),
                                     )

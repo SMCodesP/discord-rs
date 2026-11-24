@@ -13,11 +13,16 @@ pub fn render_notifications(
 ) -> Div {
     let modal_read = modal_state;
     let desk = modal_read.desktop_notifications;
-    let s_stream = modal_read.unread_badge;
-    let s_anniv = modal_read.flash_taskbar;
-    let s_online = modal_read.sound_message;
-    let s_event = modal_read.sound_voice_join;
-    let s_update = modal_read.sound_mute_toggle;
+    let notify_streams = modal_read.notify_streams;
+    let notify_anniversaries = modal_read.notify_anniversaries;
+    let notify_online = modal_read.notify_friends_online;
+    let notify_events = modal_read.notify_server_events;
+    let notify_profile = modal_read.notify_profile_updates;
+    let reaction_scope = modal_read.notify_reactions;
+    let sound_message = modal_read.sound_message;
+    let sound_voice_join = modal_read.sound_voice_join;
+    let sound_mute = modal_read.sound_mute_toggle;
+    let sound_deafen = modal_read.sound_deafen_toggle;
 
     div()
         .flex()
@@ -65,10 +70,10 @@ pub fn render_notifications(
                         "toggle-notif-stream",
                         "People I know start streaming in small servers",
                         "",
-                        s_stream,
+                        notify_streams,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
-                                this.unread_badge = !this.unread_badge;
+                                this.notify_streams = !this.notify_streams;
                                 cx.notify();
                             });
                         },
@@ -81,10 +86,10 @@ pub fn render_notifications(
                         "toggle-notif-anniv",
                         "A friend and I reach a friendship anniversary",
                         "",
-                        s_anniv,
+                        notify_anniversaries,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
-                                this.flash_taskbar = !this.flash_taskbar;
+                                this.notify_anniversaries = !this.notify_anniversaries;
                                 cx.notify();
                             });
                         },
@@ -97,10 +102,10 @@ pub fn render_notifications(
                         "toggle-notif-online",
                         "Friends come online",
                         "",
-                        s_online,
+                        notify_online,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
-                                this.sound_message = !this.sound_message;
+                                this.notify_friends_online = !this.notify_friends_online;
                                 cx.notify();
                             });
                         },
@@ -113,10 +118,10 @@ pub fn render_notifications(
                         "toggle-notif-event",
                         "A server has an upcoming event",
                         "",
-                        s_event,
+                        notify_events,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
-                                this.sound_voice_join = !this.sound_voice_join;
+                                this.notify_server_events = !this.notify_server_events;
                                 cx.notify();
                             });
                         },
@@ -129,23 +134,22 @@ pub fn render_notifications(
                         "toggle-notif-update",
                         "Friends update their profile",
                         "",
-                        s_update,
+                        notify_profile,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
-                                this.sound_mute_toggle = !this.sound_mute_toggle;
+                                this.notify_profile_updates = !this.notify_profile_updates;
                                 cx.notify();
                             });
                         },
                         cx,
                     )
                 })
-                // Someone reacts to my messages dropdown
+                // Someone reacts to my messages
                 .child(
                     div()
                         .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
+                        .flex_col()
+                        .gap(px(8.0))
                         .py(px(10.0))
                         .child(
                             div()
@@ -156,20 +160,145 @@ pub fn render_notifications(
                         )
                         .child(
                             div()
-                                .h(px(36.0))
-                                .px(px(12.0))
-                                .rounded(px(4.0))
-                                .bg(cx.discord().bg_server)
-                                .border_1()
-                                .border_color(cx.discord().neutral_67)
                                 .flex()
-                                .items_center()
+                                .flex_row()
                                 .gap(px(8.0))
-                                .text_color(cx.discord().text_primary)
-                                .text_size(px(13.0))
-                                .child("All Messages")
-                                .child("⌵"),
+                                .child(render_reaction_choice(
+                                    modal.clone(),
+                                    reaction_scope,
+                                    0,
+                                    "Todas as mensagens",
+                                    cx,
+                                ))
+                                .child(render_reaction_choice(
+                                    modal.clone(),
+                                    reaction_scope,
+                                    1,
+                                    "@Menções",
+                                    cx,
+                                ))
+                                .child(render_reaction_choice(
+                                    modal.clone(),
+                                    reaction_scope,
+                                    2,
+                                    "Nada",
+                                    cx,
+                                )),
                         ),
                 ),
         )
+        .child(render_divider(cx))
+        // -------------------------------------------------------------
+        // Sounds Section
+        // -------------------------------------------------------------
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(render_section_header("SOUNDS", cx))
+                .child({
+                    let modal_c = modal.clone();
+                    render_toggle_row(
+                        "toggle-sound-message",
+                        "Message sent",
+                        "",
+                        sound_message,
+                        move |_checked, _win, cx| {
+                            modal_c.update(cx, |this, cx| {
+                                this.sound_message = !this.sound_message;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    )
+                })
+                .child({
+                    let modal_c = modal.clone();
+                    render_toggle_row(
+                        "toggle-sound-voice-join",
+                        "User joins voice",
+                        "",
+                        sound_voice_join,
+                        move |_checked, _win, cx| {
+                            modal_c.update(cx, |this, cx| {
+                                this.sound_voice_join = !this.sound_voice_join;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    )
+                })
+                .child({
+                    let modal_c = modal.clone();
+                    render_toggle_row(
+                        "toggle-sound-mute",
+                        "Mute / Unmute",
+                        "",
+                        sound_mute,
+                        move |_checked, _win, cx| {
+                            modal_c.update(cx, |this, cx| {
+                                this.sound_mute_toggle = !this.sound_mute_toggle;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    )
+                })
+                .child({
+                    let modal_c = modal.clone();
+                    render_toggle_row(
+                        "toggle-sound-deafen",
+                        "Deafen / Undeafen",
+                        "",
+                        sound_deafen,
+                        move |_checked, _win, cx| {
+                            modal_c.update(cx, |this, cx| {
+                                this.sound_deafen_toggle = !this.sound_deafen_toggle;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    )
+                }),
+        )
+}
+
+fn render_reaction_choice(
+    modal: Entity<UserSettingsModal>,
+    current: u8,
+    value: u8,
+    label: &'static str,
+    cx: &App,
+) -> Div {
+    let is_selected = current == value;
+    let bg = if is_selected {
+        cx.discord().blurple
+    } else {
+        cx.discord().bg_channels
+    };
+    let text = if is_selected {
+        cx.discord().white
+    } else {
+        cx.discord().text_secondary
+    };
+    let hover_bg = cx.discord().channel_hover;
+
+    div()
+        .px(px(10.0))
+        .py(px(5.0))
+        .rounded(px(4.0))
+        .bg(bg)
+        .text_color(text)
+        .text_size(px(12.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover_bg))
+        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+            modal.update(cx, |this, cx| {
+                this.notify_reactions = value;
+                cx.notify();
+            });
+        })
+        .child(label)
 }

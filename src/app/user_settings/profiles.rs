@@ -17,7 +17,11 @@ pub fn render_profiles(
     cx: &App,
 ) -> Div {
     let modal_read = modal_state;
-    let display_name = modal_read.profile_display_name.clone();
+    let display_name = if modal_read.profile_display_name.is_empty() {
+        user.display_name.clone()
+    } else {
+        modal_read.profile_display_name.clone()
+    };
     let username = user.username.clone();
     let pronouns = modal_read.profile_pronouns.clone();
     let bio = modal_read.profile_bio.clone();

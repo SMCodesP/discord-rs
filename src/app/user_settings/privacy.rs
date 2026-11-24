@@ -16,6 +16,8 @@ pub fn render_privacy(
     let tel_person = modal_read.telemetry_personalize;
     let allow_dm = modal_read.allow_dm_from_members;
     let allow_req = modal_read.allow_friend_requests_from_members;
+    let sponsored = modal_read.personalize_sponsored_content;
+    let clips_voice = modal_read.allow_voice_recording_in_clips;
 
     div()
         .flex()
@@ -96,10 +98,10 @@ pub fn render_privacy(
                         "toggle-sponsored-content",
                         "Use my Discord activity to personalize Sponsored Content",
                         "Allows Discord to personalize Sponsored Content, like Quests, using your Discord activity, such as the games you play. If you opt out you may still see Quests, but they won't be personalized.",
-                        allow_dm,
+                        sponsored,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
-                                this.allow_dm_from_members = !this.allow_dm_from_members;
+                                this.personalize_sponsored_content = !this.personalize_sponsored_content;
                                 cx.notify();
                             });
                         },
@@ -113,6 +115,49 @@ pub fn render_privacy(
                         "toggle-clips-voice",
                         "Allow my voice to be recorded in Clips",
                         "Allows your voice to be included when someone in the same voice channel uses Clips.",
+                        clips_voice,
+                        move |_checked, _win, cx| {
+                            modal_c.update(cx, |this, cx| {
+                                this.allow_voice_recording_in_clips = !this.allow_voice_recording_in_clips;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    )
+                }),
+        )
+        .child(render_divider(cx))
+        // -------------------------------------------------------------
+        // Server Privacy Defaults (real fields, no cross-wiring)
+        // -------------------------------------------------------------
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(10.0))
+                .child(render_section_header("SERVER PRIVACY DEFAULTS", cx))
+                .child({
+                    let modal_c = modal.clone();
+                    render_toggle_row(
+                        "toggle-allow-dm",
+                        "Direct Messages",
+                        "Allow direct messages from server members.",
+                        allow_dm,
+                        move |_checked, _win, cx| {
+                            modal_c.update(cx, |this, cx| {
+                                this.allow_dm_from_members = !this.allow_dm_from_members;
+                                cx.notify();
+                            });
+                        },
+                        cx,
+                    )
+                })
+                .child({
+                    let modal_c = modal.clone();
+                    render_toggle_row(
+                        "toggle-allow-friend-requests",
+                        "Message Requests",
+                        "Allow friend requests from everyone.",
                         allow_req,
                         move |_checked, _win, cx| {
                             modal_c.update(cx, |this, cx| {
@@ -124,5 +169,4 @@ pub fn render_privacy(
                     )
                 }),
         )
-        .child(render_divider(cx))
 }
