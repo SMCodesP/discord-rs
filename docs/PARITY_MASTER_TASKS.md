@@ -547,3 +547,63 @@
   - **Evidência:** a janela nasce com clamp 940–1280px, mas `WindowOptions` não define `min_width`; o shell sempre monta rail + sidebar + member sidebar e vários modais têm largura fixa. No CDP oficial a 1017×605, shell=344px e página=673px; ao emular larguras menores, a sidebar permaneceu 344px e a página encolheu até 0px, sem overflow documental. O CSS oficial esconde `inviteToolbar` em `max-width:940px` e torna membros full-width em `max-width:485px`.
   - **O que falta/corrigir:** breakpoints explícitos, min width ou drawers, auto-ocultar membros/Active Now, clamp de modais e preservação de estado ao redimensionar; consolidar `T-072`/`T-074`/`T-075`/`T-079` em um comportamento de janela único.
   - **Critério de pronto:** matriz 1017×605, 940×600, 800×600, 600×600 e 485×600 sem página de largura zero, overflow horizontal ou controles inacessíveis; resize persistente e toggles restauram sidebars sem perder canal/seleção.
+
+### Ciclo 4 — Seleção/cópia, restrições de canal, tooltips, memória e edge cases de voz de 2026-11-24
+
+**Metodologia e limites:** auditoria somente leitura da `main`, dos commits integrados `f32d3a72` (Voice-Audio) e `aa8eabd6` (Voice-Stage) e do Discord Desktop já aberto. CDP acessado por `list_pages` + `select_page` na aba existente; **nenhum `new_page`, clique destrutivo, digitação ou navegação**. CSS/DOM e bundle oficial foram usados sem registrar dados pessoais. Viewport observado: **1017×605**, `devicePixelRatio=1.4375`.
+
+**Verificação dos logs:** `/tmp/discord-rs-logs/smcodes.log` tinha 11.210 linhas, 14 erros (todos os 404 de ícones já conhecidos em L51–64) e 4 avisos de portal/DBus; `/tmp/discord-rs-logs/xinxyl.log` tinha 194 linhas, 0 erros e os mesmos 4 avisos de portal/DBus. Nenhuma nova categoria de erro/warning surgiu em relação ao Ciclo 2; os achados conhecidos permanecem em `T-036`, `T-068` e `T-070`.
+
+- [ ] **T-091** — **P1** — **Chat/Seleção & Cópia** — **Permitir seleção de texto, Ctrl+C e botão Copy em blocos de código**
+  - **Arquivos:** `src/chat/markdown.rs:620-659`, `src/chat/markdown.rs:703-710`, `src/chat/message_list.rs:889-902`, `src/chat/message_list.rs:1070-1085`, `src/chat/chat_view.rs:949-952`, `src/chat/chat_view.rs:1824-1868`.
+  - **Evidência:** o RS renderiza mensagens/código como `div().child(texto)` sem estado de seleção; Ctrl+C só é tratado implicitamente pelo kit no editor, não na lista de mensagens; o code block mostra apenas o idioma e não possui ação de cópia. No CDP oficial, `.markup_ku1OHH` usa `user-select:text`; `.codeContainer_ku1OHH` limita `max-width:50vw`; `.codeActions_ku1OHH` fica oculto, aparece no hover e posiciona-se em `top:8px/right:4px`.
+  - **O que falta/corrigir:** seleção nativa por arraste no conteúdo renderizado, preservação do markdown exibido, Ctrl+C sem roubar atalhos quando não há seleção e botão Copy por code block com confirmação acessível.
+  - **Critério de pronto:** teste sintético seleciona parte de uma mensagem e de um code block, copia somente o trecho/body correto e não dispara menu de mensagem; hover revela uma ação Copy funcional, com teclado e clipboard injetado.
+
+- [ ] **T-092** — **P1** — **Chat/Menus de Mídia** — **Adicionar menu de contexto para links e imagens (Abrir/Copiar/Salvar)**
+  - **Arquivos:** `src/chat/markdown.rs:838-844`, `src/chat/message_list.rs:605-697`, `src/chat/message_list.rs:762-859`, `src/chat/chat_view.rs:908-1125`, `src/app/root_view.rs`.
+  - **Evidência:** links são `div` sem handler; imagens/anexos não têm menu próprio e o menu existente é somente da mensagem inteira. O locale oficial contém “Open Link”, “Copy Link”, “Copy Image Link”, “Copy Image”, “Copy Media Link”, “Open Image Link” e “Save Image” (`/tmp/opencode/discord-official-en-US.js:1`).
+  - **O que falta/corrigir:** handler de clique/aux-click, menu ancorado ao elemento, abertura externa segura, cópia de URL e download de imagem com nome/destino escolhidos; diferenciar link real de masked link perigoso.
+  - **Critério de pronto:** fixtures de link HTTP, masked link, imagem e GIF validam cada ação, URL sanitizada e falha de download; nenhuma ação abre caminho local arbitrário ou vaza ID/URL real em log.
+
+- [ ] **T-093** — **P1** — **Chat/Slowmode** — **Aplicar cooldown real do canal e contagem regressiva no composer**
+  - **Arquivos:** `src/domain/channel.rs:148-191`, `src/protocol/discord_api.rs:2205-2280`, `src/app/state/guilds_channels.rs:225-338`, `src/chat/editor.rs:419-486`, `src/chat/editor.rs:589-612`, `src/chat/chat_view.rs:1795-1808`, `src/app/state/messages.rs:166-204`.
+  - **Evidência:** o modelo de canal não guarda `rate_limit_per_user`; `ChatComposer` nasce `disabled:false` e `ChatView` nunca chama `.disabled(...)`; `send_message` não verifica cooldown. O CSS oficial mede `.cooldownWrapper` com gap 4px, margem automática à esquerda, padding `3px 8px` e right padding 16px; `.cooldownText` usa raio superior 8px e transição de cor 0,2s. O locale oficial informa “Slowmode is enabled. You can send another message… in N seconds”.
+  - **O que falta/corrigir:** hidratar `rate_limit_per_user`, calendário monotônico de próxima permissão, contagem regressiva, bloqueio de envio/typing durante cooldown e respeito a `BYPASS_SLOWMODE`.
+  - **Critério de pronto:** relógio injetado cobre 0/5/60s, troca de canal, tentativa prematura, expiração e bypass por permissão; UI mostra segundos reais e nenhuma mensagem otimista é criada enquanto bloqueada.
+
+- [ ] **T-094** — **P1** — **UX/Conteúdo Age-Gated** — **Modelar NSFW/age-restricted e exigir confirmação antes de renderizar conteúdo**
+  - **Arquivos:** `src/domain/channel.rs:148-191`, `src/domain/guild.rs:75-101`, `src/protocol/discord_api.rs:2205-2280`, `src/app/channel_sidebar.rs:546-793`, `src/chat/message_list.rs:605-859`, `src/app/user_settings/mod.rs`.
+  - **Evidência:** `Channel` e `Guild` não possuem `nsfw`/`age_restricted`; o parser descarta esses campos e a UI não tem gate. O locale oficial contém “This channel contains adult content marked as age-restricted. Do you wish to proceed?”, a variante para servidor e “You must be over legal age in order to view age-restricted servers”.
+  - **O que falta/corrigir:** preservar flags de canal/guilda, preferência do usuário, bloqueio de mídia/conteúdo até confirmação, lembrança por sessão/conta e estados de erro/sem permissão.
+  - **Critério de pronto:** fixtures de canal/servidor age-restricted, já confirmado, negado e sem preferência comprovam que nada é renderizado antes da decisão; a confirmação persiste conforme a política oficial e não usa idade inventada.
+
+- [ ] **T-095** — **P1** — **Moderação/Timeout** — **Aplicar `communication_disabled_until` e bloquear ações com aviso real**
+  - **Arquivos:** `src/app/state/models.rs:425-438`, `src/protocol/cache/lazy_guilds.rs:461-486`, `src/protocol/discord_api.rs:3099-3188`, `src/app/state/gateway_events.rs:238-272`, `src/app/state/messages.rs:166-204`, `src/chat/editor.rs:419-486`.
+  - **Evidência:** `MemberItemState` não guarda timeout; parsers de membro não leem `communication_disabled_until`; o composer não fica desabilitado por moderação. O bundle oficial usa `PATCH /guilds/{guild}/members/{user}` com `communication_disabled_until` (`/tmp/opencode/discord-web-entry.js:23`) e o locale contém “Timeout user”, duração e erros de permissão.
+  - **O que falta/corrigir:** interpretar timestamp ISO, expiração automática, bloqueio de envio/reação/typing conforme duração, aviso com motivo/tempo restante e atualização via Gateway; incluir também o membro atual vindo de `GUILD_CREATE`/perfil.
+  - **Critério de pronto:** relógio injetado cobre timeout ativo, expirado, removido e atualizado; UI impede requests proibidos antes do clique, mostra aviso real e libera exatamente na expiração.
+
+- [ ] **T-096** — **P2** — **Design/Tooltips** — **Alinhar delay, seta, posição e dimensões dos tooltips ao oficial**
+  - **Arquivos:** `src/components/guild_item.rs:169-181`, `src/components/guild_item.rs:476-495`, `src/components/button.rs:565-566`, `src/app/channel_sidebar.rs:1090-1146`, `src/app/header_bar.rs:359-500`, `src/app/voice_call_panel.rs:733-981`, `src/tokens/motion.rs:172-175`.
+  - **Evidência:** todos os pontos usam `.tooltip(...)`/`Tooltip::new(...)` sem configurar delay, posição ou seta; `TRANSITION_TOOLTIP` existe, mas não é aplicado explicitamente nesses componentes. O CDP oficial mede tooltip com `max-width:200px` (variante 190px), padding `8px 12px`, raio 8px, borda/sombra e seta triangular de 5px nas quatro direções; o bundle oficial usa delays de 150ms, 300ms e 500ms conforme o componente.
+  - **O que falta/corrigir:** wrapper único com delay/posição configuráveis, clamp nas bordas da janela, seta, foco/hover e reduced motion; preservar textos/atalhos reais.
+  - **Critério de pronto:** capturas sintéticas de Guild Rail, User Panel e Header nas bordas da janela confirmam dimensões/seta/posição; teste de relógio cobre 150/300/500ms, foco por teclado e nenhum tooltip em controle desabilitado sem explicação.
+
+- [ ] **T-097** — **P1** — **Performance/Memória** — **Implementar LRU limitado para mensagens, mídia e AST em sessões longas**
+  - **Arquivos:** `src/app/state/app_state.rs:73`, `src/app/state/messages.rs:94-119`, `src/app/state/guilds_channels.rs:281-323`, `src/protocol/cache_engine.rs:39-45`, `src/protocol/cache_engine.rs:158-194`, `src/protocol/media_cache.rs:355-384`, `src/protocol/media_cache.rs:478-500`, `src/protocol/media_cache.rs:564-566`, `src/chat/markdown.rs:97-119`.
+  - **Evidência:** `messages_by_channel`, `DiscordCacheEngine.memory_messages` e `MediaCacheManager.memory_cache` são `HashMap` sem limite; comentários dizem “LRU”, mas não há ordem de acesso/evicção. `MARKDOWN_AST_CACHE` limpa tudo apenas ao alcançar 1.000 entradas. Navegar por 50+ canais/guildas acumula mensagens e bytes de mídia indefinidamente.
+  - **O que falta/corrigir:** LRU por canal e por bytes de mídia, orçamentos configuráveis, pinning do canal ativo/rascunho, evicção segura de AST e métricas de hit/miss/RSS; manter disco como fonte persistente.
+  - **Critério de pronto:** teste determinístico com 60 canais/1.000 imagens sintéticas mantém RAM dentro do orçamento e preserva canal ativo/rascunhos; acesso antigo recarrega do disco sem duplicação e vazamento após 10 ciclos de navegação.
+
+- [ ] **T-098** — **P0** — **Voz/Estado** — **Corrigir invariantes mute/deafen e serializar comandos de controle**
+  - **Arquivos:** `src/app/state/voice.rs:551-613`, `src/protocol/voice_session.rs:806-831`, `src/app/state/voice.rs:230-264`, `tests/voice_stage_and_parity_test.rs`.
+  - **Evidência:** `toggle_deafen(true)` força `is_muted=true`, mas `toggle_deafen(false)` não restaura o mute anterior; `toggle_mute` também permite reativar o microfone enquanto `is_deafened` continua true. Cada comando é enviado em `tokio::spawn` separado (`voice.rs:564-571` e `:594-611`), portanto cliques rápidos podem reordenar `set_muted`/`set_deafened` e divergir do eco do Gateway. Isso contradiz o critério registrado em `T-020`.
+  - **O que falta/corrigir:** máquina de estados única para mute/deafen, restaurar mute anterior ao undeafen, impedir unmute enquanto deafened, fila serializada de comandos e rollback/aviso se o Gateway recusar.
+  - **Critério de pronto:** testes determinísticos cobrem mute→deafen→undeafen, deafen→toggle-mute, cliques concorrentes e falha parcial; estado local, bridge e último Opcode 4 permanecem idênticos após cada sequência.
+
+- [ ] **T-099** — **P1** — **Voz/Troca de Dispositivo** — **Evitar sobreposição de streams e tratar falha da thread de áudio**
+  - **Arquivos:** `src/media/audio.rs:265-335`, `src/media/audio.rs:338-457`, `src/media/audio.rs:459-583`, `src/protocol/voice_session.rs:395-455`, `src/protocol/client_manager.rs:686-740`.
+  - **Evidência:** `switch_input_device` inicia a nova stream/worker (`audio.rs:269-280`) antes de parar o antigo (`:292-298`); `switch_output_device` inicia a nova saída (`:312`) antes de parar a anterior (`:323`). Há uma janela com dois capturadores/dois reproduzidores ativos, podendo duplicar pacotes/fala ou áudio. `AudioBridge::from_engine_factory` usa `.expect` ao criar a thread e `init_rx.recv().unwrap_or((None,None))`, mascarando falha de inicialização.
+  - **O que falta/corrigir:** drenar/parar o stream antigo antes de ativar o novo sem perder fallback em caso de erro, eliminar eventos duplicados na transição e propagar `Result` da criação da thread/canais.
+  - **Critério de pronto:** teste com streams sintéticos prova que nunca há mais de um capturador/reprodutor ativo, que falha preserva o dispositivo anterior e que thread indisponível retorna erro acionável sem pânico ou silêncio fabricado.
