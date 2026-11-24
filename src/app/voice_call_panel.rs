@@ -12,7 +12,7 @@ use super::state::{ActiveVoiceCall, AppState, VoiceParticipantState};
 use crate::capture::camera::{CameraInfo, CameraManager, CameraSession};
 use crate::capture::screen::{
     ScreenCaptureManager, ScreenCaptureMode, ScreenSession, ScreenSourceType, SessionType,
-    detect_session,
+    detect_session, resolve_capture_mode,
 };
 use crate::capture::{CaptureError, VideoFrame};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -1950,6 +1950,7 @@ fn render_disconnect_control(app_entity: Entity<AppState>, cx: &App) -> AnyEleme
     let discord = cx.discord();
 
     div()
+        .id("voice-call-disconnect-btn")
         .h(px(32.0))
         .px(px(16.0))
         .rounded(px(16.0))
