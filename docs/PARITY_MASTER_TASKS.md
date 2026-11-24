@@ -438,7 +438,7 @@
 
 - [ ] **T-064** — **P1** — **Rede/Reconnect** — **Preservar o shell autenticado e mostrar banner de reconexão**
   - **Arquivos:** `src/protocol/discord_api.rs:1202-1207`, `src/protocol/discord_api.rs:1387-1419`, `src/app/state/gateway_events.rs:275-287`, `src/app/root_view.rs:554-580`.
-  - **Evidência:** cada fechamento de socket emite `TransportEvent::Disconnected`, e `RootView` troca imediatamente toda a interface pela tela de login quando `is_connected_to_gateway=false`. Não existe estado `Reconnecting`; o loop reconecta em segundo plano, causando perda visual de contexto e cache.
+  - **Evidência:** cada fechamento de socket emite `TransportEvent::Disconnected`, e `RootView` troca imediatamente toda a interface pela tela de login quando `is_connected_to_gateway=false` (`root_view.rs:554-583`). `TransportEvent::Disconnected` zera a conexão e grava `auth_error` (`gateway_events.rs:281-286`), sem estado `Reconnecting`; o loop reconecta em segundo plano, causando perda visual de contexto e cache. No CDP oficial, o banner `.notice_Q02kKo` usa 14px/500/36px, padding lateral `4px 28px`, raio superior esquerdo 8px e `z-index:101`.
   - **O que falta/corrigir:** estados Connecting/Connected/Reconnecting/Offline, manter shell/cache durante retry, banner discreto com tentativa/backoff e recuperação silenciosa após READY/RESUME.
   - **Critério de pronto:** teste de socket sintético cobre Op7, Op9, EOF e falha de DNS; UI permanece na tela atual, mostra banner e volta a conectar sem solicitar token novamente.
 
@@ -607,3 +607,87 @@
   - **Evidência:** `switch_input_device` inicia a nova stream/worker (`audio.rs:269-280`) antes de parar o antigo (`:292-298`); `switch_output_device` inicia a nova saída (`:312`) antes de parar a anterior (`:323`). Há uma janela com dois capturadores/dois reproduzidores ativos, podendo duplicar pacotes/fala ou áudio. `AudioBridge::from_engine_factory` usa `.expect` ao criar a thread e `init_rx.recv().unwrap_or((None,None))`, mascarando falha de inicialização.
   - **O que falta/corrigir:** drenar/parar o stream antigo antes de ativar o novo sem perder fallback em caso de erro, eliminar eventos duplicados na transição e propagar `Result` da criação da thread/canais.
   - **Critério de pronto:** teste com streams sintéticos prova que nunca há mais de um capturador/reprodutor ativo, que falha preserva o dispositivo anterior e que thread indisponível retorna erro acionável sem pânico ou silêncio fabricado.
+
+### Ciclo 5 — Media Viewer, mensagens modernas, conteúdo de servidor, reconnect e higiene do compilador de 2026-11-24
+
+**Metodologia e limites:** auditoria somente leitura da `main` e do Discord Desktop já aberto. CDP acessado por `list_pages` + `select_page`; **nenhum `new_page`, clique destrutivo, digitação ou navegação**. CSS/DOM, bundle e locale oficiais foram usados sem dados pessoais. Viewport observado: **1017×605**, `devicePixelRatio=1.4375`. `cargo check -j 4` terminou sem erros, mas emitiu **8 avisos `ambiguous_glob_imports`**; detalhes em `T-111`.
+
+**Itens já cobertos:** banner de reconnect permanece em `T-064` (evidência atualizada com o CSS oficial); masked links/spoofing permanecem em `T-087`/`T-092`; Stage como tipo de canal já está em `T-076`, mas a UI/controles de palco são novos em `T-107`.
+
+- [ ] **T-100** — **P1** — **Chat/Media Viewer** — **Implementar lightbox fullscreen para imagens/vídeos com zoom e navegação entre anexos**
+  - **Arquivos:** `src/chat/message_list.rs:605-697`, `src/chat/message_list.rs:762-859`, `src/chat/chat_view.rs:908-1125`, `src/app/root_view.rs:649-674`, `src/domain/message.rs:59-94`.
+  - **Evidência:** não há estado de viewer/lightbox nem handler de clique em mídia; anexos de imagem ainda são placeholders e embeds não abrem modal. O CDP oficial contém `.lightbox_od1dl1` com fundo scrim, `.imageZoom` com cursor zoom-in/out, `.videoContainer.zoomed` usando pan/scale e carrosséis com itens absolutos.
+  - **O que falta/corrigir:** modal fullscreen, índice de todos os anexos da mensagem, zoom/pan, setas/esquerda/direita, teclado/Esc, abrir no navegador e baixar; integrar com `T-089` para GIF/APNG/vídeo.
+  - **Critério de pronto:** fixtures sintéticas com 1/3 anexos, imagem/GIF/vídeo e falha de CDN comprovam navegação sem duplicação, zoom limitado, foco preso no modal e fechamento por Esc; nenhum arquivo real é salvo no repo.
+
+- [ ] **T-101** — **P1** — **Chat/Voice Messages** — **Adicionar gravação, upload e player de mensagens de voz com waveform**
+  - **Arquivos:** `src/domain/message.rs:183-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/editor.rs:124-212`, `src/chat/message_list.rs:1037-1055`, `src/media/audio.rs`.
+  - **Evidência:** `Message` não modela waveform/duração/áudio e o composer não tem botão de gravação; busca por `voice.?message|waveform` não acha fluxo de chat. O CSS oficial mede `.waveform_E0Lm4d` com `flex:1`, margem 4px e `min-width:0`; o bundle oficial expõe `voiceMessages.button` (`/tmp/opencode/discord-web-entry.js:124`) e o locale contém “Delete Voice Message”.
+  - **O que falta/corrigir:** capturar Opus/áudio, limite de duração, upload do attachment oficial, persistir waveform/duração, player play/pause/seek e estados de erro/permissão.
+  - **Critério de pronto:** teste sintético valida gravação→upload→mensagem→player, duração real, cancelamento e falha; waveform deriva do áudio real e nenhum player mostra progresso fabricado.
+
+- [ ] **T-102** — **P1** — **Chat/Polls** — **Criar, votar e renderizar enquetes nativas**
+  - **Arquivos:** `src/domain/message.rs:141-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/editor.rs:537-642`, `src/chat/message_list.rs:1037-1055`, `src/app/state/messages.rs`.
+  - **Evidência:** não há modelo `poll`, endpoint de voto/criação ou editor de enquete. O CSS oficial mede `.pollContainer` com margem 4px, `.pollAnswers` em coluna/gap 4px e `.pollAnswerOption` com padding `8px 12px`/r8; o locale contém “Create Poll”, “Add another answer” e durações.
+  - **O que falta/corrigir:** editor de pergunta/respostas/duração/multiselect, payload oficial, renderização de resultados, voto único/múltiplo, expiração e atualização via Gateway.
+  - **Critério de pronto:** fixtures cobrem criação, voto, troca de voto, expiração, empate e permissão; resultados só mudam após resposta/evento real e a UI não inventa porcentagens.
+
+- [ ] **T-103** — **P1** — **Chat/Forwarded Messages** — **Preservar `message_snapshots` e renderizar mensagens encaminhadas**
+  - **Arquivos:** `src/domain/message.rs:183-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/message_list.rs:971-1055`, `src/chat/chat_view.rs:908-1125`.
+  - **Evidência:** o parser ignora `type`, `message_reference` avançado e `message_snapshots`; uma mensagem encaminhada vira texto comum. O bundle oficial percorre `message_snapshots` (`/tmp/opencode/discord-web-entry.js:194`) e o locale contém “Forwarded”, “Forwarded a message” e restrições para canal age-restricted.
+  - **O que falta/corrigir:** modelo de snapshot/autor/conteúdo/anexos, indicação “Encaminhado”, link para origem quando permitido e ação de encaminhar no menu; não confundir com reply de `T-024`.
+  - **Critério de pronto:** fixture com snapshot completo, origem removida e canal restrito renderiza o card correto sem conteúdo inventado; encaminhar cria `message_snapshots` válido e preserva anexos/metadados.
+
+- [ ] **T-104** — **P1** — **Chat/System Messages** — **Renderizar tipos modernos de mensagens de sistema com semântica própria**
+  - **Arquivos:** `src/domain/message.rs:183-218`, `src/protocol/discord_api.rs:2417-2526`, `src/chat/message_list.rs:880-1088`, `src/chat/chat_view.rs:545-600`.
+  - **Evidência:** o parser não guarda `message.type`; join/boost/call/pin aparecem como mensagem normal do autor. O CDP oficial tem `.isSystemMessage`, `.systemMessageContainer`, `.userJoinSystemMessageIcon`, `.boostMessage` e `.stageSystemMessage`; o locale contém “Joined the server!”, “Call Ended” e textos de pin/unpin.
+  - **O que falta/corrigir:** enum de tipos de sistema, layout compacto/ícones, agrupamento correto, links para usuário/canal/mensagem e tradução i18n; manter ações de moderação quando aplicáveis.
+  - **Critério de pronto:** fixtures de join, boost, call start/end e pin/unpin geram elementos semânticos distintos, sem autor falso e com links sintéticos funcionais; agrupamento não une sistema a mensagem comum.
+
+- [ ] **T-105** — **P1** — **Chat/Usuários Bloqueados** — **Colapsar mensagens de usuários bloqueados com ação “Mostrar mensagens”**
+  - **Arquivos:** `src/app/state/friends_dms.rs`, `src/chat/message_list.rs:880-1088`, `src/chat/chat_view.rs:545-600`, `src/app/state/gateway_events.rs:109-224`.
+  - **Evidência:** a lista de bloqueados existe apenas no Friends Hub; `MessageCreate` não filtra/autor não é comparado a relações bloqueadas e não há contador/colapso. O CSS oficial usa `.blockedSystemMessage` com `user-select:none` e revela `.blockedAction` no hover; o locale contém “N Blocked Messages”, “Collapse messages” e “Show messages”.
+  - **O que falta/corrigir:** estado expansível por canal, contagem real, agrupamento de mensagens consecutivas, preservação do conteúdo ao expandir e atualização ao bloquear/desbloquear em tempo real.
+  - **Critério de pronto:** fixture com mensagens intercaladas de autor bloqueado comprova contagem, colapso, expansão e recollapse; mensagens não são apagadas do cache nem expostas antes da ação.
+
+- [ ] **T-106** — **P2** — **Servidores/Banner & Boost** — **Exibir banner do servidor, nível/contador de boosts e estado de booster**
+  - **Arquivos:** `src/domain/guild.rs:75-101`, `src/protocol/discord_api.rs:825-900`, `src/app/state/models.rs:180-211`, `src/app/channel_sidebar.rs:74-163`, `src/app/user_profile_popout.rs`.
+  - **Evidência:** `Guild`/`GuildItemState` não guardam `banner`, `premium_subscription_count`, `premium_tier` ou booster do membro; a UI só tem boosts na aba de billing. O bundle oficial gera `getGuildBannerURL` (`/tmp/opencode/discord-web-entry.js:124`); o CDP mede badge de boost 18×18 e `.boostsBadge` com 30px de altura/padding 8px.
+  - **O que falta/corrigir:** parser dos campos, URL de banner animado/estático, header/sidebar com contagem/nível, badge de booster e fallback honesto quando ausente.
+  - **Critério de pronto:** fixtures de servidor sem banner, nível 0/1/2/3 e banner `a_` renderizam estados reais; nenhum contador/boost é inventado e o banner respeita tema/clipping.
+
+- [ ] **T-107** — **P1** — **Voz/Stage Channels** — **Implementar UI e controles de Stage (palco, plateia, solicitar falar)**
+  - **Arquivos:** `src/domain/channel.rs:6-47`, `src/app/channel_sidebar.rs:638-793`, `src/app/voice_call_panel.rs`, `src/app/state/voice.rs`, `src/protocol/voice_session.rs`.
+  - **Evidência:** `ChannelType` só aceita 0..5 e `ChannelKind` não tem Stage; tipos 13 são descartados (`T-076` já cobre o parser, mas não há palco). O CSS oficial mede `.stageGrid` com duas colunas, gap 8px e padding 12px, além de pill de plateia 24px; o bundle contém `GUILD_STAGE_VOICE` e erro `STAGE_CHANNEL_USER_NOT_ALLOWED_TO_SPEAK` (`/tmp/opencode/discord-web-entry.js:23`).
+  - **O que falta/corrigir:** tipo/ícone de Stage, separar palco/plateia, controles de host, solicitar/aprovar fala, mute de plateia e eventos `STAGE_INSTANCE_*`; não reutilizar tile de voz comum como se fosse palco.
+  - **Critério de pronto:** fixtures sintéticas de host, palestrante, plateia e solicitação pendente mostram permissões corretas; áudio só é habilitado após aprovação real e nenhum tile de palco é fictício.
+
+- [ ] **T-108** — **P1** — **Servidores/Scheduled Events** — **Listar, criar, editar e participar de eventos agendados**
+  - **Arquivos:** `src/domain/guild.rs`, `src/protocol/discord_api.rs`, `src/protocol/transport.rs:150-220`, `src/app/channel_sidebar.rs`, `src/app/root_view.rs`, `src/app/state/gateway_events.rs`.
+  - **Evidência:** não há modelo, rota ou evento de scheduled event; busca por `scheduled.?event` não encontra implementação. O bundle oficial contém `GUILD_SCHEDULED_EVENT` (`/tmp/opencode/discord-web-entry.js:23`) e o locale contém “Scheduled Events”, “Starting now” e ações de criação.
+  - **O que falta/corrigir:** modelo de evento/local/canal/horário/recorrência/status, GET/POST/PATCH/DELETE, painel de eventos, notificações e inscrição/interesse via Gateway.
+  - **Critério de pronto:** servidor HTTP sintético valida rotas e payloads; UI lista passados/futuros/agora, cria/edita/cancela e mostra erro sem evento otimista falso.
+
+- [ ] **T-109** — **P2** — **Design/Categorias** — **Remover categorias sintéticas e fielmente ordenar/divider canais**
+  - **Arquivos:** `src/app/state/seed.rs:131-231`, `src/app/channel_sidebar.rs:546-635`, `src/domain/channel.rs:148-191`, `src/protocol/discord_api.rs:2205-2280`.
+  - **Evidência:** `organize_channels_into_categories` cria categorias inventadas “GERAL” e “OUTROS” em produção e usa iteração de `HashMap` para categorias órfãs, tornando a ordem não determinística. O header do RS usa 11px bold/padding 12/4 sem divider medido. O CDP oficial contém `.sectionDivider_u88IQl` com 1px, margens 12px/8px e `.divider_DERYpk` full-width.
+  - **O que falta/corrigir:** representar canais sem categoria como grupo real/sem rótulo inventado, ordenação estável por `position`/ID, preservar nomes/vazios e aplicar divider/altura do oficial.
+  - **Critério de pronto:** fixture com canais ófãos, categorias vazias, posições empatadas e payload embaralhado produz ordem determinística sem “GERAL”/“OUTROS”; snapshot valida divider e colapso.
+
+- [ ] **T-110** — **P2** — **Design/Member Roles** — **Ordenar grupos de cargo por hierarquia e não por ordem de chegada**
+  - **Arquivos:** `src/app/member_sidebar.rs:80-131`, `src/protocol/cache/lazy_guilds.rs:236-266`, `src/protocol/cache/lazy_guilds.rs:461-490`, `src/app/state/models.rs:425-438`.
+  - **Evidência:** o fallback da Member Sidebar usa `group_order` na ordem em que cada membro aparece; `MemberItemState` não guarda a posição do cargo. A cor/grupo já resolvem o maior cargo, mas a ordem dos grupos pode divergir do servidor. O CDP oficial mede header de grupo 14px/500/18px e grupos com padding `20px 4px 4px 16px`.
+  - **O que falta/corrigir:** guardar role position/ID do grupo hoisted, ordenar descendentemente com desempate estável, manter bots/online/offline após cargos e preservar a ordem Opcode 14 quando disponível.
+  - **Critério de pronto:** fixture com cargos de mesma cor, posições diferentes, bots e offline produz a mesma ordem do payload oficial; nenhum grupo é renomeado ou inventado.
+
+- [ ] **T-111** — **P1** — **Build/Compiler Warnings** — **Eliminar os 8 avisos de `white` ambíguo e manter `cargo check` limpo**
+  - **Arquivos:** `src/app/guild_rail.rs:3-7`, `src/app/guild_rail.rs:120`, `src/app/guild_rail.rs:132`, `src/components/guild_item.rs:8-12`, `src/components/guild_item.rs:166`, `src/components/guild_item.rs:227`, `src/components/guild_item.rs:252`, `src/components/guild_item.rs:483`, `src/components/guild_item.rs:531`, `src/components/guild_item.rs:690`.
+  - **Evidência:** `flock /tmp/discord-rs-cargo-A.lock timeout 600 cargo check -j 4` terminou sem erros, mas emitiu 8 `warning: white is ambiguous` (`future_incompatible`, issue #114095), todos por glob imports simultâneos de `gpui::*` e `crate::tokens::colors::*`.
+  - **O que falta/corrigir:** importar `white` explicitamente de um único módulo ou qualificar chamadas; adicionar verificação de warnings no CI.
+  - **Critério de pronto:** `cargo check -j 4` termina com zero warnings do crate e o teste de build falha se `ambiguous_glob_imports` voltar.
+
+- [ ] **T-112** — **P1** — **Build/Recursos pela Metade** — **Substituir defaults silenciosos e `allow(dead_code)` por implementação ou erro explícito**
+  - **Arquivos:** `src/protocol/transport.rs:318-381`, `src/telemetry/service.rs:119-129`, `src/app/state/profile.rs:22-37`, `src/app/voice_call_panel.rs:712-721`, `src/app/state/voice.rs:524-533`, `src/chat/message_list.rs:548-557`, `src/app/friends_hub.rs:1465-1508`.
+  - **Evidência:** a auditoria não encontrou literais `TODO`/`FIXME`, mas encontrou defaults de transporte que retornam `Ok(())` sem ação (`request_guild_members`, viewport, subscribe, voice state), `edit/pin/unpin` que sempre falham, três campos de telemetória marcados `allow(dead_code)`, `ArrowDropupTrigger` não usado e controles ainda desabilitados/comentados como pendentes. `cargo check` não detecta esses caminhos porque compilam.
+  - **O que falta/corrigir:** inventário de métodos pendentes, implementar ou retornar `Unsupported` explícito, remover `allow(dead_code)` desnecessário e garantir que UI não exiba controle cujo transporte fabrica sucesso.
+  - **Critério de pronto:** teste de contrato percorre a trait `DiscordTransport` e falha se método obrigatório retornar `Ok` sem efeito; nenhum `allow(dead_code)` novo sem justificativa e cada controle pendente está removido ou ligado a implementação real.
