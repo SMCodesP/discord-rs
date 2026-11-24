@@ -7,7 +7,8 @@
 //! 4. Inicialização Instantânea (0ms Blank Screen) via Hidratação de Snapshot em Disco
 
 use std::fs;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use discord_rs::domain::channel::{Channel, ChannelType};
 use discord_rs::domain::guild::Guild;
@@ -20,12 +21,20 @@ use discord_rs::protocol::cache::{
 use discord_rs::protocol::rate_limit::{
     RateLimitCoordinator, RateLimitHeaders, UserActionDebouncer,
 };
+use discord_rs::protocol::rate_limiter::RateLimitManager;
+
+static NEXT_CACHE_DIR: AtomicU64 = AtomicU64::new(0);
 
 fn create_temp_cache_dir(test_name: &str) -> CacheDirectory {
+    // PID + contador + timestamp evitam colisão entre testes repetidos e processos paralelos.
+    let unique = NEXT_CACHE_DIR.fetch_add(1, Ordering::Relaxed);
+    let timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
     let path = std::env::temp_dir().join(format!(
-        "discord_rs_e2e_{}_{}",
+        "discord_rs_e2e_{}_{}_{}_{}",
         test_name,
-        std::process::id()
+        std::process::id(),
+        timestamp,
+        unique
     ));
     let _ = fs::remove_dir_all(&path);
     CacheDirectory::with_root(path)
@@ -322,5 +331,183 @@ async fn test_pillar_4_instant_startup_0ms_blank_screen() -> anyhow::Result<()> 
     assert_eq!(hydrated.active_messages[0].content, "GPUI v0.2.2 lançado!");
     assert_eq!(hydrated.active_messages[1].content, "Desempenho nativo insano.");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rate_limit_manager_shares_normalized_channel_bucket() -> anyhow::Result<()> {
+    let manager = RateLimitManager::new();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-ratelimit-limit", "5".parse()?);
+    headers.insert("x-ratelimit-remaining", "0".parse()?);
+    headers.insert("x-ratelimit-reset-after", "0.08".parse()?);
+
+    manager
+        .update_from_headers("/channels/111111/messages", &headers)
+        .await;
+
+    // IDs diferentes na mesma rota canônica compartilham o bucket exaurido.
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.acquire_permit("/channels/222222/messages"),
+    )
+    .await
+    .expect("acquire_permit não deve travar após o reset do bucket");
+    assert!(
+        started.elapsed() >= Duration::from_millis(50),
+        "o bucket normalizado deve segurar a requisição até reset_after"
+    );
+
+    // Uma rota distinta não herda o bloqueio do bucket de mensagens.
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.acquire_permit("/users/@me"),
+    )
+    .await
+    .expect("rota independente deve permanecer disponível");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rate_limit_manager_429_retry_after_holds_next_request() -> anyhow::Result<()> {
+    let manager = RateLimitManager::new();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("retry-after", "0.08".parse()?);
+
+    let wait = manager
+        .handle_429("/channels/333333/messages", &headers)
+        .await;
+    assert!(
+        wait >= Duration::from_millis(170),
+        "handle_429 deve respeitar Retry-After e adicionar margem de segurança: {:?}",
+        wait
+    );
+    assert!(
+        wait < Duration::from_secs(1),
+        "Retry-After curto foi ignorado"
+    );
+
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.acquire_permit("/channels/444444/messages"),
+    )
+    .await
+    .expect("a requisição deve ser liberada depois do Retry-After");
+    assert!(
+        started.elapsed() >= Duration::from_millis(50),
+        "a próxima requisição da mesma rota foi disparada antes do reset"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_rate_limit_manager_global_header_blocks_unrelated_routes() -> anyhow::Result<()> {
+    let manager = RateLimitManager::new();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-ratelimit-global", "true".parse()?);
+    headers.insert("retry-after", "0.08".parse()?);
+
+    manager.update_from_headers("/users/@me", &headers).await;
+
+    let started = Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        manager.acquire_permit("/guilds/555555"),
+    )
+    .await
+    .expect("o limite global deve expirar e liberar a rota");
+    assert!(
+        started.elapsed() >= Duration::from_millis(50),
+        "um limite global deve bloquear também rotas não relacionadas"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_startup_empty_cache_returns_empty_state_without_fabricated_data() {
+    let cache = create_temp_cache_dir("startup_empty");
+    let hydrated = InstantStartupOrchestrator::hydrate_from_disk(&cache);
+
+    assert!(!hydrated.is_from_disk_cache);
+    assert!(hydrated.manifest.is_none());
+    assert!(hydrated.current_user.is_none());
+    assert!(hydrated.guilds.is_empty());
+    assert!(hydrated.active_guild.is_none());
+    assert!(hydrated.active_channel.is_none());
+    assert!(hydrated.active_messages.is_empty());
+}
+
+#[test]
+fn test_startup_ignores_corrupt_cache_entries_and_keeps_valid_guild() -> anyhow::Result<()> {
+    let cache = create_temp_cache_dir("startup_corrupt");
+    cache.ensure_dirs()?;
+    fs::write(cache.manifest_path(), "{manifest truncado")?;
+    fs::write(cache.users_dir().join("@me.json"), "{user truncado")?;
+    fs::write(cache.guilds_dir().join("corrupt.json"), "{guild truncado")?;
+
+    let channel = Channel::new("chan-valid", "canal-valido", ChannelType::Text);
+    let guild = Guild::new("guild-valid", "Guilda Valida", "owner-valid")
+        .with_channels(vec![channel]);
+    cache.save_guild(&guild)?;
+    cache.save_channel_messages("chan-valid", &[])?;
+    fs::write(
+        cache
+            .channel_messages_dir("chan-valid")
+            .join("messages_latest.json"),
+        "[mensagem truncada",
+    )?;
+
+    let hydrated = InstantStartupOrchestrator::hydrate_from_disk(&cache);
+    assert!(hydrated.is_from_disk_cache);
+    assert!(hydrated.manifest.is_none());
+    assert!(hydrated.current_user.is_none());
+    assert_eq!(
+        hydrated.guilds.len(),
+        1,
+        "guilda corrompida deve ser ignorada"
+    );
+    assert_eq!(
+        hydrated.active_guild.as_ref().map(|g| g.id.as_str()),
+        Some("guild-valid")
+    );
+    assert_eq!(
+        hydrated.active_channel.as_ref().map(|c| c.id.as_str()),
+        Some("chan-valid")
+    );
+    assert!(
+        hydrated.active_messages.is_empty(),
+        "mensagens corrompidas não devem ser inventadas"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_startup_stale_manifest_falls_back_to_first_valid_channel() -> anyhow::Result<()> {
+    let cache = create_temp_cache_dir("startup_stale_manifest");
+    let first = Channel::new("chan-first", "primeiro", ChannelType::Text);
+    let second = Channel::new("chan-second", "segundo", ChannelType::Text);
+    let guild = Guild::new("guild-valid", "Guilda Valida", "owner-valid")
+        .with_channels(vec![first, second]);
+    cache.save_guild(&guild)?;
+    cache.save_manifest(&CacheManifest {
+        version: 1,
+        last_selected_guild_id: Some("guild-missing".to_string()),
+        last_selected_channel_id: Some("chan-missing".to_string()),
+        active_user_id: None,
+        updated_at: chrono::Utc::now(),
+    })?;
+
+    let hydrated = InstantStartupOrchestrator::hydrate_from_disk(&cache);
+    assert_eq!(
+        hydrated.active_guild.as_ref().map(|g| g.id.as_str()),
+        Some("guild-valid")
+    );
+    assert_eq!(
+        hydrated.active_channel.as_ref().map(|c| c.id.as_str()),
+        Some("chan-first")
+    );
+    assert!(hydrated.active_messages.is_empty());
     Ok(())
 }

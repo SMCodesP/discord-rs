@@ -1,4 +1,38 @@
 use discord_rs::protocol::*;
+use gpui_kit::http_client::{AsyncBody, HttpClient, http};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+
+async fn read_http_request_head(stream: &mut TcpStream) -> std::io::Result<()> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+    }
+    Ok(())
+}
+
+async fn spawn_one_shot_http_server(
+    response: Option<String>,
+) -> anyhow::Result<(String, tokio::task::JoinHandle<std::io::Result<()>>)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        read_http_request_head(&mut stream).await?;
+        if let Some(response) = response {
+            stream.write_all(response.as_bytes()).await?;
+            stream.flush().await?;
+        }
+        // Sem resposta: derruba a conexão para exercitar erro de rede real em loopback.
+        Ok(())
+    });
+    Ok((format!("http://{}", address), handle))
+}
 
 #[tokio::test]
 async fn test_mock_provider_guilds_and_channels() {
@@ -120,4 +154,83 @@ fn test_auth_token_masking_and_headers() {
         "USER_SECRET_TOKEN_XYZ_12345678"
     );
     assert!(user_token.is_valid_format());
+}
+
+#[tokio::test]
+async fn test_http_adapter_surfaces_connection_drop_without_fake_response() -> anyhow::Result<()> {
+    let (base_url, server) = spawn_one_shot_http_server(None).await?;
+    let reqwest_client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let client = ReqwestHttpClient::with_client(reqwest_client);
+    let request = http::Request::builder()
+        .method("GET")
+        .uri(format!("{}/users/@me", base_url))
+        .body(AsyncBody::from_bytes(Vec::new().into()))?;
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(3), client.send(request))
+        .await
+        .expect("o adapter HTTP deve responder com erro após a conexão ser derrubada");
+    assert!(
+        result.is_err(),
+        "queda de rede não pode virar resposta de sucesso"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), server)
+        .await?
+        .expect("servidor local deve concluir sem erro")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_http_adapter_preserves_429_headers_for_rate_limiter() -> anyhow::Result<()> {
+    let response = concat!(
+        "HTTP/1.1 429 Too Many Requests\r\n",
+        "Content-Length: 0\r\n",
+        "Retry-After: 0.08\r\n",
+        "X-RateLimit-Global: true\r\n",
+        "X-RateLimit-Limit: 5\r\n",
+        "X-RateLimit-Remaining: 0\r\n",
+        "X-RateLimit-Reset-After: 0.08\r\n",
+        "Connection: close\r\n\r\n",
+    );
+    let (base_url, server) = spawn_one_shot_http_server(Some(response.to_string())).await?;
+    let reqwest_client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let client = ReqwestHttpClient::with_client(reqwest_client);
+    let request = http::Request::builder()
+        .method("GET")
+        .uri(format!("{}/users/@me", base_url))
+        .body(AsyncBody::from_bytes(Vec::new().into()))?;
+
+    let response = client.send(request).await?;
+    assert_eq!(response.status().as_u16(), 429);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("0.08")
+    );
+
+    // O header real do socket local alimenta o coordenador de produção.
+    let manager = RateLimitManager::new();
+    manager
+        .update_from_headers("/users/@me", response.headers())
+        .await;
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        manager.acquire_permit("/guilds/999999"),
+    )
+    .await
+    .expect("o limite global vindo do HTTP 429 deve expirar");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), server)
+        .await?
+        .expect("servidor local deve concluir sem erro")?;
+    Ok(())
 }
