@@ -757,10 +757,9 @@ impl AppState {
                         // failure. A late Gateway MESSAGE_CREATE can still prove
                         // that the request succeeded even when REST failed.
                         mark_message_send_failed(&temp_id, &target_cid, &text, &error);
-                        cm.emit_event(TransportEvent::MessageSendFailed {
-                            temp_id,
+                        cm.emit_event(TransportEvent::MessageDeleteFailed {
                             channel_id: target_cid,
-                            content: text,
+                            message_id: temp_id,
                             error: error.clone(),
                         });
                         log::warn!("Falha ao enviar mensagem via ClientManager: {:?}", error);

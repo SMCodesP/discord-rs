@@ -15,6 +15,7 @@ use crate::domain::settings::NitroTier;
 use crate::domain::settings::ServerBoost;
 use crate::domain::settings::Subscription;
 use crate::domain::settings::ThemeChoice;
+use crate::protocol::voice_session::VoiceControlState;
 use crate::protocol::ConnectionMode;
 use crate::protocol::TokenStorage;
 

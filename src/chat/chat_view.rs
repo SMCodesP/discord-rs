@@ -15,6 +15,7 @@ use crate::chat::media_picker::{
     OnSearchQueryCallback, OnSelectEmojiCallback, OnSelectGifCallback, OnSelectGifCategoryCallback,
     OnSelectGuildCallback, OnSelectStickerCallback, OnTabChangeCallback,
 };
+use crate::chat::markdown::MentionLookup;
 use crate::chat::message_list::{
     build_chat_list_items, format_message_timestamp, render_date_separator_element,
     render_message_context_menu, render_message_row_with_reply_and_edit, render_welcome_banner,
@@ -34,6 +35,44 @@ use crate::tokens::typography::*;
 pub struct PendingPinAction {
     pub message: Message,
     pub is_unpin: bool,
+}
+
+fn build_markdown_mentions(state: &AppState) -> MentionLookup {
+    let mut mentions = MentionLookup::default();
+
+    for member in &state.members {
+        if member.is_unloaded() || member.id.is_empty() || member.name.is_empty() {
+            continue;
+        }
+        mentions.users.insert(member.id.clone(), member.name.clone());
+    }
+
+    if let Some(guild_id) = state.selected_guild_id.as_deref() {
+        if let Some(guild) = state.guilds.iter().find(|g| g.id == guild_id) {
+            for category in &guild.categories {
+                for channel in &category.channels {
+                    if !channel.id.is_empty() && !channel.name.is_empty() {
+                        mentions
+                            .channels
+                            .insert(channel.id.clone(), channel.name.clone());
+                    }
+                }
+            }
+        }
+        for role in crate::protocol::cache::lazy_guilds::get_cached_guild_roles(guild_id) {
+            if !role.id.is_empty() && !role.name.is_empty() {
+                mentions.roles.insert(role.id, role.name);
+            }
+        }
+    }
+
+    for dm in &state.dm_channels {
+        if !dm.id.is_empty() && !dm.name.is_empty() {
+            mentions.channels.insert(dm.id.clone(), dm.name.clone());
+        }
+    }
+
+    mentions
 }
 
 fn render_chat_error_toast(
@@ -1368,6 +1407,7 @@ impl Render for ChatView {
                             });
 
                         let is_grouped = *is_grouped && msg.edited_timestamp.is_none();
+                        let mentions = build_markdown_mentions(&state);
                         let mut display_message = msg.clone();
                         let attachments = std::mem::take(&mut display_message.attachments);
                         let embeds = std::mem::take(&mut display_message.embeds);
@@ -1387,6 +1427,7 @@ impl Render for ChatView {
                                 on_more: on_more_item.clone(),
                                 on_reaction_click: on_rx_click_item.clone(),
                                 on_add_reaction: on_add_rx_item.clone(),
+                                mentions: Some(mentions.clone()),
                             },
                             reply_preview.as_ref(),
                             None,
@@ -1408,7 +1449,7 @@ impl Render for ChatView {
                                         .flex()
                                         .flex_col()
                                         .child(crate::chat::markdown::render_rich_attachments(&attachments))
-                                        .child(crate::chat::markdown::render_rich_embeds(&embeds)),
+                                        .child(crate::chat::markdown::render_rich_embeds_with(&embeds, &mentions)),
                                 )
                                 .into_any_element()
                         }

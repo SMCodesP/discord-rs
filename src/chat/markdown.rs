@@ -28,6 +28,29 @@ use crate::tokens::colors::*;
 use crate::tokens::kit_theme::CSS_LINK;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
+use std::collections::HashMap;
+
+/// Resolved names for mention rendering. Keys are Discord snowflake IDs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MentionLookup {
+    pub users: HashMap<String, String>,
+    pub channels: HashMap<String, String>,
+    pub roles: HashMap<String, String>,
+}
+
+impl MentionLookup {
+    pub fn user_name<'a>(&'a self, id: &str, fallback: &'a str) -> &'a str {
+        self.users.get(id).map(String::as_str).unwrap_or(fallback)
+    }
+
+    pub fn channel_name<'a>(&'a self, id: &str, fallback: &'a str) -> &'a str {
+        self.channels.get(id).map(String::as_str).unwrap_or(fallback)
+    }
+
+    pub fn role_name<'a>(&'a self, id: &str, fallback: &'a str) -> &'a str {
+        self.roles.get(id).map(String::as_str).unwrap_or(fallback)
+    }
+}
 
 // ============================================================================
 // AST Models
@@ -73,6 +96,14 @@ pub enum InlineSpan {
     },
 }
 
+/// A single item inside an ordered or unordered markdown list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListItem {
+    /// Indentation level derived from leading spaces (2 spaces = 1 level).
+    pub indent: usize,
+    pub inlines: Vec<InlineSpan>,
+}
+
 /// Represents block-level elements in Discord markdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarkdownBlock {
@@ -87,6 +118,11 @@ pub enum MarkdownBlock {
     },
     BlockQuote(Vec<MarkdownBlock>),
     Subtext(Vec<InlineSpan>),
+    OrderedList {
+        start: u64,
+        items: Vec<ListItem>,
+    },
+    UnorderedList(Vec<ListItem>),
 }
 
 // ============================================================================
@@ -237,6 +273,35 @@ fn line_bounds(input: &str, offset: usize) -> (usize, usize) {
     }
 }
 
+fn parse_ordered_list_line(line: &str) -> Option<(u64, usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let trimmed = &line[indent..];
+    let dot = trimmed.find(". ")?;
+    if dot == 0 {
+        return None;
+    }
+    let number_part = &trimmed[..dot];
+    if !number_part.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let start = number_part.parse::<u64>().ok()?;
+    let content = &trimmed[dot + 2..];
+    Some((start, indent / 2, content))
+}
+
+fn parse_unordered_list_line(line: &str) -> Option<(usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let trimmed = &line[indent..];
+    // Discord subtext `-# ` must not become a bullet.
+    if trimmed.starts_with("-# ") {
+        return None;
+    }
+    let content = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))?;
+    Some((indent / 2, content))
+}
+
 /// Parses lines of text outside of code blocks.
 fn parse_text_blocks(text: &str) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
@@ -306,6 +371,48 @@ fn parse_text_blocks(text: &str) -> Vec<MarkdownBlock> {
         if let Some(rest) = line.strip_prefix("-# ") {
             blocks.push(MarkdownBlock::Subtext(parse_inlines(rest)));
             i += 1;
+            continue;
+        }
+
+        // Ordered list: `1. item`, `3. item`
+        if parse_ordered_list_line(line).is_some() {
+            let (start, _, _) = parse_ordered_list_line(line).expect("checked above");
+            let mut items = Vec::new();
+            while i < lines.len() {
+                if let Some((_, item_indent, item_content)) = parse_ordered_list_line(lines[i]) {
+                    items.push((item_indent, parse_inlines(item_content)));
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            blocks.push(MarkdownBlock::OrderedList {
+                start,
+                items: items
+                    .into_iter()
+                    .map(|(indent, inlines)| ListItem { indent, inlines })
+                    .collect(),
+            });
+            continue;
+        }
+
+        // Unordered list: `- item`, `* item`
+        if parse_unordered_list_line(line).is_some() {
+            let mut items = Vec::new();
+            while i < lines.len() {
+                if let Some((item_indent, item_content)) = parse_unordered_list_line(lines[i]) {
+                    items.push((item_indent, parse_inlines(item_content)));
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            blocks.push(MarkdownBlock::UnorderedList(
+                items
+                    .into_iter()
+                    .map(|(indent, inlines)| ListItem { indent, inlines })
+                    .collect(),
+            ));
             continue;
         }
 
@@ -906,6 +1013,17 @@ fn discord_link_color() -> Rgba {
     rgb(u32::from_str_radix(hex, 16).unwrap_or(0x4d96ee))
 }
 
+/// Allows only http/https URLs to be opened from markdown.
+fn sanitize_http_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("https://") || lower.starts_with("http://") {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
 fn inline_plain_text(span: &InlineSpan) -> String {
     match span {
         InlineSpan::Text(text) | InlineSpan::InlineCode(text) | InlineSpan::Emoji(text) => {
@@ -955,6 +1073,11 @@ fn toggle_spoiler(key: &str) {
 /// Renders a full Discord message text natively into a GPUI `Div` element,
 /// reusing MARKDOWN_AST_CACHE directly without cloning the AST vector.
 pub fn render_markdown(input: &str) -> Div {
+    render_markdown_with(input, &MentionLookup::default())
+}
+
+/// Renders markdown with mention resolution from real channel/member/role data.
+pub fn render_markdown_with(input: &str, mentions: &MentionLookup) -> Div {
     if input.trim().is_empty() {
         return div().w_full().min_w(px(0.0));
     }
@@ -971,7 +1094,7 @@ pub fn render_markdown(input: &str) -> Div {
                 .overflow_hidden();
 
             for block in blocks {
-                container = container.child(render_block(block));
+                container = container.child(render_block_with(block, mentions));
             }
             return container;
         }
@@ -988,7 +1111,7 @@ pub fn render_markdown(input: &str) -> Div {
         .overflow_hidden();
 
     for block in &blocks {
-        container = container.child(render_block(block));
+        container = container.child(render_block_with(block, mentions));
     }
 
     container
@@ -1032,6 +1155,10 @@ pub fn prewarm_message_markdown_cache(message_id: &str, content: &str) {
 
 /// Renders a single markdown block element.
 pub fn render_block(block: &MarkdownBlock) -> Div {
+    render_block_with(block, &MentionLookup::default())
+}
+
+fn render_block_with(block: &MarkdownBlock, mentions: &MentionLookup) -> Div {
     match block {
         MarkdownBlock::Heading { level, inlines } => {
             let (font_sz, font_wt, color) = match level {
@@ -1051,7 +1178,11 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
                 .font_weight(font_wt)
                 .text_color(color)
                 .my(space_1())
-                .children(inlines.iter().map(render_inline))
+                .children(
+                    inlines
+                        .iter()
+                        .map(|span| render_inline_with(span, mentions)),
+                )
         }
 
         MarkdownBlock::Paragraph(inlines) => {
@@ -1080,7 +1211,7 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
                 .children(
                     inlines
                         .iter()
-                        .map(|span| render_inline_span(span, is_single_emoji)),
+                        .map(|span| render_inline_span_with(span, is_single_emoji, mentions)),
                 )
         }
 
@@ -1129,15 +1260,16 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
         MarkdownBlock::BlockQuote(blocks) => div()
             .w_full()
             .min_w(px(0.0))
+            .max_w(relative(0.9))
             .flex()
             .flex_row()
-            .my(space_1())
+            .my(space_2())
             .child(
                 div()
                     .w(px(4.0))
                     .flex_shrink_0()
                     .bg(borders())
-                    .rounded(radius_xs()),
+                    .rounded(radius_sm()),
             )
             .child(
                 div()
@@ -1145,10 +1277,16 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
                     .flex_col()
                     .flex_1()
                     .min_w(px(0.0))
+                    .py(space_6())
                     .pl(space_4())
+                    .pr(space_4())
                     .gap(space_1())
-                    .children(blocks.iter().map(render_block)),
+                    .children(blocks.iter().map(|b| render_block_with(b, mentions))),
             ),
+
+        MarkdownBlock::OrderedList { start, items } => render_ordered_list(*start, items, mentions),
+
+        MarkdownBlock::UnorderedList(items) => render_unordered_list(items, mentions),
 
         MarkdownBlock::Subtext(inlines) => div()
             .w_full()
@@ -1159,12 +1297,113 @@ pub fn render_block(block: &MarkdownBlock) -> Div {
             .items_baseline()
             .text_size(font_size_xs())
             .text_color(text_muted())
-            .children(inlines.iter().map(render_inline)),
+            .children(
+                inlines
+                    .iter()
+                    .map(|span| render_inline_with(span, mentions)),
+            ),
     }
+}
+
+fn render_ordered_list(start: u64, items: &[ListItem], mentions: &MentionLookup) -> Div {
+    let mut list = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .my(space_1());
+    for (idx, item) in items.iter().enumerate() {
+        let number = start.saturating_add(idx as u64);
+        let indent_px = px((item.indent as f32) * 16.0);
+        list = list.child(
+            div()
+                .flex()
+                .flex_row()
+                .w_full()
+                .min_w(px(0.0))
+                .pl(indent_px)
+                .child(
+                    div()
+                        .min_w(px(24.0))
+                        .flex_shrink_0()
+                        .text_color(text_primary())
+                        .child(format!("{}.", number)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .items_baseline()
+                        .text_color(text_primary())
+                        .children(
+                            item.inlines
+                                .iter()
+                                .map(|span| render_inline_with(span, mentions)),
+                        ),
+                ),
+        );
+    }
+    list
+}
+
+fn render_unordered_list(items: &[ListItem], mentions: &MentionLookup) -> Div {
+    let mut list = div()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .my(space_1());
+    for item in items {
+        let indent_px = px((item.indent as f32) * 16.0);
+        list = list.child(
+            div()
+                .flex()
+                .flex_row()
+                .w_full()
+                .min_w(px(0.0))
+                .pl(indent_px)
+                .child(
+                    div()
+                        .min_w(px(24.0))
+                        .flex_shrink_0()
+                        .text_color(text_primary())
+                        .child("•"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .items_baseline()
+                        .text_color(text_primary())
+                        .children(
+                            item.inlines
+                                .iter()
+                                .map(|span| render_inline_with(span, mentions)),
+                        ),
+                ),
+        );
+    }
+    list
 }
 
 /// Renders a single inline formatted element with optional single emoji flag.
 pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
+    render_inline_span_with(inline, is_single_emoji, &MentionLookup::default())
+}
+
+fn render_inline_span_with(
+    inline: &InlineSpan,
+    is_single_emoji: bool,
+    mentions: &MentionLookup,
+) -> Div {
     match inline {
         InlineSpan::Text(text) => div().text_color(text_primary()).child(text.clone()),
 
@@ -1175,7 +1414,11 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             .flex_row()
             .flex_wrap()
             .items_baseline()
-            .children(children.iter().map(render_inline)),
+            .children(
+                children
+                    .iter()
+                    .map(|child| render_inline_with(child, mentions)),
+            ),
 
         InlineSpan::Italic(children) => div()
             .italic()
@@ -1184,7 +1427,11 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             .flex_row()
             .flex_wrap()
             .items_baseline()
-            .children(children.iter().map(render_inline)),
+            .children(
+                children
+                    .iter()
+                    .map(|child| render_inline_with(child, mentions)),
+            ),
 
         InlineSpan::BoldItalic(children) => div()
             .font_weight(WEIGHT_BOLD)
@@ -1194,7 +1441,11 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             .flex_row()
             .flex_wrap()
             .items_baseline()
-            .children(children.iter().map(render_inline)),
+            .children(
+                children
+                    .iter()
+                    .map(|child| render_inline_with(child, mentions)),
+            ),
 
         InlineSpan::Underline(children) => div()
             .underline()
@@ -1203,7 +1454,11 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             .flex_row()
             .flex_wrap()
             .items_baseline()
-            .children(children.iter().map(render_inline)),
+            .children(
+                children
+                    .iter()
+                    .map(|child| render_inline_with(child, mentions)),
+            ),
 
         InlineSpan::Strikethrough(children) => div()
             .line_through()
@@ -1212,7 +1467,11 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             .flex_row()
             .flex_wrap()
             .items_baseline()
-            .children(children.iter().map(render_inline)),
+            .children(
+                children
+                    .iter()
+                    .map(|child| render_inline_with(child, mentions)),
+            ),
 
         InlineSpan::InlineCode(code) => div()
             .bg(bg_user_bar())
@@ -1232,7 +1491,7 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             let content = if revealed {
                 let mut content = div().flex().flex_row().flex_wrap().items_baseline();
                 for child in children {
-                    content = content.child(render_inline(child));
+                    content = content.child(render_inline_with(child, mentions));
                 }
                 content
             } else {
@@ -1256,6 +1515,10 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
         }
 
         InlineSpan::UserMention { id, name } => {
+            let display = id
+                .as_deref()
+                .map(|id| mentions.user_name(id, "usuário desconhecido").to_string())
+                .unwrap_or_else(|| name.clone());
             let mut mention = div()
                 .bg(mention_bg())
                 .hover(|s| s.bg(mention_hover()))
@@ -1265,7 +1528,7 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
                 .px(space_2())
                 .py(px(1.0))
                 .mx(space_1())
-                .child(format!("@{}", name));
+                .child(format!("@{}", display));
             if let Some(user_id) = id {
                 let user_id = user_id.clone();
                 mention = mention.cursor_pointer().on_mouse_down(
@@ -1289,6 +1552,10 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
         }
 
         InlineSpan::ChannelMention { id, name } => {
+            let display = id
+                .as_deref()
+                .map(|id| mentions.channel_name(id, "canal desconhecido").to_string())
+                .unwrap_or_else(|| name.clone());
             let mut mention = div()
                 .bg(mention_bg())
                 .hover(|s| s.bg(mention_hover()))
@@ -1298,7 +1565,7 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
                 .px(space_2())
                 .py(px(1.0))
                 .mx(space_1())
-                .child(format!("#{}", name));
+                .child(format!("#{}", display));
             if let Some(channel_id) = id {
                 let channel_id = channel_id.clone();
                 mention = mention.cursor_pointer().on_mouse_down(
@@ -1327,30 +1594,37 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
             mention
         }
 
-        InlineSpan::RoleMention { name, .. } => div()
-            .bg(mention_bg())
-            .hover(|s| s.bg(mention_hover()))
-            .text_color(blurple())
-            .font_weight(WEIGHT_MEDIUM)
-            .rounded(radius_xs())
-            .px(space_2())
-            .py(px(1.0))
-            .mx(space_1())
-            .cursor_pointer()
-            .child(format!("@{}", name)),
+        InlineSpan::RoleMention { id, name } => {
+            let display = id
+                .as_deref()
+                .map(|id| mentions.role_name(id, "cargo desconhecido").to_string())
+                .unwrap_or_else(|| name.clone());
+            div()
+                .bg(mention_bg())
+                .hover(|s| s.bg(mention_hover()))
+                .text_color(blurple())
+                .font_weight(WEIGHT_MEDIUM)
+                .rounded(radius_xs())
+                .px(space_2())
+                .py(px(1.0))
+                .mx(space_1())
+                .child(format!("@{}", display))
+        }
 
         InlineSpan::Link { label, url } => {
             let link_color = discord_link_color();
-            let url = url.clone();
-            div()
-                .text_color(link_color)
-                .hover(move |s| s.underline().text_decoration_color(link_color))
-                .cursor_pointer()
-                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                    cx.open_url(&url);
-                    cx.stop_propagation();
-                })
-                .child(label.clone())
+            let safe_url = sanitize_http_url(url);
+            let mut link = div().text_color(link_color).child(label.clone());
+            if let Some(url) = safe_url {
+                link = link
+                    .hover(move |s| s.underline().text_decoration_color(link_color))
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                        cx.open_url(&url);
+                        cx.stop_propagation();
+                    });
+            }
+            link
         }
 
         InlineSpan::Timestamp { unix, format } => div()
@@ -1404,7 +1678,11 @@ pub fn render_inline_span(inline: &InlineSpan, is_single_emoji: bool) -> Div {
 
 /// Renders a single inline formatted element.
 pub fn render_inline(inline: &InlineSpan) -> Div {
-    render_inline_span(inline, false)
+    render_inline_with(inline, &MentionLookup::default())
+}
+
+fn render_inline_with(inline: &InlineSpan, mentions: &MentionLookup) -> Div {
+    render_inline_span_with(inline, false, mentions)
 }
 
 // ============================================================================
@@ -1566,7 +1844,7 @@ fn stable_text_hash(value: &str) -> u64 {
     hasher.finish()
 }
 
-fn render_embed_fields(fields: &[EmbedField]) -> Div {
+fn render_embed_fields(fields: &[EmbedField], mentions: &MentionLookup) -> Div {
     let mut row = div()
         .flex()
         .flex_row()
@@ -1588,7 +1866,7 @@ fn render_embed_fields(fields: &[EmbedField]) -> Div {
                         .text_color(text_primary())
                         .child(field.name.clone()),
                 )
-                .child(render_markdown(&field.value)),
+                .child(render_markdown_with(&field.value, mentions)),
         );
     }
     row
@@ -1618,6 +1896,10 @@ fn render_embed_footer(footer: &EmbedFooter) -> Div {
 /// Renders rich embeds with their real color, author, title, description, fields,
 /// thumbnail, image and footer. URLs always come from the Discord payload.
 pub fn render_rich_embeds(embeds: &[Embed]) -> Div {
+    render_rich_embeds_with(embeds, &MentionLookup::default())
+}
+
+pub fn render_rich_embeds_with(embeds: &[Embed], mentions: &MentionLookup) -> Div {
     let mut container = div()
         .flex()
         .flex_col()
@@ -1657,21 +1939,23 @@ pub fn render_rich_embeds(embeds: &[Embed]) -> Div {
                 .text_color(title_color)
                 .child(title.clone());
             if let Some(url) = url {
-                title_element = title_element.cursor_pointer().on_mouse_down(
-                    MouseButton::Left,
-                    move |_event, _window, cx| {
-                        cx.open_url(&url);
-                        cx.stop_propagation();
-                    },
-                );
+                if let Some(safe_url) = sanitize_http_url(&url) {
+                    title_element = title_element.cursor_pointer().on_mouse_down(
+                        MouseButton::Left,
+                        move |_event, _window, cx| {
+                            cx.open_url(&safe_url);
+                            cx.stop_propagation();
+                        },
+                    );
+                }
             }
             card = card.child(title_element);
         }
         if let Some(description) = &embed.description {
-            card = card.child(render_markdown(description));
+            card = card.child(render_markdown_with(description, mentions));
         }
         if !embed.fields.is_empty() {
-            card = card.child(render_embed_fields(&embed.fields));
+            card = card.child(render_embed_fields(&embed.fields, mentions));
         }
 
         if let Some(image_url) = &embed.image_url {
@@ -1689,22 +1973,24 @@ pub fn render_rich_embeds(embeds: &[Embed]) -> Div {
 
         if let Some(thumbnail_url) = &embed.thumbnail_url {
             let thumbnail_url = thumbnail_url.clone();
-            card = card.child(
-                div().flex().flex_row().child(
-                    img(thumbnail_url.clone())
-                        .id(ElementId::Name(
-                            format!("embed-thumb-{:x}", stable_text_hash(&thumbnail_url)).into(),
-                        ))
-                        .size(avatar_lg())
-                        .rounded(radius_sm())
-                        .cursor_pointer()
-                        .with_fallback(|| div().size(avatar_lg()).into_any_element())
-                        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
-                            cx.open_url(&thumbnail_url);
-                            cx.stop_propagation();
-                        }),
-                ),
-            );
+            let safe_thumb = sanitize_http_url(&thumbnail_url);
+            let mut thumb = img(thumbnail_url.clone())
+                .id(ElementId::Name(
+                    format!("embed-thumb-{:x}", stable_text_hash(&thumbnail_url)).into(),
+                ))
+                .size(avatar_lg())
+                .rounded(radius_sm())
+                .with_fallback(|| div().size(avatar_lg()).into_any_element());
+            if let Some(url) = safe_thumb {
+                thumb = thumb.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    move |_event, _window, cx| {
+                        cx.open_url(&url);
+                        cx.stop_propagation();
+                    },
+                );
+            }
+            card = card.child(div().flex().flex_row().child(thumb));
         }
 
         if let Some(footer) = &embed.footer {

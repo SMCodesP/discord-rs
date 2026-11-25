@@ -523,7 +523,7 @@
   - **O que falta/corrigir:** criar com lista de destinatários, resolver ID real, adicionar/remover, renomear, trocar/remover ícone, sair e reconciliar `CHANNEL_CREATE/UPDATE/DELETE`; remover confirmação otimista fabricada.
   - **Critério de pronto:** testes sintéticos cobrem criação, adição/remoção, rename, ícone, saída e falha com rollback; após reinício o Group DM permanece com ID da API e membros/ícone reais, sem `dm-group-*` temporário persistido.
 
-- [ ] **T-087** — **P1** — **Chat/Markdown** — **Corrigir headings, listas, masked links, blockquotes e resolução de menções**
+- [x] **T-087** — **P1** — **Chat/Markdown** — **Corrigir headings, listas, masked links, blockquotes e resolução de menções**
   - **Arquivos:** `src/chat/markdown.rs:49-55`, `src/chat/markdown.rs:124-243`, `src/chat/markdown.rs:376-418`, `src/chat/markdown.rs:451-475`, `src/chat/markdown.rs:662-686`, `src/chat/markdown.rs:838-844`, `tests/attachments_embeds_markdown_test.rs`.
   - **Evidência:** o AST já possui `Heading`, `Subtext` e `BlockQuote`, mas não possui lista ordenada/bullet; links masked são apenas `div` sem handler; menções Snowflake exibem nomes inventados `user-####`, `canal-####` e `cargo-####`. O oficial renderiza `<ol start>`/`<ul>` (`/tmp/opencode/discord-web-entry.js:232`) e tem confirmação de domínio/protocolo para masked links (`:257`). O CSS CDP mede blockquote com divisor 4px/r4, padding `12px 8px`, margem 4px e `max-width:90%`.
   - **O que falta/corrigir:** nós de lista com início/indentação, links clicáveis e seguros, validação visual de headings/subtext/blockquote contra o oficial, resolução de IDs por membro/canal/cargo real e fallback neutro quando a entidade não existe.

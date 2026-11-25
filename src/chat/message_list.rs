@@ -16,7 +16,7 @@ use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
 
-use crate::chat::markdown::render_markdown;
+use crate::chat::markdown::{render_markdown_with, MentionLookup};
 use crate::chat::polls::render_poll_card;
 use crate::chat::reactions::{render_reaction_bar, AddReactionCallback, ReactionActionCallback};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -878,7 +878,8 @@ pub fn render_embeds(embeds: &[Embed]) -> Div {
 
         // Embed Description
         if let Some(desc) = &embed.description {
-            embed_card = embed_card.child(render_markdown(desc));
+            let empty_mentions = MentionLookup::default();
+            embed_card = embed_card.child(render_markdown_with(desc, &empty_mentions));
         }
 
         // Embed Fields
@@ -1112,6 +1113,7 @@ pub struct MessageRowConfig {
     pub on_more: Option<MessageActionPosCallback>,
     pub on_reaction_click: Option<ReactionActionCallback>,
     pub on_add_reaction: Option<AddReactionCallback>,
+    pub mentions: Option<MentionLookup>,
 }
 
 /// Renders an individual message item in Cozy format.
@@ -1320,7 +1322,9 @@ pub fn render_message_row_with_reply_and_edit(
         let format_type = message.sticker_format_type();
         content_area = content_area.child(render_sticker(sticker_id.as_deref(), &sticker_name, format_type));
     } else {
-        content_area = content_area.child(crate::chat::markdown::render_message_markdown(&message.id, &message.content));
+        let empty_mentions = MentionLookup::default();
+        let mentions = config.mentions.as_ref().unwrap_or(&empty_mentions);
+        content_area = content_area.child(render_markdown_with(&message.content, mentions));
     }
 
     // Attachments
@@ -1612,6 +1616,7 @@ fn render_message_list_inner(
                 on_more: on_more.clone(),
                 on_reaction_click: on_reaction_click.clone(),
                 on_add_reaction: on_add_reaction.clone(),
+                mentions: None,
             },
         ));
 
@@ -1863,6 +1868,7 @@ mod tests {
                 on_more: None,
                 on_reaction_click: None,
                 on_add_reaction: None,
+                mentions: None,
             },
             Some(&reply),
             None,
