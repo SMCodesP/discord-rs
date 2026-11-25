@@ -1,5 +1,6 @@
 use super::*;
 use crate::domain::channel::ChannelType;
+use crate::domain::settings::ThemeChoice;
 use crate::protocol::ConnectionMode;
 use crate::protocol::TransportEvent;
 use std::collections::HashMap;
@@ -53,9 +54,13 @@ impl AppState {
 
     pub fn apply_transport_events(&mut self, events: Vec<TransportEvent>, cx: &mut gpui::Context<Self>) {
         let mut should_notify = false;
+        let mut theme_updated = false;
         for event in events {
             if !should_notify && self.event_affects_visible_ui(&event) {
                 should_notify = true;
+            }
+            if matches!(event, TransportEvent::AccountThemeUpdated { .. }) {
+                theme_updated = true;
             }
             let deleted_call_channel = match &event {
                 TransportEvent::CallDelete { channel_id } => Some(channel_id.clone()),
@@ -73,6 +78,9 @@ impl AppState {
                     should_notify = true;
                 }
             }
+        }
+        if theme_updated {
+            self.apply_active_theme(cx);
         }
         if should_notify {
             cx.notify();
@@ -1028,6 +1036,9 @@ impl AppState {
             } => {
                 if theme != crate::protocol::user_settings_proto::Theme::Unset {
                     self.account_theme = Some(theme);
+                    if let Some(choice) = ThemeChoice::from_account_theme(theme) {
+                        self.theme_choice = choice;
+                    }
                 }
                 if client_theme_settings.is_some() {
                     self.account_client_theme_settings = client_theme_settings;

@@ -81,9 +81,25 @@ impl AppState {
         self.authorized_apps.retain(|a| a.id != app_id);
     }
 
-    /// Sets the Discord visual theme choice
-    pub fn set_theme_choice(&mut self, theme: ThemeChoice) {
+    /// Account-provided custom theme colors (gradient stops), if any.
+    pub fn custom_theme_colors(&self) -> &[String] {
+        self.account_client_theme_settings
+            .as_ref()
+            .and_then(|settings| settings.custom_user_theme_settings.as_ref())
+            .map(|custom| custom.colors.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Applies the current theme choice and account custom colors to the live
+    /// GPUI theme. Re-registers colors in place; no restart or window reopen.
+    pub fn apply_active_theme(&self, cx: &mut gpui::Context<Self>) {
+        crate::tokens::kit_theme::apply_theme(cx, self.theme_choice, self.custom_theme_colors());
+    }
+
+    /// Sets the Discord visual theme choice and applies it immediately.
+    pub fn set_theme_choice(&mut self, theme: ThemeChoice, cx: &mut gpui::Context<Self>) {
         self.theme_choice = theme;
+        self.apply_active_theme(cx);
     }
 
     /// Applies a UI language understood by the bundled i18n dictionaries.

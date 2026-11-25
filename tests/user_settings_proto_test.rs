@@ -55,7 +55,7 @@ fn test_corrupted_and_truncated_proto_error_handling() {
 }
 
 #[test]
-fn test_account_theme_stored_in_app_state_without_mutating_theme_choice() {
+fn test_account_theme_is_stored_and_applied_to_theme_choice() {
     let mut state = AppState::new();
     assert_eq!(state.theme_choice, ThemeChoice::Dark);
     assert_eq!(state.account_theme, None);
@@ -66,10 +66,9 @@ fn test_account_theme_stored_in_app_state_without_mutating_theme_choice() {
         client_theme_settings: None,
     });
 
-    // Account theme is stored
+    // Account theme is stored and becomes the effective UI choice.
     assert_eq!(state.account_theme, Some(Theme::Light));
-    // theme_choice must NOT be mutated to Light (avoid showing "Claro" selected while only dark palette exists)
-    assert_eq!(state.theme_choice, ThemeChoice::Dark);
+    assert_eq!(state.theme_choice, ThemeChoice::Light);
 
     // Dispatch AccountThemeUpdated with Theme::Midnight
     state.handle_transport_event(TransportEvent::AccountThemeUpdated {
@@ -77,7 +76,31 @@ fn test_account_theme_stored_in_app_state_without_mutating_theme_choice() {
         client_theme_settings: None,
     });
     assert_eq!(state.account_theme, Some(Theme::Midnight));
-    assert_eq!(state.theme_choice, ThemeChoice::Dark);
+    assert_eq!(state.theme_choice, ThemeChoice::Midnight);
+}
+
+#[test]
+fn test_every_account_theme_variant_maps_without_fabricating_surfaces() {
+    assert_eq!(
+        ThemeChoice::from_account_theme(Theme::Unset),
+        None
+    );
+    assert_eq!(
+        ThemeChoice::from_account_theme(Theme::Dark),
+        Some(ThemeChoice::Dark)
+    );
+    assert_eq!(
+        ThemeChoice::from_account_theme(Theme::Darker),
+        Some(ThemeChoice::Dark)
+    );
+    assert_eq!(
+        ThemeChoice::from_account_theme(Theme::Light),
+        Some(ThemeChoice::Light)
+    );
+    assert_eq!(
+        ThemeChoice::from_account_theme(Theme::Midnight),
+        Some(ThemeChoice::Midnight)
+    );
 }
 
 #[test]
@@ -90,6 +113,7 @@ fn test_partial_proto_update_preserves_existing_theme() {
         client_theme_settings: None,
     });
     assert_eq!(state.account_theme, Some(Theme::Darker));
+    assert_eq!(state.theme_choice, ThemeChoice::Dark);
 
     // 2. A partial USER_SETTINGS_PROTO_UPDATE arrives without `appearance`
     // (e.g. only audio or localization was updated, field 13 is absent)

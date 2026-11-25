@@ -299,3 +299,58 @@ fn discord_extras_match_token_accessors() {
     assert_eq!(ex.legacy_fee75c, tokens::legacy_fee75c());
     assert_eq!(ex.text_muted, tokens::text_muted());
 }
+
+#[test]
+fn theme_choices_produce_distinct_live_palettes() {
+    use discord_rs::domain::settings::ThemeChoice;
+    use discord_rs::tokens::{kit_theme, rgb};
+
+    let dark = kit_theme::palette_for_theme(ThemeChoice::Dark);
+    let darker = kit_theme::palette_for_theme(ThemeChoice::Darker);
+    let light = kit_theme::palette_for_theme(ThemeChoice::Light);
+    let midnight = kit_theme::palette_for_theme(ThemeChoice::Midnight);
+
+    // Dark=theme-darker is the audited CDP reference; Darker shares it because
+    // no separate measured surface set exists.
+    assert_eq!(darker.bg_chat, dark.bg_chat);
+    assert_eq!(dark.bg_chat, rgb(0x313338));
+    assert_eq!(light.bg_chat, rgb(0xffffff));
+    assert_eq!(midnight.bg_chat, rgb(0x000000));
+    assert_ne!(dark.bg_chat, light.bg_chat);
+    assert_ne!(dark.bg_chat, midnight.bg_chat);
+
+    // The kit payload is rebuilt from the palette, so applying a new choice
+    // repaints the same registered theme instead of requiring a restart.
+    let dark_json = kit_theme::discord_theme_json_for_palette(&dark, ThemeChoice::Dark);
+    let light_json = kit_theme::discord_theme_json_for_palette(&light, ThemeChoice::Light);
+    assert_ne!(dark_json, light_json);
+    assert!(dark_json.contains("\"background\":\"#313338\""));
+    assert!(light_json.contains("\"background\":\"#ffffff\""));
+}
+
+#[test]
+fn account_custom_colors_are_parsed_and_drive_accent() {
+    use discord_rs::domain::settings::ThemeChoice;
+    use discord_rs::tokens::kit_theme;
+
+    assert_eq!(kit_theme::parse_custom_color_hex("#1e1f22"), Some(0x1e1f22ff));
+    assert_eq!(kit_theme::parse_custom_color_hex("#abc"), Some(0xaabbccff));
+    assert_eq!(kit_theme::parse_custom_color_hex("#11223344"), Some(0x11223344));
+    assert_eq!(kit_theme::parse_custom_color_hex("not-a-color"), None);
+
+    let palette = kit_theme::palette_for_theme_with_custom(
+        ThemeChoice::Dark,
+        &["#ff0000".to_string(), "invalid".to_string(), "#00ff00".to_string()],
+    );
+    assert_eq!(palette.blurple, gpui::rgb(0xff0000));
+    // Hover/active scale the same audited blurple ratios (0.81/0.68).
+    assert!((palette.blurple_hover.r - 0.81).abs() < 0.01);
+    assert!((palette.blurple_hover.g - 0.0).abs() < 0.01);
+    assert!((palette.blurple_active.r - 0.68).abs() < 0.01);
+    // The gradient stops beyond the first remain available to future work but
+    // do not fabricate surfaces the client cannot render.
+    assert_eq!(palette.bg_chat, gpui::rgb(0x313338));
+
+    let uncustomized = kit_theme::palette_for_theme_with_custom(ThemeChoice::Dark, &[]);
+    assert_eq!(uncustomized.blurple, gpui::rgb(tokens::HEX_BLURPLE));
+}

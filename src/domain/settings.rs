@@ -163,6 +163,9 @@ pub enum ThemeChoice {
     #[default]
     Dark,
     Light,
+    /// Discord's `theme-darker` class. The audited reference palette in
+    /// `tokens::colors::DiscordPalette::dark` is exactly that surface set.
+    Darker,
     Midnight, // OLED Puro (#000000)
     SyncWithSystem,
 }
@@ -172,6 +175,7 @@ impl ThemeChoice {
         match self {
             Self::Dark => "Escuro (Padrão)",
             Self::Light => "Claro",
+            Self::Darker => "Escuro (Darker)",
             Self::Midnight => "Midnight (OLED #000000)",
             Self::SyncWithSystem => "Sincronizar com o Computador",
         }
@@ -179,10 +183,28 @@ impl ThemeChoice {
 
     pub fn bg_hex(&self) -> u32 {
         match self {
-            Self::Dark => 0x313338,
+            Self::Dark | Self::Darker => 0x313338,
             Self::Light => 0xffffff,
             Self::Midnight => 0x000000,
             Self::SyncWithSystem => 0x313338,
+        }
+    }
+
+    /// Maps the account preference decoded from `PreloadedUserSettings.proto`
+    /// (lines 390-396) to the local theme choice.
+    ///
+    /// `Dark` and `Darker` share the audited `theme-darker` surfaces because the
+    /// CDP reference inspected for this project used `theme-dark theme-darker`;
+    /// no separate, unmeasured "darker than dark" stop is invented.
+    pub fn from_account_theme(
+        theme: crate::protocol::user_settings_proto::Theme,
+    ) -> Option<Self> {
+        use crate::protocol::user_settings_proto::Theme;
+        match theme {
+            Theme::Dark | Theme::Darker => Some(Self::Dark),
+            Theme::Light => Some(Self::Light),
+            Theme::Midnight => Some(Self::Midnight),
+            Theme::Unset => None,
         }
     }
 }
