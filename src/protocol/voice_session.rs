@@ -649,6 +649,97 @@ impl AudioBridge {
 // 6. Configuração e Estrutura Principal da Sessão de Voz (VoiceSession)
 // ============================================================================
 
+/// Estado único de mute/deafen local.
+///
+/// Invariantes (T-098):
+/// - `deafened` implica `muted` (ensurdecer silencia o microfone);
+/// - não é possível reativar o microfone enquanto `deafened` for verdadeiro;
+/// - ao desensurdecer, o mute anterior ao deafen é restaurado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VoiceControlState {
+    /// Microfone silenciado.
+    pub muted: bool,
+    /// Saída de áudio ensurdecida.
+    pub deafened: bool,
+    /// Mute que existia imediatamente antes de ativar o deafen.
+    previous_mute_before_deafen: bool,
+}
+
+impl VoiceControlState {
+    /// Cria o estado normalizando a invariante deafen ⇒ mute.
+    pub fn new(muted: bool, deafened: bool) -> Self {
+        let previous = muted;
+        Self {
+            muted: muted || deafened,
+            deafened,
+            previous_mute_before_deafen: previous,
+        }
+    }
+
+    /// Alterna o mute. Enquanto ensurdecido, o comando é ignorado para não
+    /// reativar o microfone.
+    pub fn toggle_mute(&mut self) {
+        if self.deafened {
+            return;
+        }
+        self.muted = !self.muted;
+        self.previous_mute_before_deafen = self.muted;
+    }
+
+    /// Alterna o deafen preservando/restaurando o mute anterior.
+    pub fn toggle_deafen(&mut self) {
+        if self.deafened {
+            self.deafened = false;
+            self.muted = self.previous_mute_before_deafen;
+        } else {
+            self.previous_mute_before_deafen = self.muted;
+            self.deafened = true;
+            self.muted = true;
+        }
+    }
+
+    /// Aplica um mute explícito respeitando a invariante deafen ⇒ mute.
+    pub fn set_muted(&mut self, muted: bool) {
+        if self.deafened {
+            // Deafened mantém o microfone silenciado; unmute é recusado.
+            self.muted = true;
+            return;
+        }
+        self.muted = muted;
+        self.previous_mute_before_deafen = muted;
+    }
+
+    /// Aplica um deafen explícito preservando/restaurando o mute anterior.
+    pub fn set_deafened(&mut self, deafened: bool) {
+        if deafened {
+            if !self.deafened {
+                self.previous_mute_before_deafen = self.muted;
+            }
+            self.deafened = true;
+            self.muted = true;
+        } else {
+            self.deafened = false;
+            self.muted = self.previous_mute_before_deafen;
+        }
+    }
+
+    /// Sincroniza com o eco do Gateway (fonte da verdade) normalizando a
+    /// invariante. Mudanças externas atualizam também o mute de restauração.
+    pub fn observe_gateway_echo(&mut self, muted: bool, deafened: bool) {
+        if deafened {
+            if !self.deafened {
+                self.previous_mute_before_deafen = self.muted;
+            }
+            self.deafened = true;
+            self.muted = true;
+        } else {
+            self.deafened = false;
+            self.muted = muted;
+            self.previous_mute_before_deafen = muted;
+        }
+    }
+}
+
 /// Parâmetros de entrada para estabelecer uma sessão de voz.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceSessionConfig {
@@ -684,6 +775,18 @@ pub struct VoiceSession {
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
     self_mute: Arc<AtomicBool>,
     self_deaf: Arc<AtomicBool>,
+    /// Estado canônico desejado de mute/deafen.
+    control_state: Arc<std::sync::Mutex<VoiceControlState>>,
+    /// Último estado confirmado por Opcode 4 ou pelo eco do Gateway.
+    confirmed_control: Arc<std::sync::Mutex<VoiceControlState>>,
+    /// Geração monotônica dos comandos de controle planejados.
+    control_generation: Arc<AtomicU64>,
+    /// Maior geração já processada (sucesso, falha ou descarte).
+    control_last_applied: Arc<AtomicU64>,
+    /// Serializa o envio dos comandos de controle (um Opcode 4 por vez).
+    control_gate: Arc<Mutex<()>>,
+    /// Último Opcode 4 de controle confirmado como enviado.
+    last_opcode4: Arc<std::sync::RwLock<Option<VoiceControlState>>>,
     ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>>,
     ping_ms: Arc<AtomicU32>,
     call_warning: Arc<std::sync::RwLock<Option<String>>>,
@@ -706,6 +809,13 @@ impl VoiceSession {
 
         let self_mute = Arc::new(AtomicBool::new(config.self_mute));
         let self_deaf = Arc::new(AtomicBool::new(config.self_deaf));
+        let initial_control = VoiceControlState::new(config.self_mute, config.self_deaf);
+        let control_state = Arc::new(std::sync::Mutex::new(initial_control));
+        let confirmed_control = Arc::new(std::sync::Mutex::new(initial_control));
+        let control_generation = Arc::new(AtomicU64::new(0));
+        let control_last_applied = Arc::new(AtomicU64::new(0));
+        let control_gate = Arc::new(Mutex::new(()));
+        let last_opcode4 = Arc::new(std::sync::RwLock::new(None));
         let sent_packets = Arc::new(AtomicU64::new(0));
         let recv_packets = Arc::new(AtomicU64::new(0));
         let ssrc_to_user = Arc::new(RwLock::new(HashMap::new()));
@@ -740,6 +850,12 @@ impl VoiceSession {
             active_gateway: Arc::new(Mutex::new(None)),
             self_mute,
             self_deaf,
+            control_state,
+            confirmed_control,
+            control_generation,
+            control_last_applied,
+            control_gate,
+            last_opcode4,
             ssrc_to_user,
             ping_ms,
             call_warning,
@@ -910,37 +1026,152 @@ impl VoiceSession {
         bridge.switch_output_device(device_id).await
     }
 
-    /// Altera o estado de microfone local (mute).
-    pub async fn set_muted(&self, muted: bool) -> Result<()> {
-        self.self_mute.store(muted, Ordering::Relaxed);
-        self.audio_bridge.lock().await.set_muted(muted).await;
-
-        let guild_id_str = self.config.guild_id.map(|g| g.to_string());
-        let channel_id_str = self.config.channel_id.to_string();
-        let deaf = self.self_deaf.load(Ordering::Relaxed);
-
-        self.signaling
-            .send_voice_state_update(guild_id_str.as_deref(), Some(&channel_id_str), muted, deaf)
-            .await
+    fn lock_control(state: &std::sync::Mutex<VoiceControlState>) -> std::sync::MutexGuard<'_, VoiceControlState> {
+        state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Altera o estado de ensurdecimento local (deafen).
-    pub async fn set_deafened(&self, deafened: bool) -> Result<()> {
-        self.self_deaf.store(deafened, Ordering::Relaxed);
-        self.audio_bridge.lock().await.set_deafened(deafened).await;
+    /// Estado canônico desejado de mute/deafen (inclui restauração de mute).
+    pub fn control_state(&self) -> VoiceControlState {
+        *Self::lock_control(&self.control_state)
+    }
+
+    /// Último estado confirmado por Opcode 4 ou pelo eco do Gateway.
+    pub fn confirmed_control(&self) -> VoiceControlState {
+        *Self::lock_control(&self.confirmed_control)
+    }
+
+    /// Último Opcode 4 de controle efetivamente enviado, se houver.
+    pub fn last_opcode4(&self) -> Option<VoiceControlState> {
+        self.last_opcode4
+            .read()
+            .ok()
+            .and_then(|guard| *guard)
+    }
+
+    /// Indicadores derivados do estado canônico (espelho do bridge de áudio).
+    pub fn is_self_muted(&self) -> bool {
+        self.self_mute.load(Ordering::SeqCst)
+    }
+
+    /// Indicadores derivados do estado canônico (espelho do bridge de áudio).
+    pub fn is_self_deafened(&self) -> bool {
+        self.self_deaf.load(Ordering::SeqCst)
+    }
+
+    fn plan_control<F>(&self, mutate: F) -> (VoiceControlState, Option<u64>)
+    where
+        F: FnOnce(&mut VoiceControlState),
+    {
+        let mut state = Self::lock_control(&self.control_state);
+        let before = *state;
+        mutate(&mut state);
+        let desired = *state;
+        if desired == before {
+            (desired, None)
+        } else {
+            let generation = self.control_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            (desired, Some(generation))
+        }
+    }
+
+    /// Planeja um toggle de mute sem enviar nada. Retorna o estado desejado e a
+    /// geração do comando (None quando o toggle é recusado pela invariante).
+    pub fn plan_toggle_mute(&self) -> (VoiceControlState, Option<u64>) {
+        self.plan_control(VoiceControlState::toggle_mute)
+    }
+
+    /// Planeja um toggle de deafen sem enviar nada.
+    pub fn plan_toggle_deafen(&self) -> (VoiceControlState, Option<u64>) {
+        self.plan_control(VoiceControlState::toggle_deafen)
+    }
+
+    /// Envia o estado planejado de forma serializada. Comandos de gerações
+    /// anteriores à última processada são descartados, então cliques rápidos
+    /// nunca deixam o último Opcode 4 divergente do estado local.
+    pub async fn apply_control(&self, desired: VoiceControlState, generation: u64) -> Result<()> {
+        let _gate = self.control_gate.lock().await;
+
+        if generation <= self.control_last_applied.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        self.self_mute.store(desired.muted, Ordering::SeqCst);
+        self.self_deaf.store(desired.deafened, Ordering::SeqCst);
+        {
+            let bridge = self.audio_bridge.lock().await;
+            bridge.set_muted(desired.muted).await;
+            bridge.set_deafened(desired.deafened).await;
+        }
 
         let guild_id_str = self.config.guild_id.map(|g| g.to_string());
         let channel_id_str = self.config.channel_id.to_string();
-        let mute = self.self_mute.load(Ordering::Relaxed);
-
-        self.signaling
+        let result = self
+            .signaling
             .send_voice_state_update(
                 guild_id_str.as_deref(),
                 Some(&channel_id_str),
-                mute,
-                deafened,
+                desired.muted,
+                desired.deafened,
             )
-            .await
+            .await;
+
+        match result {
+            Ok(()) => {
+                self.control_last_applied.store(generation, Ordering::SeqCst);
+                *Self::lock_control(&self.confirmed_control) = desired;
+                if let Ok(mut last) = self.last_opcode4.write() {
+                    *last = Some(desired);
+                }
+                let _ = self.events_tx.send(VoiceSessionEvent::VoiceStateSent);
+                Ok(())
+            }
+            Err(err) => {
+                // Só faz rollback se este ainda é o comando mais recente.
+                // Com um comando mais novo na fila, ele decide o estado final.
+                if generation == self.control_generation.load(Ordering::SeqCst) {
+                    let confirmed = self.confirmed_control();
+                    *Self::lock_control(&self.control_state) = confirmed;
+                    self.self_mute.store(confirmed.muted, Ordering::SeqCst);
+                    self.self_deaf.store(confirmed.deafened, Ordering::SeqCst);
+                    let bridge = self.audio_bridge.lock().await;
+                    bridge.set_muted(confirmed.muted).await;
+                    bridge.set_deafened(confirmed.deafened).await;
+                }
+                self.control_last_applied.store(generation, Ordering::SeqCst);
+                Err(err)
+            }
+        }
+    }
+
+    /// Altera o estado de microfone local (mute) respeitando deafen ⇒ mute.
+    pub async fn set_muted(&self, muted: bool) -> Result<()> {
+        let (desired, generation) = self.plan_control(|state| state.set_muted(muted));
+        match generation {
+            Some(generation) => self.apply_control(desired, generation).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Altera o estado de ensurdecimento local (deafen) restaurando o mute
+    /// anterior ao desensurdecer.
+    pub async fn set_deafened(&self, deafened: bool) -> Result<()> {
+        let (desired, generation) = self.plan_control(|state| state.set_deafened(deafened));
+        match generation {
+            Some(generation) => self.apply_control(desired, generation).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Sincroniza o estado canônico com o eco autoritativo do Gateway.
+    pub fn observe_gateway_echo(&self, muted: bool, deafened: bool) {
+        let observed = {
+            let mut state = Self::lock_control(&self.control_state);
+            state.observe_gateway_echo(muted, deafened);
+            *state
+        };
+        *Self::lock_control(&self.confirmed_control) = observed;
+        self.self_mute.store(observed.muted, Ordering::SeqCst);
+        self.self_deaf.store(observed.deafened, Ordering::SeqCst);
     }
 
     /// Inicia o processo de conexão em segundo plano.

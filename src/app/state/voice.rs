@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::voice::VoiceState;
-use crate::protocol::voice_session::VoiceSessionState;
+use crate::protocol::voice_session::{VoiceControlState, VoiceSessionState};
 
 impl AppState {
     /// Connects to a voice call in a guild channel
@@ -42,6 +42,11 @@ impl AppState {
         }) {
             return;
         }
+
+        // Sincroniza a máquina de estados local com o perfil real antes de abrir
+        // a chamada; o estado de mute anterior ao deafen é preservado a partir daqui.
+        self.voice_control =
+            VoiceControlState::new(self.current_user.is_muted, self.current_user.is_deafened);
 
         let mut participants = Vec::new();
 
@@ -233,6 +238,13 @@ impl AppState {
         session_state: VoiceSessionState,
         ping_ms: Option<u32>,
     ) {
+        // A sessão é a autoridade do controle; reconcilia o espelho local após
+        // rollback por falha de sinalização ou mudança vinda do Gateway.
+        if let Some(session) = self.voice_session_for_control() {
+            let control = session.control_state();
+            self.apply_local_voice_control(control);
+        }
+
         if let Some(ref mut call) = self.active_voice_call {
             let previous_state = call.connection_state.clone();
             match &session_state {
@@ -353,8 +365,16 @@ impl AppState {
 
         // O eco do Gateway é a fonte da verdade para mute/deafen locais.
         if is_active_channel && user_id == self.current_user.id {
-            self.current_user.is_muted = state.is_muted();
-            self.current_user.is_deafened = state.is_deafened();
+            let echoed_muted = state.is_muted();
+            let echoed_deafened = state.is_deafened();
+            self.current_user.is_muted = echoed_muted;
+            self.current_user.is_deafened = echoed_deafened;
+            if let Some(session) = self.voice_session_for_control() {
+                session.observe_gateway_echo(echoed_muted, echoed_deafened);
+                self.voice_control = session.control_state();
+            } else {
+                self.voice_control = VoiceControlState::new(echoed_muted, echoed_deafened);
+            }
         }
 
         if let Some(ref mut call) = self.active_voice_call {
@@ -482,6 +502,27 @@ impl AppState {
             .and_then(|call| call.voice_session.clone())
     }
 
+    /// Espelha o estado canônico de mute/deafen no perfil e na chamada ativa.
+    fn apply_local_voice_control(&mut self, control: VoiceControlState) {
+        self.voice_control = control;
+        self.current_user.is_muted = control.muted;
+        self.current_user.is_deafened = control.deafened;
+
+        let current_user_id = self.current_user.id.clone();
+        if let Some(ref mut call) = self.active_voice_call {
+            call.is_muted = control.muted;
+            call.is_deafened = control.deafened;
+            if let Some(participant) = call
+                .participants
+                .iter_mut()
+                .find(|participant| participant.id == current_user_id)
+            {
+                participant.is_muted = control.muted;
+                participant.is_deafened = control.deafened;
+            }
+        }
+    }
+
     /// Sets selected audio input device (microfone) and dynamically switches hardware stream
     pub fn set_input_device(&mut self, device_id: Option<String>) {
         if let Some(ref mut call) = self.active_voice_call {
@@ -548,68 +589,60 @@ impl AppState {
         }
     }
 
-    /// Toggles self mute
+    /// Toggles self mute. Enquanto ensurdecido, o comando é recusado para não
+    /// reativar o microfone (invariante deafen ⇒ mute).
     pub fn toggle_mute(&mut self) {
         if let Some(ref tel) = self.telemetry {
             tel.track_button_click("toggle_mute", "Toggle Mute", 0);
         }
-        self.current_user.is_muted = !self.current_user.is_muted;
-        let is_muted = self.current_user.is_muted;
-        if let Some(ref mut call) = self.active_voice_call {
-            call.is_muted = is_muted;
-            if let Some(p) = call.participants.iter_mut().find(|p| p.id == self.current_user.id) {
-                p.is_muted = is_muted;
-            }
-        }
+
         if let Some(session) = self.voice_session_for_control() {
-            tokio::spawn(async move {
-                if let Err(e) = session.set_muted(is_muted).await {
-                    let warning = format!("Falha ao sincronizar microfone com o Discord: {e:#}");
-                    log::error!("[AppState] {}", warning);
-                    session.set_call_warning(Some(warning));
-                }
-            });
+            let (desired, generation) = session.plan_toggle_mute();
+            self.apply_local_voice_control(desired);
+            if let Some(generation) = generation {
+                tokio::spawn(async move {
+                    if let Err(e) = session.apply_control(desired, generation).await {
+                        let warning =
+                            format!("Falha ao sincronizar microfone com o Discord: {e:#}");
+                        log::error!("[AppState] {}", warning);
+                        session.set_call_warning(Some(warning));
+                    }
+                });
+            }
+            return;
         }
+
+        let mut control = self.voice_control;
+        control.toggle_mute();
+        self.apply_local_voice_control(control);
     }
 
-    /// Toggles self deafen
+    /// Toggles self deafen. Ensurdecer força o mute; desensurdecer restaura o
+    /// mute que existia antes do deafen.
     pub fn toggle_deafen(&mut self) {
         if let Some(ref tel) = self.telemetry {
             tel.track_button_click("toggle_deafen", "Toggle Deafen", 0);
         }
-        self.current_user.is_deafened = !self.current_user.is_deafened;
-        if self.current_user.is_deafened {
-            self.current_user.is_muted = true;
-        }
-        let is_deafened = self.current_user.is_deafened;
-        let is_muted = self.current_user.is_muted;
-        if let Some(ref mut call) = self.active_voice_call {
-            call.is_deafened = is_deafened;
-            call.is_muted = is_muted;
-            if let Some(p) = call.participants.iter_mut().find(|p| p.id == self.current_user.id) {
-                p.is_deafened = is_deafened;
-                p.is_muted = is_muted;
-            }
-        }
+
         if let Some(session) = self.voice_session_for_control() {
-            tokio::spawn(async move {
-                // VoiceSession::set_deafened usa o self_mute interno para o
-                // Opcode 4. Sincronize o mute antes de ativar o deafen.
-                let result = if is_deafened {
-                    match session.set_muted(true).await {
-                        Ok(()) => session.set_deafened(true).await,
-                        Err(e) => Err(e),
+            let (desired, generation) = session.plan_toggle_deafen();
+            self.apply_local_voice_control(desired);
+            if let Some(generation) = generation {
+                tokio::spawn(async move {
+                    if let Err(e) = session.apply_control(desired, generation).await {
+                        let warning =
+                            format!("Falha ao sincronizar ensurdecimento com o Discord: {e:#}");
+                        log::error!("[AppState] {}", warning);
+                        session.set_call_warning(Some(warning));
                     }
-                } else {
-                    session.set_deafened(false).await
-                };
-                if let Err(e) = result {
-                    let warning = format!("Falha ao sincronizar ensurdecimento com o Discord: {e:#}");
-                    log::error!("[AppState] {}", warning);
-                    session.set_call_warning(Some(warning));
-                }
-            });
+                });
+            }
+            return;
         }
+
+        let mut control = self.voice_control;
+        control.toggle_deafen();
+        self.apply_local_voice_control(control);
     }
 
     /// Resolve o nome, avatar_url e decoração de um participante de chamada.
