@@ -184,6 +184,10 @@ fn test_no_hardcoded_ferris_dm_and_clean_state() {
         recipient_names: vec!["Ferris".into()],
         user_limit: None,
         avatar_decoration_data: None,
+        thread_metadata: None,
+        default_tag_ids: Vec::new(),
+        available_tags: Vec::new(),
+        flags: 0,
     });
 
     // Legitimate temporary DM opened by user
@@ -228,6 +232,10 @@ fn test_guild_messages_do_not_leak_into_dms() {
         recipient_names: vec!["Dyno".into()],
         user_limit: None,
         avatar_decoration_data: None,
+        thread_metadata: None,
+        default_tag_ids: Vec::new(),
+        available_tags: Vec::new(),
+        flags: 0,
     });
 
     let friend_dm_id = "dm-chan-alice-888".to_string();
@@ -246,6 +254,10 @@ fn test_guild_messages_do_not_leak_into_dms() {
         recipient_names: vec!["Alice".into()],
         user_limit: None,
         avatar_decoration_data: None,
+        thread_metadata: None,
+        default_tag_ids: Vec::new(),
+        available_tags: Vec::new(),
+        flags: 0,
     });
 
     // Also open a pending temp DM with Carol
@@ -279,6 +291,8 @@ fn test_guild_messages_do_not_leak_into_dms() {
         edited_timestamp: None,
         pinned: false,
         is_pending: false,
+        message_reference: None,
+        referenced_message: None,
     };
 
     state.handle_transport_event(TransportEvent::MessageCreate(bot_guild_msg));
@@ -332,6 +346,8 @@ fn test_guild_messages_do_not_leak_into_dms() {
         edited_timestamp: None,
         pinned: false,
         is_pending: false,
+        message_reference: None,
+        referenced_message: None,
     };
 
     state.handle_transport_event(TransportEvent::MessageCreate(alice_guild_msg));
@@ -363,6 +379,8 @@ fn test_guild_messages_do_not_leak_into_dms() {
         edited_timestamp: None,
         pinned: false,
         is_pending: false,
+        message_reference: None,
+        referenced_message: None,
     };
 
     state.handle_transport_event(TransportEvent::MessageCreate(carol_guild_msg));
@@ -392,6 +410,8 @@ fn test_guild_messages_do_not_leak_into_dms() {
         edited_timestamp: None,
         pinned: false,
         is_pending: false,
+        message_reference: None,
+        referenced_message: None,
     };
 
     state.handle_transport_event(TransportEvent::MessageCreate(bot_real_dm_msg));

@@ -25,6 +25,10 @@ fn channel(id: &str, unread: bool, mentions: u32) -> ChannelItemState {
         recipient_names: Vec::new(),
         user_limit: None,
         avatar_decoration_data: None,
+        thread_metadata: None,
+        default_tag_ids: Vec::new(),
+        available_tags: Vec::new(),
+        flags: 0,
     }
 }
 

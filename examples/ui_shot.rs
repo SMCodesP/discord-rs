@@ -516,6 +516,10 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
                         .iter()
                         .map(|ch| ChannelItemState {
                             avatar_decoration_data: None,
+                            thread_metadata: None,
+                            default_tag_ids: Vec::new(),
+                            available_tags: Vec::new(),
+                            flags: 0,
                             id: ch.id.clone(),
                             name: ch.name.clone(),
                             kind: parse_channel_kind(&ch.kind),
@@ -554,6 +558,10 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
         .iter()
         .map(|d| ChannelItemState {
             avatar_decoration_data: None,
+            thread_metadata: None,
+            default_tag_ids: Vec::new(),
+            available_tags: Vec::new(),
+            flags: 0,
             id: d.id.clone(),
             name: d.name.clone(),
             kind: ChannelKind::Text,
@@ -664,6 +672,11 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
             channel_name: vc.channel_name.clone(),
             guild_name: vc.guild_name.clone(),
             ping_ms: vc.ping_ms,
+            packet_loss_pct: None,
+            sent_packets: 0,
+            recv_packets: 0,
+            lost_packets: 0,
+            codec: None,
             is_muted: vc.is_muted,
             is_deafened: vc.is_deafened,
             is_screen_sharing: vc.is_screen_sharing,

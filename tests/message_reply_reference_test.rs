@@ -127,7 +127,7 @@ fn parse_message_from_json_preserves_reference_fields() {
             "author": {"id": "u2", "username": "orig"}
         }
     });
-    let msg = discord_rs::protocol::parse_message_from_json_str(&raw.to_string()).expect("parse");
+    let msg = discord_rs::protocol::discord_api::parse_message_from_json_str(&raw.to_string()).expect("parse");
     assert_eq!(msg.message_reference.as_ref().and_then(|r| r.message_id.as_deref()), Some("1998"));
     assert_eq!(msg.referenced_message.as_ref().map(|m| m.content.as_str()), Some("orig"));
 }
@@ -135,7 +135,8 @@ fn parse_message_from_json_preserves_reference_fields() {
 #[test]
 fn begin_message_send_with_reference_attaches_reply_preview() {
     let mut state = discord_rs::app::state::AppState::new();
-    state.client_manager = Some(discord_rs::protocol::ClientManager::new());
+    let (cm, _rx) = discord_rs::protocol::ClientManager::new();
+    state.client_manager = Some(cm);
     let channel_id = "chan-1".to_string();
     let original = Message::new("orig-1", channel_id.clone(), Author::new("u2", "orig"), "original");
     state.messages_by_channel.insert(channel_id.clone(), vec![original]);

@@ -352,7 +352,7 @@ impl Render for ChannelSidebar {
                     // Discord measures 50px of channel-navigation clearance;
                     // the 58px panel floats over the final 16px of that area.
                     .child(div().h(channel_navigation_reserve()))
-                    .child(render_user_panel(&current_user, panel_width, &app_entity)),
+                    .child(render_user_panel(&current_user, &app_entity)),
             )
             .child(render_resize_handle(sidebar_width, sidebar_entity))
     }
@@ -2372,6 +2372,10 @@ mod tests {
             recipient_names: Vec::new(),
             user_limit: None,
             avatar_decoration_data: None,
+            thread_metadata: None,
+            default_tag_ids: Vec::new(),
+            available_tags: Vec::new(),
+            flags: 0,
         }
     }
 

@@ -29,6 +29,10 @@ fn mk_guild(id: &str, name: &str, channels: Vec<(&str, &str)>) -> GuildItemState
                     recipient_names: vec![],
                     user_limit: None,
                     avatar_decoration_data: None,
+                    thread_metadata: None,
+                    default_tag_ids: Vec::new(),
+                    available_tags: Vec::new(),
+                    flags: 0,
                 })
                 .collect(),
         }],
@@ -53,6 +57,10 @@ fn mk_dm(id: &str, name: &str) -> ChannelItemState {
         recipient_names: vec![name.to_string()],
         user_limit: None,
         avatar_decoration_data: None,
+        thread_metadata: None,
+        default_tag_ids: Vec::new(),
+        available_tags: Vec::new(),
+        flags: 0,
     }
 }
 

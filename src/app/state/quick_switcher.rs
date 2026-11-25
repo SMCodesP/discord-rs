@@ -376,6 +376,10 @@ mod tests {
                     recipient_names: vec![],
                     user_limit: None,
                     avatar_decoration_data: None,
+                    thread_metadata: None,
+                    default_tag_ids: Vec::new(),
+                    available_tags: Vec::new(),
+                    flags: 0,
                 }).collect(),
             }],
             emojis: vec![],
@@ -399,6 +403,10 @@ mod tests {
             recipient_names: vec![name.to_string()],
             user_limit: None,
             avatar_decoration_data: None,
+            thread_metadata: None,
+            default_tag_ids: Vec::new(),
+            available_tags: Vec::new(),
+            flags: 0,
         }
     }
 

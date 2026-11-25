@@ -182,7 +182,7 @@
   - **O que falta/corrigir:** negociar codec/resolução, empacotar RTP de vídeo, integrar captura local, decodificar/renderizar remoto, tratar SSRC de vídeo e implementar início/parada de tela com seleção real de janela/monitor.
   - **Critério de pronto:** teste de integração sintético valida payload types, timestamps e troca de fonte; chamada real mostra preview local e quadro remoto, e compartilhamento aparece/desaparece após confirmação do servidor, sem tile fictício.
 
-- [ ] **T-024** — **P1** — **Chat/Mensagens** — **Preservar e enviar `message_reference` nas respostas**
+- [x] **T-024** — **P1** — **Chat/Mensagens** — **Preservar e enviar `message_reference` nas respostas**
   - **Arquivos:** `src/chat/chat_view.rs:416-432`, `src/chat/chat_view.rs:482-519`, `src/app/state/messages.rs:166-213`, `src/protocol/discord_api.rs:1018-1034`, `src/domain/message.rs:183-218`.
   - **Evidência:** o callback recebe `_reply_id` e o ignora; `send_message` não aceita referência; o corpo REST contém apenas `{ "content": ... }`. O banner de resposta some no envio, mas a mensagem enviada é uma mensagem comum, sem vínculo com a original.
   - **O que falta/corrigir:** carregar `message_reference`, `referenced_message`, flag de menção e autor; enviar `message_reference.message_id` + `allowed_mentions`; renderizar preview clicável da resposta.
@@ -369,13 +369,13 @@
 
 **Limites de comparação:** idioma, servidor/canal, banner, lista de membros, conteúdo e permissão do composer diferentes não foram tratados como defeitos de layout. Os hexs medidos pertencem ao tema customizado ativo; não foram generalizados para o tema escuro padrão. A captura oficial preta bloqueou diff visual confiável e permanece explicitamente em `T-070`.
 
-- [ ] **T-071** — **P1** — **Design/Guild Rail** — **Alinhar geometria, tema e indicadores do trilho de servidores ao cliente oficial medido**
+- [x] **T-071** — **P1** — **Design/Guild Rail** — **Alinhar geometria, tema e indicadores do trilho de servidores ao cliente oficial medido**
   - **Arquivos:** `src/components/guild_item.rs:158-161`, `src/components/guild_item.rs:189-205`, `src/components/guild_item.rs:208-245`, `src/components/guild_item.rs:544-576`, `src/app/guild_rail.rs:43-71`, `src/tokens/spacing.rs:230-239`.
   - **Evidência:** medição oficial `/tmp/opencode/discord-shell-measurements.md`: trilho 72px; wrappers 40×40 em `x=16`, passo 48px; separador 32×1/r1; fundo `#0e0b17`, texto forte `#e1e1fe`; pill 8px em `x=-4`, raio `0 4px 4px 0`, alturas 8/20/40; miniaturas de pasta 19×19 com raios `13px 4px 4px`, `4px 13px 4px 4px`, `4px 4px 4px 13px`, `4px 4px 13px`. O ícone **não usa `border-radius`**: é recortado por máscara SVG squircle 40×40 com curvas em `(0,17.4545)`→`(17.4545,0)`; `border-radius:0` não significa quadrado. O RS aproxima com raio 16px, pill 4px em `x=0` e miniaturas 15×15/r10-3.
   - **O que falta/corrigir:** implementar a máscara squircle (ou aproximação explicitamente documentada), tokens de pill/pasta/separador e tema `darker`; corrigir clipping sem achatar a máscara.
   - **Critério de pronto:** screenshots sintéticos lado a lado em repouso, hover, selecionado, unread, menção e pasta fechada/aberta com diferença ≤1px; teste de máscara compara o path/contorno e imagem local cobre todos os estados.
 
-- [ ] **T-072** — **P1** — **Design/Channel Sidebar** — **Corrigir largura, cantos, redimensionamento e painel do usuário**
+- [x] **T-072** — **P1** — **Design/Channel Sidebar** — **Corrigir largura, cantos, redimensionamento e painel do usuário**
   - **Arquivos:** `src/app/channel_sidebar.rs:74-119`, `src/app/channel_sidebar.rs:127-163`, `src/app/channel_sidebar.rs:704-715`, `src/app/channel_sidebar.rs:796-902`, `src/app/channel_sidebar.rs:1003-1077`.
   - **Evidência:** medição oficial `/tmp/opencode/discord-shell-measurements.md`: rail 72px + sidebar 272px + handle 4px = **344px**; header 49px/r12 superior esquerdo, nome 16px/600; canal wrapper 34px, link 255×32/r8 com `padding 4px 8px`, ícone 20px e nome 16px/500/24px; cores normal `#8989aa`, selecionado `#e1e1fe`, fundo selecionado `#131316`; painel **328×58** em `x=8`, bottom margin 8px, bloco usuário 153×46, controles 146×32/gap8 e botões 32×32/r8. O RS fixa sidebar em 240px, não tem handle/margem inferior, usa nome 13px bold e subtexto 11px.
   - **O que falta/corrigir:** adotar largura/redimensionamento, cantos, cores, métricas do painel e tipografia; manter voice rows e badges dentro da nova largura.
@@ -387,7 +387,7 @@
   - **O que falta/corrigir:** ajustar grid/padding/altura, timestamp compacto e barra completa de ações contextuais; respeitar mensagem própria e permissões.
   - **Critério de pronto:** fixture sintética com grupo, mensagem isolada, bot, editada, reply, embed e reação gera captura ≤1px de diferença; hover mostra todos os ações permitidos e timestamp sem deslocar conteúdo.
 
-- [ ] **T-074** — **P1** — **Design/Perfil** — **Reduzir modal de perfil e corrigir avatar/banner/tabs ao oficial**
+- [x] **T-074** — **P1** — **Design/Perfil** — **Reduzir modal de perfil e corrigir avatar/banner/tabs ao oficial**
   - **Arquivos:** `src/app/user_profile_popout.rs:340-351`, `src/app/user_profile_popout.rs:434-460`, `src/app/user_profile_popout.rs:492-497`, `src/app/user_profile_popout.rs:936-965`, `src/app/user_profile_popout.rs:991-1017`, `src/app/user_profile_popout.rs:1049-1054`.
   - **Evidência:** CDP oficial: popout 300×348/r8, banner 105px e avatar 80px (estes já batem); modal **600×557/r8**, banner 210px, avatar **120px**, tabs em `y=397` com 25px de altura. O RS abre modal **1184×704/r12** e usa avatar 80px, além de largura fixa que não cabe em viewports menores.
   - **O que falta/corrigir:** modal 600px responsivo, avatar 120px, offsets/tabs medidos, remover borda/cor sem origem e limitar altura à viewport com scroll interno.
@@ -399,7 +399,7 @@
   - **O que falta/corrigir:** shell fluido `253px + flex`, header/top offsets e itens de 36px; remover largura fixa que estoura em janelas pequenas.
   - **Critério de pronto:** screenshots de todas as abas em 1018×605, 1272×756 e 800×600 sem overflow; navegação, busca e fechamento por Esc funcionam; medidas ativas/inativas batem com o CDP.
 
-- [ ] **T-076** — **P1** — **Chat/Threads/Forum** — **Adicionar tipos de canal Forum, Threads, Stage e Directory sem descartá-los no parser**
+- [x] **T-076** — **P1** — **Chat/Threads/Forum** — **Adicionar tipos de canal Forum, Threads, Stage e Directory sem descartá-los no parser**
   - **Arquivos:** `src/domain/channel.rs:6-47`, `src/domain/channel.rs:148-191`, `src/app/state/models.rs:118-143`, `src/protocol/discord_api.rs:2205-2208`, `src/app/state/gateway_events.rs:290-307`.
   - **Evidência:** `ChannelType::from_discord_code` só aceita 0..5; `parse_channel_from_json` retorna `None` para tipos 10–15. `ChannelKind` só tem Text/Voice/Announcement. Forum, threads, Stage Voice e Directory desaparecem da sidebar e não podem ser abertos.
   - **O que falta/corrigir:** modelar tipos 10–15, `parent_id`, `thread_metadata`, `default_tag_ids`, `available_tags` e flags de forum; criar ícones, ordenação e view de forum em grade/lista.
@@ -447,7 +447,7 @@
   - **O que falta/corregir:** borrow/snapshots `Arc`, cache de dispositivos atualizado por evento, virtualização de listas grandes e memoização de métricas de layout.
   - **Critério de pronto:** benchmark com 200 guildas/10k mensagens/1k amigos mantém montagem <8,33ms p95 e não cresce memória linearmente a cada frame; enumeração de dispositivos não ocorre no thread de render.
 
-- [ ] **T-066** — **P1** — **Design/Tipografia/Tema** — **Alinhar fonte e tema ao cliente oficial sem usar ativo não licenciado**
+- [x] **T-066** — **P1** — **Design/Tipografia/Tema** — **Alinhar fonte e tema ao cliente oficial sem usar ativo não licenciado**
   - **Arquivos:** `src/main.rs:30-33`, `src/tokens/kit_theme.rs:285-310`, `src/tokens/typography.rs`, `src/app/state/settings.rs:82-110`.
   - **Evidência:** CDP oficial usa `gg sans`, 16px/22px e classe `theme-darker`; o log do RS informa que `.SystemUIFont` resolve para **Adwaita Sans**. `main` instala apenas o tema escuro uma vez e `AccountThemeUpdated` não reaplica paleta.
   - **O que falta/corregir:** usar `gg sans` somente se houver licença; caso contrário, adotar fallback aberto com métricas documentadas e cessar alegação de pixel-parity tipográfica; aplicar Dark/Light/Darker/Midnight e custom colors da conta.
@@ -715,7 +715,7 @@
   - **O que falta/corrigir:** cofre de múltiplas credenciais, rótulos/avatares não sensíveis, adicionar/remover conta, logout individual, troca sem vazar cache/mensagens entre contas e persistência segura.
   - **Critério de pronto:** testes com tokens sintéticos comprovam isolamento de mensagens/guildas/DMs, falha de login preservando a conta anterior e nenhum token em log; troca real exige confirmação do Gateway antes de mostrar a nova conta.
 
-- [ ] **T-116** — **P1** — **Voz/Painel Compacto** — **Completar a barra “Voz Conectada” fora do palco com qualidade e controles reais**
+- [x] **T-116** — **P1** — **Voz/Painel Compacto** — **Completar a barra “Voz Conectada” fora do palco com qualidade e controles reais**
   - **Arquivos:** `src/app/channel_sidebar.rs:908-1001`, `src/app/voice_call_panel.rs:251-305`, `src/app/state/models.rs:344-361`, `src/app/state/voice.rs:230-264`, `src/protocol/voice_session.rs:774-782`.
   - **Evidência:** já existe uma barra de 52px com canal, RTT e botão desconectar, mas faltam nome da guilda, câmera, screen share, soundboard e popout de qualidade; os botões de vídeo/tela no palco continuam desabilitados (`T-023`). O CDP oficial define classes de qualidade Fine/Average/Bad com cores positiva/warning/critical e usa “Voice Connected”.
   - **O que falta/corrigir:** exibir guilda/canal, classificar qualidade por métricas reais, popout com RTT/perda/codec quando disponível, controles de câmera/tela/soundboard e retorno ao palco; não exibir controle sem pipeline real.
@@ -743,7 +743,7 @@
 
 **Metodologia e limites:** auditoria somente leitura de `src/` e dos logs `/tmp/discord-rs-logs/smcodes.log` e `xinxyl.log`; nenhum arquivo Rust foi editado. Os logs atuais não contêm `panic`, stack overflow ou falha fatal, mas a análise estática encontrou caminhos que ainda podem derrubar o processo ou deixar tasks/streams vivos.
 
-- [ ] **T-120** — **P0** — **Robustez/Panics** — **Eliminar `unwrap`/`expect` em caminhos de voz, payload e UI que podem derrubar o processo**
+- [x] **T-120** — **P0** — **Robustez/Panics** — **Eliminar `unwrap`/`expect` em caminhos de voz, payload e UI que podem derrubar o processo**
   - **Arquivos:** `src/protocol/voice_session.rs:445`, `src/protocol/voice_session.rs:705`, `src/protocol/voice_session.rs:1107-1108`, `src/protocol/voice_session.rs:1194-1201`, `src/protocol/voice_session.rs:1370-1442`, `src/app/root_view.rs:580`, `src/app/root_view.rs:614`, `src/app/root_view.rs:742-804`, `src/media/audio.rs:181-463`.
   - **Evidência:** DAVE usa `std::sync::Mutex::lock().unwrap()` em oito pontos; um pânico anterior pode envenenar o mutex e derrubar a task de voz. A sessão também usa `captured_session_id.unwrap()`/`captured_token.unwrap()` após um timeout e serializa payloads com `unwrap`. `RootView` usa `expect` para estados de input que podem faltar em montagem/teardown. Os logs atuais não registraram pânico, mas esses caminhos não têm teste de payload adverso.
   - **O que falta/corrigir:** recuperar mutex envenenado com fail-closed, substituir unwraps por erros de domínio, validar invariantes de handshake e transformar expects de UI em fallback/erro explícito; limitar mensagens antes de parsear.

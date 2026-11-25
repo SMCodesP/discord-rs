@@ -93,6 +93,10 @@ fn test_app_state_presence_update_and_resolution() {
         recipient_ids: vec![user_id.clone()],
         recipient_names: vec!["Amigo Teste".into()],
         avatar_decoration_data: None,
+        thread_metadata: None,
+        default_tag_ids: Vec::new(),
+        available_tags: Vec::new(),
+        flags: 0,
     });
 
     let dm = state.dm_channels.first().unwrap();
