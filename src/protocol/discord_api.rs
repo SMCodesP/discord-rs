@@ -1316,15 +1316,17 @@ impl DiscordApiClient {
     }
 
     /// Subscribes to lazy guild members / viewport for a guild and channel.
-    /// User account sends Gateway Opcode 14 (Guild Subscriptions) with [[0, 99]].
-    /// Bot account uses standard guild members chunk / request members.
+    /// User account with capabilities >= 16384 (30717) sends Gateway Opcode 37
+    /// (GUILD_SUBSCRIPTIONS_BULK) with [[0, 99]].
+    /// Bot account uses standard guild members chunk / request members (Opcode 8).
     pub async fn subscribe_guild_members(&self, guild_id: &str, channel_id: &str) -> Result<()> {
         if self.token.token_type == TokenType::User {
             let coordinator = crate::protocol::cache::lazy_guilds::LazyGuildCoordinator::shared();
-            let payload = coordinator
+            let op14_payload = coordinator
                 .focus_guild_and_channel(guild_id, channel_id)
                 .await;
-            self.send_gateway_payload(&payload).await
+            let bulk_payload = wrap_guild_subscription_bulk(&op14_payload);
+            self.send_gateway_payload(&bulk_payload).await
         } else {
             // For Bot token, Opcode 14 does not exist; send Opcode 8 (Request Guild Members)
             let payload = json!({
@@ -1338,6 +1340,27 @@ impl DiscordApiClient {
             self.send_gateway_payload(&payload).await
         }
     }
+}
+
+/// Wraps an Opcode 14 (`GUILD_SUBSCRIPTIONS`) payload into Opcode 37
+/// (`GUILD_SUBSCRIPTIONS_BULK`), which Discord Gateway v9 requires when
+/// IDENTIFY advertises `capabilities >= 16384` (we send `30717`).
+fn wrap_guild_subscription_bulk(op14_payload: &serde_json::Value) -> serde_json::Value {
+    if let Some(d) = op14_payload.get("d") {
+        if let Some(guild_id) = d.get("guild_id").and_then(|v| v.as_str()) {
+            let mut sub = d.clone();
+            if let Some(obj) = sub.as_object_mut() {
+                obj.remove("guild_id");
+            }
+            let mut subs = serde_json::Map::new();
+            subs.insert(guild_id.to_string(), sub);
+            return json!({
+                "op": 37,
+                "d": { "subscriptions": subs }
+            });
+        }
+    }
+    op14_payload.clone()
 }
 
 #[async_trait]
@@ -5064,7 +5087,8 @@ impl DiscordApiClient {
             match coordinator
                 .try_update_viewport_ranges_and_send(guild_id, channel_id, ranges, move |payload| {
                     let client = client.clone();
-                    async move { client.send_gateway_payload(&payload).await }
+                    let bulk_payload = wrap_guild_subscription_bulk(&payload);
+                    async move { client.send_gateway_payload(&bulk_payload).await }
                 })
                 .await
             {

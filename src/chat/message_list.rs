@@ -171,28 +171,25 @@ pub fn render_date_separator_element(date: NaiveDate) -> Div {
     let date_text = format_date_separator(date);
 
     div()
-        .relative()
         .flex()
+        .flex_row()
         .items_center()
-        .justify_center()
         .w_full()
-        .h_px()
-        .border_t_1()
-        .border_color(border_subtle())
+        .h(px(24.0))
+        .mt(px(16.0))
+        .mb(px(8.0))
+        .px(px(16.0))
+        .child(div().flex_1().h_px().bg(border_subtle()))
         .child(
             div()
-                .relative()
-                .bg(bg_chat())
-                .px(space_2())
-                .py(space_1())
-                .pl(space_4())
-                .rounded(radius_md())
+                .px(px(8.0))
                 .text_size(font_size_xs())
                 .font_weight(WEIGHT_SEMIBOLD)
                 .line_height(px(13.0))
                 .text_color(channels_default())
                 .child(date_text),
         )
+        .child(div().flex_1().h_px().bg(border_subtle()))
 }
 
 /// Renders Discord's unread divider: a red rule with the `NOVAS` end cap
@@ -1171,6 +1168,7 @@ pub fn render_message_row_with_reply_and_edit(
         .flex_row()
         .w_full()
         .min_w(px(0.0))
+        .mt(if config.is_grouped { px(0.0) } else { px(17.0) })
         .min_h(if config.is_grouped { px(22.0) } else { px(44.0) })
         .max_w_full()
         .pl(space_8())
@@ -1390,13 +1388,28 @@ pub fn render_message_row_with_reply_and_edit(
     }
 
     if !message.is_pending {
-        let action_bar = render_hover_action_bar_with_edit(
+        let mut action_bar = render_hover_action_bar_with_edit(
             &message.id,
             config.on_react,
             config.on_reply,
             on_edit,
             config.on_more,
         );
+        if !message.content.is_empty() {
+            let copy_content = message.content.clone();
+            let copy_btn = IconButton::with_icon(
+                format!("hover-copy-{}", message.id),
+                |sz, col| svg().path("icons/copy.svg").size(sz).text_color(col).into_any_element(),
+            )
+            .size(px(32.0))
+            .icon_size(px(18.0))
+            .rounded(radius_sm())
+            .tooltip("Copiar texto")
+            .on_click(move |_ev, _window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
+            });
+            action_bar = action_bar.child(copy_btn);
+        }
         row = row.child(action_bar);
     }
 

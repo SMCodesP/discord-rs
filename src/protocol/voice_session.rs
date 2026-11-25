@@ -2379,7 +2379,14 @@ async fn run_voice_session(
                             }
                             Ok(None) => {}
                             Err(err) => {
-                                close_reason = Some(format!("Falha no handshake DAVE: {err:#}"));
+                                let msg = format!("{err:#}");
+                                if msg.contains("Voice gateway is not connected") {
+                                    log::warn!(
+                                        "[VoiceSession] Ignorando resposta DAVE enquanto Voice Gateway reconecta: {msg}"
+                                    );
+                                    continue;
+                                }
+                                close_reason = Some(format!("Falha no handshake DAVE: {msg}"));
                                 break;
                             }
                         }

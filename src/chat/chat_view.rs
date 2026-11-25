@@ -1031,7 +1031,12 @@ impl ChatView {
         self.list_state
             .set_scroll_handler(move |event, _window, cx| {
                 if event.is_scrolled && event.visible_range.start <= 1 {
-                    this_entity.update(cx, |chat, cx| chat.load_more_history(cx));
+                    // Defer out of the ListState RefCell borrow held during scroll/layout
+                    // to prevent `RefCell already mutably borrowed` panics.
+                    let entity = this_entity.clone();
+                    cx.defer(move |cx| {
+                        let _ = entity.update(cx, |chat, cx| chat.load_more_history(cx));
+                    });
                 }
             });
         self.scroll_handler_installed = true;
