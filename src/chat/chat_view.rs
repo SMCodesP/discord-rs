@@ -8,7 +8,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::app::state::AppState;
-use crate::chat::editor::{ChatComposer, EditorActionCallback, EditorSendCallback};
+use crate::chat::editor::{
+    ChatAttachmentPreview, ChatComposer, EditorActionCallback, EditorPasteCallback,
+    EditorSendCallback,
+};
 use crate::chat::media_picker::{
     gif_query_from_picker, new_gifs_client, MediaPickerConfig, MediaPickerGuildSection,
     MediaPickerModal, MediaPickerTab, OnCloseMediaPickerCallback, OnPlaySoundCallback,
@@ -24,6 +27,7 @@ use crate::chat::message_list::{
 };
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
+use crate::platform::clipboard::{fetch_remote_image, ClipboardImage, PlatformClipboard};
 use crate::protocol::gifs_client::{GifItem, GifsClient};
 use crate::protocol::media_cache::MediaCacheManager;
 use crate::tokens::colors::white;
@@ -73,6 +77,29 @@ fn build_markdown_mentions(state: &AppState) -> MentionLookup {
     }
 
     mentions
+}
+
+/// A bitmap pasted into the composer, kept as original bytes until the upload
+/// path is available. The render image is created once to avoid cloning the
+/// payload on every frame.
+#[derive(Clone)]
+pub struct PendingClipboardAttachment {
+    pub image: ClipboardImage,
+    pub render_image: Arc<Image>,
+    pub filename: String,
+}
+
+fn format_clipboard_size(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= MIB {
+        format!("{:.1} MB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.1} KB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as u64)
+    }
 }
 
 fn render_chat_error_toast(
@@ -185,6 +212,8 @@ pub struct ChatView {
     pub pending_jump_request: Option<(String, String, u64)>,
     pub jump_request_seq: u64,
     pub highlight_clear_task: Option<Task<()>>,
+    pub pending_clipboard_attachment: Option<PendingClipboardAttachment>,
+    pub clipboard_error: Option<String>,
 }
 
 fn chat_items_signature(messages: &[Message]) -> u64 {
@@ -273,6 +302,8 @@ impl ChatView {
             pending_jump_request: None,
             jump_request_seq: 0,
             highlight_clear_task: None,
+            pending_clipboard_attachment: None,
+            clipboard_error: None,
         }
     }
 
@@ -1142,6 +1173,8 @@ impl Render for ChatView {
             self.history_error = None;
             self.send_error = None;
             self.retry_send = None;
+            self.clipboard_error = None;
+            self.pending_clipboard_attachment = None;
             if switched_from_channel {
                 self.replying_to = None;
                 self.editing_message = None;
@@ -1285,7 +1318,40 @@ impl Render for ChatView {
             },
         ));
 
-        // 6. Send message
+        // 6. Image paste: intercept bitmap payloads before the textarea's
+        // native text paste, keeping the original encoded bytes.
+        let self_for_paste = self_entity.clone();
+        let on_paste_image: Option<EditorPasteCallback> = Some(Arc::new(move |_window, cx| {
+            match PlatformClipboard::new(cx).read_image() {
+                Ok(Some(image)) => {
+                    let filename = image.default_filename();
+                    let render_image = Arc::new(image.to_gpui_image());
+                    let attachment = PendingClipboardAttachment {
+                        image,
+                        render_image,
+                        filename,
+                    };
+                    self_for_paste.update(cx, |this, cx| {
+                        this.pending_clipboard_attachment = Some(attachment);
+                        this.clipboard_error = None;
+                        this.send_error = None;
+                        cx.notify();
+                    });
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    self_for_paste.update(cx, |this, cx| {
+                        this.clipboard_error =
+                            Some(format!("Não foi possível colar a imagem: {error}"));
+                        cx.notify();
+                    });
+                    true
+                }
+            }
+        }));
+
+        // 7. Send message
         let cid_for_send = channel_id.clone();
         let app_for_send = app_entity.clone();
         let self_for_send = self_entity.clone();
@@ -1297,6 +1363,17 @@ impl Render for ChatView {
                 }
                 let trimmed = content.trim();
                 if trimmed.is_empty() {
+                    return;
+                }
+
+                if self_for_send.read(cx).pending_clipboard_attachment.is_some() {
+                    self_for_send.update(cx, |this, cx| {
+                        this.send_error = Some(
+                            "Envio de imagem indisponível: o upload de anexos ainda não está conectado ao compositor."
+                                .to_string(),
+                        );
+                        cx.notify();
+                    });
                     return;
                 }
 
@@ -1325,7 +1402,7 @@ impl Render for ChatView {
             },
         ));
 
-        // 7. Dismiss / Cancel Reply
+        // 8. Dismiss / Cancel Reply
         let self_for_cancel = self_entity.clone();
         let on_cancel_reply: Option<EditorActionCallback> =
             Some(Arc::new(move |_window: &mut Window, cx: &mut App| {
@@ -1911,6 +1988,54 @@ impl Render for ChatView {
                         cx.write_to_clipboard(ClipboardItem::new_string(content_for_copy.clone()));
                     }));
 
+                let image_attachment_for_copy =
+                    msg.attachments.iter().find(|attachment| attachment.is_image()).cloned();
+                let self_cm_copy_image = self_entity.clone();
+                let on_cm_copy_image: Option<MessageActionCallback> = image_attachment_for_copy
+                    .map(|attachment| {
+                        let url = attachment.url.clone();
+                        let callback = move |_m_id: &str, _win: &mut Window, cx: &mut App| {
+                            let url = url.clone();
+                            let self_copy = self_cm_copy_image.clone();
+                            self_copy.update(cx, |this, cx| {
+                                this.active_context_menu = None;
+                                this.clipboard_error = None;
+                                cx.notify();
+                            });
+                            cx.spawn(move |cx: &mut AsyncApp| {
+                                let cx = cx.clone();
+                                async move {
+                                    let result = fetch_remote_image(&url).await;
+                                    let _ = cx.update(|cx| {
+                                        let _ = self_copy.update(cx, |chat, cx| {
+                                            match result {
+                                                Ok(image) => {
+                                                    if let Err(error) =
+                                                        PlatformClipboard::new(cx).write_image(&image)
+                                                    {
+                                                        chat.clipboard_error = Some(format!(
+                                                            "Não foi possível copiar a imagem: {error}"
+                                                        ));
+                                                    } else {
+                                                        chat.clipboard_error = None;
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    chat.clipboard_error = Some(format!(
+                                                        "Não foi possível copiar a imagem: {error}"
+                                                    ));
+                                                }
+                                            }
+                                            cx.notify();
+                                        });
+                                    });
+                                }
+                            })
+                            .detach();
+                        };
+                        Arc::new(callback) as MessageActionCallback
+                    });
+
                 let link_target = format!(
                     "https://discord.com/channels/{}/{}/{}",
                     guild_part, channel_id, msg.id
@@ -2087,6 +2212,7 @@ impl Render for ChatView {
                                                 on_edit: on_cm_edit,
                                                 on_reply: on_cm_reply,
                                                 on_copy_text: on_cm_copy_text,
+                                                on_copy_image: on_cm_copy_image,
                                                 on_copy_link: on_cm_copy_link,
                                                 on_copy_id: on_cm_copy_id,
                                                 on_mark_unread: None,
@@ -2773,6 +2899,18 @@ impl Render for ChatView {
             .clone()
             .and_then(|message| render_chat_error_toast(message, None, None, dismiss_history));
 
+        let self_dismiss_clipboard = self_entity.clone();
+        let dismiss_clipboard: Option<EditorActionCallback> =
+            Some(Arc::new(move |_window, cx| {
+                self_dismiss_clipboard.update(cx, |this, cx| {
+                    this.clipboard_error = None;
+                    cx.notify();
+                });
+            }));
+        let clipboard_error_toast = self.clipboard_error.clone().and_then(|message| {
+            render_chat_error_toast(message, None, None, dismiss_clipboard)
+        });
+
         let self_for_cancel_edit = self_entity.clone();
         let on_cancel_edit: Option<EditorActionCallback> =
             Some(Arc::new(move |window: &mut Window, cx: &mut App| {
@@ -2792,6 +2930,29 @@ impl Render for ChatView {
         } else {
             channel_name.clone()
         };
+
+        let pending_attachment_preview =
+            self.pending_clipboard_attachment
+                .as_ref()
+                .map(|attachment| {
+                    let self_remove = self_entity.clone();
+                    ChatAttachmentPreview {
+                        filename: attachment.filename.clone().into(),
+                        details: format!(
+                            "{} · {}",
+                            attachment.image.format.label(),
+                            format_clipboard_size(attachment.image.len())
+                        )
+                        .into(),
+                        image: attachment.render_image.clone(),
+                        on_remove: Some(Arc::new(move |_window, cx| {
+                            self_remove.update(cx, |this, cx| {
+                                this.pending_clipboard_attachment = None;
+                                cx.notify();
+                            });
+                        })),
+                    }
+                });
 
         let main_chat_col = div()
             .relative()
@@ -2836,6 +2997,7 @@ impl Render for ChatView {
                     render_chat_error_toast(message, None, None, on_dismiss)
                 })
             })
+            .children(clipboard_error_toast)
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)
@@ -2845,6 +3007,8 @@ impl Render for ChatView {
                     .disabled(self.is_saving_edit || self.is_sending_message)
                     .on_cancel_edit(on_cancel_edit)
                     .on_attachment(on_attachment)
+                    .on_paste_image(on_paste_image)
+                    .attachment_preview(pending_attachment_preview)
                     .mention_author(self.reply_mention_author)
                     .on_toggle_mention(on_toggle_mention)
                     .typing_users(typing_users)

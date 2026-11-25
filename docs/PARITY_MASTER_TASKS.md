@@ -761,7 +761,7 @@
   - **O que falta/corrigir:** shutdown idempotente e ordenado (parar UI/timers → voz/áudio → gateway → flush), `Drop`/AbortOnDrop para tasks de rede, join com timeout e escrita atômica (`tmp` + `rename` + fsync quando aplicável).
   - **Critério de pronto:** teste fecha a janela durante conexão, chamada e gravação; nenhuma task/thread permanece viva, o cache abre íntegro no próximo start e o encerramento termina dentro do timeout configurado.
 
-- [ ] **T-123** — **P1** — **Linux/Clipboard** — **Soportar cópia/colagem de imagem no Wayland e X11**
+- [x] **T-123** — **P1** — **Linux/Clipboard** — **Soportar cópia/colagem de imagem no Wayland e X11**
   - **Arquivos:** `src/chat/editor.rs:405-408`, `src/chat/media_picker.rs:372-399`, `src/chat/chat_view.rs:1795-1808`, `Cargo.toml`, `src/platform/*` (novo, se necessário).
   - **Evidência:** o clipboard só é lido via `clipboard.text()` em dois pontos e só há escrita de `ClipboardItem::new_string`; não há leitura/escrita de bitmap ou MIME `image/png`. `T-027` já prevê paste de imagem, mas sem backend/teste específico Wayland/X11.
   - **O que falta/corrigir:** abstração de clipboard com texto e bitmap, fallback X11/Wayland, limites de tamanho, preview/anexo e teste sem exibir diálogo do sistema.

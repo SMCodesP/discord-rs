@@ -12,6 +12,7 @@ pub mod protocol;
 pub mod telemetry;
 pub mod tokens;
 pub mod media;
+pub mod platform;
 
 pub use app::*;
 pub use capture::*;

@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::platform::clipboard::PlatformClipboard;
 use crate::protocol::gifs_client::{
     parse_gifs_response, GifItem, GifQuery, GifsClient, GifsClientConfig, DEFAULT_GIFS_LOCALE,
     DEFAULT_SEARCH_MEDIA_FORMAT, DEFAULT_TRENDING_MEDIA_FORMAT,
@@ -563,13 +564,11 @@ fn render_search_bar(config: &MediaPickerConfig) -> Div {
                         || (ev.keystroke.modifiers.shift && key == "insert");
 
                     if is_paste {
-                        if let Some(clipboard) = cx.read_from_clipboard() {
-                            if let Some(text) = clipboard.text() {
-                                let mut new_str = current_query.clone();
-                                new_str.push_str(&text);
-                                if let Some(ref handler) = on_search {
-                                    handler(&new_str, window, cx);
-                                }
+                        if let Ok(Some(text)) = PlatformClipboard::new(cx).read_text() {
+                            let mut new_str = current_query.clone();
+                            new_str.push_str(&text);
+                            if let Some(ref handler) = on_search {
+                                handler(&new_str, window, cx);
                             }
                         }
                         return;
