@@ -1,13 +1,13 @@
 //! Discord RS - Canonical User Profile Components (Fase 4 & Modal Parity)
 //! 1:1 Parity with Official Discord Desktop Client:
 //! - UserProfilePopout: 300px anchored popout card, no backdrop, dismissible on click-outside or Esc
-//! - UserProfileModal: 1184x704px centered Dialog with backdrop, 3 tabs (Sobre mim, Servidores em comum, Amigos em comum)
+//! - UserProfileModal: 600x557px centered Dialog with backdrop, 3 tabs (Sobre mim, Servidores em comum, Amigos em comum)
 //!
 //! Features:
 //! - Popout opens anchored to the clicked element/position and snaps to window edges
 //! - Popout has NO close button (closes on click outside / Esc key)
 //! - Opens full modal when clicking avatar/name inside popout or "Ver perfil completo"
-//! - Modal is a single 1184x704 r12 box with a single close button (native DialogClose)
+//! - Modal is a single 600x557 r8 box with a single close button (native DialogClose)
 //! - Bio text breaks lines smoothly within 300px width
 //! - Quick message input has show_paste(false) and ellipsis placeholder
 //! - Canonical Avatar component with decor & presence support throughout
