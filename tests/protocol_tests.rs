@@ -94,8 +94,14 @@ async fn test_mock_provider_messaging_and_reactions() {
 
     let rx_event = rx.try_recv().expect("Expected ReactionAdd event");
     match rx_event {
-        TransportEvent::ReactionAdd { emoji, message_id, .. } => {
-            assert_eq!(emoji, "🦀");
+        TransportEvent::ReactionAdd {
+            emoji_name,
+            emoji_id,
+            message_id,
+            ..
+        } => {
+            assert_eq!(emoji_name, "🦀");
+            assert_eq!(emoji_id, None);
             assert_eq!(message_id, new_msg.id);
         }
         other => panic!("Unexpected event received: {:?}", other),
@@ -109,8 +115,14 @@ async fn test_mock_provider_messaging_and_reactions() {
 
     let rx_rm_event = rx.try_recv().expect("Expected ReactionRemove event");
     match rx_rm_event {
-        TransportEvent::ReactionRemove { emoji, message_id, .. } => {
-            assert_eq!(emoji, "🦀");
+        TransportEvent::ReactionRemove {
+            emoji_name,
+            emoji_id,
+            message_id,
+            ..
+        } => {
+            assert_eq!(emoji_name, "🦀");
+            assert_eq!(emoji_id, None);
             assert_eq!(message_id, new_msg.id);
         }
         other => panic!("Unexpected event received: {:?}", other),

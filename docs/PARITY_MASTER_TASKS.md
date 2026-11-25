@@ -188,7 +188,7 @@
   - **O que falta/corrigir:** carregar `message_reference`, `referenced_message`, flag de menção e autor; enviar `message_reference.message_id` + `allowed_mentions`; renderizar preview clicável da resposta.
   - **Critério de pronto:** teste de contrato REST exige `message_reference` e menção configurável; teste de UI verifica preview, cancelamento, Editar/Escape e limpeza somente após sucesso.
 
-- [ ] **T-025** — **P1** — **Chat/Reações** — **Manter identidade de emoji customizado e alternar reação via API**
+- [x] **T-025** — **P1** — **Chat/Reações** — **Manter identidade de emoji customizado e alternar reação via API**
   - **Arquivos:** `src/protocol/discord_api.rs:2462-2472`, `src/domain/message.rs:96-114`, `src/chat/reactions.rs:61-86`, `src/chat/chat_view.rs:437-445`, `src/app/state/messages.rs:25-40`, `src/protocol/discord_api.rs:1050-1099`.
   - **Evidência:** o parser guarda apenas `emoji.name`, perde `id`/`animated` e inventa `"👍"` se ausente. O badge renderiza esse nome como texto. Clicar sempre incrementa localmente e nunca chama PUT/DELETE, portanto reações customizadas não funcionam e o contador não reflete remoção.
   - **O que falta/corrigir:** modelo estruturado `{id,name,animated}`; URL CDN correta; chave de reação `name:id`; toggle otimista com rollback e reconciliação Gateway.

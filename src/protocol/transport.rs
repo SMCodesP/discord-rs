@@ -78,14 +78,30 @@ pub enum TransportEvent {
         channel_id: String,
         message_id: String,
         user_id: String,
-        emoji: String,
+        emoji_name: String,
+        emoji_id: Option<String>,
+        emoji_animated: bool,
     },
     /// A reaction emoji was removed from a message.
     ReactionRemove {
         channel_id: String,
         message_id: String,
         user_id: String,
-        emoji: String,
+        emoji_name: String,
+        emoji_id: Option<String>,
+        emoji_animated: bool,
+    },
+    /// Authoritative reaction state after API reconciliation.
+    ReactionReconcile {
+        channel_id: String,
+        message_id: String,
+        reaction: crate::domain::message::Reaction,
+    },
+    /// Roll back optimistic reaction changes after API failure.
+    ReactionRollback {
+        channel_id: String,
+        message_id: String,
+        reactions: Vec<crate::domain::message::Reaction>,
     },
     /// Presence status or activity for a user changed.
     PresenceUpdate {
@@ -359,6 +375,15 @@ pub trait DiscordTransport: Send + Sync {
     async fn send_typing(&self, channel_id: &str) -> anyhow::Result<()> {
         let _ = channel_id;
         anyhow::bail!("send_typing não implementado no transporte atual")
+    }
+
+    /// Fetch a single message by ID. Default: unsupported.
+    async fn get_message(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+    ) -> anyhow::Result<Option<Message>> {
+        Ok(None)
     }
 
     /// Add an emoji reaction to a message.

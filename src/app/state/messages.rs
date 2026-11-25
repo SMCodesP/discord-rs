@@ -133,20 +133,67 @@ impl AppState {
         }
     }
 
-    /// Adds an emoji reaction to a message in state
-    pub fn add_reaction_to_message(&mut self, channel_id: &str, message_id: &str, emoji: &str) {
+    /// Adds or increments a reaction in local state.
+    pub fn add_reaction_to_message(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        reaction: Reaction,
+    ) {
         if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
             if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
-                if let Some(rx) = msg.reactions.iter_mut().find(|r| r.emoji == emoji) {
-                    rx.count += 1;
-                    rx.me = true;
+                let key = reaction.reaction_key();
+                if let Some(existing) = msg.reactions.iter_mut().find(|r| r.reaction_key() == key) {
+                    existing.count = existing.count.saturating_add(1);
+                    if reaction.me {
+                        existing.me = true;
+                    }
                 } else {
-                    msg.reactions.push(Reaction {
-                        emoji: emoji.to_string(),
-                        count: 1,
-                        me: true,
-                    });
+                    let mut rx = reaction;
+                    if rx.count == 0 {
+                        rx.count = 1;
+                    }
+                    msg.reactions.push(rx);
                 }
+            }
+        }
+    }
+
+    /// Removes/decrements a reaction in local state.
+    pub fn remove_reaction_from_message(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        reaction_key: &str,
+        is_me: bool,
+    ) {
+        if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                if let Some(pos) = msg.reactions.iter().position(|r| r.reaction_key() == reaction_key) {
+                    let rx = &mut msg.reactions[pos];
+                    if rx.count > 1 {
+                        rx.count -= 1;
+                        if is_me {
+                            rx.me = false;
+                        }
+                    } else {
+                        msg.reactions.remove(pos);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Replaces reaction state from authoritative transport/API payload.
+    pub fn reconcile_reaction(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        reaction: Reaction,
+    ) {
+        if let Some(messages) = self.messages_by_channel.get_mut(channel_id) {
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.set_reaction(reaction);
             }
         }
     }
@@ -968,27 +1015,103 @@ impl AppState {
         }
     }
 
-    /// Adds a reaction and dispatches it via ClientManager
-    pub fn add_reaction(&mut self, message_id: &str, emoji: &str) {
-        if let Some(ref tel) = self.telemetry {
-            tel.track_reaction(emoji, message_id, true, 0);
-        }
-        let channel_id_opt = self.selected_channel_id.clone();
-        if let Some(cid) = channel_id_opt {
-            self.add_reaction_to_message(&cid, message_id, emoji);
+    /// Toggles a reaction optimistically, calls API, and reconciles/rolls back on failure.
+    pub fn toggle_reaction(&mut self, message_id: &str, reaction_key: &str) {
+        let Some(cid) = self.selected_channel_id.clone() else {
+            return;
+        };
+        let Some(messages) = self.messages_by_channel.get_mut(&cid) else {
+            return;
+        };
+        let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) else {
+            return;
+        };
 
-            if let Some(ref cm) = self.client_manager {
-                let cm = cm.clone();
-                let cid = cid.clone();
-                let mid = message_id.to_string();
-                let em = emoji.to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = cm.add_reaction(&cid, &mid, &em).await {
-                        log::warn!("Falha ao adicionar reação via ClientManager: {:?}", e);
-                    }
-                });
+        let previous = msg.reactions.clone();
+        let key = reaction_key.to_string();
+        let existing = msg.reactions.iter().find(|r| r.reaction_key() == key).cloned();
+        let (emoji_name, emoji_id) = crate::domain::message::parse_reaction_key(&key);
+        let emoji_animated = existing.as_ref().map(|r| r.emoji_animated).unwrap_or(false);
+
+        let added = if let Some(pos) = msg.reactions.iter().position(|r| r.reaction_key() == key) {
+            let rx = &mut msg.reactions[pos];
+            if rx.me {
+                // optimistic remove
+                if rx.count > 1 {
+                    rx.count -= 1;
+                    rx.me = false;
+                } else {
+                    msg.reactions.remove(pos);
+                }
+                false
+            } else {
+                rx.count = rx.count.saturating_add(1);
+                rx.me = true;
+                true
             }
+        } else {
+            msg.reactions.push(Reaction::from_parts(
+                emoji_name.clone(),
+                emoji_id.clone(),
+                emoji_animated,
+                1,
+                true,
+            ));
+            true
+        };
+
+        if let Some(ref tel) = self.telemetry {
+            tel.track_reaction(&key, message_id, added, 0);
         }
+
+        let Some(ref cm) = self.client_manager else {
+            return;
+        };
+        let cm = cm.clone();
+        let mid = message_id.to_string();
+        let cid_clone = cid.clone();
+        let api_key = key.clone();
+        let prev = previous;
+        tokio::spawn(async move {
+            let result = if added {
+                cm.add_reaction(&cid_clone, &mid, &api_key).await
+            } else {
+                cm.remove_reaction(&cid_clone, &mid, &api_key).await
+            };
+            match result {
+                Ok(()) => {
+                    if let Ok(Some(fresh)) = cm.get_message(&cid_clone, &mid).await {
+                        if let Some(reaction) = fresh.reactions.iter().find(|r| r.reaction_key() == api_key).cloned() {
+                            cm.emit_event(TransportEvent::ReactionReconcile {
+                                channel_id: cid_clone,
+                                message_id: mid,
+                                reaction,
+                            });
+                        } else {
+                            cm.emit_event(TransportEvent::ReactionReconcile {
+                                channel_id: cid_clone,
+                                message_id: mid,
+                                reaction: Reaction::from_parts(
+                                    emoji_name,
+                                    emoji_id,
+                                    emoji_animated,
+                                    0,
+                                    false,
+                                ),
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Falha ao alternar reação via API: {:?}", e);
+                    cm.emit_event(TransportEvent::ReactionRollback {
+                        channel_id: cid_clone,
+                        message_id: mid,
+                        reactions: prev,
+                    });
+                }
+            }
+        });
     }
 
     // =========================================================================
