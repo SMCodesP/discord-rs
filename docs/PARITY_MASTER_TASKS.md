@@ -755,7 +755,7 @@
   - **O que falta/corrigir:** timeouts de connect/read/write/Hello, limites de frame/mensagem/asset, validação de intervalo mínimo e cancelamento rápido no shutdown; erros devem virar estado de reconexão, não travamento.
   - **Critério de pronto:** servidor sintético que aceita TCP e não responde, envia frame gigante ou Hello inválido expira dentro do orçamento documentado sem OOM/pânico; reconexão continua funcionando.
 
-- [ ] **T-122** — **P0** — **Ciclo de Vida/Shutdown** — **Encerrar Gateway, VoiceSession, AudioEngine e flush de cache ao fechar a janela**
+- [x] **T-122** — **P0** — **Ciclo de Vida/Shutdown** — **Encerrar Gateway, VoiceSession, AudioEngine e flush de cache ao fechar a janela**
   - **Arquivos:** `src/main.rs:26-69`, `src/app/root_view.rs:155-216`, `src/protocol/voice_session.rs:906-948`, `src/protocol/voice_gateway.rs:967-980`, `src/protocol/client_manager.rs:328-350`, `src/app/state/disk_cache.rs:19-31`.
   - **Evidência:** não há hook de fechamento da janela nem orquestrador de shutdown. `VoiceSession::Drop` só aborta `session_task`; `VoiceGateway` guarda um `JoinHandle` sem `Drop` que chame `stop_signal`, permitindo loop reconectável continuar após o drop. `save_guilds_to_disk` escreve direto no arquivo final, sem rename atômico, podendo corromper o cache se o processo morrer durante a gravação.
   - **O que falta/corrigir:** shutdown idempotente e ordenado (parar UI/timers → voz/áudio → gateway → flush), `Drop`/AbortOnDrop para tasks de rede, join com timeout e escrita atômica (`tmp` + `rename` + fsync quando aplicável).

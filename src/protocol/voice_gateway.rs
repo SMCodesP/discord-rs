@@ -31,6 +31,11 @@ pub const VOICE_GATEWAY_VERSION: u32 = 8;
 /// Default DAVE protocol version requested in Identify payload (Version 1 per DAVE spec).
 pub const DEFAULT_MAX_DAVE_PROTOCOL_VERSION: u32 = SUPPORTED_DAVE_PROTOCOL_VERSION as u32;
 
+/// Orçamento padrão para parar o loop do Voice Gateway no encerramento.
+///
+/// Mantém o shutdown do app abaixo do limite de 200ms imposto pelo GPUI.
+pub const VOICE_GATEWAY_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
+
 // ============================================================================
 // DAVE PROTOCOL ARCHITECTURAL DOCUMENTATION
 // ============================================================================
@@ -1567,23 +1572,74 @@ impl VoiceGateway {
 
     /// Gracefully disconnects from the Voice Gateway.
     pub async fn disconnect(&self) -> Result<()> {
+        self.shutdown_with_timeout(VOICE_GATEWAY_SHUTDOWN_TIMEOUT)
+            .await
+    }
+
+    /// Stops the reconnecting Voice Gateway loop and joins its task with a
+    /// bounded timeout. Safe to call multiple times.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown_with_timeout(VOICE_GATEWAY_SHUTDOWN_TIMEOUT)
+            .await
+    }
+
+    /// Stops the Voice Gateway using the caller's shutdown budget.
+    ///
+    /// The stop flag is published before any await so a reconnect backoff can
+    /// never start a new connection after shutdown was requested. If the task
+    /// does not finish within `timeout`, it is aborted and joined again so no
+    /// WebSocket loop survives the drop.
+    pub async fn shutdown_with_timeout(&self, timeout: Duration) -> Result<()> {
+        let was_stopped = self.stop_signal.swap(true, Ordering::SeqCst);
+        self.is_connected.store(false, Ordering::SeqCst);
+
+        {
+            let mut out_lock = self.outbound_tx.write().await;
+            *out_lock = None;
+        }
+
+        let task = {
+            let mut lock = self.connection_task.lock().await;
+            lock.take()
+        };
+        if let Some(task) = task {
+            join_task_with_timeout(task, timeout).await;
+        }
+
+        if !was_stopped {
+            let _ = self.event_sender.send(VoiceGatewayEvent::Disconnected {
+                code: Some(1000),
+                reason: "Disconnected by client".to_string(),
+                decision: VoiceCloseDecision::Fatal,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Aborta e aguarda uma task de rede dentro de um orçamento fixo.
+async fn join_task_with_timeout(mut task: tokio::task::JoinHandle<()>, timeout: Duration) {
+    if tokio::time::timeout(timeout, &mut task).await.is_err() {
+        task.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(25), &mut task).await;
+    }
+}
+
+impl Drop for VoiceGateway {
+    fn drop(&mut self) {
+        // Publica a intenção de parada antes de qualquer tentativa de lock para
+        // que um loop em backoff não reconecte caso o mutex esteja ocupado.
         self.stop_signal.store(true, Ordering::SeqCst);
         self.is_connected.store(false, Ordering::SeqCst);
 
-        let mut lock = self.connection_task.lock().await;
-        if let Some(task) = lock.take() {
-            task.abort();
+        if let Ok(mut out_lock) = self.outbound_tx.try_write() {
+            *out_lock = None;
         }
-
-        let mut out_lock = self.outbound_tx.write().await;
-        *out_lock = None;
-
-        let _ = self.event_sender.send(VoiceGatewayEvent::Disconnected {
-            code: Some(1000),
-            reason: "Disconnected by client".to_string(),
-            decision: VoiceCloseDecision::Fatal,
-        });
-        Ok(())
+        if let Ok(mut lock) = self.connection_task.try_lock() {
+            if let Some(task) = lock.take() {
+                task.abort();
+            }
+        }
     }
 }
 
