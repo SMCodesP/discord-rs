@@ -722,6 +722,7 @@ impl AppState {
                         preview_message: "Opa! Vi seus commits no discord-rs com GPUI, muito top! Queria tirar uma dúvida sobre async tokio.".into(),
                         timestamp: "Hoje às 18:24".into(),
                         is_spam: false,
+                        avatar_decoration_data: None,
                     },
                     MessageRequestItem {
                         id: "req-2".into(),
@@ -736,6 +737,7 @@ impl AppState {
                         preview_message: "E aí, tudo bem? Você usa Wayland ou X11 no teste de rendering do GPUI?".into(),
                         timestamp: "Ontem às 21:10".into(),
                         is_spam: false,
+                        avatar_decoration_data: None,
                     },
                     MessageRequestItem {
                         id: "req-spam-1".into(),
@@ -750,6 +752,7 @@ impl AppState {
                         preview_message: "Parabéns! Você ganhou 3 meses de Discord Nitro grátis! Clique para resgatar: http://discrod-free-nitro.xyz/gift".into(),
                         timestamp: "Há 3 dias".into(),
                         is_spam: true,
+                        avatar_decoration_data: None,
                     },
                 ]
             },

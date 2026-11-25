@@ -664,3 +664,130 @@ fn test_qprofile_timeline_layer_visibility_and_reduced_motion() {
     let _ = rendered_reduced;
 }
 
+
+#[test]
+fn test_kavatardata_message_request_decoration_reaches_model() {
+    use discord_rs::app::state::MessageRequestItem;
+
+    let decorated = MessageRequestItem {
+        id: "synth-req-401".to_string(),
+        user_id: "synth-user-401".to_string(),
+        username: "synth_requester".to_string(),
+        display_name: "Synth Requester".to_string(),
+        avatar_url: Some(
+            "https://cdn.discordapp.com/avatars/synth-user-401/synth_hash_401.png".to_string(),
+        ),
+        avatar_text: "S".to_string(),
+        presence: AppPresenceStatus::Online,
+        mutual_guilds: 0,
+        mutual_guild_name: None,
+        preview_message: "synthetic request".to_string(),
+        timestamp: "synthetic time".to_string(),
+        is_spam: false,
+        avatar_decoration_data: Some(synth_decor("a_synth_req_deco")),
+    };
+
+    // Field survives serde round-trip (same shape used by persisted UI models).
+    let json = serde_json::to_string(&decorated).expect("message request must serialize");
+    let back: MessageRequestItem =
+        serde_json::from_str(&json).expect("message request must deserialize");
+    assert_eq!(
+        back.avatar_decoration_data
+            .as_ref()
+            .map(|d| d.asset.as_str()),
+        Some("a_synth_req_deco")
+    );
+
+    // Legacy payload without the field still loads and carries no decoration.
+    let legacy = r#"{
+        "id": "synth-req-402",
+        "user_id": "synth-user-402",
+        "username": "synth_legacy",
+        "display_name": "Synth Legacy",
+        "avatar_url": null,
+        "avatar_text": "S",
+        "presence": "Online",
+        "mutual_guilds": 0,
+        "mutual_guild_name": null,
+        "preview_message": "legacy",
+        "timestamp": "legacy",
+        "is_spam": false
+    }"#;
+    let bare: MessageRequestItem =
+        serde_json::from_str(legacy).expect("legacy message request must deserialize");
+    assert_eq!(bare.avatar_decoration_data, None);
+}
+
+/// Inventory: every production `Avatar::new` chain must pass decoration through
+/// `.opt_decoration(...)`/`.decoration(...)`, so user photos never drop the
+/// equipped frame on any surface. Test modules are ignored.
+#[test]
+fn test_inventory_every_user_avatar_receives_decoration() {
+    use std::path::Path;
+
+    fn avatar_chain(source: &str, start: usize) -> &str {
+        let bytes = source.as_bytes();
+        let mut depth = 0i32;
+        let mut i = start;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    if depth == 0 {
+                        return &source[start..i];
+                    }
+                    depth -= 1;
+                }
+                b',' | b';' if depth == 0 => return &source[start..i],
+                _ => {}
+            }
+            i += 1;
+        }
+        &source[start..]
+    }
+
+    fn visit_rs_files(dir: &Path, cb: &mut dyn FnMut(&Path)) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit_rs_files(&path, cb);
+                } else if path.extension().map_or(false, |ext| ext == "rs") {
+                    cb(&path);
+                }
+            }
+        }
+    }
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let src_dir = Path::new(manifest_dir).join("src");
+    let mut checked = 0usize;
+    let mut violations = Vec::new();
+
+    visit_rs_files(&src_dir, &mut |path| {
+        let content = std::fs::read_to_string(path).unwrap();
+        let production = content.split("#[cfg(test)]").next().unwrap_or(&content);
+        let mut offset = 0usize;
+        while let Some(found) = production[offset..].find("Avatar::new") {
+            let start = offset + found;
+            let line = production[..start].lines().count();
+            let chain = avatar_chain(production, start);
+            if !chain.contains(".opt_decoration(") && !chain.contains(".decoration(") {
+                let relative = path.strip_prefix(manifest_dir).unwrap_or(path);
+                violations.push(format!("{}:{}: {}", relative.display(), line, chain.trim()));
+            }
+            checked += 1;
+            offset = start + "Avatar::new".len();
+        }
+    });
+
+    assert!(
+        checked >= 20,
+        "inventory scanned only {checked} Avatar::new builders; expected to cover the UI"
+    );
+    assert!(
+        violations.is_empty(),
+        "user avatars without decoration propagation:\n{}",
+        violations.join("\n\n")
+    );
+}

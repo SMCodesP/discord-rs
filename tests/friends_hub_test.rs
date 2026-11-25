@@ -403,6 +403,7 @@ fn test_tab_badge_counts_match_view_filters() {
             preview_message: "Olá!".into(),
             timestamp: "Hoje".into(),
             is_spam,
+            avatar_decoration_data: None,
         });
     }
 
