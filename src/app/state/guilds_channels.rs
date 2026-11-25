@@ -167,7 +167,10 @@ impl AppState {
                 }
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
+                (None, None) => {
+                    // Deterministic fallback: newest DM (higher snowflake) first.
+                    crate::domain::hierarchy::compare_snowflakes(&b.id, &a.id)
+                }
             }
         });
     }
@@ -511,6 +514,181 @@ impl AppState {
 }
 
 impl AppState {
+    fn channel_kind_for(channel: &crate::domain::Channel) -> ChannelKind {
+        match channel.channel_type {
+            crate::domain::ChannelType::Voice | crate::domain::ChannelType::Stage => {
+                ChannelKind::Voice
+            }
+            crate::domain::ChannelType::Announcement => ChannelKind::Announcement,
+            _ => ChannelKind::Text,
+        }
+    }
+
+    fn channel_item_from_domain(channel: &crate::domain::Channel) -> ChannelItemState {
+        let recipient_decorations = channel.recipient_avatar_decorations.first().cloned().flatten();
+        ChannelItemState {
+            id: channel.id.clone(),
+            name: channel.name.clone(),
+            kind: Self::channel_kind_for(channel),
+            topic: channel.topic.clone(),
+            unread: false,
+            mention_count: 0,
+            icon_url: channel.icon_url.clone(),
+            is_pinned: channel.is_pinned,
+            last_message_id: channel.last_message_id.clone(),
+            is_group_dm: matches!(
+                channel.channel_type,
+                crate::domain::ChannelType::GroupDm
+            ),
+            recipient_ids: channel.recipient_ids.clone(),
+            recipient_names: channel.recipient_names.clone(),
+            user_limit: channel.user_limit,
+            avatar_decoration_data: recipient_decorations,
+        }
+    }
+
+    /// Inserts a channel into the guild sidebar, replacing any previous entry
+    /// with the same id. Used by CHANNEL_CREATE/UPDATE and thread events so the
+    /// Gateway lifecycle is reflected without reloading the whole guild.
+    pub fn upsert_guild_channel(&mut self, channel: crate::domain::Channel) {
+        let guild_id = match channel.guild_id.clone() {
+            Some(guild_id) => guild_id,
+            None => {
+                let existing = self
+                    .guilds
+                    .iter()
+                    .find(|guild| {
+                        guild.categories.iter().any(|category| {
+                            category.channels.iter().any(|item| item.id == channel.id)
+                        })
+                    })
+                    .map(|guild| guild.id.clone());
+                match existing {
+                    Some(guild_id) => guild_id,
+                    None => return,
+                }
+            }
+        };
+
+        // A thread's `parent_id` points at the parent channel, not at a
+        // category. Resolve the real category before choosing the bucket.
+        let target_category_id = {
+            let Some(guild) = self.guilds.iter().find(|guild| guild.id == guild_id) else {
+                return;
+            };
+            channel.category_id.as_deref().and_then(|parent_id| {
+                if guild.categories.iter().any(|category| category.id == parent_id) {
+                    Some(parent_id.to_string())
+                } else {
+                    guild
+                        .categories
+                        .iter()
+                        .find(|category| {
+                            category.channels.iter().any(|item| item.id == parent_id)
+                        })
+                        .map(|category| category.id.clone())
+                }
+            })
+        };
+
+        let is_category = channel.channel_type == crate::domain::ChannelType::Category;
+        let item = Self::channel_item_from_domain(&channel);
+
+        let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) else {
+            return;
+        };
+
+        // Remove the old entry everywhere first (an update may have moved the
+        // channel to another category).
+        for category in &mut guild.categories {
+            category.channels.retain(|existing| existing.id != channel.id);
+        }
+
+        if is_category {
+            let cat_id = channel.id.clone();
+            if let Some(category) = guild.categories.iter_mut().find(|cat| cat.id == cat_id) {
+                category.name = channel.name.clone();
+            } else {
+                guild.categories.push(CategoryItemState {
+                    id: cat_id,
+                    name: channel.name.clone(),
+                    channels: Vec::new(),
+                });
+            }
+        } else if let Some(category_id) = target_category_id {
+            if let Some(category) = guild
+                .categories
+                .iter_mut()
+                .find(|category| category.id == category_id)
+            {
+                category.channels.push(item);
+            } else {
+                guild.categories.push(CategoryItemState {
+                    id: category_id,
+                    name: String::new(),
+                    channels: vec![item],
+                });
+            }
+        } else {
+            let root_id = format!("cat-{}-root", guild.id);
+            if let Some(category) = guild
+                .categories
+                .iter_mut()
+                .find(|category| category.id == root_id)
+            {
+                category.channels.push(item);
+            } else {
+                // Keep uncategorized channels at the top without inventing a
+                // category label.
+                guild.categories.insert(
+                    0,
+                    CategoryItemState {
+                        id: root_id,
+                        name: String::new(),
+                        channels: vec![item],
+                    },
+                );
+            }
+        }
+
+        save_guilds_to_disk(&self.guilds, &self.guild_folders);
+    }
+
+    /// Removes a channel/thread from the guild sidebar. Called only after the
+    /// Gateway confirms CHANNEL_DELETE/THREAD_DELETE.
+    pub fn remove_guild_channel(&mut self, channel_id: &str, guild_id: Option<&str>) {
+        let guild_ids: Vec<String> = match guild_id {
+            Some(guild_id) => vec![guild_id.to_string()],
+            None => self.guilds.iter().map(|guild| guild.id.clone()).collect(),
+        };
+
+        for guild_id in guild_ids {
+            let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) else {
+                continue;
+            };
+            for category in &mut guild.categories {
+                category.channels.retain(|channel| channel.id != channel_id);
+            }
+        }
+
+        self.messages_by_channel.remove(channel_id);
+        if self.selected_channel_id.as_deref() == Some(channel_id) {
+            self.selected_channel_id = None;
+        }
+        save_guilds_to_disk(&self.guilds, &self.guild_folders);
+    }
+
+    /// Reconciles a THREAD_LIST_SYNC payload with the thread entries known to
+    /// the sidebar. Each thread is matched by id, so re-syncing is idempotent.
+    pub fn apply_thread_list_sync(&mut self, guild_id: &str, threads: Vec<crate::domain::Channel>) {
+        for mut thread in threads {
+            if thread.guild_id.is_none() {
+                thread.guild_id = Some(guild_id.to_string());
+            }
+            self.upsert_guild_channel(thread);
+        }
+    }
+
     /// Gets the currently selected guild
     pub fn get_selected_guild(&self) -> Option<&GuildItemState> {
         let gid = self.selected_guild_id.as_ref()?;

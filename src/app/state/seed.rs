@@ -146,8 +146,9 @@ pub(super) fn organize_channels_into_categories(
         }
     }
 
-    // Ordenar cabeçalhos de categoria por position oficial do Discord
-    category_headers.sort_by_key(|c| c.position);
+    // Ordenar cabeçalhos de categoria por position oficial do Discord, com o
+    // snowflake como desempate determinístico (posições podem se repetir).
+    category_headers.sort_by(crate::domain::hierarchy::compare_channels);
 
     // Canais sem category_id (órfãos / topo) e canais agrupados por category_id
     let mut top_channels = Vec::new();
@@ -164,10 +165,11 @@ pub(super) fn organize_channels_into_categories(
         }
     }
 
-    // Ordenar canais dentro de cada categoria por position oficial
-    top_channels.sort_by_key(|c| c.position);
+    // Ordenar canais dentro de cada categoria por position oficial, com o
+    // snowflake como desempate determinístico.
+    top_channels.sort_by(crate::domain::hierarchy::compare_channels);
     for list in channels_by_category.values_mut() {
-        list.sort_by_key(|c| c.position);
+        list.sort_by(crate::domain::hierarchy::compare_channels);
     }
 
     let to_item_state = |c: crate::domain::Channel| -> ChannelItemState {

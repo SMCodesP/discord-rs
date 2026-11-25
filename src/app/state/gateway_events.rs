@@ -479,6 +479,64 @@ impl AppState {
                     }
                 }
             }
+            TransportEvent::ChannelCreate(channel) => {
+                if matches!(
+                    channel.channel_type,
+                    ChannelType::Dm | ChannelType::GroupDm
+                ) {
+                    self.handle_transport_event(TransportEvent::DmChannelCreated(channel));
+                } else {
+                    self.upsert_guild_channel(channel);
+                }
+            }
+            TransportEvent::ChannelUpdate(channel) => {
+                if matches!(
+                    channel.channel_type,
+                    ChannelType::Dm | ChannelType::GroupDm
+                ) {
+                    self.handle_transport_event(TransportEvent::DmChannelCreated(channel));
+                } else {
+                    self.upsert_guild_channel(channel);
+                }
+            }
+            TransportEvent::ChannelDelete {
+                channel_id,
+                guild_id,
+            } => {
+                let is_dm = self
+                    .dm_channels
+                    .iter()
+                    .any(|channel| channel.id == channel_id);
+                if is_dm {
+                    self.dm_channels.retain(|channel| channel.id != channel_id);
+                    self.messages_by_channel.remove(&channel_id);
+                    if self.selected_channel_id.as_deref() == Some(channel_id.as_str()) {
+                        self.selected_channel_id = None;
+                    }
+                } else {
+                    self.remove_guild_channel(&channel_id, guild_id.as_deref());
+                }
+            }
+            TransportEvent::ThreadCreate(thread) => {
+                self.upsert_guild_channel(thread);
+            }
+            TransportEvent::ThreadUpdate(thread) => {
+                self.upsert_guild_channel(thread);
+            }
+            TransportEvent::ThreadDelete {
+                thread_id,
+                guild_id,
+                parent_id: _,
+            } => {
+                self.remove_guild_channel(&thread_id, guild_id.as_deref());
+            }
+            TransportEvent::ThreadListSync { guild_id, threads } => {
+                self.apply_thread_list_sync(&guild_id, threads);
+            }
+            TransportEvent::ThreadMemberUpdate { .. } => {
+                // Membership only affects thread notification UI. The channel
+                // entry itself is already reconciled by THREAD_CREATE/UPDATE.
+            }
             TransportEvent::GuildCreate(g) => {
                 crate::protocol::cache::lazy_guilds::cache_guild_roles(&g.id, g.roles.clone());
                 let icon_url = g.icon_url();

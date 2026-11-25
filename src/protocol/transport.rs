@@ -129,6 +129,33 @@ pub enum TransportEvent {
     },
     /// A new channel was created.
     ChannelCreate(Channel),
+    /// An existing channel was updated (name, topic, parent, overwrites...).
+    ChannelUpdate(Channel),
+    /// A channel was deleted. `guild_id` is absent for private channels.
+    ChannelDelete {
+        channel_id: String,
+        guild_id: Option<String>,
+    },
+    /// A thread was created (THREAD_CREATE).
+    ThreadCreate(Channel),
+    /// A thread changed its metadata (THREAD_UPDATE).
+    ThreadUpdate(Channel),
+    /// A thread was deleted (THREAD_DELETE).
+    ThreadDelete {
+        thread_id: String,
+        guild_id: Option<String>,
+        parent_id: Option<String>,
+    },
+    /// Thread list synchronized for a guild (THREAD_LIST_SYNC).
+    ThreadListSync {
+        guild_id: String,
+        threads: Vec<Channel>,
+    },
+    /// A thread member joined/left or changed notification settings.
+    ThreadMemberUpdate {
+        thread_id: String,
+        user_id: String,
+    },
     /// A new guild was joined or became available.
     GuildCreate(Guild),
     /// Transport successfully connected.

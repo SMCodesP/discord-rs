@@ -1,3 +1,4 @@
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
 /// Bitwise permission flags (Discord official values).
@@ -40,6 +41,79 @@ impl PermissionOverwrite {
             allow,
             deny,
         }
+    }
+}
+
+impl Serialize for PermissionOverwrite {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PermissionOverwrite", 4)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field(
+            "type",
+            &match self.overwrite_type {
+                OverwriteType::Role => 0u8,
+                OverwriteType::Member => 1u8,
+            },
+        )?;
+        state.serialize_field("allow", &self.allow.to_string())?;
+        state.serialize_field("deny", &self.deny.to_string())?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for PermissionOverwrite {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Bitfield {
+            String(String),
+            Number(u64),
+        }
+
+        impl Bitfield {
+            fn value(&self) -> u64 {
+                match self {
+                    Bitfield::String(value) => parse_permissions(value),
+                    Bitfield::Number(value) => *value,
+                }
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct RawOverwrite {
+            id: String,
+            #[serde(rename = "type", default)]
+            overwrite_type: u8,
+            #[serde(default)]
+            allow: Option<Bitfield>,
+            #[serde(default)]
+            deny: Option<Bitfield>,
+        }
+
+        let raw = RawOverwrite::deserialize(deserializer)?;
+        let overwrite_type = match raw.overwrite_type {
+            0 => OverwriteType::Role,
+            1 => OverwriteType::Member,
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "Unknown permission overwrite type: {}",
+                    other
+                )));
+            }
+        };
+        Ok(Self {
+            id: raw.id,
+            overwrite_type,
+            allow: raw.allow.map(|value| value.value()).unwrap_or(0),
+            deny: raw.deny.map(|value| value.value()).unwrap_or(0),
+        })
     }
 }
 

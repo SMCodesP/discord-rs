@@ -2562,9 +2562,81 @@ async fn handle_dispatch(
             if let Some(ch) = parse_channel_from_json(&data, None) {
                 if ch.channel_type == ChannelType::Dm || ch.channel_type == ChannelType::GroupDm {
                     let _ = event_tx.send(TransportEvent::DmChannelCreated(ch));
+                } else if ch.is_thread() {
+                    let _ = event_tx.send(TransportEvent::ThreadCreate(ch));
                 } else {
                     let _ = event_tx.send(TransportEvent::ChannelCreate(ch));
                 }
+            }
+        }
+        "CHANNEL_UPDATE" => {
+            if let Some(ch) = parse_channel_from_json(&data, None) {
+                let _ = event_tx.send(TransportEvent::ChannelUpdate(ch));
+            }
+        }
+        "CHANNEL_DELETE" => {
+            if let Some(channel_id) = data.get("id").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(TransportEvent::ChannelDelete {
+                    channel_id: channel_id.to_string(),
+                    guild_id: data
+                        .get("guild_id")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                });
+            }
+        }
+        "THREAD_CREATE" => {
+            if let Some(ch) = parse_channel_from_json(&data, None) {
+                let _ = event_tx.send(TransportEvent::ThreadCreate(ch));
+            }
+        }
+        "THREAD_UPDATE" => {
+            if let Some(ch) = parse_channel_from_json(&data, None) {
+                let _ = event_tx.send(TransportEvent::ThreadUpdate(ch));
+            }
+        }
+        "THREAD_DELETE" => {
+            if let Some(thread_id) = data.get("id").and_then(|v| v.as_str()) {
+                let _ = event_tx.send(TransportEvent::ThreadDelete {
+                    thread_id: thread_id.to_string(),
+                    guild_id: data
+                        .get("guild_id")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                    parent_id: data
+                        .get("parent_id")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                });
+            }
+        }
+        "THREAD_LIST_SYNC" => {
+            let guild_id = data
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let threads = data
+                .get("threads")
+                .and_then(|v| v.as_array())
+                .map(|threads| {
+                    threads
+                        .iter()
+                        .filter_map(|thread| parse_channel_from_json(thread, Some(&guild_id)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let _ = event_tx.send(TransportEvent::ThreadListSync { guild_id, threads });
+        }
+        "THREAD_MEMBER_UPDATE" => {
+            if let (Some(thread_id), Some(user_id)) = (
+                data.get("id").and_then(|v| v.as_str()),
+                data.get("user_id").and_then(|v| v.as_str()),
+            ) {
+                let _ = event_tx.send(TransportEvent::ThreadMemberUpdate {
+                    thread_id: thread_id.to_string(),
+                    user_id: user_id.to_string(),
+                });
             }
         }
         "GUILD_CREATE" => {
@@ -3298,13 +3370,67 @@ pub(crate) fn parse_voice_state_from_json(
     Some(state)
 }
 
-fn parse_channel_from_json(
+fn parse_overwrite_bitfield(value: Option<&serde_json::Value>) -> u64 {
+    value
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(crate::domain::permissions::parse_permissions)
+                .or_else(|| value.as_u64())
+        })
+        .unwrap_or(0)
+}
+
+fn parse_permission_overwrites_from_json(
+    val: &serde_json::Value,
+) -> Vec<crate::domain::permissions::PermissionOverwrite> {
+    use crate::domain::permissions::{OverwriteType, PermissionOverwrite};
+
+    let Some(raw_overwrites) = val
+        .get("permission_overwrites")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    raw_overwrites
+        .iter()
+        .filter_map(|overwrite| {
+            let id = overwrite.get("id").and_then(|v| v.as_str())?;
+            let overwrite_type = match overwrite.get("type").and_then(|v| v.as_u64()) {
+                Some(0) => OverwriteType::Role,
+                Some(1) => OverwriteType::Member,
+                _ => return None,
+            };
+            Some(PermissionOverwrite::new(
+                id,
+                overwrite_type,
+                parse_overwrite_bitfield(overwrite.get("allow")),
+                parse_overwrite_bitfield(overwrite.get("deny")),
+            ))
+        })
+        .collect()
+}
+
+/// Parses a Discord channel JSON payload into a domain [`Channel`].
+///
+/// Accepts every channel type the client understands (0-5 and 10-16),
+/// preserving `parent_id`, `thread_metadata` and `permission_overwrites`.
+pub fn parse_channel_from_json(
     val: &serde_json::Value,
     default_guild_id: Option<&str>,
 ) -> Option<Channel> {
     let id = val.get("id")?.as_str()?;
-    let raw_type = val.get("type")?.as_u64()?;
-    let channel_type = ChannelType::from_discord_code(raw_type)?;
+    let channel_type = val
+        .get("type")
+        .and_then(|raw_type| ChannelType::from_discord_code(raw_type.as_u64()?))
+        .or_else(|| {
+            // Accept synthetic/string payloads (`"public_thread"`, `"forum"`)
+            // in addition to Discord's integer wire format.
+            val.get("type")
+                .cloned()
+                .and_then(|raw_type| serde_json::from_value::<ChannelType>(raw_type).ok())
+        })?;
 
     let mut recipient_ids: Vec<String> = Vec::new();
     let mut recipient_names: Vec<String> = Vec::new();
@@ -3365,6 +3491,12 @@ fn parse_channel_from_json(
         .and_then(|v| v.as_bool())
         .or_else(|| val.get("pinned").and_then(|v| v.as_bool()))
         .unwrap_or(false);
+    ch.permission_overwrites = parse_permission_overwrites_from_json(val);
+    ch.thread_metadata = val
+        .get("thread_metadata")
+        .and_then(|metadata| {
+            serde_json::from_value::<crate::domain::channel::ThreadMetadata>(metadata.clone()).ok()
+        });
 
     let icon_url: Option<String> = val
         .get("recipients")
@@ -3389,6 +3521,13 @@ fn parse_channel_from_json(
     ch.icon_url = icon_url;
 
     Some(ch)
+}
+
+/// Parses a Discord channel JSON string into a domain [`Channel`].
+/// Exposed for tests and tooling that validate parser behavior.
+pub fn parse_channel_from_json_str(input: &str) -> Option<Channel> {
+    let val: serde_json::Value = serde_json::from_str(input).ok()?;
+    parse_channel_from_json(&val, None)
 }
 
 fn parse_roles_from_json(guild_val: &serde_json::Value) -> Vec<Role> {

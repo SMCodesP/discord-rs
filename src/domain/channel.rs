@@ -1,9 +1,10 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
+use super::permissions::PermissionOverwrite;
 use super::user::AvatarDecorationData;
 
-/// Supported Discord channel types.
+/// Supported Discord channel types, including modern guild/thread types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ChannelType {
     /// Standard text chat channel (Guild Text, Discord type 0).
@@ -19,9 +20,31 @@ pub enum ChannelType {
     Category,
     /// Read-only announcement channel (Guild News / Announcement, Discord type 5).
     Announcement,
+    /// Announcement thread (Discord type 10).
+    AnnouncementThread,
+    /// Public thread (Discord type 11).
+    PublicThread,
+    /// Private thread (Discord type 12).
+    PrivateThread,
+    /// Stage voice channel (Discord type 13).
+    Stage,
+    /// Student hub / directory channel (Discord type 14).
+    Directory,
+    /// Forum channel (Discord type 15).
+    Forum,
+    /// Media channel (Discord type 16).
+    Media,
 }
 
+#[allow(non_upper_case_globals)]
 impl ChannelType {
+    /// Alias matching Discord's official name for [`ChannelType::Stage`].
+    pub const StageVoice: Self = Self::Stage;
+    /// Alias matching Discord's official name for a guild directory channel.
+    pub const GuildDirectory: Self = Self::Directory;
+    /// Alias used by some call sites for a guild forum channel.
+    pub const GuildForum: Self = Self::Forum;
+
     /// Discord integer code for channel type.
     pub fn discord_code(&self) -> u8 {
         match self {
@@ -31,6 +54,13 @@ impl ChannelType {
             Self::GroupDm => 3,
             Self::Category => 4,
             Self::Announcement => 5,
+            Self::AnnouncementThread => 10,
+            Self::PublicThread => 11,
+            Self::PrivateThread => 12,
+            Self::Stage => 13,
+            Self::Directory => 14,
+            Self::Forum => 15,
+            Self::Media => 16,
         }
     }
 
@@ -43,6 +73,13 @@ impl ChannelType {
             3 => Some(Self::GroupDm),
             4 => Some(Self::Category),
             5 => Some(Self::Announcement),
+            10 => Some(Self::AnnouncementThread),
+            11 => Some(Self::PublicThread),
+            12 => Some(Self::PrivateThread),
+            13 => Some(Self::Stage),
+            14 => Some(Self::Directory),
+            15 => Some(Self::Forum),
+            16 => Some(Self::Media),
             _ => None,
         }
     }
@@ -50,10 +87,12 @@ impl ChannelType {
     /// Display symbol/icon for the channel.
     pub fn symbol(&self) -> &'static str {
         match self {
-            Self::Text => "#",
-            Self::Voice => "",
+            Self::Text | Self::Forum | Self::Media => "#",
+            Self::Voice | Self::Stage => "",
             Self::Announcement => "",
             Self::Category => "",
+            Self::Directory => "",
+            Self::AnnouncementThread | Self::PublicThread | Self::PrivateThread => "",
             Self::Dm | Self::GroupDm => "@",
         }
     }
@@ -67,6 +106,12 @@ impl ChannelType {
             Self::Category => Some(crate::tokens::icons::DiscordIcon::Folder),
             Self::Dm => Some(crate::tokens::icons::DiscordIcon::User),
             Self::GroupDm => Some(crate::tokens::icons::DiscordIcon::Members),
+            Self::AnnouncementThread | Self::PublicThread | Self::PrivateThread => {
+                Some(crate::tokens::icons::DiscordIcon::Chat)
+            }
+            Self::Stage => Some(crate::tokens::icons::DiscordIcon::Speaker),
+            Self::Directory => Some(crate::tokens::icons::DiscordIcon::Compass),
+            Self::Forum | Self::Media => Some(crate::tokens::icons::DiscordIcon::Chat),
         }
     }
 
@@ -75,7 +120,7 @@ impl ChannelType {
     }
 
     pub fn is_voice(&self) -> bool {
-        matches!(self, Self::Voice)
+        matches!(self, Self::Voice | Self::Stage)
     }
 
     pub fn is_announcement(&self) -> bool {
@@ -84,6 +129,31 @@ impl ChannelType {
 
     pub fn is_category(&self) -> bool {
         matches!(self, Self::Category)
+    }
+
+    pub fn is_thread(&self) -> bool {
+        matches!(
+            self,
+            Self::AnnouncementThread | Self::PublicThread | Self::PrivateThread
+        )
+    }
+
+    pub fn is_forum(&self) -> bool {
+        matches!(self, Self::Forum | Self::Media)
+    }
+
+    pub fn is_stage(&self) -> bool {
+        matches!(self, Self::Stage)
+    }
+
+    pub fn is_directory(&self) -> bool {
+        matches!(self, Self::Directory)
+    }
+
+    /// Whether the type is a guild channel shown in the channel sidebar.
+    pub fn is_guild_channel(&self) -> bool {
+        !matches!(self, Self::Dm | Self::GroupDm | Self::Directory | Self::Media)
+            && !self.is_thread()
     }
 }
 
@@ -96,6 +166,13 @@ impl fmt::Display for ChannelType {
             Self::GroupDm => write!(f, "group_dm"),
             Self::Category => write!(f, "category"),
             Self::Announcement => write!(f, "announcement"),
+            Self::AnnouncementThread => write!(f, "announcement_thread"),
+            Self::PublicThread => write!(f, "public_thread"),
+            Self::PrivateThread => write!(f, "private_thread"),
+            Self::Stage => write!(f, "stage_voice"),
+            Self::Directory => write!(f, "directory"),
+            Self::Forum => write!(f, "forum"),
+            Self::Media => write!(f, "media"),
         }
     }
 }
@@ -136,6 +213,21 @@ impl<'de> Deserialize<'de> for ChannelType {
                 "announcement" | "news" | "guild_news" | "guild_announcement" => {
                     Ok(ChannelType::Announcement)
                 }
+                "announcement_thread" | "guild_announcement_thread" | "thread_announcement" => {
+                    Ok(ChannelType::AnnouncementThread)
+                }
+                "public_thread" | "guild_public_thread" | "thread_public" => {
+                    Ok(ChannelType::PublicThread)
+                }
+                "private_thread" | "guild_private_thread" | "thread_private" => {
+                    Ok(ChannelType::PrivateThread)
+                }
+                "stage" | "stage_voice" | "guild_stage_voice" | "guild_stage" => {
+                    Ok(ChannelType::Stage)
+                }
+                "directory" | "guild_directory" => Ok(ChannelType::Directory),
+                "forum" | "guild_forum" => Ok(ChannelType::Forum),
+                "media" | "guild_media" => Ok(ChannelType::Media),
                 other => Err(serde::de::Error::custom(format!(
                     "Unknown channel type string: {}",
                     other
@@ -145,7 +237,30 @@ impl<'de> Deserialize<'de> for ChannelType {
     }
 }
 
-/// Represents a Discord Channel (Text, Voice, or Announcement).
+/// Discord thread metadata attached to thread channels (types 10, 11 and 12).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ThreadMetadata {
+    /// Whether the thread is archived.
+    #[serde(default)]
+    pub archived: bool,
+    /// Auto-archive duration in minutes chosen when the thread was created.
+    #[serde(default)]
+    pub auto_archive_duration: u32,
+    /// ISO-8601 timestamp when the thread was archived, when archived.
+    #[serde(default)]
+    pub archive_timestamp: Option<String>,
+    /// Whether the thread is locked.
+    #[serde(default)]
+    pub locked: bool,
+    /// Whether non-moderators can add members to a private thread.
+    #[serde(default)]
+    pub invitable: Option<bool>,
+    /// ISO-8601 timestamp when the thread was created.
+    #[serde(default)]
+    pub create_timestamp: Option<String>,
+}
+
+/// Represents a Discord Channel (Text, Voice, Announcement, Forum or Thread).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Channel {
     /// Snowflake identifier of the channel.
@@ -154,12 +269,14 @@ pub struct Channel {
     pub guild_id: Option<String>,
     /// Name of the channel (e.g. "general" or "Lounge").
     pub name: String,
-    /// Type of channel (Text, Voice, Announcement).
+    /// Type of channel (Text, Voice, Announcement, Forum or Thread).
     #[serde(rename = "type")]
     pub channel_type: ChannelType,
-    /// Parent category Snowflake ID if grouped.
+    /// Parent category (or parent channel for threads) Snowflake ID.
+    #[serde(rename = "parent_id", alias = "category_id", default)]
     pub category_id: Option<String>,
     /// Channel description or topic text.
+    #[serde(default)]
     pub topic: Option<String>,
     /// Sorting position in channel list.
     #[serde(default)]
@@ -188,6 +305,12 @@ pub struct Channel {
     /// User limit for voice channels (0 or None means unlimited).
     #[serde(default)]
     pub user_limit: Option<u32>,
+    /// Thread metadata, present for thread channels.
+    #[serde(default)]
+    pub thread_metadata: Option<ThreadMetadata>,
+    /// Role/member permission overwrites for this channel or category.
+    #[serde(default)]
+    pub permission_overwrites: Vec<PermissionOverwrite>,
 }
 
 impl Channel {
@@ -208,6 +331,8 @@ impl Channel {
             recipient_names: Vec::new(),
             recipient_avatar_decorations: Vec::new(),
             user_limit: None,
+            thread_metadata: None,
+            permission_overwrites: Vec::new(),
         }
     }
 
@@ -257,8 +382,29 @@ impl Channel {
         self
     }
 
+    pub fn with_permission_overwrites(
+        mut self,
+        overwrites: Vec<PermissionOverwrite>,
+    ) -> Self {
+        self.permission_overwrites = overwrites;
+        self
+    }
+
+    pub fn with_thread_metadata(mut self, metadata: ThreadMetadata) -> Self {
+        self.thread_metadata = Some(metadata);
+        self
+    }
+
+    /// Parent category/channel ID (Discord `parent_id`).
+    pub fn parent_id(&self) -> Option<&str> {
+        self.category_id.as_deref()
+    }
+
     pub fn is_voice(&self) -> bool {
-        matches!(self.channel_type, ChannelType::Voice)
+        matches!(
+            self.channel_type,
+            ChannelType::Voice | ChannelType::Stage
+        )
     }
 
     pub fn is_text(&self) -> bool {
@@ -267,6 +413,14 @@ impl Channel {
 
     pub fn is_announcement(&self) -> bool {
         matches!(self.channel_type, ChannelType::Announcement)
+    }
+
+    pub fn is_thread(&self) -> bool {
+        self.channel_type.is_thread()
+    }
+
+    pub fn is_forum(&self) -> bool {
+        self.channel_type.is_forum()
     }
 
     pub fn icon_symbol(&self) -> &'static str {
