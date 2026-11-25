@@ -569,6 +569,18 @@ impl ClientManager {
 
     /// Sends a chat message to a text channel using the active transport
     pub async fn send_message(&self, channel_id: &str, content: &str) -> Result<Message> {
+        self.send_message_with_reference(channel_id, content, None, true)
+            .await
+    }
+
+    /// Sends a chat message with optional reply reference and mention control.
+    pub async fn send_message_with_reference(
+        &self,
+        channel_id: &str,
+        content: &str,
+        message_reference: Option<&crate::domain::message::MessageReference>,
+        mention_replied_user: bool,
+    ) -> Result<Message> {
         let real_channel_id =
             if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
                 let recipient_id = channel_id.trim_start_matches("dm-");
@@ -593,8 +605,14 @@ impl ClientManager {
             let lock = self.transport.read().await;
             lock.clone()
         };
-        let msg = transport.send_message(&real_channel_id, content).await?;
-        // Broadcast local message creation event
+        let msg = transport
+            .send_message_with_reference(
+                &real_channel_id,
+                content,
+                message_reference,
+                mention_replied_user,
+            )
+            .await?;
         let _ = self
             .event_tx
             .send(TransportEvent::MessageCreate(msg.clone()));

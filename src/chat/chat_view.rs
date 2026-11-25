@@ -16,9 +16,10 @@ use crate::chat::media_picker::{
     OnSelectGuildCallback, OnSelectStickerCallback, OnTabChangeCallback,
 };
 use crate::chat::message_list::{
-    build_chat_list_items, render_date_separator_element, render_message_context_menu,
-    render_message_row, render_welcome_banner, ChatListItem, MessageActionCallback,
-    MessageActionPosCallback, MessageContextMenuConfig, MessageRowConfig,
+    build_chat_list_items, format_message_timestamp, render_date_separator_element,
+    render_message_context_menu, render_message_row_with_reply_and_edit, render_welcome_banner,
+    ChatListItem, MessageActionCallback, MessageActionPosCallback, MessageContextMenuConfig,
+    MessageRowConfig,
 };
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
@@ -133,7 +134,7 @@ pub struct ChatView {
     pub edit_request_sequence: u64,
     pub pin_error: Option<String>,
     pub send_error: Option<String>,
-    pub retry_send: Option<(String, String)>,
+    pub retry_send: Option<(String, String, Option<crate::domain::message::MessageReference>, bool)>,
     pub is_sending_message: bool,
     pub history_loading: bool,
     pub history_error: Option<String>,
@@ -389,8 +390,12 @@ impl ChatView {
             cx.notify();
             return;
         };
+        let reply_reference = self.replying_to.as_ref().map(|msg| {
+            crate::domain::message::MessageReference::reply(msg.id.clone())
+        });
+        let mention_replied_user = self.reply_mention_author;
         let temp_id = match self.state.update(cx, |state, _cx| {
-            state.begin_message_send(&channel_id, &text)
+            state.begin_message_send_with_reference(&channel_id, &text, reply_reference.clone())
         }) {
             Ok(temp_id) => temp_id,
             Err(error) => {
@@ -414,7 +419,12 @@ impl ChatView {
             async move {
                 let request = tokio::time::timeout(
                     std::time::Duration::from_secs(15),
-                    client_manager.send_message(&target_channel, &content),
+                    client_manager.send_message_with_reference(
+                        &target_channel,
+                        &content,
+                        reply_reference.as_ref(),
+                        mention_replied_user,
+                    ),
                 )
                 .await;
                 let result = match request {
@@ -452,15 +462,11 @@ impl ChatView {
                                     .state
                                     .update(cx, |state, _cx| state.fail_message_send(&temp_id));
                                 chat.is_sending_message = false;
-                                if let Some(retry) = retry {
+                                if let Some((cid, msg)) = retry {
                                     chat.send_error =
                                         Some(format!("Falha ao enviar mensagem: {}", error));
-                                    chat.retry_send = Some(retry);
+                                    chat.retry_send = Some((cid, msg, reply_reference.clone(), mention_replied_user));
                                 } else {
-                                    // Gateway confirmation may have arrived while
-                                    // the REST request was failing or timing out.
-                                    // Do not report a false failure or keep the
-                                    // composer in a sending state.
                                     chat.send_error = None;
                                     chat.retry_send = None;
                                     chat.state.update(cx, |state, _cx| {
@@ -487,11 +493,89 @@ impl ChatView {
     }
 
     fn retry_failed_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((channel_id, content)) = self.retry_send.clone() else {
+        let Some((channel_id, content, reply_reference, mention_replied_user)) = self.retry_send.clone() else {
             return;
         };
         self.retry_send = None;
-        self.submit_composer_message(channel_id, content, window, cx);
+        let Some(client_manager) = self.state.read(cx).client_manager.clone() else {
+            self.send_error = Some("Não conectado ao Discord: cliente não inicializado".to_string());
+            cx.notify();
+            return;
+        };
+        let temp_id = match self.state.update(cx, |state, _cx| {
+            state.begin_message_send_with_reference(&channel_id, &content, reply_reference.clone())
+        }) {
+            Ok(temp_id) => temp_id,
+            Err(error) => {
+                self.send_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.send_error = None;
+        self.is_sending_message = true;
+        cx.notify();
+        let this_entity = cx.entity().clone();
+        let target_channel = channel_id.clone();
+        let send_content = content.clone();
+        cx.spawn(move |_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let request = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    client_manager.send_message_with_reference(
+                        &target_channel,
+                        &send_content,
+                        reply_reference.as_ref(),
+                        mention_replied_user,
+                    ),
+                )
+                .await;
+                let result = match request {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!("Tempo limite de 15s excedido ao confirmar o envio")),
+                };
+                match result {
+                    Ok(confirmed) => {
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                chat.state.update(cx, |state, _cx| {
+                                    state.confirm_message_send(&temp_id, confirmed);
+                                    state.replying_to_message = None;
+                                    state.active_draft.clear();
+                                });
+                                chat.is_sending_message = false;
+                                if chat.last_channel_id.as_deref() == Some(target_channel.as_str()) {
+                                    chat.typed_text.clear();
+                                    chat.set_replying_to(None);
+                                    chat.list_state.scroll_to_end();
+                                    chat.scroll_handle.scroll_to_bottom();
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
+                    Err(error) => {
+                        let error = error.to_string();
+                        let _ = cx.update(|cx| {
+                            let _ = this_entity.update(cx, |chat, cx| {
+                                let retry = chat.state.update(cx, |state, _cx| state.fail_message_send(&temp_id));
+                                chat.is_sending_message = false;
+                                if let Some((cid, msg)) = retry {
+                                    chat.send_error = Some(format!("Falha ao enviar mensagem: {}", error));
+                                    chat.retry_send = Some((cid, msg, reply_reference, mention_replied_user));
+                                } else {
+                                    chat.send_error = None;
+                                    chat.retry_send = None;
+                                }
+                                cx.notify();
+                            });
+                        });
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     fn refresh_media_picker_gifs(&mut self, cx: &mut Context<Self>) {
@@ -593,9 +677,8 @@ impl ChatView {
                                         let items =
                                             build_chat_list_items(state.get_active_messages());
                                         items.iter().position(|item| match item {
-                                            ChatListItem::Message { message_idx, .. } => state
-                                                .get_active_messages()
-                                                .get(*message_idx)
+                                            ChatListItem::Message { message_idx, .. } => (*message_idx < state.get_active_messages().len())
+                                                .then(|| &state.get_active_messages()[*message_idx])
                                                 .map(|message| message.id == anchor_id)
                                                 .unwrap_or(false),
                                             _ => false,
@@ -906,7 +989,7 @@ impl Render for ChatView {
             .update(cx, |state, _cx| state.take_failed_message_sends());
         if let Some((channel_id, content, error)) = failed_sends.into_iter().last() {
             self.send_error = Some(format!("Falha ao enviar mensagem: {}", error));
-            self.retry_send = Some((channel_id, content));
+            self.retry_send = Some((channel_id, content, None, true));
         }
         let app_state = self.state.read(cx);
         let selected_channel_opt = if let Some((_, ch)) = app_state.get_selected_channel() {
@@ -1289,7 +1372,11 @@ impl Render for ChatView {
                         let attachments = std::mem::take(&mut display_message.attachments);
                         let embeds = std::mem::take(&mut display_message.embeds);
                         let is_highlighted = state.highlighted_message_id.as_deref() == Some(&msg.id);
-                        let row = render_message_row(
+                        let reply_preview = display_message.referenced_message.as_deref().cloned().or_else(|| {
+                            let ref_id = display_message.message_reference.as_ref()?.message_id.as_ref()?;
+                            msgs.iter().find(|m| m.id == *ref_id).cloned()
+                        });
+                        let row = render_message_row_with_reply_and_edit(
                             &display_message,
                             MessageRowConfig {
                                 is_grouped,
@@ -1301,6 +1388,8 @@ impl Render for ChatView {
                                 on_reaction_click: on_rx_click_item.clone(),
                                 on_add_reaction: on_add_rx_item.clone(),
                             },
+                            reply_preview.as_ref(),
+                            None,
                         );
                         if attachments.is_empty() && embeds.is_empty() {
                             row.into_any_element()

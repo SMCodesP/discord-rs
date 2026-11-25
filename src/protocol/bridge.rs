@@ -338,6 +338,18 @@ impl ProtocolBridge {
 
     /// Posts a new chat message to a Discord text channel.
     pub async fn send_message(&self, channel_id: &str, content: &str) -> Result<Message> {
+        self.send_message_with_reference(channel_id, content, None, true)
+            .await
+    }
+
+    /// Posts a new chat message with optional reply reference and mention control.
+    pub async fn send_message_with_reference(
+        &self,
+        channel_id: &str,
+        content: &str,
+        message_reference: Option<&crate::domain::message::MessageReference>,
+        mention_replied_user: bool,
+    ) -> Result<Message> {
         let client = {
             let guard = self.client.read().await;
             guard
@@ -347,7 +359,7 @@ impl ProtocolBridge {
         };
 
         client
-            .send_message(channel_id, content)
+            .send_message_with_reference(channel_id, content, message_reference, mention_replied_user)
             .await
             .context("Failed to send message via DiscordApiClient")
     }
