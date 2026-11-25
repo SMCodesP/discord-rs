@@ -4,8 +4,8 @@ use gpui::prelude::*;
 use gpui::*;
 
 use super::state::{
-    ActiveModal, ActiveVoiceCall, AppState, ChannelItemState, ChannelKind, CurrentUserProfile,
-    FriendsTab, SettingsTab,
+    ActiveModal, ActiveVoiceCall, AppState, CategoryItemState, ChannelItemState, ChannelKind,
+    CurrentUserProfile, FriendsTab, SettingsTab,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::badge::MentionBadge;
@@ -720,6 +720,99 @@ fn render_dm_item(
 // Guild Channels Section
 // ============================================================================
 
+/// Official Discord Desktop section divider metrics.
+///
+/// Source: inspected Discord Desktop DOM classes `.sectionDivider_u88IQl`
+/// (1px high, 12px vertical / 8px horizontal margins) wrapping the full-width
+/// `.divider_DERYpk` line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SectionDividerMetrics {
+    pub height: f32,
+    pub margin_y: f32,
+    pub margin_x: f32,
+    pub full_width: bool,
+}
+
+impl Default for SectionDividerMetrics {
+    fn default() -> Self {
+        Self {
+            height: 1.0,
+            margin_y: 12.0,
+            margin_x: 8.0,
+            full_width: true,
+        }
+    }
+}
+
+/// One element in the guild channel section, used by both rendering and tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GuildChannelSectionItem<'a> {
+    Divider,
+    Header {
+        id: &'a str,
+        name: &'a str,
+        collapsed: bool,
+    },
+    Channel(&'a ChannelItemState),
+}
+
+/// Whether a category state is the real unlabeled group created for channels
+/// without a parent. That group never receives a synthetic header.
+pub(crate) fn is_unlabeled_category(category: &CategoryItemState) -> bool {
+    category.name.trim().is_empty()
+}
+
+/// Plans the official order of a guild channel section.
+///
+/// * A divider separates every pair of adjacent groups.
+/// * The unlabeled group has no header and is never collapsible.
+/// * Labeled categories keep their real header even when they have no channels.
+/// * A collapsed category hides its channels but keeps its header.
+pub(crate) fn plan_guild_channel_section<'a>(
+    categories: &'a [CategoryItemState],
+    is_collapsed: impl Fn(&str) -> bool,
+) -> Vec<GuildChannelSectionItem<'a>> {
+    let mut plan = Vec::new();
+
+    for (index, category) in categories.iter().enumerate() {
+        if index > 0 {
+            plan.push(GuildChannelSectionItem::Divider);
+        }
+
+        let unlabeled = is_unlabeled_category(category);
+        let collapsed = !unlabeled && is_collapsed(&category.id);
+        if !unlabeled {
+            plan.push(GuildChannelSectionItem::Header {
+                id: &category.id,
+                name: &category.name,
+                collapsed,
+            });
+        }
+
+        if !collapsed {
+            plan.extend(
+                category
+                    .channels
+                    .iter()
+                    .map(GuildChannelSectionItem::Channel),
+            );
+        }
+    }
+
+    plan
+}
+
+fn render_section_divider() -> AnyElement {
+    let metrics = SectionDividerMetrics::default();
+    div()
+        .h(px(metrics.height))
+        .my(px(metrics.margin_y))
+        .mx(px(metrics.margin_x))
+        .w_full()
+        .child(div().w_full().h_full().bg(border_subtle()))
+        .into_any_element()
+}
+
 fn render_guild_channels_section(
     state: &AppState,
     guild: &super::state::GuildItemState,
@@ -729,20 +822,24 @@ fn render_guild_channels_section(
 ) -> Vec<AnyElement> {
     let mut category_elements = Vec::new();
 
-    for category in &guild.categories {
-        let cat_id = category.id.clone();
-        let cat_name = category.name.clone();
-        let is_collapsed = state.is_category_collapsed(&cat_id);
-
-        category_elements.push(render_category_header(
-            &cat_id,
-            &cat_name,
-            is_collapsed,
-            app_entity,
-        ));
-
-        if !is_collapsed {
-            for channel in &category.channels {
+    for item in plan_guild_channel_section(&guild.categories, |category_id| {
+        state.is_category_collapsed(category_id)
+    }) {
+        match item {
+            GuildChannelSectionItem::Divider => {
+                category_elements.push(render_section_divider());
+            }
+            GuildChannelSectionItem::Header {
+                id,
+                name,
+                collapsed,
+            } => category_elements.push(render_category_header(
+                id,
+                name,
+                collapsed,
+                app_entity,
+            )),
+            GuildChannelSectionItem::Channel(channel) => {
                 category_elements.push(render_channel_entry(
                     &guild.id,
                     channel,
@@ -1736,5 +1833,110 @@ mod tests {
             Some(text_header()),
         );
         let _ = (text, voice);
+    }
+
+    fn channel(id: &str, name: &str) -> ChannelItemState {
+        ChannelItemState {
+            id: id.into(),
+            name: name.into(),
+            kind: ChannelKind::Text,
+            topic: None,
+            unread: false,
+            mention_count: 0,
+            icon_url: None,
+            is_pinned: false,
+            last_message_id: None,
+            is_group_dm: false,
+            recipient_ids: Vec::new(),
+            recipient_names: Vec::new(),
+            user_limit: None,
+            avatar_decoration_data: None,
+        }
+    }
+
+    fn category(id: &str, name: &str, channels: Vec<ChannelItemState>) -> CategoryItemState {
+        CategoryItemState {
+            id: id.into(),
+            name: name.into(),
+            channels,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn section_divider_matches_official_metrics() {
+        let metrics = SectionDividerMetrics::default();
+        assert_eq!(metrics.height, 1.0);
+        assert_eq!(metrics.margin_y, 12.0);
+        assert_eq!(metrics.margin_x, 8.0);
+        assert!(metrics.full_width);
+    }
+
+    #[::core::prelude::v1::test]
+    fn section_plan_snapshot_covers_divider_and_collapse() {
+        let categories = vec![
+            category(
+                "cat-uncategorized",
+                "",
+                vec![channel("c-top", "top"), channel("c-orphan", "orphan")],
+            ),
+            category("cat-empty", "EMPTY", Vec::new()),
+            category("cat-text", "TEXT", vec![channel("c-general", "general")]),
+        ];
+
+        let collapsed = |id: &str| id == "cat-empty";
+        let plan = plan_guild_channel_section(&categories, collapsed);
+
+        assert_eq!(
+            plan,
+            vec![
+                GuildChannelSectionItem::Channel(&categories[0].channels[0]),
+                GuildChannelSectionItem::Channel(&categories[0].channels[1]),
+                GuildChannelSectionItem::Divider,
+                GuildChannelSectionItem::Header {
+                    id: "cat-empty",
+                    name: "EMPTY",
+                    collapsed: true,
+                },
+                GuildChannelSectionItem::Divider,
+                GuildChannelSectionItem::Header {
+                    id: "cat-text",
+                    name: "TEXT",
+                    collapsed: false,
+                },
+                GuildChannelSectionItem::Channel(&categories[2].channels[0]),
+            ]
+        );
+
+        assert!(!plan.iter().any(|item| matches!(
+            item,
+            GuildChannelSectionItem::Header { name: "", .. }
+        )));
+        assert!(plan.iter().any(|item| matches!(
+            item,
+            GuildChannelSectionItem::Channel(channel) if channel.id == "c-general"
+        )));
+    }
+
+    #[::core::prelude::v1::test]
+    fn collapsed_category_hides_only_its_own_channels() {
+        let categories = vec![
+            category("cat-text", "TEXT", vec![channel("c-general", "general")]),
+            category("cat-voice", "VOICE", vec![channel("c-lobby", "lobby")]),
+        ];
+
+        let plan = plan_guild_channel_section(&categories, |id| id == "cat-text");
+        let channel_ids: Vec<&str> = plan
+            .iter()
+            .filter_map(|item| match item {
+                GuildChannelSectionItem::Channel(channel) => Some(channel.id.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(channel_ids, vec!["c-lobby"]);
+        assert!(plan.iter().any(|item| matches!(
+            item,
+            GuildChannelSectionItem::Header { id: "cat-text", collapsed: true, .. }
+        )));
     }
 }
