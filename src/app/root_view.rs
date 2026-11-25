@@ -51,10 +51,13 @@ pub struct RootView {
     friends_list_state: Option<ListState>,
     guild_nick_state: Option<Entity<InputState>>,
     guild_nick_sub: Option<Subscription>,
+    quick_switcher_state: Option<Entity<InputState>>,
+    quick_switcher_sub: Option<Subscription>,
     active_modal_open: Option<ActiveModal>,
     profile_modal_open: bool,
     spotify_timer: Option<gpui::Task<()>>,
     login_screen: Option<Entity<crate::app::login_screen::LoginScreen>>,
+    focus_handle: FocusHandle,
 }
 
 impl RootView {
@@ -188,10 +191,13 @@ impl RootView {
             add_friend_sub: None,
             guild_nick_state: None,
             guild_nick_sub: None,
+            quick_switcher_state: None,
+            quick_switcher_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
             spotify_timer: None,
             login_screen: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 
@@ -304,10 +310,13 @@ impl RootView {
             add_friend_sub: None,
             guild_nick_state: None,
             guild_nick_sub: None,
+            quick_switcher_state: None,
+            quick_switcher_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
             spotify_timer: None,
             login_screen: None,
+            focus_handle: cx.focus_handle(),
         }
     }
 }
@@ -551,6 +560,56 @@ fn sync_guild_nick_input(
     }
 }
 
+fn ensure_quick_switcher_input(
+    slot: &mut Option<Entity<InputState>>,
+    sub: &mut Option<Subscription>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let st = cx.new(|cx| InputState::new(window, cx));
+    let app = app_state.clone();
+    let sub_new = cx.subscribe_in(&st, window, move |_view, st, event: &InputEvent, _window, cx| {
+        match event {
+            InputEvent::Change => {
+                let v = st.read(cx).value().to_string();
+                app.update(cx, |s, cx| {
+                    s.set_quick_switcher_query(v);
+                    cx.notify();
+                });
+            }
+            InputEvent::PressEnter { .. } => {
+                app.update(cx, |s, cx| {
+                    s.confirm_quick_switcher();
+                    cx.notify();
+                });
+            }
+            _ => {}
+        }
+    });
+    *slot = Some(st);
+    *sub = Some(sub_new);
+}
+
+fn sync_quick_switcher_input(
+    st: &Entity<InputState>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let want: SharedString = app_state.read(cx).quick_switcher_query().to_string().into();
+    let ph: SharedString = "Where would you like to go?".into();
+    if st.read(cx).presentation().placeholder() != &ph {
+        st.update(cx, |s, cx| s.set_placeholder(ph.clone(), window, cx));
+    }
+    if st.read(cx).value() != want {
+        st.update(cx, |s, cx| s.set_value(want.clone(), window, cx));
+    }
+}
+
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Kit input states live on this view (never in AppState). Ensure +
@@ -650,12 +709,31 @@ impl Render for RootView {
             self.quick_msg_sub = None;
         }
 
-        let (is_connected_to_gateway, active_modal, is_prof_modal) = {
+        let quick_switcher_open = self.state.read(cx).quick_switcher.open;
+        if quick_switcher_open {
+            ensure_quick_switcher_input(
+                &mut self.quick_switcher_state,
+                &mut self.quick_switcher_sub,
+                &app,
+                window,
+                cx,
+            );
+            if let Some(st) = self.quick_switcher_state.clone() {
+                sync_quick_switcher_input(&st, &app, window, cx);
+                window.focus(&st.read(cx).focus_handle(cx), cx);
+            }
+        } else {
+            self.quick_switcher_state = None;
+            self.quick_switcher_sub = None;
+        }
+
+        let (is_connected_to_gateway, active_modal, is_prof_modal, quick_switcher_open_state) = {
             let s = self.state.read(cx);
             (
                 s.is_connected_to_gateway,
                 s.active_modal.clone(),
                 s.is_profile_modal_open(),
+                s.quick_switcher.open,
             )
         };
 
@@ -794,6 +872,7 @@ impl Render for RootView {
                 .map(|call| state.selected_channel_id.as_deref() == Some(&call.channel_id))
                 .unwrap_or(false);
         let app_entity = self.state.clone();
+        let app_entity_keys = app_entity.clone();
 
         div()
             .relative()
@@ -803,6 +882,49 @@ impl Render for RootView {
             .overflow_hidden()
             .flex()
             .flex_row()
+            .track_focus(&self.focus_handle)
+            .on_key_down(move |ev: &KeyDownEvent, _window, cx| {
+                let key = ev.keystroke.key.to_lowercase();
+                let is_cmdk = (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform) && key == "k";
+                if is_cmdk {
+                    app_entity_keys.update(cx, |s, cx| {
+                        s.toggle_quick_switcher();
+                        cx.notify();
+                    });
+                    return;
+                }
+
+                let quick_open = app_entity_keys.read(cx).quick_switcher.open;
+                if quick_open {
+                    match key.as_str() {
+                        "escape" => {
+                            app_entity_keys.update(cx, |s, cx| {
+                                s.close_quick_switcher();
+                                cx.notify();
+                            });
+                        }
+                        "down" | "arrowdown" | "tab" if !ev.keystroke.modifiers.shift => {
+                            app_entity_keys.update(cx, |s, cx| {
+                                s.quick_switcher_move_selection(1);
+                                cx.notify();
+                            });
+                        }
+                        "up" | "arrowup" | "tab" if ev.keystroke.modifiers.shift => {
+                            app_entity_keys.update(cx, |s, cx| {
+                                s.quick_switcher_move_selection(-1);
+                                cx.notify();
+                            });
+                        }
+                        "enter" => {
+                            app_entity_keys.update(cx, |s, cx| {
+                                s.confirm_quick_switcher();
+                                cx.notify();
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            })
             // =========================================================================
             // COLUMN 1: Server Rail (72px)
             // =========================================================================
@@ -918,6 +1040,13 @@ impl Render for RootView {
                             self.quick_msg_state.as_ref().expect("quick message state"),
                         )),
                 )
+            } else {
+                None
+            })
+            .children(if quick_switcher_open_state {
+                self.quick_switcher_state.as_ref().map(|input| {
+                    render_quick_switcher_overlay(app_entity.clone(), self.state.read(cx), input)
+                })
             } else {
                 None
             })
@@ -2214,4 +2343,135 @@ mod group_dm_avatar_tests {
         assert!(!row.show_status, "pending relationships must not show presence");
         assert!(row.avatar_decoration_data.is_some());
     }
+}
+
+fn render_quick_switcher_overlay(
+    entity: Entity<AppState>,
+    state: &AppState,
+    input_state: &Entity<InputState>,
+) -> impl IntoElement {
+    let results = state.quick_switcher.results.clone();
+    let selected = state.quick_switcher.selected_index;
+    let query_empty = state.quick_switcher.query.trim().is_empty();
+
+    let mut list = div().flex().flex_col().gap(px(2.0)).w_full();
+    if results.is_empty() {
+        list = list.child(
+            div()
+                .px(px(12.0))
+                .py(px(10.0))
+                .text_size(px(14.0))
+                .text_color(text_secondary())
+                .child(if query_empty { "No recent channels" } else { "No results found" }),
+        );
+    } else {
+        for (idx, item) in results.iter().enumerate().take(20) {
+            let is_selected = idx == selected;
+            let ent = entity.clone();
+            let row_idx = idx;
+            let bg = if is_selected { rgba(0x5865F233) } else { rgba(0x00000000) };
+            let hover_bg = rgba(0x5865F21A);
+            let label = item.label.clone();
+            let detail = item.detail.clone().unwrap_or_default();
+            let icon = match item.kind {
+                crate::app::state::QuickSwitcherKind::Dm => icon_user(px(16.0), text_secondary()),
+                crate::app::state::QuickSwitcherKind::Channel => icon_hash(px(16.0), text_secondary()),
+                crate::app::state::QuickSwitcherKind::Guild => icon_compass(px(16.0), text_secondary()),
+            };
+            list = list.child(
+                div()
+                    .id(("quick-switcher-row", idx))
+                    .w_full()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(4.0))
+                    .bg(bg)
+                    .hover(move |s| s.bg(hover_bg))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+                        ent.update(cx, |s, cx| {
+                            s.quick_switcher_select_index(row_idx);
+                            s.confirm_quick_switcher();
+                            cx.notify();
+                        });
+                    })
+                    .child(icon)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(text_primary())
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(text_secondary())
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(detail),
+                            ),
+                    ),
+            );
+        }
+    }
+
+    let entity_backdrop = entity.clone();
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_start()
+        .justify_center()
+        .pt(px(80.0))
+        .bg(rgba(0x00000066))
+        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+            entity_backdrop.update(cx, |s, cx| {
+                s.close_quick_switcher();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .w(px(570.0))
+                .max_w(px(570.0))
+                .rounded(px(8.0))
+                .bg(bg_floating())
+                .border_1()
+                .border_color(border_subtle())
+                .p(px(20.0))
+                .pt(px(12.0))
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .on_mouse_down(MouseButton::Left, |_ev, _window, _cx| {
+                    // prevent backdrop close when clicking inside
+                })
+                .child(
+                    div()
+                        .w_full()
+                        .child(TextInput::new("quick-switcher-input", input_state))
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(text_secondary())
+                        .child("Search for servers, channels, or DMs"),
+                )
+                .child(list),
+        )
 }

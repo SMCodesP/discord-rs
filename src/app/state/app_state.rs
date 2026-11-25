@@ -178,6 +178,10 @@ pub struct AppState {
     /// Effective permissions of the current user keyed by guild channel ID.
     /// Missing entries (DMs or unknown guilds) default to allowed.
     pub channel_permissions: HashMap<String, u64>,
+    /// Quick Switcher (Ctrl/Cmd+K) overlay state
+    pub quick_switcher: QuickSwitcherState,
+    /// Channel IDs explicitly inaccessible to current user (used for quick switcher filtering/fixtures).
+    pub quick_switcher_inaccessible_channel_ids: std::collections::HashSet<String>,
 }
 
 pub struct AppStateGlobal(pub gpui::Entity<AppState>);
@@ -344,6 +348,8 @@ impl AppState {
             voice_states_by_channel: HashMap::new(),
             guild_permission_contexts: HashMap::new(),
             channel_permissions: HashMap::new(),
+            quick_switcher: QuickSwitcherState::new(),
+            quick_switcher_inaccessible_channel_ids: std::collections::HashSet::new(),
         };
         state.sync_guild_media();
         state

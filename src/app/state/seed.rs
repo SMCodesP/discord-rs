@@ -817,6 +817,8 @@ impl AppState {
             pins_generation: 0,
             guild_permission_contexts: HashMap::new(),
             channel_permissions: HashMap::new(),
+            quick_switcher: QuickSwitcherState::new(),
+            quick_switcher_inaccessible_channel_ids: std::collections::HashSet::new(),
         };
         state.sync_guild_media();
         state
