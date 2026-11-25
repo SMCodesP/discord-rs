@@ -344,6 +344,51 @@ pub struct VoiceParticipantState {
     pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
+/// Discord voice connection quality class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceQuality {
+    Unknown,
+    Fine,
+    Average,
+    Bad,
+}
+
+impl VoiceQuality {
+    pub const FINE_MAX_PING_MS: u32 = 100;
+    pub const AVERAGE_MAX_PING_MS: u32 = 250;
+    pub const FINE_MAX_LOSS_PCT: f32 = 1.0;
+    pub const AVERAGE_MAX_LOSS_PCT: f32 = 5.0;
+
+    pub fn classify(ping_ms: Option<u32>, packet_loss_pct: Option<f32>) -> Self {
+        if ping_ms.is_none() && packet_loss_pct.is_none() {
+            return Self::Unknown;
+        }
+
+        let bad = ping_ms.is_some_and(|ms| ms > Self::AVERAGE_MAX_PING_MS)
+            || packet_loss_pct.is_some_and(|loss| loss >= Self::AVERAGE_MAX_LOSS_PCT);
+        if bad {
+            return Self::Bad;
+        }
+
+        let average = ping_ms.is_some_and(|ms| ms > Self::FINE_MAX_PING_MS)
+            || packet_loss_pct.is_some_and(|loss| loss >= Self::FINE_MAX_LOSS_PCT);
+        if average {
+            return Self::Average;
+        }
+
+        Self::Fine
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Aguardando",
+            Self::Fine => "Boa",
+            Self::Average => "Média",
+            Self::Bad => "Ruim",
+        }
+    }
+}
+
 /// Active voice call session
 #[derive(Clone)]
 pub struct ActiveVoiceCall {
@@ -351,6 +396,11 @@ pub struct ActiveVoiceCall {
     pub channel_name: String,
     pub guild_name: String,
     pub ping_ms: Option<u32>,
+    pub packet_loss_pct: Option<f32>,
+    pub sent_packets: u64,
+    pub recv_packets: u64,
+    pub lost_packets: u64,
+    pub codec: Option<String>,
     pub is_muted: bool,
     pub is_deafened: bool,
     pub is_screen_sharing: bool,
@@ -365,6 +415,12 @@ pub struct ActiveVoiceCall {
     pub voice_session: Option<std::sync::Arc<crate::protocol::voice_session::VoiceSession>>,
 }
 
+impl ActiveVoiceCall {
+    pub fn quality(&self) -> VoiceQuality {
+        VoiceQuality::classify(self.ping_ms, self.packet_loss_pct)
+    }
+}
+
 impl std::fmt::Debug for ActiveVoiceCall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ActiveVoiceCall")
@@ -372,6 +428,11 @@ impl std::fmt::Debug for ActiveVoiceCall {
             .field("channel_name", &self.channel_name)
             .field("guild_name", &self.guild_name)
             .field("ping_ms", &self.ping_ms)
+            .field("packet_loss_pct", &self.packet_loss_pct)
+            .field("sent_packets", &self.sent_packets)
+            .field("recv_packets", &self.recv_packets)
+            .field("lost_packets", &self.lost_packets)
+            .field("codec", &self.codec)
             .field("is_muted", &self.is_muted)
             .field("is_deafened", &self.is_deafened)
             .field("is_screen_sharing", &self.is_screen_sharing)
@@ -394,6 +455,11 @@ impl PartialEq for ActiveVoiceCall {
             && self.channel_name == other.channel_name
             && self.guild_name == other.guild_name
             && self.ping_ms == other.ping_ms
+            && self.packet_loss_pct == other.packet_loss_pct
+            && self.sent_packets == other.sent_packets
+            && self.recv_packets == other.recv_packets
+            && self.lost_packets == other.lost_packets
+            && self.codec == other.codec
             && self.is_muted == other.is_muted
             && self.is_deafened == other.is_deafened
             && self.is_screen_sharing == other.is_screen_sharing

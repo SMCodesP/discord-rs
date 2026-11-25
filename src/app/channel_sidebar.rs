@@ -1,11 +1,14 @@
 use gpui::component::input::{InputEvent, InputState};
 use gpui::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
+use gpui::component::popover::Popover;
+use gpui::component::tooltip::Tooltip;
+use gpui::component::Selectable;
 use gpui::prelude::*;
 use gpui::*;
 
 use super::state::{
     ActiveModal, ActiveVoiceCall, AppState, CategoryItemState, ChannelItemState, ChannelKind,
-    CurrentUserProfile, FriendsTab, SettingsTab,
+    CurrentUserProfile, FriendsTab, SettingsTab, VoiceQuality,
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::badge::MentionBadge;
@@ -158,7 +161,13 @@ impl Render for ChannelSidebar {
                     .flex()
                     .flex_col()
                     .flex_shrink_0()
-                    .children(active_voice.map(|v| render_voice_bar(&v, &app_entity)))
+                    .children(active_voice.as_ref().map(|v| {
+                        render_voice_bar(
+                            v,
+                            &app_entity,
+                            selected_channel_id.as_deref() != Some(v.channel_id.as_str()),
+                        )
+                    }))
                     // Discord measures 50px of channel-navigation clearance;
                     // the 58px panel floats over the final 16px of that area.
                     .child(div().h(channel_navigation_reserve()))
@@ -462,6 +471,39 @@ pub fn toggle_channel_mute(state: &mut AppState, channel_id: &str) -> bool {
 /// Whether the channel is locally muted.
 pub fn is_channel_muted(state: &AppState, channel_id: &str) -> bool {
     state.muted_channels.contains(channel_id)
+}
+
+pub fn focus_active_voice_stage(state: &mut AppState) -> bool {
+    let Some(channel_id) = state
+        .active_voice_call
+        .as_ref()
+        .map(|call| call.channel_id.clone())
+    else {
+        return false;
+    };
+    if state.selected_channel_id.as_deref() == Some(channel_id.as_str()) {
+        return false;
+    }
+
+    let guild_id = state
+        .guilds
+        .iter()
+        .find(|guild| {
+            guild
+                .categories
+                .iter()
+                .any(|category| category.channels.iter().any(|channel| channel.id == channel_id))
+        })
+        .map(|guild| guild.id.clone());
+
+    if let Some(guild_id) = guild_id {
+        state.selected_guild_id = Some(guild_id);
+    } else if state.dm_channels.iter().any(|channel| channel.id == channel_id) {
+        state.selected_guild_id = None;
+    }
+
+    state.selected_channel_id = Some(channel_id);
+    true
 }
 
 fn render_dm_nav_button(
@@ -1343,8 +1385,258 @@ fn render_voice_user_row(
 // Voice bar & User panel
 // ============================================================================
 
-fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> AnyElement {
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceQualitySummary {
+    pub quality: VoiceQuality,
+    pub ping_ms: Option<u32>,
+    pub packet_loss_pct: Option<f32>,
+    pub codec: Option<String>,
+    pub sent_packets: u64,
+    pub recv_packets: u64,
+    pub lost_packets: u64,
+}
+
+impl VoiceQualitySummary {
+    pub fn from_call(call: &ActiveVoiceCall) -> Self {
+        Self {
+            quality: call.quality(),
+            ping_ms: call.ping_ms,
+            packet_loss_pct: call.packet_loss_pct,
+            codec: call.codec.clone(),
+            sent_packets: call.sent_packets,
+            recv_packets: call.recv_packets,
+            lost_packets: call.lost_packets,
+        }
+    }
+
+    pub fn rows(&self) -> Vec<(&'static str, String)> {
+        let mut rows = vec![("Qualidade", self.quality.label().to_string())];
+        if let Some(ms) = self.ping_ms {
+            rows.push(("RTT", format!("{ms} ms")));
+        }
+        if let Some(loss) = self.packet_loss_pct {
+            rows.push(("Perda de pacotes", format!("{loss:.1}%")));
+        }
+        if let Some(codec) = self.codec.as_deref() {
+            rows.push(("Codec", codec.to_string()));
+        }
+        rows
+    }
+}
+
+fn voice_quality_color(quality: VoiceQuality) -> Rgba {
+    match quality {
+        VoiceQuality::Unknown => status_online(),
+        VoiceQuality::Fine => status_positive(),
+        VoiceQuality::Average => status_warning(),
+        VoiceQuality::Bad => status_dnd(),
+    }
+}
+
+fn voice_connection_color(voice: &ActiveVoiceCall) -> Rgba {
+    match voice.connection_state {
+        crate::protocol::voice_session::VoiceSessionState::Connected => status_online(),
+        crate::protocol::voice_session::VoiceSessionState::Connecting
+        | crate::protocol::voice_session::VoiceSessionState::Reconnecting => status_idle(),
+        crate::protocol::voice_session::VoiceSessionState::Disconnected { .. } => status_dnd(),
+    }
+}
+
+fn voice_bar_title(voice: &ActiveVoiceCall) -> String {
+    match voice.connection_state {
+        crate::protocol::voice_session::VoiceSessionState::Connected => "Voz Conectada".to_string(),
+        crate::protocol::voice_session::VoiceSessionState::Connecting => {
+            "Conectando ao RTC...".to_string()
+        }
+        crate::protocol::voice_session::VoiceSessionState::Reconnecting => {
+            "Reconectando...".to_string()
+        }
+        crate::protocol::voice_session::VoiceSessionState::Disconnected { ref reason } => {
+            if let Some(code) = crate::protocol::voice_gateway::extract_close_code(reason) {
+                format!("Desconectado (código {})", code)
+            } else if reason.contains("4006") {
+                "Desconectado (código 4006)".to_string()
+            } else if reason.contains("Opcode 2")
+                || reason.contains("Timed out")
+                || reason.contains("Tempo limite")
+            {
+                "Desconectado (tempo limite)".to_string()
+            } else if !reason.is_empty() && reason != "Sessão inicializada" {
+                format!("Desconectado ({})", reason)
+            } else {
+                "Desconectado".to_string()
+            }
+        }
+    }
+}
+
+#[derive(IntoElement)]
+struct VoiceBarTrigger {
+    is_open: bool,
+    child: AnyElement,
+}
+
+impl Selectable for VoiceBarTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.is_open = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.is_open
+    }
+}
+
+impl RenderOnce for VoiceBarTrigger {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        div()
+            .id("voice-bar-quality-trigger")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .min_w(px(0.0))
+            .flex_1()
+            .rounded(radius_sm())
+            .cursor_pointer()
+            .hover(|style| style.bg(channel_hover()))
+            .tooltip(|window, cx| Tooltip::new("Detalhes da conexão de voz").build(window, cx))
+            .child(self.child)
+    }
+}
+
+fn render_voice_quality_popout(app_entity: &Entity<AppState>, cx: &App) -> AnyElement {
+    let state = app_entity.read(cx);
+    let Some(call) = state.active_voice_call.as_ref() else {
+        return div().into_any_element();
+    };
+    let summary = VoiceQualitySummary::from_call(call);
+    let quality_color = voice_quality_color(summary.quality);
+
+    div()
+        .w(px(214.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .child(
+            div()
+                .text_color(text_header())
+                .font_weight(FontWeight::BOLD)
+                .text_size(px(13.0))
+                .child("Conexão de voz"),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(icon_wifi(px(14.0), quality_color))
+                .child(
+                    div()
+                        .text_color(quality_color)
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(12.0))
+                        .child(summary.quality.label()),
+                ),
+        )
+        .child(
+            div()
+                .text_color(text_muted())
+                .text_size(px(11.0))
+                .truncate()
+                .child(format!("{} • {}", call.guild_name, call.channel_name)),
+        )
+        .children(summary.rows().into_iter().map(|(label, value)| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(11.0))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_color(interactive_normal())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_size(px(11.0))
+                        .child(value),
+                )
+        }))
+        .into_any_element()
+}
+
+fn render_voice_bar(
+    voice: &ActiveVoiceCall,
+    app_entity: &Entity<AppState>,
+    show_return_to_stage: bool,
+) -> AnyElement {
     let entity = app_entity.clone();
+    let quality = voice.quality();
+    let quality_color = if matches!(
+        voice.connection_state,
+        crate::protocol::voice_session::VoiceSessionState::Connected
+    ) {
+        voice_quality_color(quality)
+    } else {
+        voice_connection_color(voice)
+    };
+    let return_entity = app_entity.clone();
+
+    let identity = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .min_w(px(0.0))
+        .flex_1()
+        .overflow_hidden()
+        .child(icon_wifi(px(16.0), quality_color).flex_shrink_0())
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.0))
+                .flex_1()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .text_color(voice_connection_color(voice))
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(12.0))
+                        .truncate()
+                        .child(voice_bar_title(voice)),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(11.0))
+                        .truncate()
+                        .child(format!("{} • {}", voice.guild_name, voice.channel_name)),
+                ),
+        )
+        .into_any_element();
+
+    let trigger = VoiceBarTrigger {
+        is_open: false,
+        child: identity,
+    };
+
+    let quality_popover = Popover::new("voice-bar-quality-popover")
+        .anchor(Anchor::TopCenter)
+        .offset(px(6.0))
+        .trigger_style(StyleRefinement::default().w_full())
+        .trigger(trigger)
+        .content({
+            let entity = app_entity.clone();
+            move |_state, _window, cx| render_voice_quality_popout(&entity, cx)
+        });
+
     div()
         .h(px(52.0))
         .px(px(12.0))
@@ -1355,69 +1647,39 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
         .flex_row()
         .items_center()
         .justify_between()
+        .gap(px(8.0))
         .child(
             div()
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap(px(8.0))
                 .min_w(px(0.0))
                 .flex_1()
                 .overflow_hidden()
-                .child(icon_wifi(px(16.0), status_online()).flex_shrink_0())
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w(px(0.0))
-                        .flex_1()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .text_color(match voice.connection_state {
-                                    crate::protocol::voice_session::VoiceSessionState::Connected => status_online(),
-                                    crate::protocol::voice_session::VoiceSessionState::Connecting
-                                    | crate::protocol::voice_session::VoiceSessionState::Reconnecting => status_idle(),
-                                    crate::protocol::voice_session::VoiceSessionState::Disconnected { .. } => status_dnd(),
-                                })
-                                .font_weight(FontWeight::BOLD)
-                                .text_size(px(12.0))
-                                .truncate()
-                                .child(match voice.connection_state {
-                                    crate::protocol::voice_session::VoiceSessionState::Connected => "Voz Conectada".to_string(),
-                                    crate::protocol::voice_session::VoiceSessionState::Connecting => "Conectando ao RTC...".to_string(),
-                                    crate::protocol::voice_session::VoiceSessionState::Reconnecting => "Reconectando...".to_string(),
-                                    crate::protocol::voice_session::VoiceSessionState::Disconnected { ref reason } => {
-                                        if let Some(code) = crate::protocol::voice_gateway::extract_close_code(reason) {
-                                            format!("Desconectado (código {})", code)
-                                        } else if reason.contains("4006") {
-                                            "Desconectado (código 4006)".to_string()
-                                        } else if reason.contains("Opcode 2") || reason.contains("Timed out") || reason.contains("Tempo limite") {
-                                            "Desconectado (tempo limite)".to_string()
-                                        } else if !reason.is_empty() && reason != "Sessão inicializada" {
-                                            format!("Desconectado ({})", reason)
-                                        } else {
-                                            "Desconectado".to_string()
-                                        }
-                                    }
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_color(text_muted())
-                                .text_size(px(11.0))
-                                .truncate()
-                                .child(if let Some(ms) = voice.ping_ms {
-                                    format!("{} / {}ms", voice.channel_name, ms)
-                                } else {
-                                    voice.channel_name.clone()
-                                }),
-                        ),
-                ),
+                .child(quality_popover),
         )
         .child(
             div()
+                .flex()
+                .flex_row()
+                .items_center()
                 .flex_shrink_0()
+                .gap(px(4.0))
+                .children(show_return_to_stage.then(|| {
+                    IconButton::with_icon("voice-return-stage-btn", |sz, col| {
+                        icon_speaker(sz, col).into_any_element()
+                    })
+                    .size(px(28.0))
+                    .icon_size(px(16.0))
+                    .rounded(radius_sm())
+                    .tooltip("Voltar ao palco de voz")
+                    .on_click(move |_event, _window, cx| {
+                        return_entity.update(cx, |state, cx| {
+                            focus_active_voice_stage(state);
+                            cx.notify();
+                        });
+                    })
+                }))
                 .child(
                     IconButton::with_icon("voice-disconnect-btn", |sz, col| {
                         icon_phone_hangup(sz, col).into_any_element()
