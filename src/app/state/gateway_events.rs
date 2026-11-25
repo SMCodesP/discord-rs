@@ -232,6 +232,7 @@ impl AppState {
             }
             TransportEvent::MessageCreate(msg) => {
                 self.clear_typing(&msg.channel_id, &msg.author.id);
+                crate::chat::markdown::prewarm_message_markdown_cache(&msg.id, &msg.content);
                 crate::chat::markdown::prewarm_markdown_cache(&msg.content);
                 let channel_id = msg.channel_id.clone();
 
@@ -365,6 +366,7 @@ impl AppState {
                 self.set_channel_messages(&channel_id, messages);
             }
             TransportEvent::MessageUpdate(msg) => {
+                crate::chat::markdown::prewarm_message_markdown_cache(&msg.id, &msg.content);
                 crate::chat::markdown::prewarm_markdown_cache(&msg.content);
                 if let Some(msgs) = self.messages_by_channel.get_mut(&msg.channel_id) {
                     if let Some(existing) = msgs.iter_mut().find(|m| m.id == msg.id) {
@@ -382,6 +384,14 @@ impl AppState {
             }
             TransportEvent::MessageDeleteFailed { .. } => {
                 log::warn!("Falha ao deletar mensagem no canal.");
+            }
+            TransportEvent::MessageSendFailed {
+                temp_id,
+                channel_id,
+                content,
+                error,
+            } => {
+                self.handle_message_send_failure_event(&temp_id, &channel_id, &content, &error);
             }
             TransportEvent::GuildMemberListUpdate(update) => {
                 if self.selected_guild_id.as_deref() == Some(&update.guild_id) {

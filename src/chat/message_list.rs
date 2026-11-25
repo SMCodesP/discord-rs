@@ -1285,7 +1285,7 @@ pub fn render_message_row_with_reply_and_edit(
         let format_type = message.sticker_format_type();
         content_area = content_area.child(render_sticker(sticker_id.as_deref(), &sticker_name, format_type));
     } else {
-        content_area = content_area.child(render_markdown(&message.content));
+        content_area = content_area.child(crate::chat::markdown::render_message_markdown(&message.id, &message.content));
     }
 
     // Attachments

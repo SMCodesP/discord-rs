@@ -994,10 +994,39 @@ pub fn render_markdown(input: &str) -> Div {
     container
 }
 
+/// Renders message markdown using the O(1) LRU cache keyed by `(message_id, content_hash)`.
+/// This is the hot path for chat rendering at 120 FPS.
+pub fn render_message_markdown(message_id: &str, content: &str) -> Div {
+    if content.trim().is_empty() {
+        return div().w_full().min_w(px(0.0));
+    }
+
+    let blocks = crate::chat::markdown_cache::get_or_parse_message_markdown(message_id, content);
+    let mut container = div()
+        .flex()
+        .flex_col()
+        .gap(space_1())
+        .w_full()
+        .min_w(px(0.0))
+        .overflow_hidden();
+
+    for block in &blocks {
+        container = container.child(render_block(block));
+    }
+    container
+}
+
 /// Pre-warms the markdown AST cache for a message content string
 pub fn prewarm_markdown_cache(input: &str) {
     if !input.trim().is_empty() {
         let _ = parse_markdown(input);
+    }
+}
+
+/// Pre-warms the O(1) message markdown cache keyed by `(message_id, content_hash)`.
+pub fn prewarm_message_markdown_cache(message_id: &str, content: &str) {
+    if !content.trim().is_empty() {
+        let _ = crate::chat::markdown_cache::get_or_parse_message_markdown(message_id, content);
     }
 }
 
