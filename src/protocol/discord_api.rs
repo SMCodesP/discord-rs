@@ -1094,6 +1094,27 @@ impl DiscordApiClient {
         self.send_gateway_payload(&payload).await
     }
 
+    /// Applies a status picker change to Discord:
+    /// 1. Gateway Opcode 3 (Presence Update) for the live status/custom activity.
+    /// 2. `PATCH /users/@me/settings` so the custom status is persisted exactly
+    ///    like the official client (including clearing it with `null`).
+    ///
+    /// Returns an error if either request fails so the caller can rollback the
+    /// optimistic UI state.
+    pub async fn update_user_status(
+        &self,
+        gateway_payload: &serde_json::Value,
+        settings_payload: &serde_json::Value,
+    ) -> Result<()> {
+        self.send_gateway_payload(gateway_payload).await?;
+        let path = "/users/@me/settings";
+        let req = self
+            .auth_request(reqwest::Method::PATCH, path)
+            .json(settings_payload);
+        self.send_request(path, req).await?;
+        Ok(())
+    }
+
     /// Send an arbitrary JSON payload to the main Gateway WebSocket.
     pub async fn send_gateway_payload(&self, payload: &serde_json::Value) -> Result<()> {
         let text = serde_json::to_string(payload)?;
@@ -1853,6 +1874,15 @@ impl DiscordTransport for DiscordApiClient {
         self_deaf: bool,
     ) -> anyhow::Result<()> {
         self.send_voice_state_update(guild_id, channel_id, self_mute, self_deaf)
+            .await
+    }
+
+    async fn update_user_status(
+        &self,
+        gateway_payload: &serde_json::Value,
+        settings_payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.update_user_status(gateway_payload, settings_payload)
             .await
     }
 

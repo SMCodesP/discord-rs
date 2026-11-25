@@ -107,6 +107,15 @@ impl AppState {
                     .to_string();
                 let avatar_url = user.avatar_url();
                 let username = user.username;
+                let ready_status =
+                    crate::components::status_picker::UserStatusSelection::from_presence_status(
+                        user.presence,
+                    );
+                let ready_custom_status = user
+                    .custom_status
+                    .as_ref()
+                    .map(crate::components::status_picker::CustomStatusDraft::from_custom_status)
+                    .unwrap_or_default();
                 self.current_user.id = user.id;
                 self.current_user.username = username.clone();
                 self.current_user.display_name = display_name;
@@ -114,6 +123,10 @@ impl AppState {
                 self.current_user.avatar_text = avatar_text;
                 self.current_user.avatar_url = avatar_url;
                 self.current_user.avatar_decoration_data = user.avatar_decoration_data;
+                self.current_user.custom_status = ready_custom_status.text.clone();
+                self.current_status_selection = ready_status;
+                self.current_custom_status = ready_custom_status;
+                self.status_picker_status = ready_status;
                 self.is_connected_to_gateway = true;
                 self.is_gateway_reconnecting = false;
                 self.reconnect_attempt = None;
@@ -1142,6 +1155,12 @@ impl AppState {
                 self.update_user_presence(user_id.clone(), status, activity.clone(), custom_status);
                 let st: PresenceStatus = status.into();
                 self.update_active_now_from_presence(&user_id, st, activity.as_ref());
+            }
+            TransportEvent::UserStatusUpdateResult { request_id, error } => {
+                match error {
+                    Some(error) => self.finish_status_update(request_id, Err(error)),
+                    None => self.finish_status_update(request_id, Ok(())),
+                }
             }
             TransportEvent::PinnedDmsUpdated(pinned) => {
                 self.pinned_dms = pinned;

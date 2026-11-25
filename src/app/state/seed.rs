@@ -632,6 +632,17 @@ impl AppState {
                 is_deafened: false,
                 avatar_decoration_data: None,
             },
+            status_picker_open: false,
+            status_picker_status: crate::components::status_picker::UserStatusSelection::Online,
+            status_picker_custom_status: crate::components::status_picker::CustomStatusDraft::new()
+                .with_text("Navegando no Discord RS 🦀"),
+            current_status_selection:
+                crate::components::status_picker::UserStatusSelection::Online,
+            current_custom_status: crate::components::status_picker::CustomStatusDraft::new()
+                .with_text("Navegando no Discord RS 🦀"),
+            pending_status_update: None,
+            status_update_error: None,
+            status_update_request_seq: 0,
             guilds,
             members: if has_token { Vec::new() } else { members },
             search_query: String::new(),

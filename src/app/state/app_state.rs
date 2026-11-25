@@ -42,6 +42,22 @@ pub struct AppState {
     pub pending_guild_action: Option<String>,
     /// Logged in user profile
     pub current_user: CurrentUserProfile,
+    /// Whether the user-panel status picker popover is open
+    pub status_picker_open: bool,
+    /// Draft status currently selected in the picker
+    pub status_picker_status: crate::components::status_picker::UserStatusSelection,
+    /// Draft custom status (text, emoji and expiration) in the picker
+    pub status_picker_custom_status: crate::components::status_picker::CustomStatusDraft,
+    /// Last status confirmed by Discord (or restored after a failure)
+    pub current_status_selection: crate::components::status_picker::UserStatusSelection,
+    /// Last custom status confirmed by Discord (or restored after a failure)
+    pub current_custom_status: crate::components::status_picker::CustomStatusDraft,
+    /// In-flight status change awaiting Gateway/REST confirmation
+    pub pending_status_update: Option<PendingStatusUpdate>,
+    /// Last failure shown by the status picker, if any
+    pub status_update_error: Option<String>,
+    /// Monotonic correlation id for status updates
+    pub status_update_request_seq: u64,
     /// List of user's guilds
     pub guilds: Vec<GuildItemState>,
     /// List of members in currently selected guild
@@ -276,6 +292,17 @@ impl AppState {
                 is_deafened: false,
                 avatar_decoration_data: None,
             },
+            status_picker_open: false,
+            status_picker_status: crate::components::status_picker::UserStatusSelection::Invisible,
+            status_picker_custom_status:
+                crate::components::status_picker::CustomStatusDraft::default(),
+            current_status_selection:
+                crate::components::status_picker::UserStatusSelection::Invisible,
+            current_custom_status:
+                crate::components::status_picker::CustomStatusDraft::default(),
+            pending_status_update: None,
+            status_update_error: None,
+            status_update_request_seq: 0,
             guilds,
             members: Vec::new(),
             search_query: String::new(),

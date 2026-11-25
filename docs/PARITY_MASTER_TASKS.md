@@ -703,7 +703,7 @@
   - **O que falta/corrigir:** player não bloqueante com volume real, catálogo de eventos, prioridade/coalescing, seleção de som de mensagem/chamada e respeito a DND/mute do sistema; usar apenas assets oficiais/licenciados.
   - **Critério de pronto:** player injetado recebe exatamente um evento por transição real, toca o asset correto e para ring ao aceitar/recusar; nenhum som é inventado e falha do dispositivo aparece sem sucesso fabricado.
 
-- [ ] **T-114** — **P1** — **UX/Status Picker** — **Abrir seletor de status no User Panel e sincronizar presença/custom status**
+- [x] **T-114** — **P1** — **UX/Status Picker** — **Abrir seletor de status no User Panel e sincronizar presença/custom status**
   - **Arquivos:** `src/app/channel_sidebar.rs:1003-1077`, `src/app/state/models.rs:5-67`, `src/app/state/connection.rs:79-113`, `src/protocol/transport.rs:88-95`, `src/protocol/discord_api.rs:1916-1919`, `src/protocol/discord_api.rs:354-391`.
   - **Evidência:** clicar no próprio avatar/nome abre `UserSettings`, não um status picker; só há parser de `PRESENCE_UPDATE` recebido e nenhum envio de Gateway Opcode 3 ou atualização de custom status. O CDP oficial mede `.statusPickerModalMenu` com 300px, `max-height:calc(-72px + 100vh)` e `.customStatusEmoji` 14×14; o locale contém Online/Idle/DND/Invisible, “Clear custom status” e expiração.
   - **O que falta/corrigir:** popover ancorado, quatro status, custom status com emoji/texto/expiração, limpar, copiar username e atualização otimista com rollback via Opcode 3/REST.

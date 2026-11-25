@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::components::status_picker::{CustomStatusDraft, UserStatusSelection};
 use crate::domain::user::AvatarDecorationData;
 
 /// Status presence for users
@@ -52,6 +53,17 @@ impl From<PresenceStatus> for crate::domain::user::PresenceStatus {
             PresenceStatus::Offline => Self::Offline,
         }
     }
+}
+
+/// In-flight status picker change. The previous snapshot is kept so a failed
+/// Gateway/REST request can restore the exact UI state the user had before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingStatusUpdate {
+    pub request_id: u64,
+    pub previous_status: UserStatusSelection,
+    pub previous_custom_status: CustomStatusDraft,
+    pub target_status: UserStatusSelection,
+    pub target_custom_status: CustomStatusDraft,
 }
 
 /// Active modal dialogs in the application

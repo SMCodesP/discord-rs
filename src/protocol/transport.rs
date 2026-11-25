@@ -243,7 +243,7 @@ pub enum TransportEvent {
     /// The current user object changed live (gateway USER_UPDATE dispatch).
     /// Carries the updated user; AppState refreshes CurrentUserProfile from it.
     CurrentUserUpdated(User),
-    /// Message send action failed
+    /// Message send action failed after the optimistic row was inserted
     MessageSendFailed {
         temp_id: String,
         channel_id: String,
@@ -263,6 +263,13 @@ pub enum TransportEvent {
         guild_id: String,
         members: Vec<crate::protocol::cache::lazy_guilds::GuildMemberChunkItem>,
         not_found: Vec<String>,
+    },
+    /// Outbound presence/custom-status change finished. `error` is `None` only
+    /// after every transport request (Gateway Opcode 3 and REST settings)
+    /// succeeded, so the UI never confirms before Discord did.
+    UserStatusUpdateResult {
+        request_id: u64,
+        error: Option<String>,
     },
 }
 
@@ -486,6 +493,22 @@ pub trait DiscordTransport: Send + Sync {
     ) -> anyhow::Result<()> {
         let _ = (guild_id, channel_id, self_mute, self_deaf);
         Ok(())
+    }
+
+    /// Update the authenticated user's presence (Gateway Opcode 3) and custom
+    /// status (PATCH /users/@me/settings).
+    ///
+    /// Both payloads are built by the UI/state layer from the status picker
+    /// model so a synthetic gateway can validate the exact wire shape. The
+    /// default implementation is explicit: a transport that cannot update
+    /// presence must fail instead of fabricating success.
+    async fn update_user_status(
+        &self,
+        gateway_payload: &serde_json::Value,
+        settings_payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let _ = (gateway_payload, settings_payload);
+        anyhow::bail!("update_user_status não implementado no transporte atual")
     }
 
     /// Ring participants in a DM / private channel via POST /channels/{id}/call/ring.
