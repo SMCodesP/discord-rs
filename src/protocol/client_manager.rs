@@ -742,6 +742,28 @@ impl ClientManager {
         transport.remove_relationship(user_id).await
     }
 
+    /// Updates the current user's guild nickname (PATCH /guilds/{guild_id}/members/@me).
+    pub async fn update_my_guild_nickname(
+        &self,
+        guild_id: &str,
+        nick: Option<&str>,
+    ) -> Result<Option<String>> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.update_my_guild_nickname(guild_id, nick).await
+    }
+
+    /// Leaves a guild (DELETE /users/@me/guilds/{guild_id}).
+    pub async fn leave_guild(&self, guild_id: &str) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.leave_guild(guild_id).await
+    }
+
     /// Ring participants in a DM / private channel via POST /channels/{id}/call/ring
     pub async fn ring_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
         let transport = {

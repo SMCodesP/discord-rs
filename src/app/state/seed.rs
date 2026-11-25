@@ -504,6 +504,8 @@ impl AppState {
                 is_bot: false,
                 avatar_decoration_data: None,
                 activity: Some("Codando discord-rs".into()),
+                nickname: None,
+                guild_id: Some("guild-rust-brasil".into()),
             },
             MemberItemState {
                 id: "user-rustacean".into(),
@@ -515,6 +517,8 @@ impl AppState {
                 is_bot: false,
                 avatar_decoration_data: None,
                 activity: Some("Jogando cargo run".into()),
+                nickname: None,
+                guild_id: Some("guild-rust-brasil".into()),
             },
             MemberItemState {
                 id: "user-gpui-bot".into(),
@@ -526,6 +530,8 @@ impl AppState {
                 is_bot: true,
                 avatar_decoration_data: None,
                 activity: Some("/help para comandos".into()),
+                nickname: None,
+                guild_id: Some("guild-rust-brasil".into()),
             },
             MemberItemState {
                 id: "user-dev-idle".into(),
@@ -537,6 +543,8 @@ impl AppState {
                 is_bot: false,
                 avatar_decoration_data: None,
                 activity: Some("Compilando crates".into()),
+                nickname: None,
+                guild_id: Some("guild-rust-brasil".into()),
             },
             MemberItemState {
                 id: "user-borrow-checker".into(),
@@ -548,6 +556,8 @@ impl AppState {
                 is_bot: false,
                 avatar_decoration_data: None,
                 activity: Some("Rejeitando referências".into()),
+                nickname: None,
+                guild_id: Some("guild-rust-brasil".into()),
             },
             MemberItemState {
                 id: "user-tokio-fan".into(),
@@ -559,6 +569,8 @@ impl AppState {
                 is_bot: false,
                 avatar_decoration_data: None,
                 activity: None,
+                nickname: None,
+                guild_id: Some("guild-rust-brasil".into()),
             },
         ];
 
@@ -614,11 +626,14 @@ impl AppState {
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
+            voice_control: crate::protocol::voice_session::VoiceControlState::new(false, false),
             show_members: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
             collapsed_categories: HashSet::new(),
             muted_channels: HashSet::new(),
+            guild_nickname_draft: String::new(),
+            pending_guild_action: None,
             current_user: CurrentUserProfile {
                 id: "user-me".into(),
                 username: "vanguard_dev".into(),

@@ -149,6 +149,22 @@ pub enum TransportEvent {
         temp_id: String,
         channel: Channel,
     },
+    /// Current user guild nickname updated (confirmed by API).
+    GuildNicknameUpdated {
+        guild_id: String,
+        user_id: String,
+        nick: Option<String>,
+    },
+    /// Current user left a guild (confirmed by API).
+    GuildLeft {
+        guild_id: String,
+    },
+    /// Guild action failed (nickname/leave).
+    GuildActionFailed {
+        guild_id: String,
+        action: String,
+        error: String,
+    },
     /// User relationships / friends list updated
     RelationshipsUpdated(Vec<Relationship>),
     /// User relationship added or updated in real-time
@@ -203,6 +219,13 @@ pub enum TransportEvent {
     /// The current user object changed live (gateway USER_UPDATE dispatch).
     /// Carries the updated user; AppState refreshes CurrentUserProfile from it.
     CurrentUserUpdated(User),
+    /// Message send action failed
+    MessageSendFailed {
+        temp_id: String,
+        channel_id: String,
+        content: String,
+        error: String,
+    },
     /// Message delete action failed
     MessageDeleteFailed {
         channel_id: String,
@@ -401,6 +424,22 @@ pub trait DiscordTransport: Send + Sync {
     ) -> anyhow::Result<()> {
         let _ = (channel_id, recipients);
         Ok(())
+    }
+
+    /// Update current user's nickname in a guild (PATCH /guilds/{guild_id}/members/@me).
+    async fn update_my_guild_nickname(
+        &self,
+        guild_id: &str,
+        nick: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        let _ = (guild_id, nick);
+        anyhow::bail!("update_my_guild_nickname not supported on this transport");
+    }
+
+    /// Leave a guild (DELETE /users/@me/guilds/{guild_id}).
+    async fn leave_guild(&self, guild_id: &str) -> anyhow::Result<()> {
+        let _ = guild_id;
+        anyhow::bail!("leave_guild not supported on this transport");
     }
 
     /// Subscribe to real-time events emitted by the transport.

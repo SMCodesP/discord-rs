@@ -67,6 +67,12 @@ impl AppState {
                 ActiveModal::AddFriendToGroup(_) | ActiveModal::CreateGroupDm => {
                     crate::telemetry::ScreenKind::FriendsHub
                 }
+                ActiveModal::EditGuildNickname { .. } | ActiveModal::LeaveGuild { .. } => {
+                    crate::telemetry::ScreenKind::Guild {
+                        id: self.selected_guild_id.clone().unwrap_or_default(),
+                        name: self.get_selected_guild().map(|g| g.name.clone()).unwrap_or_default(),
+                    }
+                }
             };
             let mut meta = std::collections::HashMap::new();
             meta.insert("modal".into(), format!("{:?}", modal));

@@ -570,6 +570,29 @@ impl AppState {
                 }
                 save_guilds_to_disk(&self.guilds, &self.guild_folders);
             }
+            TransportEvent::GuildNicknameUpdated { guild_id, user_id, nick } => {
+                if user_id == self.current_user.id {
+                    if let Some(member) = self
+                        .members
+                        .iter_mut()
+                        .find(|m| m.id == user_id && m.guild_id.as_deref() == Some(&guild_id))
+                    {
+                        member.nickname = nick.clone();
+                    }
+                    self.guild_nickname_draft = nick.unwrap_or_default();
+                    self.pending_guild_action = None;
+                    self.close_modal();
+                }
+            }
+            TransportEvent::GuildLeft { guild_id } => {
+                self.pending_guild_action = None;
+                self.close_modal();
+                self.apply_guild_left(&guild_id);
+            }
+            TransportEvent::GuildActionFailed { guild_id: _, action, error } => {
+                self.pending_guild_action = None;
+                self.auth_error = Some(format!("Ação de servidor falhou ({}): {}", action, error));
+            }
             TransportEvent::DmChannelsUpdated(channels) => {
                 let mut new_dms: Vec<ChannelItemState> = channels
                     .into_iter()

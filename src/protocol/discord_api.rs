@@ -121,6 +121,7 @@ struct GatewayPayload {
 /// Live Discord Client combining REST API v10 and Gateway WebSocket event loop.
 #[derive(Clone)]
 pub struct DiscordApiClient {
+    base_url: String,
     token: AuthToken,
     http_client: reqwest::Client,
     rate_limiter: Arc<RateLimitCoordinator>,
@@ -207,10 +208,16 @@ fn build_http_client(token: &AuthToken) -> reqwest::Client {
 impl DiscordApiClient {
     /// Creates a new Discord API client with the provided authentication token.
     pub fn new(token: AuthToken) -> Self {
+        Self::with_base_url(token, DISCORD_API_BASE)
+    }
+
+    /// Creates a client targeting a custom API base URL (synthetic HTTP tests).
+    pub fn with_base_url(token: AuthToken, base_url: impl Into<String>) -> Self {
         let (event_sender, _) = broadcast::channel(256);
         let http_client = build_http_client(&token);
 
         Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
             token,
             http_client,
             rate_limiter: Arc::new(RateLimitCoordinator::new()),
@@ -241,6 +248,7 @@ impl DiscordApiClient {
         let http_client = build_http_client(&token);
 
         Self {
+            base_url: DISCORD_API_BASE.to_string(),
             token,
             http_client,
             rate_limiter,
@@ -301,7 +309,7 @@ impl DiscordApiClient {
     }
 
     fn auth_request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}{}", DISCORD_API_BASE, path);
+        let url = format!("{}{}", self.base_url, path);
         self.apply_auth_headers(self.http_client.request(method, url))
     }
 
@@ -676,6 +684,29 @@ impl DiscordApiClient {
     /// Removes a relationship (decline, cancel, unfriend, or unblock) (/users/@me/relationships/{user_id})
     pub async fn remove_relationship(&self, user_id: &str) -> Result<()> {
         let path = format!("/users/@me/relationships/{}", user_id);
+        let req = self.auth_request(reqwest::Method::DELETE, &path);
+        self.send_request(&path, req).await?;
+        Ok(())
+    }
+
+    /// Updates the current user's guild member (PATCH /guilds/{guild_id}/members/@me).
+    /// Returns the nickname from the response when present.
+    pub async fn update_my_guild_member(
+        &self,
+        guild_id: &str,
+        nick: Option<&str>,
+    ) -> Result<Option<String>> {
+        let path = format!("/guilds/{}/members/@me", guild_id);
+        let body = serde_json::json!({ "nick": nick });
+        let req = self.auth_request(reqwest::Method::PATCH, &path).json(&body);
+        let resp = self.send_request(&path, req).await?;
+        let val: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        Ok(val.get("nick").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    }
+
+    /// Leaves a guild (DELETE /users/@me/guilds/{guild_id}).
+    pub async fn leave_guild(&self, guild_id: &str) -> Result<()> {
+        let path = format!("/users/@me/guilds/{}", guild_id);
         let req = self.auth_request(reqwest::Method::DELETE, &path);
         self.send_request(&path, req).await?;
         Ok(())
@@ -1448,6 +1479,18 @@ impl DiscordTransport for DiscordApiClient {
 
     async fn remove_relationship(&self, user_id: &str) -> anyhow::Result<()> {
         self.remove_relationship(user_id).await
+    }
+
+    async fn update_my_guild_nickname(
+        &self,
+        guild_id: &str,
+        nick: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        self.update_my_guild_member(guild_id, nick).await
+    }
+
+    async fn leave_guild(&self, guild_id: &str) -> anyhow::Result<()> {
+        self.leave_guild(guild_id).await
     }
 
     async fn get_messages(&self, channel_id: &str, limit: usize) -> Result<Vec<Message>> {
