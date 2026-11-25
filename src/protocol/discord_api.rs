@@ -578,6 +578,112 @@ impl DiscordApiClient {
         Ok(user)
     }
 
+    /// Resolves a temporary `dm-{user_id}` channel to its real channel ID.
+    async fn resolve_message_channel(&self, channel_id: &str) -> String {
+        if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM: {}", e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        }
+    }
+
+    /// Fetches one message-history page, optionally anchored with a `before` or
+    /// `around` cursor. Only the latest page participates in the ETag cache so a
+    /// cursor page can never replace the canonical recent-message snapshot.
+    async fn fetch_messages_page(
+        &self,
+        channel_id: &str,
+        limit: usize,
+        before: Option<&str>,
+        around: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        let resolved_id = self.resolve_message_channel(channel_id).await;
+        let mut path = format!(
+            "/channels/{}/messages?limit={}",
+            resolved_id,
+            limit.min(100)
+        );
+        if let Some(before) = before {
+            path.push_str(&format!("&before={}", before));
+        }
+        if let Some(around) = around {
+            path.push_str(&format!("&around={}", around));
+        }
+
+        let is_latest_page = before.is_none() && around.is_none();
+        let endpoint_key = format!("/channels/{}/messages", resolved_id);
+        let etag = if is_latest_page {
+            self.cache_engine.get_etag(&endpoint_key).await
+        } else {
+            None
+        };
+
+        let mut req = self.auth_request(reqwest::Method::GET, &path);
+        if let Some(ref tag) = etag {
+            req = req.header("If-None-Match", tag);
+        }
+
+        let resp = self.send_request(&path, req).await?;
+
+        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
+            log::debug!(
+                "[DiscordApiClient] Mensagens retornaram 304 Not Modified. Carregando do cache em disco."
+            );
+            let cached = self.cache_engine.get_channel_messages(&resolved_id).await;
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+
+        if is_latest_page {
+            if let Some(new_etag) = resp.headers().get("ETag").and_then(|v| v.to_str().ok()) {
+                self.cache_engine.set_etag(&endpoint_key, new_etag).await;
+            }
+        }
+
+        let raw_messages: Vec<serde_json::Value> = resp.json().await?;
+
+        let mut messages = Vec::new();
+        for val in raw_messages.into_iter().rev() {
+            if let Some(author_id) = val
+                .get("author")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                let guild_id = val.get("guild_id").and_then(|v| v.as_str());
+                if let (Some(gid), Some(member_obj)) = (guild_id, val.get("member")) {
+                    if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
+                        let role_ids: Vec<String> = roles_arr
+                            .iter()
+                            .filter_map(|r| r.as_str().map(ToString::to_string))
+                            .collect();
+                        crate::protocol::cache::lazy_guilds::cache_author_roles(
+                            gid, author_id, role_ids,
+                        );
+                    }
+                }
+            }
+            if let Some(msg) = parse_message_from_json(&val) {
+                messages.push(msg);
+            }
+        }
+
+        if is_latest_page {
+            self.cache_engine
+                .save_channel_messages(&resolved_id, &messages)
+                .await;
+        }
+
+        Ok(messages)
+    }
+
     /// Fetches a user's full profile (/users/{user_id}/profile)
     pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileData> {
         self.get_user_profile_with_guild(user_id, None).await
@@ -1494,80 +1600,27 @@ impl DiscordTransport for DiscordApiClient {
     }
 
     async fn get_messages(&self, channel_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-            let recipient_id = channel_id.trim_start_matches("dm-");
-            match self.create_or_get_dm_channel(recipient_id).await {
-                Ok(ch) => ch.id,
-                Err(e) => {
-                    log::warn!("Falha ao resolver DM: {}", e);
-                    channel_id.to_string()
-                }
-            }
-        } else {
-            channel_id.to_string()
-        };
+        self.fetch_messages_page(channel_id, limit, None, None).await
+    }
 
-        let path = format!(
-            "/channels/{}/messages?limit={}",
-            resolved_id,
-            limit.min(100)
-        );
-        let endpoint_key = format!("/channels/{}/messages", resolved_id);
-        let etag = self.cache_engine.get_etag(&endpoint_key).await;
+    async fn get_messages_before(
+        &self,
+        channel_id: &str,
+        before_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        self.fetch_messages_page(channel_id, limit, Some(before_id), None)
+            .await
+    }
 
-        let mut req = self.auth_request(reqwest::Method::GET, &path);
-        if let Some(ref tag) = etag {
-            req = req.header("If-None-Match", tag);
-        }
-
-        let resp = self.send_request(&path, req).await?;
-
-        if resp.status() == reqwest::StatusCode::NOT_MODIFIED {
-            log::debug!(
-                "[DiscordApiClient] Mensagens retornaram 304 Not Modified. Carregando do cache em disco."
-            );
-            let cached = self.cache_engine.get_channel_messages(&resolved_id).await;
-            if !cached.is_empty() {
-                return Ok(cached);
-            }
-        }
-
-        if let Some(new_etag) = resp.headers().get("ETag").and_then(|v| v.to_str().ok()) {
-            self.cache_engine.set_etag(&endpoint_key, new_etag).await;
-        }
-
-        let raw_messages: Vec<serde_json::Value> = resp.json().await?;
-
-        let mut messages = Vec::new();
-        for val in raw_messages.into_iter().rev() {
-            if let Some(author_id) = val
-                .get("author")
-                .and_then(|a| a.get("id"))
-                .and_then(|v| v.as_str())
-            {
-                let guild_id = val.get("guild_id").and_then(|v| v.as_str());
-                if let (Some(gid), Some(member_obj)) = (guild_id, val.get("member")) {
-                    if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
-                        let role_ids: Vec<String> = roles_arr
-                            .iter()
-                            .filter_map(|r| r.as_str().map(ToString::to_string))
-                            .collect();
-                        crate::protocol::cache::lazy_guilds::cache_author_roles(
-                            gid, author_id, role_ids,
-                        );
-                    }
-                }
-            }
-            if let Some(msg) = parse_message_from_json(&val) {
-                messages.push(msg);
-            }
-        }
-
-        self.cache_engine
-            .save_channel_messages(&resolved_id, &messages)
-            .await;
-
-        Ok(messages)
+    async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        around_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        self.fetch_messages_page(channel_id, limit, None, Some(around_id))
+            .await
     }
 
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<Message> {

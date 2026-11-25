@@ -136,6 +136,7 @@ impl AppState {
 
                 // Limpar mensagens fictícias para exibir apenas dados reais carregados da API
                 self.messages_by_channel.clear();
+                self.history_pagination.clear();
 
                 for g in &guilds {
                     crate::protocol::cache::lazy_guilds::cache_guild_roles(&g.id, g.roles.clone());

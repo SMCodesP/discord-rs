@@ -2,11 +2,13 @@
 //! Complete reactive chat stream combining kit v_virtual_list message stream,
 //! welcome header, hover actions, active replies, popover media picker, and message editor.
 
+use gpui::component::Sizable;
 use gpui::component::input::{InputEvent, TextareaState};
+use gpui::component::spinner::Spinner;
 use gpui::*;
 use std::sync::Arc;
 
-use crate::app::state::AppState;
+use crate::app::state::{AppState, HISTORY_PAGE_SIZE};
 use crate::chat::editor::{ChatComposer, EditorActionCallback, EditorSendCallback};
 use crate::chat::media_picker::{
     gif_query_from_picker, new_gifs_client, MediaPickerConfig, MediaPickerGuildSection,
@@ -32,6 +34,25 @@ use crate::tokens::typography::*;
 pub struct PendingPinAction {
     pub message: Message,
     pub is_unpin: bool,
+}
+
+fn render_history_loading_row() -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap(space_2())
+        .py(space_2())
+        .child(Spinner::new().small())
+        .child(
+            div()
+                .text_size(font_size_xs())
+                .text_color(text_muted())
+                .child(crate::i18n::t("common.loading")),
+        )
+        .into_any_element()
 }
 
 fn render_chat_error_toast(
@@ -130,7 +151,8 @@ pub struct ChatView {
     pub is_sending_message: bool,
     pub history_loading: bool,
     pub history_error: Option<String>,
-    pub last_history_limit: usize,
+    pub context_loading: bool,
+    pub context_target_id: Option<String>,
     pub scroll_handler_installed: bool,
     pub typing_refresh_task: Option<Task<()>>,
     pub composer_state: Option<Entity<TextareaState>>,
@@ -191,7 +213,8 @@ impl ChatView {
             is_sending_message: false,
             history_loading: false,
             history_error: None,
-            last_history_limit: 0,
+            context_loading: false,
+            context_target_id: None,
             scroll_handler_installed: false,
             typing_refresh_task: None,
             composer_state: None,
@@ -509,28 +532,31 @@ impl ChatView {
         let Some(channel_id) = self.state.read(cx).selected_channel_id.clone() else {
             return;
         };
-        let (message_count, anchor_message_id) = {
+        let anchor_message_id = {
             let state = self.state.read(cx);
             let messages = state.get_active_messages();
-            (
-                messages.len(),
-                messages.first().map(|message| message.id.clone()),
-            )
+            if messages.is_empty() {
+                return;
+            }
+            let items = build_chat_list_items(messages);
+            let top_index = self
+                .list_state
+                .logical_scroll_top()
+                .item_ix
+                .min(items.len().saturating_sub(1));
+            items.get(top_index).and_then(|item| match item {
+                ChatListItem::Message { message_idx, .. } => {
+                    messages.get(*message_idx).map(|message| message.id.clone())
+                }
+                _ => messages.first().map(|message| message.id.clone()),
+            })
         };
-        if message_count == 0 {
+        let Some(cursor) = self
+            .state
+            .update(cx, |state, _cx| state.begin_history_load(&channel_id))
+        else {
             return;
-        }
-
-        // The current transport only exposes `get_messages(limit)`. Grow the
-        // latest-page window once, up to Discord's maximum of 100. A true
-        // `before` cursor requires a protocol/transport change outside this task.
-        let requested_limit = (message_count + 50).min(100);
-        if requested_limit <= self.last_history_limit {
-            self.history_error = Some("Histórico mais antigo indisponível: o transporte atual não oferece cursor `before`.".to_string());
-            cx.notify();
-            return;
-        }
-        self.last_history_limit = requested_limit;
+        };
         self.history_loading = true;
         self.history_error = None;
         cx.notify();
@@ -539,50 +565,71 @@ impl ChatView {
         cx.spawn(move |_view, cx: &mut AsyncApp| {
             let cx = cx.clone();
             async move {
-                match client_manager
-                    .get_messages(&channel_id, requested_limit)
-                    .await
-                {
-                    Ok(older) => {
-                        let _ = cx.update(|cx| {
-                            let _ = this_entity.update(cx, |chat, cx| {
-                                chat.state.update(cx, |state, _cx| {
-                                    state.merge_older_messages(&channel_id, older);
+                let result = client_manager
+                    .get_messages_before(&channel_id, &cursor, HISTORY_PAGE_SIZE)
+                    .await;
+                let _ = cx.update(|cx| {
+                    let _ = this_entity.update(cx, |chat, cx| {
+                        match result {
+                            Ok(page) => {
+                                let added = chat.state.update(cx, |state, _cx| {
+                                    state.finish_history_load(&channel_id, page)
                                 });
                                 chat.history_loading = false;
-                                if let Some(anchor_id) = anchor_message_id {
-                                    let target_index = {
+                                if chat.last_channel_id.as_deref()
+                                    == Some(channel_id.as_str())
+                                {
+                                    let (message_count, items, message_ids) = {
                                         let state = chat.state.read(cx);
-                                        let items =
-                                            build_chat_list_items(state.get_active_messages());
-                                        items.iter().position(|item| match item {
-                                            ChatListItem::Message { message_idx, .. } => state
-                                                .get_active_messages()
-                                                .get(*message_idx)
-                                                .map(|message| message.id == anchor_id)
-                                                .unwrap_or(false),
-                                            _ => false,
-                                        })
+                                        let messages = state.get_active_messages();
+                                        (
+                                            messages.len(),
+                                            build_chat_list_items(messages),
+                                            messages
+                                                .iter()
+                                                .map(|message| message.id.clone())
+                                                .collect::<Vec<_>>(),
+                                        )
                                     };
-                                    if let Some(index) = target_index {
+                                    let total_items = items.len();
+                                    let anchor_index = anchor_message_id.as_ref().and_then(
+                                        |anchor_id| {
+                                            items.iter().position(|item| match item {
+                                                ChatListItem::Message { message_idx, .. } => {
+                                                    message_ids.get(*message_idx) == Some(anchor_id)
+                                                }
+                                                _ => false,
+                                            })
+                                        },
+                                    );
+                                    chat.last_message_count = message_count;
+                                    chat.list_state.reset(total_items);
+                                    if let Some(index) = anchor_index {
                                         chat.list_state.scroll_to_reveal_item(index);
+                                    } else if added > 0 {
+                                        chat.list_state.scroll_to_reveal_item(0);
                                     }
                                 }
-                                cx.notify();
-                            });
-                        });
-                    }
-                    Err(error) => {
-                        let _ = cx.update(|cx| {
-                            let _ = this_entity.update(cx, |chat, cx| {
+                            }
+                            Err(error) => {
+                                let error = error.to_string();
+                                chat.state.update(cx, |state, _cx| {
+                                    state.fail_history_load(&channel_id, error.clone())
+                                });
                                 chat.history_loading = false;
-                                chat.history_error =
-                                    Some(format!("Falha ao carregar mensagens antigas: {}", error));
-                                cx.notify();
-                            });
-                        });
-                    }
-                }
+                                if chat.last_channel_id.as_deref()
+                                    == Some(channel_id.as_str())
+                                {
+                                    chat.history_error = Some(format!(
+                                        "Falha ao carregar mensagens antigas: {}",
+                                        error
+                                    ));
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
             }
         })
         .detach();
@@ -789,9 +836,10 @@ impl Render for ChatView {
         let count_changed = message_count != self.last_message_count;
         if channel_changed {
             self.last_channel_id = Some(channel_id.clone());
-            self.last_history_limit = 0;
             self.history_loading = false;
             self.history_error = None;
+            self.context_loading = false;
+            self.context_target_id = None;
             self.send_error = None;
             self.retry_send = None;
             if switched_from_channel {
@@ -1107,6 +1155,8 @@ impl Render for ChatView {
         .size_full();
 
         // Handle target message scroll/focus from Search results or reply jump.
+        // When the target is not loaded yet, fetch an `around` page and merge it
+        // so search can jump to messages outside the current window.
         let target_message_id = self.state.read(cx).target_message_id.clone();
         if let Some(ref target_id) = target_message_id {
             let target_idx = {
@@ -1125,6 +1175,59 @@ impl Render for ChatView {
                 self.state.update(cx, |state, _cx| {
                     state.target_message_id = None;
                 });
+                self.context_loading = false;
+                self.context_target_id = None;
+            } else if !self.context_loading
+                && self.context_target_id.as_deref() != Some(target_id.as_str())
+            {
+                if let Some(client_manager) = self.state.read(cx).client_manager.clone() {
+                    self.context_loading = true;
+                    self.context_target_id = Some(target_id.clone());
+                    let channel_id = channel_id.clone();
+                    let target_id = target_id.clone();
+                    let this_entity = cx.entity().clone();
+                    cx.spawn(move |_view, cx: &mut AsyncApp| {
+                        let cx = cx.clone();
+                        async move {
+                            let result = client_manager
+                                .get_messages_around(&channel_id, &target_id, HISTORY_PAGE_SIZE)
+                                .await;
+                            let _ = cx.update(|cx| {
+                                let _ = this_entity.update(cx, |chat, cx| {
+                                    chat.context_loading = false;
+                                    match result {
+                                        Ok(page) => {
+                                            let found =
+                                                page.iter().any(|message| message.id == target_id);
+                                            chat.state.update(cx, |state, _cx| {
+                                                state.merge_history_around(&channel_id, page);
+                                            });
+                                            if !found {
+                                                chat.state.update(cx, |state, _cx| {
+                                                    state.target_message_id = None;
+                                                });
+                                                chat.context_target_id = None;
+                                                chat.history_error = Some(
+                                                    "Mensagem não encontrada no histórico do canal."
+                                                        .to_string(),
+                                                );
+                                            }
+                                        }
+                                        Err(error) => {
+                                            chat.context_target_id = None;
+                                            chat.history_error = Some(format!(
+                                                "Falha ao carregar contexto da mensagem: {}",
+                                                error
+                                            ));
+                                        }
+                                    }
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    })
+                    .detach();
+                }
             }
         }
 
@@ -2428,6 +2531,13 @@ impl Render for ChatView {
             .justify_between()
             .bg(bg_chat())
             .overflow_hidden()
+            // Older-history page spinner. The state-level loading guard makes
+            // this the single spinner for one in-flight `before` request.
+            .children(if self.history_loading {
+                Some(render_history_loading_row())
+            } else {
+                None
+            })
             // 1. Fully Virtualized Message Stream Area via kit v_virtual_list
             .child(
                 div()
