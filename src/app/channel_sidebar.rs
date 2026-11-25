@@ -92,7 +92,7 @@ impl Render for ChannelSidebar {
         let app_entity = self.state.clone();
 
         let header_el = if let Some(ref guild) = selected_guild {
-            render_server_header(&guild.name)
+            render_server_header(guild, &app_entity)
         } else {
             render_dm_search_header(&dm_search_state)
         };
@@ -171,8 +171,14 @@ impl Render for ChannelSidebar {
 // Header elements
 // ============================================================================
 
-fn render_server_header(guild_name: &str) -> AnyElement {
+fn render_server_header(guild: &super::state::GuildItemState, app_entity: &Entity<AppState>) -> AnyElement {
     let typography = typo_server_header();
+    let guild_id = guild.id.clone();
+    let nick_entity = app_entity.clone();
+    let nick_gid = guild_id.clone();
+    let leave_entity = app_entity.clone();
+    let leave_gid = guild_id.clone();
+
     div()
         .h(header_height())
         .px(space_4())
@@ -195,7 +201,7 @@ fn render_server_header(guild_name: &str) -> AnyElement {
                 .text_size(typography.size)
                 .line_height(typography.line_height)
                 .truncate()
-                .child(guild_name.to_string()),
+                .child(guild.name.clone()),
         )
         .child(
             svg()
@@ -203,6 +209,31 @@ fn render_server_header(guild_name: &str) -> AnyElement {
                 .size(px(16.0))
                 .text_color(text_normal()),
         )
+        .context_menu(move |menu: PopupMenu, _window, _cx| {
+            let nick_entity = nick_entity.clone();
+            let nick_gid = nick_gid.clone();
+            let leave_entity = leave_entity.clone();
+            let leave_gid = leave_gid.clone();
+            menu.item(
+                PopupMenuItem::new("Alterar apelido").on_click(move |_ev, _win, cx| {
+                    nick_entity.update(cx, |s, cx| {
+                        s.open_edit_guild_nickname(nick_gid.clone());
+                        cx.notify();
+                    });
+                }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new("Sair do servidor").on_click(move |_ev, _win, cx| {
+                    leave_entity.update(cx, |s, cx| {
+                        s.open_modal(ActiveModal::LeaveGuild {
+                            guild_id: leave_gid.clone(),
+                        });
+                        cx.notify();
+                    });
+                }),
+            )
+        })
         .into_any_element()
 }
 
@@ -1716,9 +1747,21 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn test_server_header_creation() {
-        let el = render_server_header("Rust Server");
-        let _ = el;
+    fn test_server_header_guild_state() {
+        let guild = super::super::state::GuildItemState {
+            id: "1".into(),
+            name: "Rust Server".into(),
+            acronym: "RS".into(),
+            icon_url: None,
+            icon_hash: None,
+            unread: false,
+            mention_count: 0,
+            categories: vec![],
+            emojis: vec![],
+            stickers: vec![],
+        };
+        assert_eq!(guild.name, "Rust Server");
+        assert_eq!(guild.id, "1");
     }
 
     #[::core::prelude::v1::test]

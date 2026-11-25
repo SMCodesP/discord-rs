@@ -399,6 +399,115 @@ impl AppState {
         }
         self.show_members = !self.show_members;
     }
+
+    /// Opens the nickname editor for a guild, prefilled with current member nick.
+    pub fn open_edit_guild_nickname(&mut self, guild_id: String) {
+        let current_nick = self
+            .members
+            .iter()
+            .find(|m| m.id == self.current_user.id)
+            .and_then(|m| m.nickname.clone())
+            .unwrap_or_default();
+        self.guild_nickname_draft = current_nick;
+        self.open_modal(ActiveModal::EditGuildNickname { guild_id });
+    }
+
+    /// Submits guild nickname change. UI updates only after 2xx response.
+    pub fn submit_guild_nickname(&mut self, guild_id: String, nick: String) {
+        if self.pending_guild_action.as_deref() == Some("nickname") {
+            return;
+        }
+        let Some(cm) = self.client_manager.clone() else {
+            self.auth_error = Some("Cliente não conectado.".to_string());
+            return;
+        };
+        let nick_payload = {
+            let trimmed = nick.trim();
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        };
+        self.pending_guild_action = Some("nickname".to_string());
+        let cm_clone = cm.clone();
+        let gid = guild_id.clone();
+        let current_user_id = self.current_user.id.clone();
+        tokio::spawn(async move {
+            let result = cm_clone
+                .update_my_guild_nickname(&gid, nick_payload.as_deref())
+                .await;
+            match result {
+                Ok(new_nick) => {
+                    cm_clone.emit_event(TransportEvent::GuildNicknameUpdated {
+                        guild_id: gid,
+                        user_id: current_user_id,
+                        nick: new_nick,
+                    });
+                }
+                Err(e) => {
+                    cm_clone.emit_event(TransportEvent::GuildActionFailed {
+                        guild_id: gid,
+                        action: "nickname".to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Confirms leaving a guild. Guild removed only after 2xx response.
+    pub fn confirm_leave_guild(&mut self, guild_id: String) {
+        if self.pending_guild_action.as_deref() == Some("leave") {
+            return;
+        }
+        let Some(cm) = self.client_manager.clone() else {
+            self.auth_error = Some("Cliente não conectado.".to_string());
+            return;
+        };
+        self.pending_guild_action = Some("leave".to_string());
+        let cm_clone = cm.clone();
+        let gid = guild_id.clone();
+        tokio::spawn(async move {
+            match cm_clone.leave_guild(&gid).await {
+                Ok(()) => {
+                    cm_clone.emit_event(TransportEvent::GuildLeft { guild_id: gid });
+                }
+                Err(e) => {
+                    cm_clone.emit_event(TransportEvent::GuildActionFailed {
+                        guild_id: gid,
+                        action: "leave".to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Removes guild locally and selects next destination. Called only after confirmed leave.
+    pub fn apply_guild_left(&mut self, guild_id: &str) {
+        let was_selected = self.selected_guild_id.as_deref() == Some(guild_id);
+        let removed_index = self.guilds.iter().position(|g| g.id == guild_id);
+        self.guilds.retain(|g| g.id != guild_id);
+        self.guild_folders.iter_mut().for_each(|f| f.guild_ids.retain(|id| id != guild_id));
+        self.guild_folders.retain(|f| !f.guild_ids.is_empty() || f.id.is_some());
+
+        // Clean caches/state tied to guild
+        self.members.retain(|m| m.guild_id.as_deref() != Some(guild_id));
+        self.voice_states_by_channel.retain(|_, states| {
+            states.retain(|s| s.guild_id.as_deref() != Some(guild_id));
+            !states.is_empty()
+        });
+
+        save_guilds_to_disk(&self.guilds, &self.guild_folders);
+
+        if was_selected {
+            let next_guild = removed_index
+                .and_then(|idx| self.guilds.get(idx).or_else(|| self.guilds.get(idx.saturating_sub(1))))
+                .map(|g| g.id.clone());
+            if let Some(next) = next_guild {
+                self.select_guild(Some(next));
+            } else {
+                self.select_guild(None);
+            }
+        }
+    }
 }
 
 impl AppState {

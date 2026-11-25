@@ -530,6 +530,8 @@ pub fn convert_member_to_item_state(
         is_bot: member.is_bot,
         activity: member.activity.clone(),
         avatar_decoration_data: member.avatar_decoration_data.clone(),
+        nickname: None,
+        guild_id: None,
     }
 }
 
@@ -691,10 +693,13 @@ pub fn convert_list_item_to_state(
                 is_bot: false,
                 activity: Some(g.count.to_string()),
                 avatar_decoration_data: None,
+                nickname: None,
+                guild_id: Some(guild_id.to_string()),
             }
         }
         MemberListItem::Member(m) => {
-            let state = convert_member_to_item_state(m, guild_roles);
+            let mut state = convert_member_to_item_state(m, guild_roles);
+            state.guild_id = Some(guild_id.to_string());
             if state.role_color != 0 {
                 cache_author_role_color(guild_id, &m.id, state.role_color);
             }

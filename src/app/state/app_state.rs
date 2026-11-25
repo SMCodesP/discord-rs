@@ -36,6 +36,10 @@ pub struct AppState {
     pub collapsed_categories: HashSet<String>,
     /// Channel IDs muted locally from the sidebar context menu
     pub muted_channels: HashSet<String>,
+    /// Guild nickname draft for modal editing
+    pub guild_nickname_draft: String,
+    /// Guild action currently in flight (nick/leave) to avoid duplicate requests
+    pub pending_guild_action: Option<String>,
     /// Logged in user profile
     pub current_user: CurrentUserProfile,
     /// List of user's guilds
@@ -217,6 +221,8 @@ impl AppState {
             user_settings_tab: SettingsTab::MyAccount,
             collapsed_categories: HashSet::new(),
             muted_channels: HashSet::new(),
+            guild_nickname_draft: String::new(),
+            pending_guild_action: None,
             current_user: CurrentUserProfile {
                 id: String::new(),
                 username: String::new(),

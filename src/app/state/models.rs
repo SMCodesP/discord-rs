@@ -64,6 +64,8 @@ pub enum ActiveModal {
     LoginDiscord,
     AddFriendToGroup(String),
     CreateGroupDm,
+    EditGuildNickname { guild_id: String },
+    LeaveGuild { guild_id: String },
 }
 
 /// User settings navigation tabs
@@ -435,6 +437,10 @@ pub struct MemberItemState {
     pub activity: Option<String>,
     /// Avatar decoration equipped by the member, when the member payload carries it.
     pub avatar_decoration_data: Option<AvatarDecorationData>,
+    /// Guild-scoped nickname, when present.
+    pub nickname: Option<String>,
+    /// Guild id this member row belongs to, when known.
+    pub guild_id: Option<String>,
 }
 
 impl MemberItemState {
@@ -450,6 +456,8 @@ impl MemberItemState {
             is_bot: false,
             activity: None,
             avatar_decoration_data: None,
+            nickname: None,
+            guild_id: None,
         }
     }
 

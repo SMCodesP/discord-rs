@@ -48,6 +48,8 @@ pub struct RootView {
     friends_search_query: String,
     add_friend_state: Option<Entity<InputState>>,
     add_friend_sub: Option<Subscription>,
+    guild_nick_state: Option<Entity<InputState>>,
+    guild_nick_sub: Option<Subscription>,
     active_modal_open: Option<ActiveModal>,
     profile_modal_open: bool,
     spotify_timer: Option<gpui::Task<()>>,
@@ -182,6 +184,8 @@ impl RootView {
             friends_search_query: String::new(),
             add_friend_state: None,
             add_friend_sub: None,
+            guild_nick_state: None,
+            guild_nick_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
             spotify_timer: None,
@@ -295,6 +299,8 @@ impl RootView {
             friends_search_query: String::new(),
             add_friend_state: None,
             add_friend_sub: None,
+            guild_nick_state: None,
+            guild_nick_sub: None,
             active_modal_open: None,
             profile_modal_open: false,
             spotify_timer: None,
@@ -464,10 +470,7 @@ fn ensure_add_friend_input(
         return;
     }
     let initial = app_state.read(cx).add_friend_input.clone();
-    let st = cx.new(|cx| {
-        InputState::new(window, cx)
-            .default_value(initial)
-    });
+    let st = cx.new(|cx| InputState::new(window, cx).default_value(initial));
     let app = app_state.clone();
     let sub_new = cx.subscribe_in(&st, window, move |_view, st, event: &InputEvent, _window, cx| {
         match event {
@@ -502,6 +505,44 @@ fn sync_add_friend_input(
     cx: &mut App,
 ) {
     let want: SharedString = app_state.read(cx).add_friend_input.clone().into();
+    if st.read(cx).value() != want {
+        st.update(cx, |s, cx| s.set_value(want.clone(), window, cx));
+    }
+}
+
+fn ensure_guild_nick_input(
+    slot: &mut Option<Entity<InputState>>,
+    sub: &mut Option<Subscription>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut Context<RootView>,
+) {
+    if slot.is_some() {
+        return;
+    }
+    let initial = app_state.read(cx).guild_nickname_draft.clone();
+    let st = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+    let app = app_state.clone();
+    let sub_new = cx.subscribe_in(&st, window, move |_view, st, event: &InputEvent, _window, cx| {
+        if matches!(event, InputEvent::Change) {
+            let v = st.read(cx).value().to_string();
+            app.update(cx, |s, cx| {
+                s.guild_nickname_draft = v;
+                cx.notify();
+            });
+        }
+    });
+    *slot = Some(st);
+    *sub = Some(sub_new);
+}
+
+fn sync_guild_nick_input(
+    st: &Entity<InputState>,
+    app_state: &Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let want: SharedString = app_state.read(cx).guild_nickname_draft.clone().into();
     if st.read(cx).value() != want {
         st.update(cx, |s, cx| s.set_value(want.clone(), window, cx));
     }
@@ -553,6 +594,20 @@ impl Render for RootView {
         }
         if let Some(st) = self.token_modal_state.clone() {
             sync_token_input(&st, &app, login_placeholder.clone(), window, cx);
+        }
+
+        let is_guild_nick_modal = matches!(
+            self.state.read(cx).active_modal,
+            Some(ActiveModal::EditGuildNickname { .. })
+        );
+        if is_guild_nick_modal {
+            ensure_guild_nick_input(&mut self.guild_nick_state, &mut self.guild_nick_sub, &app, window, cx);
+            if let Some(st) = self.guild_nick_state.clone() {
+                sync_guild_nick_input(&st, &app, window, cx);
+            }
+        } else {
+            self.guild_nick_state = None;
+            self.guild_nick_sub = None;
         }
 
         // Quick-message state: sync while a popout is open, drop on close so
@@ -659,6 +714,21 @@ impl Render for RootView {
                         window.open_dialog(cx, move |dialog, window, cx| {
                             let vh = window.viewport_size().height;
                             build_create_group_dm_dialog(dialog, entity.clone(), vh, cx)
+                        });
+                    }
+                    ActiveModal::EditGuildNickname { guild_id } => {
+                        let gid = guild_id.clone();
+                        let nick_state = self.guild_nick_state.as_ref().expect("guild nick state").clone();
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_edit_guild_nickname_dialog(dialog, entity.clone(), gid.clone(), &nick_state, vh, cx)
+                        });
+                    }
+                    ActiveModal::LeaveGuild { guild_id } => {
+                        let gid = guild_id.clone();
+                        window.open_dialog(cx, move |dialog, window, cx| {
+                            let vh = window.viewport_size().height;
+                            build_leave_guild_dialog(dialog, entity.clone(), gid.clone(), vh, cx)
                         });
                     }
                 }
@@ -1787,6 +1857,184 @@ fn render_create_group_dm_row(
                 }),
         )
         .into_any_element()
+}
+
+fn build_edit_guild_nickname_dialog(
+    dialog: Dialog,
+    entity: Entity<AppState>,
+    guild_id: String,
+    nick_state: &Entity<InputState>,
+    vh: Pixels,
+    _cx: &mut App,
+) -> Dialog {
+    let entity_close = entity.clone();
+    let entity_save = entity.clone();
+    let entity_cancel = entity.clone();
+    let gid = guild_id.clone();
+    let state = entity.read(_cx);
+    let guild_name = state
+        .guilds
+        .iter()
+        .find(|g| g.id == guild_id)
+        .map(|g| g.name.clone())
+        .unwrap_or_else(|| "Servidor".to_string());
+    let pending = state.pending_guild_action.as_deref() == Some("nickname");
+    let margin_top = (vh - px(220.0)).max(px(20.0)) / 2.0;
+
+    dialog
+        .w(px(440.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.pending_guild_action = None;
+                s.close_modal();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space_4())
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(20.0))
+                        .child("Alterar apelido"),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(13.0))
+                        .child(format!("Defina seu apelido em {}", guild_name)),
+                )
+                .child(
+                    TextInput::new("guild-nickname-input", nick_state)
+                        .placeholder("Apelido (vazio remove)")
+                        .show_clear(true),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(space_2())
+                        .child(
+                            Button::gray("guild-nick-cancel", "Cancelar")
+                                .size(ButtonSize::Md)
+                                .on_click(move |_ev, window, cx| {
+                                    window.close_dialog(cx);
+                                    entity_cancel.update(cx, |s, cx| {
+                                        s.pending_guild_action = None;
+                                        s.close_modal();
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child({
+                            let mut btn = Button::blurple("guild-nick-save", if pending { "Salvando..." } else { "Salvar" })
+                                .size(ButtonSize::Md);
+                            if !pending {
+                                btn = btn.on_click(move |_ev, _window, cx| {
+                                    entity_save.update(cx, |s, cx| {
+                                        let nick = s.guild_nickname_draft.clone();
+                                        s.submit_guild_nickname(gid.clone(), nick);
+                                        cx.notify();
+                                    });
+                                });
+                            }
+                            btn
+                        }),
+                ),
+        )
+}
+
+fn build_leave_guild_dialog(
+    dialog: Dialog,
+    entity: Entity<AppState>,
+    guild_id: String,
+    vh: Pixels,
+    _cx: &mut App,
+) -> Dialog {
+    let entity_close = entity.clone();
+    let entity_leave = entity.clone();
+    let entity_cancel = entity.clone();
+    let gid = guild_id.clone();
+    let state = entity.read(_cx);
+    let guild_name = state
+        .guilds
+        .iter()
+        .find(|g| g.id == guild_id)
+        .map(|g| g.name.clone())
+        .unwrap_or_else(|| "Servidor".to_string());
+    let pending = state.pending_guild_action.as_deref() == Some("leave");
+    let margin_top = (vh - px(180.0)).max(px(20.0)) / 2.0;
+
+    dialog
+        .w(px(440.0))
+        .margin_top(margin_top)
+        .on_close(move |_event, _window, cx| {
+            entity_close.update(cx, |s, cx| {
+                s.pending_guild_action = None;
+                s.close_modal();
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(space_4())
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(20.0))
+                        .child(format!("Sair de '{}'", guild_name)),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(px(13.0))
+                        .child(format!(
+                            "Tem certeza que deseja sair de {}? Você não poderá voltar a menos que seja convidado novamente.",
+                            guild_name
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .gap(space_2())
+                        .child(
+                            Button::gray("guild-leave-cancel", "Cancelar")
+                                .size(ButtonSize::Md)
+                                .on_click(move |_ev, window, cx| {
+                                    window.close_dialog(cx);
+                                    entity_cancel.update(cx, |s, cx| {
+                                        s.pending_guild_action = None;
+                                        s.close_modal();
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child({
+                            let mut btn = Button::danger("guild-leave-confirm", if pending { "Saindo..." } else { "Sair do servidor" })
+                                .size(ButtonSize::Md);
+                            if !pending {
+                                btn = btn.on_click(move |_ev, _window, cx| {
+                                    entity_leave.update(cx, |s, cx| {
+                                        s.confirm_leave_guild(gid.clone());
+                                        cx.notify();
+                                    });
+                                });
+                            }
+                            btn
+                        }),
+                ),
+        )
 }
 
 /// Renders the Friends list view ("Amigos") when on Home without an active DM channel.
