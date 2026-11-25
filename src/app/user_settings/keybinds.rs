@@ -1,5 +1,6 @@
 use gpui::prelude::*;
 use gpui::*;
+use serde::{Deserialize, Serialize};
 
 use crate::tokens::icons::icon_info;
 use crate::tokens::kit_theme::DiscordTheme;
@@ -7,16 +8,81 @@ use crate::tokens::kit_theme::DiscordTheme;
 use super::components::render_section_description;
 use super::UserSettingsModal;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeybindBinding {
+    pub action: String,
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeybindConfig {
+    pub bindings: Vec<KeybindBinding>,
+}
+
+impl Default for KeybindConfig {
+    fn default() -> Self {
+        Self {
+            bindings: vec![
+                KeybindBinding { action: "Buscar".into(), keys: vec!["CTRL".into(), "F".into()] },
+                KeybindBinding { action: "Mostrar Lista de Atalhos".into(), keys: vec!["CTRL".into(), "/".into()] },
+                KeybindBinding { action: "Editar Mensagem Selecionada".into(), keys: vec!["E".into()] },
+                KeybindBinding { action: "Excluir Mensagem Selecionada".into(), keys: vec!["BACKSPACE".into()] },
+                KeybindBinding { action: "Navegar Mensagens".into(), keys: vec!["↑".into(), "↓".into()] },
+                KeybindBinding { action: "Fechar / Cancelar".into(), keys: vec!["ESC".into()] },
+            ],
+        }
+    }
+}
+
+pub fn keybinds_config_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".config"))
+        .join("discord-rs")
+        .join("keybinds.json")
+}
+
+pub fn load_keybinds_config_from(path: &std::path::Path) -> KeybindConfig {
+    if !path.exists() {
+        return KeybindConfig::default();
+    }
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(_) => return KeybindConfig::default(),
+    };
+    serde_json::from_str::<KeybindConfig>(&data).unwrap_or_default()
+}
+
+pub fn save_keybinds_config_to(path: &std::path::Path, config: &KeybindConfig) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(config) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+pub fn load_keybinds_config() -> KeybindConfig {
+    load_keybinds_config_from(&keybinds_config_path())
+}
+
+pub fn save_keybinds_config(config: &KeybindConfig) {
+    save_keybinds_config_to(&keybinds_config_path(), config);
+}
+
 pub fn render_keybinds(
     _modal: Entity<UserSettingsModal>,
     _modal_state: &UserSettingsModal,
     cx: &App,
 ) -> Div {
+    let config = load_keybinds_config();
+    let (nav_bindings, msg_bindings): (Vec<_>, Vec<_>) = config.bindings.iter().partition(|b| {
+        matches!(b.action.as_str(), "Buscar" | "Mostrar Lista de Atalhos" | "Fechar / Cancelar")
+    });
+
     div()
         .flex()
         .flex_col()
         .gap(px(20.0))
-        // Section: Custom Keybinds
         .child(
             div()
                 .flex()
@@ -27,10 +93,10 @@ pub fn render_keybinds(
                         .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(20.0))
-                        .child("Custom Keybinds"),
+                        .child("Atalhos de Teclado"),
                 )
                 .child(render_section_description(
-                    "Keybinds are custom keyboard shortcuts that let you perform specific actions in Discord without needing to click through menus.",
+                    "Atalhos padrão disponíveis no cliente. A personalização de atalhos é persistida localmente quando configurada.",
                     cx,
                 ))
                 .child(
@@ -51,11 +117,10 @@ pub fn render_keybinds(
                                 .w(px(580.0))
                                 .text_color(cx.discord().text_primary)
                                 .text_size(px(13.0))
-                                .child("Custom keybinds are not currently supported in the browser. Download the desktop application to use custom keybinds."),
+                                .child("A reatribuição interativa de atalhos ainda não está disponível nesta versão; os atalhos padrão abaixo estão ativos e sua configuração é persistida em disco."),
                         ),
                 ),
         )
-        // Section: Default Keybinds
         .child(
             div()
                 .flex()
@@ -66,17 +131,19 @@ pub fn render_keybinds(
                         .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(16.0))
-                        .child("Default Keybinds"),
+                        .child("Navegação"),
                 )
                 .child(
                     div()
                         .rounded(px(8.0))
                         .bg(cx.discord().bg_channels)
                         .child(render_keybind_row("Quick Switcher", &["CTRL", "K"], cx))
-                        .child(render_keybind_row("Show Keyboard Shortcuts List", &["CTRL", "/"], cx)),
+                        .children(nav_bindings.iter().map(|b| {
+                            let keys: Vec<&str> = b.keys.iter().map(|k| k.as_str()).collect();
+                            render_keybind_row(&b.action, &keys, cx)
+                        })),
                 ),
         )
-        // Section: Messages
         .child(
             div()
                 .flex()
@@ -87,25 +154,27 @@ pub fn render_keybinds(
                         .text_color(cx.discord().text_titles)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(16.0))
-                        .child("Messages"),
+                        .child("Mensagens"),
                 )
                 .child(render_section_description(
-                    "These shortcuts work when focused on a message.",
+                    "Estes atalhos funcionam com uma mensagem selecionada ou no contexto do chat.",
                     cx,
                 ))
                 .child(
                     div()
                         .rounded(px(8.0))
                         .bg(cx.discord().bg_channels)
-                        .child(render_keybind_row("Edit Message", &["E"], cx))
-                        .child(render_keybind_row("Delete Message", &["BACKSPACE"], cx)),
+                        .children(msg_bindings.iter().map(|b| {
+                            let keys: Vec<&str> = b.keys.iter().map(|k| k.as_str()).collect();
+                            render_keybind_row(&b.action, &keys, cx)
+                        })),
                 ),
         )
 }
 
 fn render_keybind_row(
-    action: &'static str,
-    keys: &[&'static str],
+    action: &str,
+    keys: &[&str],
     cx: &App,
 ) -> Div {
     let hover_bg = cx.discord().channel_hover;
@@ -124,7 +193,7 @@ fn render_keybind_row(
                 .text_color(cx.discord().text_titles)
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(14.0))
-                .child(action),
+                        .child(action.to_string()),
         )
         // Key Pills
         .child(
@@ -144,7 +213,7 @@ fn render_keybind_row(
                         .text_color(cx.discord().text_primary)
                         .font_weight(FontWeight::BOLD)
                         .text_size(px(12.0))
-                        .child(*key)
+                        .child((*key).to_string())
                 })),
         )
 }

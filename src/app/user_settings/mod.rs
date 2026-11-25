@@ -14,7 +14,7 @@ mod billing;
 pub mod components;
 mod connections;
 mod family_center;
-mod keybinds;
+pub mod keybinds;
 mod language;
 mod my_account;
 mod notifications;

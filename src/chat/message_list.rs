@@ -1135,6 +1135,7 @@ pub struct MessageRowConfig {
     pub on_reaction_click: Option<ReactionActionCallback>,
     pub on_add_reaction: Option<AddReactionCallback>,
     pub mentions: Option<MentionLookup>,
+    pub is_selected: bool,
 }
 
 /// Renders an individual message item in Cozy format.
@@ -1180,6 +1181,11 @@ pub fn render_message_row_with_reply_and_edit(
 
     if config.is_highlighted {
         row = row.bg(with_alpha(HEX_BLURPLE, 0.16));
+    } else if config.is_selected {
+        row = row
+            .bg(with_alpha(HEX_BLURPLE, 0.12))
+            .border_l_2()
+            .border_color(blurple());
     } else {
         row = row.hover(|s| s.bg(bg_chat_hover()));
     }
@@ -1651,6 +1657,7 @@ fn render_message_list_inner(
                 on_reaction_click: on_reaction_click.clone(),
                 on_add_reaction: on_add_reaction.clone(),
                 mentions: None,
+                is_selected: false,
             },
         ));
 
@@ -1905,6 +1912,7 @@ mod tests {
                 on_reaction_click: None,
                 on_add_reaction: None,
                 mentions: None,
+                is_selected: false,
             },
             Some(&reply),
             None,
