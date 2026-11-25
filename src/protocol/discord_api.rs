@@ -1,3 +1,6 @@
+use crate::domain::permissions::{
+    OverwriteType, PermissionOverwrite, parse_permissions,
+};
 use crate::domain::profile::{
     ConnectedAccount, MutualGuild, ProfileBadge, UserProfileData, snowflake_to_datetime,
 };
@@ -2334,7 +2337,18 @@ async fn handle_dispatch(
                                 )
                             }
                         });
-                    let mut guild = Guild::new(id, name, "");
+                    let owner_id = g
+                        .get("owner_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let (current_user_roles, current_user_timeout_until) =
+                        parse_current_member_permissions(g, &user.id);
+                    let mut guild = Guild::new(id, name, owner_id)
+                        .with_roles(parse_roles_from_json(g))
+                        .with_current_user_member(
+                            current_user_roles,
+                            current_user_timeout_until,
+                        );
                     guild.icon = icon;
                     if let Some(raw_channels) = g.get("channels").and_then(|v| v.as_array()) {
                         guild.channels = raw_channels
@@ -2597,9 +2611,20 @@ async fn handle_dispatch(
                     }
                 }
                 let roles = parse_roles_from_json(&data);
+                let (current_user_roles, current_user_timeout_until) = {
+                    let user_id = current_user_id.read().await;
+                    user_id
+                        .as_deref()
+                        .map(|user_id| parse_current_member_permissions(&data, user_id))
+                        .unwrap_or_default()
+                };
                 let mut guild = Guild::new(id, name, owner_id)
                     .with_channels(channels)
-                    .with_roles(roles);
+                    .with_roles(roles)
+                    .with_current_user_member(
+                        current_user_roles,
+                        current_user_timeout_until,
+                    );
                 guild.icon = icon;
                 if let Some(raw_emojis) = data.get("emojis").and_then(|v| v.as_array()) {
                     guild.emojis = parse_emojis_from_value_array(raw_emojis, id);
@@ -3298,6 +3323,89 @@ pub(crate) fn parse_voice_state_from_json(
     Some(state)
 }
 
+fn parse_bitfield_value(value: Option<&serde_json::Value>) -> u64 {
+    value
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(parse_permissions)
+                .or_else(|| value.as_u64())
+        })
+        .unwrap_or(0)
+}
+
+fn parse_permission_overwrites_from_json(
+    val: &serde_json::Value,
+) -> Vec<PermissionOverwrite> {
+    let Some(raw_overwrites) = val
+        .get("permission_overwrites")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    raw_overwrites
+        .iter()
+        .filter_map(|overwrite| {
+            let id = overwrite.get("id").and_then(|v| v.as_str())?;
+            let overwrite_type = match overwrite.get("type").and_then(|v| v.as_u64()) {
+                Some(0) => OverwriteType::Role,
+                Some(1) => OverwriteType::Member,
+                _ => return None,
+            };
+            Some(PermissionOverwrite::new(
+                id,
+                overwrite_type,
+                parse_bitfield_value(overwrite.get("allow")),
+                parse_bitfield_value(overwrite.get("deny")),
+            ))
+        })
+        .collect()
+}
+
+/// Extracts the authenticated member's role IDs and timeout from a guild payload.
+/// READY/GUILD_CREATE include the current member in `members`; bots sometimes get a
+/// single `member` object instead.
+fn parse_current_member_permissions(
+    guild: &serde_json::Value,
+    user_id: &str,
+) -> (Vec<String>, Option<String>) {
+    let member = guild
+        .get("members")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|members| {
+            members.iter().find(|member| {
+                member
+                    .get("user")
+                    .and_then(|user| user.get("id"))
+                    .and_then(|id| id.as_str())
+                    == Some(user_id)
+            })
+        })
+        .or_else(|| guild.get("member"));
+
+    let Some(member) = member else {
+        return (Vec::new(), None);
+    };
+
+    let roles = member
+        .get("roles")
+        .and_then(serde_json::Value::as_array)
+        .map(|roles| {
+            roles
+                .iter()
+                .filter_map(|role| role.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let timeout_until = member
+        .get("communication_disabled_until")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+
+    (roles, timeout_until)
+}
+
 fn parse_channel_from_json(
     val: &serde_json::Value,
     default_guild_id: Option<&str>,
@@ -3365,6 +3473,7 @@ fn parse_channel_from_json(
         .and_then(|v| v.as_bool())
         .or_else(|| val.get("pinned").and_then(|v| v.as_bool()))
         .unwrap_or(false);
+    ch.permission_overwrites = parse_permission_overwrites_from_json(val);
 
     let icon_url: Option<String> = val
         .get("recipients")

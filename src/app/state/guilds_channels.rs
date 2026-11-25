@@ -1,5 +1,155 @@
 use super::*;
+use crate::domain::permissions::{
+    self as permission, GuildPermissionContext, RolePermissions,
+};
 use crate::protocol::TransportEvent;
+
+impl AppState {
+    /// Recomputes the current member's effective permissions for every channel
+    /// in `guild`, including category overwrites and communication timeouts.
+    pub fn update_guild_permissions(&mut self, guild: &crate::domain::Guild) {
+        let roles: Vec<RolePermissions> = guild
+            .roles
+            .iter()
+            .map(|role| {
+                RolePermissions::new(
+                    role.id.clone(),
+                    permission::parse_permissions(&role.permissions),
+                )
+            })
+            .collect();
+        let timeout_active = permission::is_timeout_active(
+            guild.current_user_timeout_until.as_deref(),
+            chrono::Utc::now(),
+        );
+        let context = GuildPermissionContext::new(
+            guild.id.clone(),
+            guild.owner_id.clone(),
+            self.current_user.id.clone(),
+            guild.current_user_roles.clone(),
+            roles,
+            timeout_active,
+        );
+
+        self.remove_guild_channel_permissions(&guild.id, &guild.channels);
+        if context.known {
+            self.insert_channel_permissions(&context, &guild.channels);
+            self.guild_permission_contexts
+                .insert(guild.id.clone(), context);
+        } else {
+            // A snapshot without roles (bot REST fallback) has no reliable
+            // baseline. Do not hide channels or block actions in that state.
+            self.guild_permission_contexts.remove(&guild.id);
+        }
+    }
+
+    /// Applies fresh channel overwrites using the cached guild permission
+    /// context (for lazy channel loads without a full guild payload).
+    pub fn update_channel_permissions(&mut self, guild_id: &str, channels: &[crate::domain::Channel]) {
+        let Some(context) = self.guild_permission_contexts.get(guild_id).cloned() else {
+            return;
+        };
+        if !context.known {
+            return;
+        }
+        self.remove_guild_channel_permissions(guild_id, channels);
+        self.insert_channel_permissions(&context, channels);
+    }
+
+    /// Stores effective permissions for a synthetic channel (tests/UI).
+    pub fn set_channel_permissions(
+        &mut self,
+        channel_id: impl Into<String>,
+        permissions: u64,
+    ) {
+        self.channel_permissions.insert(channel_id.into(), permissions);
+    }
+
+    pub fn effective_channel_permissions(&self, channel_id: &str) -> Option<u64> {
+        self.channel_permissions.get(channel_id).copied()
+    }
+
+    /// Unknown channels (DMs and not-yet-loaded guilds) remain visible so a
+    /// transient snapshot cannot blank the sidebar.
+    pub fn can_view_channel(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_view_channel)
+            .unwrap_or(true)
+    }
+
+    pub fn can_send_messages(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_send_messages)
+            .unwrap_or(true)
+    }
+
+    pub fn can_add_reactions(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_add_reactions)
+            .unwrap_or(true)
+    }
+
+    pub fn can_attach_files(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_attach_files)
+            .unwrap_or(true)
+    }
+
+    pub fn can_connect_to_channel(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_connect)
+            .unwrap_or(true)
+    }
+
+    pub fn can_speak_in_channel(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_speak)
+            .unwrap_or(true)
+    }
+
+    fn insert_channel_permissions(
+        &mut self,
+        context: &GuildPermissionContext,
+        channels: &[crate::domain::Channel],
+    ) {
+        for channel in channels {
+            let parent_overwrites = channel
+                .category_id
+                .as_deref()
+                .and_then(|category_id| {
+                    channels
+                        .iter()
+                        .find(|candidate| candidate.id == category_id)
+                })
+                .map(|parent| parent.permission_overwrites.as_slice())
+                .unwrap_or(&[]);
+            let permissions = context.channel_permissions(
+                &channel.permission_overwrites,
+                parent_overwrites,
+            );
+            self.channel_permissions
+                .insert(channel.id.clone(), permissions);
+        }
+    }
+
+    fn remove_guild_channel_permissions(
+        &mut self,
+        guild_id: &str,
+        channels: &[crate::domain::Channel],
+    ) {
+        let mut ids: std::collections::HashSet<String> =
+            channels.iter().map(|channel| channel.id.clone()).collect();
+        if let Some(guild) = self.guilds.iter().find(|guild| guild.id == guild_id) {
+            for category in &guild.categories {
+                for channel in &category.channels {
+                    ids.insert(channel.id.clone());
+                }
+            }
+        }
+        self.channel_permissions
+            .retain(|channel_id, _| !ids.contains(channel_id));
+    }
+}
 
 impl AppState {
     /// Selects a guild (or None for DMs / Home)
