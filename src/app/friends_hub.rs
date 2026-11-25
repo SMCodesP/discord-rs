@@ -11,9 +11,9 @@
 //!
 //! Friend rows come exclusively from real relationship state. Search and add
 //! friend fields are bound to kit `InputState` entities owned by `RootView`.
-//! DECORAÇÃO: `FriendItemState.avatar_decoration_data` e
+//! DECORAÇÃO: `FriendItemState.avatar_decoration_data`,
+//! `MessageRequestItem.avatar_decoration_data` e
 //! `ActiveNowItem.avatar_decoration_data` são repassados ao `Avatar`.
-//! `MessageRequestItem` ainda não carrega decoração no modelo atual.
 
 use crate::app::state::*;
 use crate::components::{Avatar, AvatarSize, Button, ButtonSize, TextInput};
@@ -713,6 +713,7 @@ fn render_msgreq_card_left(req: &MessageRequestItem) -> AnyElement {
                 .opt_src(req.avatar_url.clone())
                 .size(AvatarSize::Px40)
                 .opt_status(Some(domain_presence(req.presence)))
+                .opt_decoration(req.avatar_decoration_data.clone())
                 .bg_color(blurple())
                 .cutout_color(bg_channels()),
         )

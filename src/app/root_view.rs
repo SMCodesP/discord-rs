@@ -6,7 +6,7 @@ use super::channel_sidebar::ChannelSidebar;
 use super::guild_rail::GuildRail;
 use super::header_bar::HeaderBar;
 use super::member_sidebar::MemberSidebar;
-use super::state::{ActiveModal, AppState, ChannelKind};
+use super::state::{ActiveModal, AppState, ChannelKind, FriendItemState};
 use super::user_settings::UserSettingsModal;
 use super::voice_call_panel::VoiceCallPanel;
 use crate::chat::ChatView;
@@ -1542,6 +1542,34 @@ fn build_explore_dialog(
         )
 }
 
+/// Row data shared by the "add to group" and "create group" friend pickers.
+/// Carries the avatar fields straight from the live friend relationship so both
+/// dialogs render the same `Avatar` (URL, status and decoration).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupDmFriendRow {
+    id: String,
+    username: String,
+    display_name: String,
+    avatar_url: Option<String>,
+    avatar_decoration_data: Option<crate::domain::user::AvatarDecorationData>,
+    presence: crate::app::state::PresenceStatus,
+    show_status: bool,
+}
+
+impl GroupDmFriendRow {
+    fn from_friend(friend: &FriendItemState) -> Self {
+        Self {
+            id: friend.id.clone(),
+            username: friend.username.clone(),
+            display_name: friend.display_name.clone(),
+            avatar_url: friend.avatar_url.clone(),
+            avatar_decoration_data: friend.avatar_decoration_data.clone(),
+            presence: friend.presence,
+            show_status: friend.relationship_type == 1,
+        }
+    }
+}
+
 /// Builds the Dialog to add friends to an existing DM channel / group DM
 fn build_add_friend_to_group_dialog(
     dialog: Dialog,
@@ -1561,9 +1589,7 @@ fn build_add_friend_to_group_dialog(
         friend_rows.push(render_add_friend_row(
             entity.clone(),
             channel_id.clone(),
-            friend.id.clone(),
-            friend.username.clone(),
-            friend.display_name.clone(),
+            friend,
             is_already_member,
         ));
     }
@@ -1645,15 +1671,15 @@ fn build_add_friend_to_group_dialog(
 fn render_add_friend_row(
     entity: Entity<AppState>,
     channel_id: String,
-    fid: String,
-    fname: String,
-    dname: String,
+    friend: &FriendItemState,
     is_already_member: bool,
 ) -> AnyElement {
+    let row = GroupDmFriendRow::from_friend(friend);
     let entity_add = entity;
     let cid = channel_id;
+    let fid = row.id.clone();
     let friend_id = fid.clone();
-    let friend_name = fname.clone();
+    let friend_name = row.username.clone();
 
     div()
         .h(px(44.0))
@@ -1670,7 +1696,15 @@ fn render_add_friend_row(
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(Avatar::new(dname.clone()).size(AvatarSize::Px32))
+                .child(
+                    Avatar::new(row.display_name.clone())
+                        .opt_src(row.avatar_url.clone())
+                        .size(AvatarSize::Px32)
+                        .opt_status(row.show_status.then(|| row.presence.into()))
+                        .opt_decoration(row.avatar_decoration_data.clone())
+                        .bg_color(blurple())
+                        .cutout_color(bg_channels()),
+                )
                 .child(
                     div()
                         .flex()
@@ -1680,13 +1714,13 @@ fn render_add_friend_row(
                                 .text_color(text_titles())
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(14.0))
-                                .child(dname),
+                                .child(row.display_name.clone()),
                         )
                         .child(
                             div()
                                 .text_color(legacy_949ba4())
                                 .text_size(px(11.0))
-                                .child(format!("@{}", fname)),
+                                .child(format!("@{}", row.username)),
                         ),
                 ),
         )
@@ -1730,9 +1764,7 @@ fn build_create_group_dm_dialog(
     for friend in &state.friends {
         friend_rows.push(render_create_group_dm_row(
             entity.clone(),
-            friend.id.clone(),
-            friend.username.clone(),
-            friend.display_name.clone(),
+            friend,
         ));
     }
 
@@ -1812,13 +1844,13 @@ fn build_create_group_dm_dialog(
 
 fn render_create_group_dm_row(
     entity: Entity<AppState>,
-    fid: String,
-    fname: String,
-    dname: String,
+    friend: &FriendItemState,
 ) -> AnyElement {
+    let row = GroupDmFriendRow::from_friend(friend);
     let entity_create = entity;
+    let fid = row.id.clone();
     let friend_id = fid.clone();
-    let friend_name = fname.clone();
+    let friend_name = row.username.clone();
 
     div()
         .h(px(44.0))
@@ -1835,7 +1867,15 @@ fn render_create_group_dm_row(
                 .flex()
                 .items_center()
                 .gap(px(10.0))
-                .child(Avatar::new(dname.clone()).size(AvatarSize::Px32))
+                .child(
+                    Avatar::new(row.display_name.clone())
+                        .opt_src(row.avatar_url.clone())
+                        .size(AvatarSize::Px32)
+                        .opt_status(row.show_status.then(|| row.presence.into()))
+                        .opt_decoration(row.avatar_decoration_data.clone())
+                        .bg_color(blurple())
+                        .cutout_color(bg_channels()),
+                )
                 .child(
                     div()
                         .flex()
@@ -1845,13 +1885,13 @@ fn render_create_group_dm_row(
                                 .text_color(text_titles())
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(14.0))
-                                .child(dname),
+                                .child(row.display_name.clone()),
                         )
                         .child(
                             div()
                                 .text_color(legacy_949ba4())
                                 .text_size(px(11.0))
-                                .child(format!("@{}", fname)),
+                                .child(format!("@{}", row.username)),
                         ),
                 ),
         )
@@ -2126,3 +2166,51 @@ fn render_reconnect_banner(state: &AppState) -> Option<AnyElement> {
 }
 
 
+
+#[cfg(test)]
+mod group_dm_avatar_tests {
+    use super::*;
+    use crate::app::state::{FriendItemState, PresenceStatus as AppPresenceStatus};
+    use crate::domain::user::AvatarDecorationData;
+
+    fn friend(relationship_type: u32) -> FriendItemState {
+        FriendItemState {
+            id: "synth-group-user-1".to_string(),
+            username: "synth_group_user".to_string(),
+            display_name: "Synth Group User".to_string(),
+            avatar_url: Some("https://cdn.discordapp.com/avatars/synth-group-user-1/synth_hash.png".to_string()),
+            avatar_text: "S".to_string(),
+            presence: AppPresenceStatus::Idle,
+            custom_status: Some("synthetic status".to_string()),
+            relationship_type,
+            avatar_decoration_data: Some(AvatarDecorationData::with_sku(
+                "a_synth_group_deco",
+                "synth-sku-group",
+            )),
+        }
+    }
+
+    #[test]
+    fn group_dm_picker_rows_propagate_avatar_url_status_and_decoration() {
+        let friend = friend(1);
+        let row = GroupDmFriendRow::from_friend(&friend);
+
+        assert_eq!(row.id, friend.id);
+        assert_eq!(row.username, friend.username);
+        assert_eq!(row.display_name, friend.display_name);
+        assert_eq!(row.avatar_url, friend.avatar_url);
+        assert_eq!(
+            row.avatar_decoration_data.as_ref().map(|d| d.asset.as_str()),
+            Some("a_synth_group_deco")
+        );
+        assert_eq!(row.presence, AppPresenceStatus::Idle);
+        assert!(row.show_status, "accepted friends show presence");
+    }
+
+    #[test]
+    fn group_dm_picker_hides_status_for_non_accepted_relationships() {
+        let row = GroupDmFriendRow::from_friend(&friend(3));
+        assert!(!row.show_status, "pending relationships must not show presence");
+        assert!(row.avatar_decoration_data.is_some());
+    }
+}

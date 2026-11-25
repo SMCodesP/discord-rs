@@ -264,6 +264,9 @@ pub struct MessageRequestItem {
     pub preview_message: String,
     pub timestamp: String,
     pub is_spam: bool,
+    /// Avatar decoration equipped by the requesting user, when available.
+    #[serde(default)]
+    pub avatar_decoration_data: Option<AvatarDecorationData>,
 }
 
 /// Activity category for Rich Presence & Active Now panel
