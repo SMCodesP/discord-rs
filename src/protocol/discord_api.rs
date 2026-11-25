@@ -1685,6 +1685,10 @@ impl DiscordTransport for DiscordApiClient {
         self.unpin_message(channel_id, message_id).await
     }
 
+    async fn get_pinned_messages(&self, channel_id: &str) -> anyhow::Result<Vec<Message>> {
+        self.get_pinned_messages(channel_id).await
+    }
+
     async fn request_guild_members(
         &self,
         guild_id: &str,
@@ -4505,6 +4509,35 @@ impl DiscordApiClient {
         let req = self.auth_request(reqwest::Method::DELETE, &path);
         self.send_request(&path, req).await?;
         Ok(())
+    }
+
+    /// Fetches pinned messages for a channel (GET /channels/{channel_id}/pins).
+    pub async fn get_pinned_messages(&self, channel_id: &str) -> Result<Vec<Message>> {
+        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM para pins: {}", e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let path = format!("/channels/{}/pins", resolved_id);
+        let req = self.auth_request(reqwest::Method::GET, &path);
+        let resp = self.send_request(&path, req).await?;
+        let raw_messages: Vec<serde_json::Value> = resp.json().await?;
+
+        let mut messages = Vec::new();
+        for val in raw_messages {
+            if let Some(msg) = parse_message_from_json(&val) {
+                messages.push(msg);
+            }
+        }
+        Ok(messages)
     }
 
     /// Requests guild members for message authors via Gateway Opcode 8 (chunks of <= 100)

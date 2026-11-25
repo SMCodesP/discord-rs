@@ -1239,6 +1239,26 @@ impl ClientManager {
         transport.unpin_message(&real_channel_id, message_id).await
     }
 
+    /// Fetches pinned messages in a channel (GET /channels/{channel_id}/pins).
+    pub async fn get_pinned_messages(&self, channel_id: &str) -> Result<Vec<Message>> {
+        let real_channel_id =
+            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+                let recipient_id = channel_id.trim_start_matches("dm-");
+                match self.create_or_get_dm_channel(recipient_id).await {
+                    Ok(ch) => ch.id,
+                    Err(_) => channel_id.to_string(),
+                }
+            } else {
+                channel_id.to_string()
+            };
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.get_pinned_messages(&real_channel_id).await
+    }
+
     /// Requests guild members for message authors missing from cache (Gateway Opcode 8)
     pub async fn request_guild_members(&self, guild_id: &str, user_ids: Vec<String>) -> Result<()> {
         let transport = {

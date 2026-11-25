@@ -424,6 +424,7 @@ fn render_toolbar(
         );
     } else {
         // 1. Notifications / Bell button (Guild text/voice channels)
+        let notif_entity = app_entity.clone();
         toolbar = toolbar.child(
             IconButton::with_icon("header-btn-notifications", |sz, col| {
                 icon_bell(sz, col).into_any_element()
@@ -431,11 +432,22 @@ fn render_toolbar(
             .size(px(28.0))
             .icon_size(px(16.0))
             .rounded(px(4.0))
-            .tooltip("Notification Settings"),
+            .tooltip("Notification Settings")
+            .on_click(move |_event, _window, cx| {
+                notif_entity.update(cx, |state, cx| {
+                    state.user_settings_tab = crate::app::state::SettingsTab::Notifications;
+                    state.open_modal(crate::app::state::ActiveModal::UserSettings);
+                    cx.notify();
+                });
+            }),
         );
     }
 
     // 2. Pinned messages button
+    let pins_entity = app_entity.clone();
+    let pins_channel_id = state.selected_channel_id.clone();
+    let pins_disabled = pins_channel_id.is_none();
+    let pins_active = state.is_pins_panel_open;
     toolbar = toolbar.child(
         IconButton::with_icon("header-btn-pinned", |sz, col| {
             icon_pin(sz, col).into_any_element()
@@ -443,7 +455,50 @@ fn render_toolbar(
         .size(px(28.0))
         .icon_size(px(16.0))
         .rounded(px(4.0))
-        .tooltip("Pinned Messages"),
+        .disabled(pins_disabled)
+        .active(pins_active)
+        .tooltip(if pins_disabled {
+            "Selecione um canal para ver mensagens fixadas"
+        } else if pins_active {
+            "Ocultar mensagens fixadas"
+        } else {
+            "Mensagens fixadas"
+        })
+        .on_click(move |_event, _window, cx| {
+            let Some(channel_id) = pins_channel_id.clone() else {
+                return;
+            };
+            let request = pins_entity.update(cx, |state, cx| {
+                let was_open = state.is_pins_panel_open;
+                state.toggle_pins_panel();
+                let req = if !was_open {
+                    state.begin_load_pins(&channel_id)
+                } else {
+                    None
+                };
+                cx.notify();
+                req
+            });
+            if let Some((cm, cid, generation)) = request {
+                let app_weak = pins_entity.downgrade();
+                cx.spawn(|_this, cx: &mut gpui::AsyncApp| {
+                    let mut cx = cx.clone();
+                    async move {
+                        let result = cm
+                            .get_pinned_messages(&cid)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = cx.update(|cx| {
+                            let _ = app_weak.update(cx, |state, cx| {
+                                state.finish_load_pins(&cid, generation, result);
+                                cx.notify();
+                            });
+                        });
+                    }
+                })
+                .detach();
+            }
+        }),
     );
 
     // 3. Member list toggle button
@@ -479,6 +534,7 @@ fn render_toolbar(
     ));
 
     // 5. Inbox button
+    let inbox_entity = app_entity.clone();
     toolbar = toolbar.child(
         IconButton::with_icon("header-btn-inbox", |sz, col| {
             icon_inbox(sz, col).into_any_element()
@@ -486,7 +542,14 @@ fn render_toolbar(
         .size(px(28.0))
         .icon_size(px(16.0))
         .rounded(px(4.0))
-        .tooltip("Inbox"),
+        .tooltip("Inbox")
+        .on_click(move |_event, _window, cx| {
+            inbox_entity.update(cx, |state, cx| {
+                state.selected_guild_id = None;
+                state.select_friends_tab(crate::app::state::FriendsTab::MessageRequests);
+                cx.notify();
+            });
+        }),
     );
 
     // 6. Help button
@@ -497,7 +560,10 @@ fn render_toolbar(
         .size(px(28.0))
         .icon_size(px(16.0))
         .rounded(px(4.0))
-        .tooltip("Help"),
+        .tooltip("Help")
+        .on_click(move |_event, _window, cx| {
+            cx.open_url("https://support.discord.com");
+        }),
     );
 
     toolbar.into_any_element()

@@ -68,6 +68,18 @@ pub struct AppState {
     pub search_retry_after: Option<f64>,
     /// Monotonic search generation counter to discard stale out-of-order responses
     pub search_generation: u64,
+    /// Whether the pinned messages panel is open
+    pub is_pins_panel_open: bool,
+    /// Pinned messages loaded for the active channel
+    pub pinned_messages: Vec<Message>,
+    /// Loading flag for pinned messages panel
+    pub is_pins_loading: bool,
+    /// Visible error for pinned messages panel
+    pub pinned_messages_error: Option<String>,
+    /// Channel ID the loaded pins belong to
+    pub pinned_messages_channel_id: Option<String>,
+    /// Monotonic generation counter to discard stale pin responses
+    pub pins_generation: u64,
     /// Target message Snowflake ID to focus/scroll to in chat
     pub target_message_id: Option<String>,
     /// Real-time coalesced typing tracker: channel_id -> user_id -> (username, timestamp)
@@ -249,6 +261,12 @@ impl AppState {
             is_search_indexing: false,
             search_retry_after: None,
             search_generation: 0,
+            is_pins_panel_open: false,
+            pinned_messages: Vec::new(),
+            is_pins_loading: false,
+            pinned_messages_error: None,
+            pinned_messages_channel_id: None,
+            pins_generation: 0,
             target_message_id: None,
             typing_tracker: HashMap::new(),
             event_batcher: crate::protocol::EventBatcher::new(),

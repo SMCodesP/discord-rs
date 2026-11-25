@@ -1170,6 +1170,19 @@ impl Render for ChatView {
             None
         };
 
+        let is_pins_panel_open = app_state_ref.is_pins_panel_open;
+        let pins_panel = if is_pins_panel_open {
+            let state = self.state.read(cx);
+            Some(render_pinned_messages_panel(
+                app_entity.clone(),
+                self_entity.clone(),
+                &state,
+                &channel_id,
+            ))
+        } else {
+            None
+        };
+
         // 8. Rich Media Picker Callbacks & Popover
         let self_for_attachment = self_entity.clone();
         let on_attachment: Option<EditorActionCallback> = Some(Arc::new(move |_window, cx| {
@@ -2495,6 +2508,7 @@ impl Render for ChatView {
                 }
 
                 if key == "escape" || key == "Escape" {
+                    let app_esc = app_entity_shortcut.clone();
                     self_keys.update(cx, |this, cx| {
                         if this.media_picker_open {
                             this.media_picker_open = false;
@@ -2514,6 +2528,14 @@ impl Render for ChatView {
                         } else if this.active_context_menu.is_some() {
                             this.active_context_menu = None;
                             cx.notify();
+                        } else {
+                            let was_open = app_esc.read(cx).is_pins_panel_open;
+                            if was_open {
+                                app_esc.update(cx, |state, cx| {
+                                    state.close_pins_panel();
+                                    cx.notify();
+                                });
+                            }
                         }
                     });
                     return;
@@ -2543,8 +2565,264 @@ impl Render for ChatView {
             })
             .child(main_chat_col)
             .children(search_panel)
+            .children(pins_panel)
             .children(context_menu_overlay)
             .children(delete_modal_overlay)
             .children(pin_modal_overlay)
     }
+}
+
+fn render_pinned_messages_panel(
+    app_entity: Entity<AppState>,
+    chat_entity: Entity<ChatView>,
+    state: &AppState,
+    channel_id: &str,
+) -> AnyElement {
+    use crate::components::{Avatar, AvatarSize, IconButton};
+    use crate::tokens::icons::{icon_close, icon_pin};
+
+    let close_entity = app_entity.clone();
+    let header = div()
+        .h(px(48.0))
+        .px(px(16.0))
+        .border_b_1()
+        .border_color(border_subtle())
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(icon_pin(px(16.0), text_titles()))
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(px(14.0))
+                        .child("Mensagens fixadas"),
+                ),
+        )
+        .child(
+            IconButton::with_icon("pins-panel-close", |sz, col| icon_close(sz, col).into_any_element())
+                .size(px(28.0))
+                .icon_size(px(14.0))
+                .rounded(px(4.0))
+                .tooltip("Fechar")
+                .on_click(move |_ev, _win, cx| {
+                    close_entity.update(cx, |state, cx| {
+                        state.close_pins_panel();
+                        cx.notify();
+                    });
+                }),
+        );
+
+    let mut body = div()
+        .flex_1()
+        .min_h(px(0.0))
+        .overflow_y_scroll()
+        .p(px(12.0))
+        .flex()
+        .flex_col()
+        .gap(px(8.0));
+
+    if state.is_pins_loading {
+        body = body.child(
+            div()
+                .text_color(text_muted())
+                .text_size(font_size_sm())
+                .child("Carregando mensagens fixadas..."),
+        );
+    } else if let Some(ref err) = state.pinned_messages_error {
+        body = body.child(
+            div()
+                .p(px(10.0))
+                .rounded(radius_sm())
+                .bg(with_alpha(HEX_STATUS_DANGER, 0.12))
+                .border_1()
+                .border_color(status_danger())
+                .text_color(status_danger())
+                .text_size(font_size_sm())
+                .child(err.clone()),
+        );
+    } else if state.pinned_messages.is_empty() {
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .py(px(24.0))
+                .child(icon_pin(px(32.0), text_muted()))
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(font_size_sm())
+                        .child("Nenhuma mensagem fixada"),
+                )
+                .child(
+                    div()
+                        .text_color(text_muted())
+                        .text_size(font_size_xs())
+                        .child("As mensagens fixadas neste canal aparecerão aqui."),
+                ),
+        );
+    } else {
+        let can_manage = state
+            .selected_guild_id
+            .is_none()
+            || state.selected_channel_id.as_deref() == Some(channel_id);
+        for msg in &state.pinned_messages {
+            let msg_jump = msg.clone();
+            let msg_unpin = msg.clone();
+            let app_jump = app_entity.clone();
+            let app_unpin = app_entity.clone();
+            let chat_unpin = chat_entity.clone();
+            let cid = channel_id.to_string();
+            let content = if msg.content.trim().is_empty() {
+                if !msg.attachments.is_empty() {
+                    format!("{} anexo(s)", msg.attachments.len())
+                } else {
+                    "Mensagem sem texto".to_string()
+                }
+            } else {
+                msg.content.clone()
+            };
+
+            let mut card = div()
+                .p(px(10.0))
+                .rounded(radius_md())
+                .bg(bg_channels())
+                .border_1()
+                .border_color(border_subtle())
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            Avatar::new(msg.author.display_name().to_string())
+                                .size(AvatarSize::Px24)
+                                .opt_src(msg.author.avatar_url.clone())
+                                .opt_decoration(msg.author.avatar_decoration_data.clone())
+                                .cutout_color(bg_channels()),
+                        )
+                        .child(
+                            div()
+                                .text_color(text_titles())
+                                .text_size(font_size_sm())
+                                .font_weight(FontWeight::BOLD)
+                                .child(msg.author.display_name().to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_color(text_primary())
+                        .text_size(font_size_sm())
+                        .overflow_hidden()
+                        .max_h(px(72.0))
+                        .child(content),
+                );
+
+            let mut actions = div().flex().flex_row().gap(px(8.0)).child(
+                div()
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(radius_sm())
+                    .bg(channel_hover())
+                    .cursor_pointer()
+                    .text_size(font_size_xs())
+                    .text_color(text_titles())
+                    .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                        let cid_jump = msg_jump.channel_id.clone();
+                        let mid = msg_jump.id.clone();
+                        app_jump.update(cx, |state, cx| {
+                            state.jump_to_message(&cid_jump, &mid);
+                            state.close_pins_panel();
+                            cx.notify();
+                        });
+                    })
+                    .child("Ir para mensagem"),
+            );
+
+            if can_manage {
+                actions = actions.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(radius_sm())
+                        .bg(with_alpha(HEX_STATUS_DANGER, 0.12))
+                        .cursor_pointer()
+                        .text_size(font_size_xs())
+                        .text_color(status_danger())
+                        .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                            let mid = msg_unpin.id.clone();
+                            let cid_unpin = cid.clone();
+                            let cm = app_unpin.read(cx).client_manager.clone();
+                            if let Some(cm) = cm {
+                                let app_async = app_unpin.clone();
+                                let chat_async = chat_unpin.clone();
+                                cx.spawn(|cx: &mut gpui::AsyncApp| {
+                                    let mut cx = cx.clone();
+                                    async move {
+                                        let res = cm.unpin_message(&cid_unpin, &mid).await;
+                                        match res {
+                                            Ok(()) => {
+                                                let _ = cx.update(|cx| {
+                                                    let _ = app_async.update(cx, |state, cx| {
+                                                        state.set_message_pinned(&cid_unpin, &mid, false);
+                                                        cx.notify();
+                                                    });
+                                                });
+                                            }
+                                            Err(err) => {
+                                                let err = err.to_string();
+                                                let _ = cx.update(|cx| {
+                                                    let _ = chat_async.update(cx, |chat, cx| {
+                                                        chat.pin_error = Some(err);
+                                                        cx.notify();
+                                                    });
+                                                });
+                                            }
+                                        }
+                                    }
+                                })
+                                .detach();
+                            } else {
+                                chat_unpin.update(cx, |chat, cx| {
+                                    chat.pin_error = Some("Não conectado à API do Discord".to_string());
+                                    cx.notify();
+                                });
+                            }
+                        })
+                        .child("Desafixar"),
+                );
+            }
+
+            card = card.child(actions);
+            body = body.child(card);
+        }
+    }
+
+    div()
+        .w(px(420.0))
+        .h_full()
+        .flex()
+        .flex_col()
+        .bg(bg_channels())
+        .border_l_1()
+        .border_color(bg_server())
+        .flex_shrink_0()
+        .child(header)
+        .child(body)
+        .into_any_element()
 }
