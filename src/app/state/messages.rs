@@ -7,6 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+/// Maximum time an optimistic message may stay pending without a REST/Gateway
+/// confirmation before it is rolled back and offered for retry. Mirrors the
+/// composer's request timeout so both paths expire together.
+pub const MESSAGE_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Correlation metadata for one optimistic send. Discord's REST transport in
 /// this repository does not yet expose a nonce parameter, so the nonce is kept
 /// here as a stable client correlation token and reconciled by the REST message
@@ -219,17 +224,14 @@ impl AppState {
                     continue;
                 }
                 let keep = if message.is_pending || message.id.starts_with("temp-") {
+                    // Only a correlated confirmation may drop an optimistic row.
+                    // An older message with the same text must never remove a
+                    // newer pending send.
                     let correlated = pending_send(&message.id)
                         .and_then(|pending| pending.confirmed_id)
                         .map(|confirmed_id| seen_ids.contains(&confirmed_id))
                         .unwrap_or(false);
-                    let legacy_match = pending_send(&message.id).is_none()
-                        && messages.iter().any(|incoming| {
-                            incoming.content == message.content
-                                && (incoming.author.id == message.author.id
-                                    || incoming.author.username == message.author.username)
-                        });
-                    !correlated && !legacy_match
+                    !correlated
                 } else {
                     // Keep live rows not included in a stale history response.
                     true
@@ -381,32 +383,25 @@ impl AppState {
         Ok(temp_id)
     }
 
-    /// Reconciles a successful REST response with its optimistic row. Safe to
-    /// call before or after the duplicate Gateway `MESSAGE_CREATE` event.
-    pub fn confirm_message_send(&mut self, temp_id: &str, mut confirmed: Message) {
-        prewarm_message_markdown(&confirmed);
-        let pending = take_pending_send(temp_id);
-        if let Some(pending) = pending {
-            log::debug!(
-                "Confirmando mensagem otimista {} com nonce de correlação {}",
-                pending.temp_id,
-                pending.client_nonce
-            );
-            if let Some(messages) = self.messages_by_channel.get_mut(&pending.channel_id) {
-                messages.retain(|message| message.id != pending.temp_id);
-            }
-            if pending.channel_id != confirmed.channel_id {
-                if let Some(messages) = self.messages_by_channel.get_mut(&confirmed.channel_id) {
-                    messages.retain(|message| message.id != pending.temp_id);
+    /// Removes one optimistic row from every channel it may have been migrated
+    /// to (temporary DM -> resolved DM). Returns the channel that contained it.
+    fn remove_message_row(&mut self, temp_id: &str) -> Option<String> {
+        let mut found = None;
+        for (channel_id, messages) in self.messages_by_channel.iter_mut() {
+            if let Some(position) = messages.iter().position(|message| message.id == temp_id) {
+                messages.remove(position);
+                if found.is_none() {
+                    found = Some(channel_id.clone());
                 }
             }
-        } else {
-            // The row may already have been migrated to the resolved DM channel.
-            for messages in self.messages_by_channel.values_mut() {
-                messages.retain(|message| message.id != temp_id);
-            }
         }
+        found
+    }
 
+    /// Inserts or replaces a confirmed message, keeping channel ordering and the
+    /// DM last-message pointer in sync.
+    fn upsert_confirmed_message(&mut self, mut confirmed: Message) {
+        prewarm_message_markdown(&confirmed);
         confirmed.is_pending = false;
         let channel_id = confirmed.channel_id.clone();
         let messages = self
@@ -435,58 +430,247 @@ impl AppState {
         }
     }
 
-    /// Removes a failed optimistic row and returns its channel/content for retry.
-    /// If Gateway already confirmed the send, no error is returned.
-    pub fn fail_message_send(&mut self, temp_id: &str) -> Option<(String, String)> {
-        let pending = take_pending_send(temp_id)?;
-        let mut candidate_channels = vec![pending.channel_id.as_str()];
-        if let Some(recipient_id) = pending.channel_id.strip_prefix("dm-") {
-            for dm in &self.dm_channels {
-                if dm.recipient_ids.iter().any(|id| id == recipient_id) {
-                    candidate_channels.push(dm.id.as_str());
+    /// Reconciles a successful REST response with its optimistic row. Safe to
+    /// call before or after the duplicate Gateway `MESSAGE_CREATE` event.
+    pub fn confirm_message_send(&mut self, temp_id: &str, confirmed: Message) {
+        if let Some(pending) = take_pending_send(temp_id) {
+            log::debug!(
+                "Confirmando mensagem otimista {} com nonce de correlação {}",
+                pending.temp_id,
+                pending.client_nonce
+            );
+        }
+        self.remove_message_row(temp_id);
+        self.upsert_confirmed_message(confirmed);
+    }
+
+    /// Correlates a Gateway `MESSAGE_CREATE` with one optimistic send. Matching
+    /// is anchored on the registered temp ID/nonce; text+author is only used to
+    /// locate a legacy offline row that has no correlation metadata. Pending
+    /// entries stay registered after this call so a later REST success/failure
+    /// can still be resolved idempotently.
+    pub fn reconcile_gateway_message_create(&mut self, message: &Message) -> bool {
+        let already_confirmed: Vec<String> = PENDING_MESSAGE_SENDS
+            .lock()
+            .map(|sends| {
+                sends
+                    .values()
+                    .filter(|pending| pending.confirmed_id.as_deref() == Some(message.id.as_str()))
+                    .map(|pending| pending.temp_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !already_confirmed.is_empty() {
+            for temp_id in already_confirmed {
+                self.remove_message_row(&temp_id);
+            }
+            self.upsert_confirmed_message(message.clone());
+            return true;
+        }
+
+        let matched = PENDING_MESSAGE_SENDS
+            .lock()
+            .ok()
+            .and_then(|sends| {
+                sends
+                    .values()
+                    .filter(|pending| {
+                        pending.confirmed_id.is_none()
+                            && pending.content == message.content
+                            && pending.author_id == message.author.id
+                            && (pending.channel_id == message.channel_id
+                                || pending.channel_id.starts_with("dm-"))
+                    })
+                    .min_by(|left, right| {
+                        left.created_at
+                            .cmp(&right.created_at)
+                            .then_with(|| left.temp_id.cmp(&right.temp_id))
+                    })
+                    .map(|pending| pending.temp_id.clone())
+            });
+        if let Some(temp_id) = matched {
+            if let Ok(mut sends) = PENDING_MESSAGE_SENDS.lock() {
+                if let Some(pending) = sends.get_mut(&temp_id) {
+                    pending.confirmed_id = Some(message.id.clone());
+                }
+            }
+            self.remove_message_row(&temp_id);
+            self.upsert_confirmed_message(message.clone());
+            return true;
+        }
+
+        // Legacy rows created by the offline dispatcher never registered a
+        // nonce. They may still be confirmed once, but only a row that matches
+        // this exact author/content pair is consumed.
+        let legacy = self.find_legacy_pending_row(message);
+        if let Some(temp_id) = legacy {
+            self.remove_message_row(&temp_id);
+            self.upsert_confirmed_message(message.clone());
+            return true;
+        }
+        false
+    }
+
+    fn find_legacy_pending_row(&self, message: &Message) -> Option<String> {
+        let registered: HashSet<String> = PENDING_MESSAGE_SENDS
+            .lock()
+            .map(|sends| sends.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut best: Option<(i64, String)> = None;
+        for (channel_id, messages) in &self.messages_by_channel {
+            if channel_id != &message.channel_id && !channel_id.starts_with("dm-") {
+                continue;
+            }
+            for candidate in messages {
+                if !(candidate.is_pending || candidate.id.starts_with("temp-")) {
+                    continue;
+                }
+                if registered.contains(&candidate.id) {
+                    continue;
+                }
+                if candidate.content != message.content {
+                    continue;
+                }
+                if candidate.author.id != message.author.id
+                    && candidate.author.username != message.author.username
+                {
+                    continue;
+                }
+                let candidate_timestamp = candidate.timestamp.timestamp_millis();
+                let is_older = best
+                    .as_ref()
+                    .map(|(timestamp, _)| candidate_timestamp < *timestamp)
+                    .unwrap_or(true);
+                if is_older {
+                    best = Some((candidate_timestamp, candidate.id.clone()));
                 }
             }
         }
-        let already_confirmed = candidate_channels.iter().any(|channel_id| {
-            self.messages_by_channel
-                .get(*channel_id)
-                .map(|messages| {
-                    messages.iter().any(|message| {
-                        !message.is_pending
-                            && message.id != temp_id
-                            && message.author.id == pending.author_id
-                            && message.content == pending.content
-                    }) || pending
-                        .confirmed_id
-                        .as_ref()
-                        .is_some_and(|id| messages.iter().any(|message| &message.id == id))
-                })
-                .unwrap_or(false)
-        });
-        if already_confirmed {
-            return None;
-        }
-
-        if let Some(messages) = self.messages_by_channel.get_mut(&pending.channel_id) {
-            messages.retain(|message| message.id != temp_id);
-        }
-        Some((pending.channel_id, pending.content))
+        best.map(|(_, id)| id)
     }
 
-    /// Drains failures from the legacy `send_message` dispatcher, removes their
-    /// temporary rows and returns `(channel_id, content, error)` for UI retry.
+    /// Removes a failed optimistic row and returns its channel/content for retry.
+    /// If the Gateway/REST already confirmed the send, no error is returned and
+    /// the temporary row is still rolled back.
+    pub fn fail_message_send(&mut self, temp_id: &str) -> Option<(String, String)> {
+        let pending = take_pending_send(temp_id)?;
+        let actual_channel = self
+            .remove_message_row(temp_id)
+            .unwrap_or_else(|| pending.channel_id.clone());
+        if pending.confirmed_id.is_some() {
+            return None;
+        }
+        Some((actual_channel, pending.content))
+    }
+
+    /// Records a transport-level send failure without touching a send that the
+    /// Gateway already confirmed. The UI drains it through
+    /// `take_failed_message_sends`.
+    pub fn handle_message_send_failure_event(
+        &mut self,
+        temp_id: &str,
+        channel_id: &str,
+        content: &str,
+        error: &str,
+    ) {
+        if pending_send(temp_id)
+            .map(|pending| pending.confirmed_id.is_some())
+            .unwrap_or(false)
+        {
+            return;
+        }
+        mark_message_send_failed(temp_id, channel_id, content, error);
+    }
+
+    /// Expires one pending send when it exceeds `max_age`. Returns the retry
+    /// payload only when no REST/Gateway confirmation arrived.
+    pub fn expire_pending_message_send(
+        &mut self,
+        temp_id: &str,
+        max_age: Duration,
+    ) -> Option<(String, String, String)> {
+        let expired = PENDING_MESSAGE_SENDS.lock().ok().and_then(|mut sends| {
+            let should_expire = sends
+                .get(temp_id)
+                .map(|pending| {
+                    pending.confirmed_id.is_none() && pending.created_at.elapsed() >= max_age
+                })
+                .unwrap_or(false);
+            if should_expire {
+                sends.remove(temp_id)
+            } else {
+                None
+            }
+        })?;
+        let actual_channel = self
+            .remove_message_row(temp_id)
+            .unwrap_or_else(|| expired.channel_id.clone());
+        Some((
+            actual_channel,
+            expired.content,
+            format!(
+                "Tempo limite de {}s excedido ao confirmar o envio",
+                MESSAGE_SEND_TIMEOUT.as_secs()
+            ),
+        ))
+    }
+
+    /// Rolls back every optimistic row older than `max_age` that never received
+    /// a confirmation, so a lost request can never leave an infinite pending row.
+    pub fn expire_message_sends_older_than(
+        &mut self,
+        max_age: Duration,
+    ) -> Vec<(String, String, String)> {
+        let expired_ids: Vec<String> = PENDING_MESSAGE_SENDS
+            .lock()
+            .map(|sends| {
+                sends
+                    .values()
+                    .filter(|pending| {
+                        pending.confirmed_id.is_none() && pending.created_at.elapsed() >= max_age
+                    })
+                    .map(|pending| pending.temp_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut result = Vec::new();
+        for temp_id in expired_ids {
+            if let Some(failure) = self.expire_pending_message_send(&temp_id, max_age) {
+                result.push(failure);
+            }
+        }
+        result
+    }
+
+    /// Production timeout sweep used before the UI drains failures.
+    pub fn expire_timed_out_message_sends(&mut self) -> Vec<(String, String, String)> {
+        self.expire_message_sends_older_than(MESSAGE_SEND_TIMEOUT)
+    }
+
+    /// Drains failures from the legacy `send_message` dispatcher and expired
+    /// optimistic sends, removes their temporary rows and returns
+    /// `(channel_id, content, error)` for UI retry.
     pub fn take_failed_message_sends(&mut self) -> Vec<(String, String, String)> {
+        let mut result = self.expire_timed_out_message_sends();
         let failures = FAILED_MESSAGE_SENDS
             .lock()
             .map(|mut failures| std::mem::take(&mut *failures))
             .unwrap_or_default();
-        let mut result = Vec::with_capacity(failures.len());
         for (temp_id, channel_id, content, error) in failures {
-            let _ = take_pending_send(&temp_id);
-            if let Some(messages) = self.messages_by_channel.get_mut(&channel_id) {
-                messages.retain(|message| message.id != temp_id);
+            let pending = take_pending_send(&temp_id);
+            let confirmed = pending
+                .as_ref()
+                .map(|pending| pending.confirmed_id.is_some())
+                .unwrap_or(false);
+            let actual_channel = self
+                .remove_message_row(&temp_id)
+                .unwrap_or(channel_id);
+            if confirmed {
+                // A late Gateway MESSAGE_CREATE already proved the send; the
+                // failure must not be reported or retried.
+                continue;
             }
-            result.push((channel_id, content, error));
+            result.push((actual_channel, content, error));
         }
         result
     }
@@ -510,7 +694,19 @@ impl AppState {
             let target_cid = channel_id.to_string();
             let text = trimmed.to_string();
             tokio::spawn(async move {
-                match cm.send_message(&target_cid, &text).await {
+                let result = tokio::time::timeout(
+                    MESSAGE_SEND_TIMEOUT,
+                    cm.send_message(&target_cid, &text),
+                )
+                .await;
+                let result = match result {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Tempo limite de {}s excedido ao confirmar o envio",
+                        MESSAGE_SEND_TIMEOUT.as_secs()
+                    )),
+                };
+                match result {
                     Ok(message) => mark_pending_send_confirmed(&temp_id, &message.id),
                     Err(error) => {
                         let error = error.to_string();
@@ -518,6 +714,12 @@ impl AppState {
                         // failure. A late Gateway MESSAGE_CREATE can still prove
                         // that the request succeeded even when REST failed.
                         mark_message_send_failed(&temp_id, &target_cid, &text, &error);
+                        cm.emit_event(TransportEvent::MessageSendFailed {
+                            temp_id,
+                            channel_id: target_cid,
+                            content: text,
+                            error: error.clone(),
+                        });
                         log::warn!("Falha ao enviar mensagem via ClientManager: {:?}", error);
                     }
                 }
