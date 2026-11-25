@@ -4,6 +4,7 @@
 
 use gpui::component::input::{InputEvent, TextareaState};
 use gpui::*;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::app::state::AppState;
@@ -105,6 +106,12 @@ pub struct ChatView {
     pub list_state: ListState,
     pub last_channel_id: Option<String>,
     pub last_message_count: usize,
+    pub cached_chat_items: Arc<Vec<ChatListItem>>,
+    pub cached_chat_items_channel: Option<String>,
+    pub cached_chat_items_len: usize,
+    pub cached_chat_items_first_id: Option<String>,
+    pub cached_chat_items_last_id: Option<String>,
+    pub cached_chat_items_signature: u64,
     pub media_picker_open: bool,
     pub media_picker_tab: MediaPickerTab,
     pub media_picker_search: String,
@@ -137,6 +144,24 @@ pub struct ChatView {
     pub composer_sub: Option<Subscription>,
 }
 
+fn chat_items_signature(messages: &[Message]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    messages.len().hash(&mut hasher);
+    for msg in messages {
+        msg.id.hash(&mut hasher);
+        msg.edited_timestamp.hash(&mut hasher);
+        msg.is_pinned.hash(&mut hasher);
+        msg.is_pending.hash(&mut hasher);
+        msg.reactions.len().hash(&mut hasher);
+        for reaction in &msg.reactions {
+            reaction.emoji.hash(&mut hasher);
+            reaction.count.hash(&mut hasher);
+            reaction.me.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 impl ChatView {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
@@ -167,6 +192,12 @@ impl ChatView {
             list_state,
             last_channel_id: None,
             last_message_count: 0,
+            cached_chat_items: Arc::new(Vec::new()),
+            cached_chat_items_channel: None,
+            cached_chat_items_len: 0,
+            cached_chat_items_first_id: None,
+            cached_chat_items_last_id: None,
+            cached_chat_items_signature: 0,
             media_picker_open: false,
             media_picker_tab: MediaPickerTab::Emojis,
             media_picker_search: String::new(),
@@ -777,15 +808,32 @@ impl Render for ChatView {
 
         // ZERO DEEP CLONES: borrow direct slice from AppState
         let message_count = all_messages.len();
+        let first_id = all_messages.first().map(|m| m.id.as_str());
+        let last_id = all_messages.last().map(|m| m.id.as_str());
+        let signature = chat_items_signature(all_messages);
 
-        // Build flattened virtual item list with zero message cloning (O(N) index mapping)
-        let chat_items = build_chat_list_items(all_messages);
+        let channel_changed = self.last_channel_id.as_deref() != Some(&channel_id);
+        let switched_from_channel = self.last_channel_id.is_some();
+        let items_changed = channel_changed
+            || self.cached_chat_items_channel.as_deref() != Some(&channel_id)
+            || self.cached_chat_items_len != message_count
+            || self.cached_chat_items_first_id.as_deref() != first_id
+            || self.cached_chat_items_last_id.as_deref() != last_id
+            || self.cached_chat_items_signature != signature
+            || self.list_state.item_count() == 0;
+        if items_changed {
+            self.cached_chat_items = Arc::new(build_chat_list_items(all_messages));
+            self.cached_chat_items_channel = Some(channel_id.clone());
+            self.cached_chat_items_len = message_count;
+            self.cached_chat_items_first_id = first_id.map(str::to_string);
+            self.cached_chat_items_last_id = last_id.map(str::to_string);
+            self.cached_chat_items_signature = signature;
+        }
+        let chat_items = self.cached_chat_items.clone();
         let total_items = chat_items.len();
 
         // Synchronize scroll state when channel switches or message count changes.
         // Preserve the visible anchor while the user is reading older messages.
-        let channel_changed = self.last_channel_id.as_deref() != Some(&channel_id);
-        let switched_from_channel = self.last_channel_id.is_some();
         let count_changed = message_count != self.last_message_count;
         if channel_changed {
             self.last_channel_id = Some(channel_id.clone());
@@ -1012,7 +1060,7 @@ impl Render for ChatView {
         }));
 
         // Virtualized list items rendering via GPUI list
-        let items_arc = Arc::new(chat_items.clone());
+        let items_arc = chat_items.clone();
         let ch_name = channel_name.clone();
         let ch_topic = channel_topic.clone();
         let is_dm_welcome = is_dm;

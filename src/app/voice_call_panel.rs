@@ -101,6 +101,8 @@ pub struct VoiceCallPanel {
     preview_generation: u64,
     preview_source_id: Option<String>,
     selected_screen_index: Option<usize>,
+    cached_audio_device_warning: Option<String>,
+    audio_devices_checked_at: Option<std::time::Instant>,
 }
 
 impl Drop for VoiceCallPanel {
@@ -125,6 +127,33 @@ fn shutdown_preview_sessions(
             drop(camera_session);
             drop(screen_session);
         });
+}
+
+fn enumerate_audio_device_warning() -> Option<String> {
+    let device_manager = MediaDeviceManager::new();
+    let input_devices = device_manager.list_input_devices();
+    let output_devices = device_manager.list_output_devices();
+    match (&input_devices, &output_devices) {
+        (Err(input_error), Err(output_error)) => Some(format!(
+            "Não foi possível enumerar os dispositivos de áudio: entrada: {input_error}; saída: {output_error}"
+        )),
+        (Err(input_error), _) => Some(format!(
+            "Não foi possível enumerar os microfones: {input_error}"
+        )),
+        (_, Err(output_error)) => Some(format!(
+            "Não foi possível enumerar as saídas de áudio: {output_error}"
+        )),
+        (Ok(inputs), Ok(outputs)) if inputs.is_empty() && outputs.is_empty() => {
+            Some("Nenhum microfone ou saída de áudio detectados no sistema.".to_string())
+        }
+        (Ok(inputs), _) if inputs.is_empty() => {
+            Some("Nenhum microfone de entrada detectado no sistema.".to_string())
+        }
+        (_, Ok(outputs)) if outputs.is_empty() => {
+            Some("Nenhum dispositivo de saída de áudio detectado no sistema.".to_string())
+        }
+        _ => None,
+    }
 }
 
 fn select_camera_device(
@@ -180,6 +209,8 @@ impl VoiceCallPanel {
             preview_generation: 0,
             preview_source_id: None,
             selected_screen_index: None,
+            cached_audio_device_warning: None,
+            audio_devices_checked_at: None,
         }
     }
 
@@ -200,6 +231,19 @@ impl VoiceCallPanel {
         {
             cx.notify();
         }
+    }
+
+    fn audio_device_warning(&mut self) -> Option<String> {
+        const AUDIO_DEVICE_CACHE_TTL: Duration = Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        let fresh = self
+            .audio_devices_checked_at
+            .is_some_and(|checked| now.saturating_duration_since(checked) < AUDIO_DEVICE_CACHE_TTL);
+        if !fresh {
+            self.cached_audio_device_warning = enumerate_audio_device_warning();
+            self.audio_devices_checked_at = Some(now);
+        }
+        self.cached_audio_device_warning.clone()
     }
 
     fn start_camera_preview(&mut self, cx: &mut Context<Self>) {
@@ -657,6 +701,7 @@ impl Render for VoiceCallPanel {
         let stage_height = (viewport.height - px(180.0)).max(px(180.0));
 
         if let Some(call) = active_call {
+            let device_warning = self.audio_device_warning();
             div()
                 .flex()
                 .flex_col()
@@ -664,7 +709,7 @@ impl Render for VoiceCallPanel {
                 .bg(cx.discord().bg_server)
                 .justify_between()
                 .p(px(16.0))
-                .child(render_top_bar(&call, cx))
+                .child(render_top_bar(&call, device_warning.as_deref(), cx))
                 .child(render_stage_body(
                     app_entity.clone(),
                     panel_entity.clone(),
@@ -732,36 +777,10 @@ fn grid_tile_size(
 // Top Bar: Channel info, RTC status badge & fatal error banner
 // ============================================================================
 
-fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
+fn render_top_bar(call: &ActiveVoiceCall, device_warning: Option<&str>, cx: &App) -> AnyElement {
     let discord = cx.discord();
     let has_fatal_error = call.fatal_error.is_some();
     let call_warning = call.voice_session.as_ref().and_then(|s| s.call_warning());
-
-    // Verificação de dispositivos de áudio reais de hardware (Zero mocks em produção)
-    let device_manager = MediaDeviceManager::new();
-    let input_devices = device_manager.list_input_devices();
-    let output_devices = device_manager.list_output_devices();
-    let device_warning = match (&input_devices, &output_devices) {
-        (Err(input_error), Err(output_error)) => Some(format!(
-            "Não foi possível enumerar os dispositivos de áudio: entrada: {input_error}; saída: {output_error}"
-        )),
-        (Err(input_error), _) => Some(format!(
-            "Não foi possível enumerar os microfones: {input_error}"
-        )),
-        (_, Err(output_error)) => Some(format!(
-            "Não foi possível enumerar as saídas de áudio: {output_error}"
-        )),
-        (Ok(inputs), Ok(outputs)) if inputs.is_empty() && outputs.is_empty() => {
-            Some("Nenhum microfone ou saída de áudio detectados no sistema.".to_string())
-        }
-        (Ok(inputs), _) if inputs.is_empty() => {
-            Some("Nenhum microfone de entrada detectado no sistema.".to_string())
-        }
-        (_, Ok(outputs)) if outputs.is_empty() => {
-            Some("Nenhum dispositivo de saída de áudio detectado no sistema.".to_string())
-        }
-        _ => None,
-    };
 
     div()
         .flex()
@@ -782,7 +801,7 @@ fn render_top_bar(call: &ActiveVoiceCall, cx: &App) -> AnyElement {
         )
         .children(has_fatal_error.then(|| render_fatal_error_banner(call, discord.white)))
         .children(call_warning.map(|msg| render_call_warning_banner(&msg, discord.white)))
-        .children(device_warning.map(|msg| render_audio_device_warning_banner(&msg, discord.white)))
+        .children(device_warning.map(|msg| render_audio_device_warning_banner(msg, discord.white)))
         .into_any_element()
 }
 

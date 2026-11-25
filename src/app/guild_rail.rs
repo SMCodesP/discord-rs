@@ -25,20 +25,19 @@ impl GuildRail {
 
 impl Render for GuildRail {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let state = self.state.read(cx);
-        let selected_guild_id = state.selected_guild_id.clone();
-        let guilds = state.guilds.clone();
-        let guild_folders = state.guild_folders.clone();
-        let expanded_folders = state.expanded_folders.clone();
         let app_entity = self.state.clone();
-
-        let guilds_elements = render_guilds_list(
-            &guilds,
-            &guild_folders,
-            &expanded_folders,
-            selected_guild_id.as_deref(),
-            &app_entity,
-        );
+        let (selected_guild_id, guilds_elements) = {
+            let state = self.state.read(cx);
+            let selected_guild_id = state.selected_guild_id.as_deref();
+            let guilds_elements = render_guilds_list(
+                &state.guilds,
+                &state.guild_folders,
+                &state.expanded_folders,
+                selected_guild_id,
+                &app_entity,
+            );
+            (state.selected_guild_id.clone(), guilds_elements)
+        };
 
         div()
             .flex()

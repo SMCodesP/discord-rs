@@ -26,6 +26,7 @@ use gpui::component::input::InputState;
 use gpui::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui::component::tooltip::Tooltip;
 use gpui::*;
+use std::sync::Arc;
 
 /// Maps state presence to the domain presence the `Avatar` component takes.
 fn domain_presence(p: PresenceStatus) -> DomainPresence {
@@ -89,12 +90,14 @@ pub fn render_friends_hub(
     search_query: &str,
     add_friend_state: &Entity<InputState>,
 ) -> Div {
+    let list_state = ListState::new(0, ListAlignment::Top, px(120.0));
     render_friends_hub_for_width(
         entity,
         state,
         search_state,
         search_query,
         add_friend_state,
+        &list_state,
         f32::INFINITY,
     )
 }
@@ -107,6 +110,7 @@ pub fn render_friends_hub_for_width(
     search_state: &Entity<InputState>,
     search_query: &str,
     add_friend_state: &Entity<InputState>,
+    list_state: &ListState,
     viewport_width: f32,
 ) -> Div {
     let mut container = div()
@@ -125,7 +129,7 @@ pub fn render_friends_hub_for_width(
     } else if state.friends_tab == FriendsTab::AddFriend {
         render_add_friend_view(entity.clone(), state, add_friend_state)
     } else {
-        render_friends_list_view(entity.clone(), state, search_state, search_query)
+        render_friends_list_view(entity.clone(), state, search_state, search_query, list_state)
     };
 
     let mut content = div()
@@ -950,6 +954,7 @@ fn render_friends_rows(
     entity: Entity<AppState>,
     state: &AppState,
     rows: Vec<FriendRowData>,
+    list_state: &ListState,
 ) -> AnyElement {
     let count_text = match state.friends_tab {
         FriendsTab::Online => format!("DISPONÍVEL — {}", rows.len()),
@@ -959,16 +964,30 @@ fn render_friends_rows(
         _ => format!("AMIGOS — {}", rows.len()),
     };
 
-    let mut list = div()
-        .id("friends-scroll-list")
+    let row_count = rows.len();
+    if list_state.item_count() != row_count {
+        list_state.reset(row_count);
+    }
+    let rows = Arc::new(rows);
+    let entity_for_list = entity.clone();
+
+    let virtual_rows = list(list_state.clone(), move |ix, _window, cx| {
+        let Some(row) = rows.get(ix).cloned() else {
+            return div().h(px(62.0)).into_any_element();
+        };
+        let state = entity_for_list.read(cx);
+        render_friend_row(entity_for_list.clone(), state, row, ix)
+    })
+    .size_full();
+
+    div()
         .flex_1()
         .w_full()
+        .min_h(px(0.0))
         .flex()
         .flex_col()
         .px(px(24.0))
         .py(px(16.0))
-        .gap(px(4.0))
-        .overflow_y_scroll()
         .child(
             div()
                 .text_size(px(12.0))
@@ -976,11 +995,15 @@ fn render_friends_rows(
                 .text_color(text_muted())
                 .pb(px(8.0))
                 .child(count_text),
-        );
-    for (idx, row) in rows.into_iter().enumerate() {
-        list = list.child(render_friend_row(entity.clone(), state, row, idx));
-    }
-    list.into_any_element()
+        )
+        .child(
+            div()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.0))
+                .child(virtual_rows),
+        )
+        .into_any_element()
 }
 
 /// Empty state per tab (same icons/texts as today).
