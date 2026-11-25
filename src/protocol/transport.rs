@@ -232,6 +232,13 @@ pub enum TransportEvent {
         message_id: String,
         error: String,
     },
+    /// Optimistic message send failed before the Gateway confirmed it
+    MessageSendFailed {
+        temp_id: String,
+        channel_id: String,
+        content: String,
+        error: String,
+    },
     /// Lazy guild member list update dispatched by gateway
     GuildMemberListUpdate(crate::protocol::cache::lazy_guilds::GuildMemberListUpdate),
     /// Member chunk returned by Gateway Opcode 8 (REQUEST_GUILD_MEMBERS)

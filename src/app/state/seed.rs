@@ -128,48 +128,17 @@ pub(super) fn generate_seed_messages() -> HashMap<String, Vec<Message>> {
     messages
 }
 
-/// Groups channels into their real Discord categories based on category headers (ChannelType::Category),
-/// parent category IDs, and position ordering.
+/// Groups channels into their real Discord categories.
+///
+/// The canonical ordering lives in [`crate::domain::hierarchy`]: categories and
+/// channels are sorted by `position` with the snowflake `id` as a stable
+/// tie-breaker. Channels without a parent (or pointing at a missing category)
+/// stay in a real unlabeled group; no synthetic label such as "GERAL"/"OUTROS"
+/// is ever invented. Empty real categories are preserved.
 pub(super) fn organize_channels_into_categories(
     guild_id: &str,
     channels: Vec<crate::domain::Channel>,
 ) -> Vec<CategoryItemState> {
-    // 1. Separar cabeçalhos de categoria (ChannelType::Category) e canais normais
-    let mut category_headers = Vec::new();
-    let mut normal_channels = Vec::new();
-
-    for c in channels {
-        if c.channel_type == ChannelType::Category {
-            category_headers.push(c);
-        } else {
-            normal_channels.push(c);
-        }
-    }
-
-    // Ordenar cabeçalhos de categoria por position oficial do Discord
-    category_headers.sort_by_key(|c| c.position);
-
-    // Canais sem category_id (órfãos / topo) e canais agrupados por category_id
-    let mut top_channels = Vec::new();
-    let mut channels_by_category: HashMap<String, Vec<crate::domain::Channel>> = HashMap::new();
-
-    for c in normal_channels {
-        if let Some(ref cat_id) = c.category_id {
-            channels_by_category
-                .entry(cat_id.clone())
-                .or_default()
-                .push(c);
-        } else {
-            top_channels.push(c);
-        }
-    }
-
-    // Ordenar canais dentro de cada categoria por position oficial
-    top_channels.sort_by_key(|c| c.position);
-    for list in channels_by_category.values_mut() {
-        list.sort_by_key(|c| c.position);
-    }
-
     let to_item_state = |c: crate::domain::Channel| -> ChannelItemState {
         ChannelItemState {
             id: c.id,
@@ -193,41 +162,20 @@ pub(super) fn organize_channels_into_categories(
         }
     };
 
-    let mut result_categories = Vec::new();
-
-    // Canais com category_id.is_none() ficam em uma categoria raiz 'GERAL' no topo
-    if !top_channels.is_empty() {
-        result_categories.push(CategoryItemState {
-            id: format!("cat-{}-root", guild_id),
-            name: "GERAL".to_string(),
-            channels: top_channels.into_iter().map(to_item_state).collect(),
-        });
-    }
-
-    // Adicionar categorias reais ordenadas
-    for cat in category_headers {
-        let cat_id = cat.id.clone();
-        let cat_name = cat.name.to_uppercase();
-        let cat_channels = channels_by_category.remove(&cat_id).unwrap_or_default();
-        result_categories.push(CategoryItemState {
-            id: cat_id,
-            name: cat_name,
-            channels: cat_channels.into_iter().map(to_item_state).collect(),
-        });
-    }
-
-    // Fallback: caso haja canais com category_id que não corresponda a nenhum cabeçalho existente
-    for (cat_id, remaining) in channels_by_category {
-        if !remaining.is_empty() {
-            result_categories.push(CategoryItemState {
-                id: cat_id,
-                name: "OUTROS".to_string(),
-                channels: remaining.into_iter().map(to_item_state).collect(),
-            });
-        }
-    }
-
-    result_categories
+    crate::domain::hierarchy::order_channel_groups_from_channels(&channels)
+        .into_iter()
+        .map(|group| {
+            let (id, name) = match group.category {
+                Some(category) => (category.id, category.name),
+                None => (format!("cat-{}-uncategorized", guild_id), String::new()),
+            };
+            CategoryItemState {
+                id,
+                name,
+                channels: group.channels.into_iter().map(to_item_state).collect(),
+            }
+        })
+        .collect()
 }
 
 impl AppState {
@@ -623,6 +571,7 @@ impl AppState {
 
         let mut state = Self {
             event_batcher: crate::protocol::EventBatcher::new(),
+            voice_control: crate::protocol::voice_session::VoiceControlState::new(false, false),
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
@@ -854,5 +803,64 @@ impl AppState {
         };
         state.sync_guild_media();
         state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::Channel;
+
+    fn text(id: &str, name: &str, position: i32, category_id: Option<&str>) -> Channel {
+        let mut channel = Channel::text(id, name).with_position(position);
+        if let Some(category_id) = category_id {
+            channel = channel.with_category_id(category_id);
+        }
+        channel
+    }
+
+    #[::core::prelude::v1::test]
+    fn organizer_is_deterministic_with_orphans_empty_categories_and_tied_positions() {
+        let channels = vec![
+            text("900", "orphan", 1, Some("999")),
+            text("950", "top", 0, None),
+            text("700", "a2", 2, Some("100")),
+            text("600", "a1", 2, Some("100")),
+            text("800", "b1", 1, Some("200")),
+            Channel::category("200", "Cat B").with_position(10),
+            Channel::category("100", "Cat A").with_position(10),
+            Channel::category("300", "Empty").with_position(20),
+        ];
+
+        let categories = organize_channels_into_categories("guild-synthetic", channels.clone());
+
+        let ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["cat-guild-synthetic-uncategorized", "100", "200", "300"]);
+
+        assert_eq!(categories[0].name, "");
+        assert_eq!(categories[0].channels[0].name, "top");
+        assert_eq!(categories[0].channels[1].name, "orphan");
+
+        assert_eq!(categories[1].name, "Cat A");
+        let cat_a: Vec<&str> = categories[1]
+            .channels
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(cat_a, vec!["a1", "a2"]);
+
+        assert_eq!(categories[2].name, "Cat B");
+        assert_eq!(categories[3].name, "Empty");
+        assert!(categories[3].channels.is_empty());
+
+        for category in &categories {
+            assert_ne!(category.name, "GERAL");
+            assert_ne!(category.name, "OUTROS");
+        }
+
+        let mut reversed_channels = channels;
+        reversed_channels.reverse();
+        let reversed = organize_channels_into_categories("guild-synthetic", reversed_channels);
+        assert_eq!(categories, reversed, "shuffled payload must keep identical order");
     }
 }

@@ -1449,7 +1449,7 @@ impl DiscordTransport for DiscordApiClient {
             }
         }
 
-        channels.sort_by_key(|c| c.position);
+        crate::domain::hierarchy::sort_channels(&mut channels);
         Ok(channels)
     }
 
