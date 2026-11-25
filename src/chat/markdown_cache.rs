@@ -119,6 +119,10 @@ impl MarkdownLruCache {
         self.free.clear();
         self.head = None;
         self.tail = None;
+        self.hits = 0;
+        self.misses = 0;
+        self.inserts = 0;
+        self.evictions = 0;
     }
 
     /// Returns a cloned AST for the key and marks it as most-recently-used.
