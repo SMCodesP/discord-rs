@@ -429,7 +429,7 @@
   - **O que falta/corregir:** disparar typing no editor com coalescing oficial, limpar no envio e agendar expiração que chame `notify`; resolver nome por membro/amigo/DM sem exibir ID bruto.
   - **Critério de pronto:** teste determinístico com relógio injetado comprova um request por janela, parada após envio e remoção visual em 9s; Gateway sintético cobre vários usuários e canal trocado.
 
-- [ ] **T-063** — **P1** — **Chat/Unread** — **Implementar read state, badges e barra de não lidas/jump to present**
+- [x] **T-063** — **P1** — **Chat/Unread** — **Implementar read state, badges e barra de não lidas/jump to present**
   - **Arquivos:** `src/app/state/models.rs:147-170`, `src/app/state/gateway_events.rs:72-83`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/guilds_channels.rs:281-323`, `src/protocol/discord_api.rs:1268-1275`, `src/chat/chat_view.rs:602-612`.
   - **Evidência:** canais nascem com `unread=false` e `mention_count=0`; `MessageCreate` não incrementa esses campos; não há ACK de leitura nem modelo de `last_read_message_id`. O oficial mostra badges, divisor “NEW” e barra de não lidas; o RS não renderiza nenhum desses estados.
   - **O que falta/corregir:** manter `read_state_version`, `last_message_id`, `last_read_message_id` e contagem de menções; ACK ao visualizar; divisor/new badge e botão “Jump to Present” quando afastado do fim.

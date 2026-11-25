@@ -61,6 +61,8 @@ pub enum TransportEvent {
         user: User,
         guilds: Vec<Guild>,
         guild_folders: Vec<GuildFolder>,
+        #[serde(default)]
+        read_state: Option<crate::protocol::ReadState>,
     },
     /// A new chat message was posted.
     MessageCreate(Message),
@@ -374,6 +376,17 @@ pub trait DiscordTransport: Send + Sync {
         message_id: &str,
         emoji: &str,
     ) -> anyhow::Result<()>;
+
+    /// Acknowledge a message as read (POST /channels/{channel_id}/messages/{message_id}/ack).
+    async fn ack_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let _ = (channel_id, message_id, token);
+        anyhow::bail!("ack_message não implementado no transporte atual")
+    }
 
     /// Delete a message from a channel (/channels/{channel_id}/messages/{message_id}).
     async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()>;

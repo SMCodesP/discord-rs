@@ -37,6 +37,7 @@ fn state_with_channel(channel_id: &str) -> AppState {
                 icon_url: None,
                 is_pinned: false,
                 last_message_id: None,
+                last_read_message_id: None,
                 is_group_dm: false,
                 recipient_ids: vec![],
                 recipient_names: vec![],

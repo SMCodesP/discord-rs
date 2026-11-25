@@ -20,10 +20,10 @@ use crate::chat::media_picker::{
 };
 use crate::chat::markdown::MentionLookup;
 use crate::chat::message_list::{
-    build_chat_list_items, format_message_timestamp, render_date_separator_element,
-    render_message_context_menu, render_message_row_with_reply_and_edit, render_welcome_banner,
-    ChatListItem, MessageActionCallback, MessageActionPosCallback, MessageContextMenuConfig,
-    MessageRowConfig,
+    build_chat_list_items_with_unread, render_date_separator_element,
+    render_message_context_menu, render_message_row_with_reply_and_edit,
+    render_new_messages_divider, render_welcome_banner, ChatListItem, MessageActionCallback,
+    MessageActionPosCallback, MessageContextMenuConfig, MessageRowConfig,
 };
 use crate::chat::reactions::{AddReactionCallback, ReactionActionCallback};
 use crate::domain::message::Message;
@@ -744,8 +744,8 @@ impl ChatView {
                                 if let Some(anchor_id) = anchor_message_id {
                                     let target_index = {
                                         let state = chat.state.read(cx);
-                                        let items =
-                                            build_chat_list_items(state.get_active_messages());
+                                        let first_unread = state.unread_divider_message_id(&channel_id).map(|s| s.to_string());
+                                        let items = build_chat_list_items_with_unread(state.get_active_messages(), first_unread.as_deref());
                                         items.iter().position(|item| match item {
                                             ChatListItem::Message { message_idx, .. } => (*message_idx < state.get_active_messages().len())
                                                 .then(|| &state.get_active_messages()[*message_idx])
@@ -1143,6 +1143,13 @@ impl Render for ChatView {
         let last_id = all_messages.last().map(|m| m.id.as_str());
         let signature = chat_items_signature(all_messages);
 
+        let first_unread_message_id = app_state.unread_divider_message_id(&channel_id).map(|s| s.to_string());
+        let signature = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            signature.hash(&mut hasher);
+            first_unread_message_id.hash(&mut hasher);
+            hasher.finish()
+        };
         let channel_changed = self.last_channel_id.as_deref() != Some(&channel_id);
         let switched_from_channel = self.last_channel_id.is_some();
         let items_changed = channel_changed
@@ -1153,7 +1160,10 @@ impl Render for ChatView {
             || self.cached_chat_items_signature != signature
             || self.list_state.item_count() == 0;
         if items_changed {
-            self.cached_chat_items = Arc::new(build_chat_list_items(all_messages));
+            self.cached_chat_items = Arc::new(build_chat_list_items_with_unread(
+                all_messages,
+                first_unread_message_id.as_deref(),
+            ));
             self.cached_chat_items_channel = Some(channel_id.clone());
             self.cached_chat_items_len = message_count;
             self.cached_chat_items_first_id = first_id.map(str::to_string);
@@ -1204,19 +1214,24 @@ impl Render for ChatView {
             self.last_message_count = message_count;
             self.list_state.reset(total_items);
             if at_bottom {
-                self.list_state.scroll_to_end();
-                self.scroll_handle.scroll_to_bottom();
-            } else if let Some(anchor_id) = anchor_id {
-                if let Some(index) = chat_items.iter().position(|item| match item {
-                    ChatListItem::Message { message_idx, .. } => all_messages
-                        .get(*message_idx)
-                        .map(|message| message.id == anchor_id)
-                        .unwrap_or(false),
-                    _ => false,
-                }) {
-                    self.list_state.scroll_to_reveal_item(index);
-                }
+            self.list_state.scroll_to_end();
+            self.scroll_handle.scroll_to_bottom();
+            let cid = channel_id.clone();
+            self.state.update(cx, |state, _cx| {
+                state.maybe_ack_visible_channel_read();
+                state.clear_unread_divider_for_channel(&cid);
+            });
+        } else if let Some(anchor_id) = anchor_id {
+            if let Some(index) = chat_items.iter().position(|item| match item {
+                ChatListItem::Message { message_idx, .. } => all_messages
+                    .get(*message_idx)
+                    .map(|message| message.id == anchor_id)
+                    .unwrap_or(false),
+                _ => false,
+            }) {
+                self.list_state.scroll_to_reveal_item(index);
             }
+        }
         }
 
         if switched_from_channel && channel_changed {
@@ -1450,6 +1465,13 @@ impl Render for ChatView {
         let on_rx_click_item = on_reaction_click.clone();
         let on_add_rx_item = on_add_reaction.clone();
 
+        let is_at_bottom = self.list_state.is_following_tail()
+            || self.list_state.is_scrolled_to_end() != Some(false);
+        let unread_divider_for_bar = first_unread_message_id.clone();
+        let self_for_jump = self_entity.clone();
+        let app_for_jump = app_entity.clone();
+        let channel_id_for_jump = channel_id.clone();
+
         let virtual_list = list(self.list_state.clone(), move |ix, _window, cx| {
             if ix >= items_arc.len() {
                 return div().into_any_element();
@@ -1467,6 +1489,9 @@ impl Render for ChatView {
                 }
                 ChatListItem::DateSeparator(date) => {
                     render_date_separator_element(*date).into_any_element()
+                }
+                ChatListItem::UnreadDivider => {
+                    render_new_messages_divider().into_any_element()
                 }
                 ChatListItem::Message { message_idx, is_grouped } => {
                     let state = app_entity_list.read(cx);

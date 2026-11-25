@@ -89,6 +89,7 @@ fn test_app_state_presence_update_and_resolution() {
         icon_url: None,
         is_pinned: false,
         last_message_id: None,
+        last_read_message_id: None,
         is_group_dm: false,
         recipient_ids: vec![user_id.clone()],
         recipient_names: vec!["Amigo Teste".into()],

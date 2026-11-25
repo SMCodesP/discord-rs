@@ -808,6 +808,7 @@ mod tests {
             topic: None,
             unread: false,
             mention_count: 0,
+            last_read_message_id: None,
             icon_url: Some("https://cdn.discordapp.com/avatars/u1/hash.png".into()),
             is_pinned: false,
             last_message_id: None,

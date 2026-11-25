@@ -92,6 +92,14 @@ pub struct AppState {
     pub typing_tracker: HashMap<String, HashMap<String, (String, std::time::Instant)>>,
     /// Coalesces burst gateway events (presence/typing) into single UI updates.
     pub event_batcher: crate::protocol::EventBatcher,
+    /// Read-state version from Discord READY/read_state updates.
+    pub read_state_version: i64,
+    /// Debounces message ACKs to avoid spamming Discord API.
+    pub read_ack_debouncer: crate::protocol::ReadAckDebouncer,
+    /// Channel whose first unread message should be shown as divider.
+    pub unread_divider_channel_id: Option<String>,
+    /// First unread message id for the current unread divider.
+    pub unread_divider_message_id: Option<String>,
 
     // Real-Time Discord Gateway & Chat State
     pub is_connected_to_gateway: bool,
@@ -293,6 +301,10 @@ impl AppState {
             jump_error: None,
             typing_tracker: HashMap::new(),
             event_batcher: crate::protocol::EventBatcher::new(),
+            read_state_version: 0,
+            read_ack_debouncer: crate::protocol::ReadAckDebouncer::default(),
+            unread_divider_channel_id: None,
+            unread_divider_message_id: None,
             is_connected_to_gateway: false,
             is_gateway_reconnecting: false,
             reconnect_attempt: None,

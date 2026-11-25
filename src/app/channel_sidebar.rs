@@ -628,41 +628,9 @@ pub fn close_dm_channel(state: &mut AppState, channel_id: &str) -> bool {
     state.dm_channels.len() != before
 }
 
-/// Marks a guild channel or DM as read, clearing unread and mention badges.
+/// Marks a guild channel or DM as read, clearing unread and mention badges and ACKing.
 pub fn mark_channel_read(state: &mut AppState, channel_id: &str) -> bool {
-    let mut changed = false;
-    for guild in &mut state.guilds {
-        let mut touched = false;
-        for category in &mut guild.categories {
-            for channel in &mut category.channels {
-                if channel.id == channel_id {
-                    changed |= channel.unread || channel.mention_count > 0;
-                    channel.unread = false;
-                    channel.mention_count = 0;
-                    touched = true;
-                }
-            }
-        }
-        if touched {
-            guild.mention_count = guild
-                .categories
-                .iter()
-                .flat_map(|category| category.channels.iter())
-                .map(|channel| channel.mention_count)
-                .sum();
-            guild.unread = guild
-                .categories
-                .iter()
-                .flat_map(|category| category.channels.iter())
-                .any(|channel| channel.unread);
-        }
-    }
-    if let Some(dm) = state.dm_channels.iter_mut().find(|dm| dm.id == channel_id) {
-        changed |= dm.unread || dm.mention_count > 0;
-        dm.unread = false;
-        dm.mention_count = 0;
-    }
-    changed
+    state.mark_channel_read(channel_id)
 }
 
 /// Toggles local mute for a channel and returns the new muted state.
@@ -2367,6 +2335,7 @@ mod tests {
             icon_url: None,
             is_pinned: false,
             last_message_id: None,
+            last_read_message_id: None,
             is_group_dm: false,
             recipient_ids: Vec::new(),
             recipient_names: Vec::new(),

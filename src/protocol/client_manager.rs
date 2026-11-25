@@ -402,6 +402,7 @@ impl ClientManager {
                     user: user.clone(),
                     guilds,
                     guild_folders,
+                    read_state: None,
                 });
             }
 
@@ -879,6 +880,20 @@ impl ClientManager {
             lock.clone()
         };
         transport.remove_relationship(user_id).await
+    }
+
+    /// ACKs a message as read through the active transport.
+    pub async fn ack_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        token: Option<&str>,
+    ) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport.ack_message(channel_id, message_id, token).await
     }
 
     /// Updates the current user's guild nickname (PATCH /guilds/{guild_id}/members/@me).

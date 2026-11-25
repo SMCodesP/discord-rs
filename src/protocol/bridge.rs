@@ -212,6 +212,7 @@ impl ProtocolBridge {
                 user: user.clone(),
                 guilds,
                 guild_folders: Vec::new(),
+                read_state: None,
             };
             let _ = b_tx_clone.send(ready_event.clone());
             let _ = u_tx_clone.send(ready_event);

@@ -452,8 +452,14 @@ impl AppState {
                 });
             }
         }
+        let previous_channel = self.selected_channel_id.clone();
         self.selected_channel_id = Some(channel_id.clone());
         self.typing_users = self.get_active_typing_users(&channel_id);
+
+        if previous_channel.as_deref() != Some(channel_id.as_str()) {
+            self.prepare_unread_divider_for_channel(&channel_id);
+        }
+        self.maybe_ack_visible_channel_read();
 
         // Se houver ClientManager (seja Mock ou Discord API), resolver canal de DM temporário sob demanda
         if let Some(ref cm) = self.client_manager {
@@ -560,6 +566,220 @@ impl AppState {
             tel.track_button_click("toggle_members", "Toggle Member Sidebar", 0);
         }
         self.show_members = !self.show_members;
+    }
+
+    pub(crate) fn channel_state_mut_by_id(&mut self, channel_id: &str) -> Option<&mut ChannelItemState> {
+        if let Some(dm) = self.dm_channels.iter_mut().find(|dm| dm.id == channel_id) {
+            return Some(dm);
+        }
+        for guild in &mut self.guilds {
+            for category in &mut guild.categories {
+                for channel in &mut category.channels {
+                    if channel.id == channel_id {
+                        return Some(channel);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn channel_state_ref_by_id(&self, channel_id: &str) -> Option<&ChannelItemState> {
+        if let Some(dm) = self.dm_channels.iter().find(|dm| dm.id == channel_id) {
+            return Some(dm);
+        }
+        for guild in &self.guilds {
+            for category in &guild.categories {
+                for channel in &category.channels {
+                    if channel.id == channel_id {
+                        return Some(channel);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn recompute_guild_unread(&mut self, guild_id: &str) {
+        if let Some(guild) = self.guilds.iter_mut().find(|g| g.id == guild_id) {
+            guild.mention_count = guild
+                .categories
+                .iter()
+                .flat_map(|c| c.channels.iter())
+                .map(|c| c.mention_count)
+                .sum();
+            guild.unread = guild
+                .categories
+                .iter()
+                .flat_map(|c| c.channels.iter())
+                .any(|c| c.unread);
+        }
+    }
+
+    pub(crate) fn recompute_channel_unread_flags(&mut self, channel_id: &str) {
+        let Some(channel) = self.channel_state_mut_by_id(channel_id) else {
+            return;
+        };
+        let last_message_id = channel.last_message_id.clone();
+        let last_read_message_id = channel.last_read_message_id.clone();
+        let unread = crate::protocol::is_message_unread(
+            last_message_id.as_deref(),
+            last_read_message_id.as_deref(),
+        );
+        channel.unread = unread;
+        if !unread {
+            channel.mention_count = 0;
+        }
+        let guild_id = self
+            .guilds
+            .iter()
+            .find(|g| {
+                g.categories
+                    .iter()
+                    .any(|cat| cat.channels.iter().any(|ch| ch.id == channel_id))
+            })
+            .map(|g| g.id.clone());
+        if let Some(guild_id) = guild_id {
+            self.recompute_guild_unread(&guild_id);
+        }
+    }
+
+    /// Returns the first unread message id for the currently selected channel, if any.
+    pub fn first_unread_message_id_for_channel(&self, channel_id: &str) -> Option<String> {
+        let channel = self.channel_state_ref_by_id(channel_id)?;
+        let last_read = channel.last_read_message_id.as_deref();
+        let last_message = channel.last_message_id.as_deref();
+        if !crate::protocol::is_message_unread(last_message, last_read) {
+            return None;
+        }
+        let msgs = self.messages_by_channel.get(channel_id)?;
+        if let Some(last_read) = last_read {
+            msgs.iter()
+                .find(|m| crate::protocol::is_newer_snowflake(Some(m.id.as_str()), Some(last_read)))
+                .map(|m| m.id.clone())
+        } else {
+            msgs.first().map(|m| m.id.clone())
+        }
+    }
+
+    pub fn unread_divider_message_id(&self, channel_id: &str) -> Option<&str> {
+        if self.unread_divider_channel_id.as_deref() == Some(channel_id) {
+            self.unread_divider_message_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    fn prepare_unread_divider_for_channel(&mut self, channel_id: &str) {
+        self.unread_divider_channel_id = Some(channel_id.to_string());
+        self.unread_divider_message_id = self.first_unread_message_id_for_channel(channel_id);
+    }
+
+    pub fn clear_unread_divider_for_channel(&mut self, channel_id: &str) {
+        if self.unread_divider_channel_id.as_deref() == Some(channel_id) {
+            self.unread_divider_channel_id = None;
+            self.unread_divider_message_id = None;
+        }
+    }
+
+    /// Marks a channel read up to its latest known message and schedules ACK.
+    pub fn mark_channel_read(&mut self, channel_id: &str) -> bool {
+        let Some(last_message_id) = self
+            .channel_state_ref_by_id(channel_id)
+            .and_then(|c| c.last_message_id.clone())
+        else {
+            return false;
+        };
+        self.mark_channel_read_up_to(channel_id, &last_message_id, true)
+    }
+
+    pub fn mark_channel_read_up_to(
+        &mut self,
+        channel_id: &str,
+        message_id: &str,
+        manual: bool,
+    ) -> bool {
+        let Some(msg_id) = crate::protocol::normalize_snowflake(message_id) else {
+            return false;
+        };
+        let Some(channel) = self.channel_state_mut_by_id(channel_id) else {
+            return false;
+        };
+
+        let changed = !crate::protocol::is_message_unread(
+            Some(msg_id.as_str()),
+            channel.last_read_message_id.as_deref(),
+        ) == false
+            || channel.mention_count > 0;
+        if crate::protocol::is_newer_snowflake(
+            Some(msg_id.as_str()),
+            channel.last_read_message_id.as_deref(),
+        ) || channel.last_read_message_id.is_none()
+        {
+            channel.last_read_message_id = Some(msg_id.clone());
+        }
+        let caught_up = !crate::protocol::is_message_unread(
+            channel.last_message_id.as_deref(),
+            channel.last_read_message_id.as_deref(),
+        );
+        if caught_up {
+            channel.mention_count = 0;
+            channel.unread = false;
+            self.clear_unread_divider_for_channel(channel_id);
+        }
+        self.recompute_channel_unread_flags(channel_id);
+
+        self.read_ack_debouncer.schedule(
+            channel_id.to_string(),
+            &msg_id,
+            self.channel_state_ref_by_id(channel_id)
+                .map(|c| c.mention_count)
+                .unwrap_or(0),
+            manual,
+            std::time::Instant::now(),
+        );
+        self.flush_due_read_acks();
+        changed || caught_up
+    }
+
+    /// Called when the user is at bottom of selected channel; ACKs latest message.
+    pub fn maybe_ack_visible_channel_read(&mut self) {
+        let Some(channel_id) = self.selected_channel_id.clone() else {
+            return;
+        };
+        let Some(last_message_id) = self
+            .channel_state_ref_by_id(&channel_id)
+            .and_then(|c| c.last_message_id.clone())
+        else {
+            return;
+        };
+        let should_ack = self
+            .channel_state_ref_by_id(&channel_id)
+            .map(|c| {
+                crate::protocol::is_message_unread(
+                    Some(last_message_id.as_str()),
+                    c.last_read_message_id.as_deref(),
+                ) || c.mention_count > 0
+            })
+            .unwrap_or(false);
+        if should_ack {
+            self.mark_channel_read_up_to(&channel_id, &last_message_id, false);
+        } else {
+            self.flush_due_read_acks();
+        }
+    }
+
+    pub fn flush_due_read_acks(&mut self) {
+        let Some(cm) = self.client_manager.clone() else {
+            return;
+        };
+        for ack in self.read_ack_debouncer.drain_due(std::time::Instant::now()) {
+            let cm = cm.clone();
+            tokio::spawn(async move {
+                let token = ack.payload.token.as_deref();
+                let _ = cm.ack_message(&ack.channel_id, &ack.message_id, token).await;
+            });
+        }
     }
 
     /// Opens the nickname editor for a guild, prefilled with current member nick.

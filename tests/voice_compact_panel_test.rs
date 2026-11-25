@@ -15,6 +15,7 @@ fn channel(id: &str, name: &str, kind: ChannelKind) -> ChannelItemState {
         icon_url: None,
         is_pinned: false,
         last_message_id: None,
+        last_read_message_id: None,
         is_group_dm: false,
         recipient_ids: Vec::new(),
         recipient_names: Vec::new(),

@@ -555,6 +555,7 @@ impl DiscordTransport for MockDiscordProvider {
             user: state.current_user.clone(),
             guilds: state.guilds.clone(),
             guild_folders: Vec::new(),
+            read_state: None,
         });
         Ok(())
     }

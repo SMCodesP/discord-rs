@@ -94,6 +94,7 @@ impl AppState {
                 user,
                 guilds,
                 guild_folders,
+                read_state,
             } => {
                 let display_name = user.display_name().to_string();
                 let avatar_text = user
@@ -235,6 +236,27 @@ impl AppState {
                 self.guilds = new_guilds;
                 self.sync_guild_media();
                 save_guilds_to_disk(&self.guilds, &self.guild_folders);
+
+                if let Some(read_state) = read_state {
+                    self.read_state_version = read_state.version;
+                    for entry in &read_state.entries {
+                        let channel_id = entry.id.trim();
+                        if channel_id.is_empty() { continue; }
+                        let last_read = crate::protocol::read_states::normalize_snowflake_opt(entry.last_message_id.as_deref());
+                        if let Some(ch) = self.channel_state_mut_by_id(channel_id) {
+                            ch.last_read_message_id = last_read.clone();
+                            ch.mention_count = entry.mention_count;
+                        } else {
+                            // Keep read state even if channel not known yet by creating no UI entry; handled on demand.
+                        }
+                        // Recompute unread after setting last_read/mentions if channel known.
+                        let known = self.channel_state_ref_by_id(channel_id).is_some();
+                        if known {
+                            self.recompute_channel_unread_flags(channel_id);
+                        }
+                    }
+                }
+
                 if let Some(first) = self.guilds.first() {
                     self.select_guild(Some(first.id.clone()));
                 } else {
@@ -303,16 +325,49 @@ impl AppState {
                     channel_msgs.push(msg.clone());
                 }
 
+                let is_selected = self.selected_channel_id.as_deref() == Some(&channel_id);
+                let from_current_user = msg.author.id == self.current_user.id;
+                let mention_for_me = if from_current_user {
+                    0
+                } else {
+                    let mentions_me = msg.content.contains(&format!("<@{}>", self.current_user.id))
+                        || msg.content.contains(&format!("<@!{}>", self.current_user.id))
+                        || msg.content.contains("@everyone")
+                        || msg.content.contains("@here");
+                    if mentions_me { 1 } else { 0 }
+                };
+
                 if is_guild_message {
-                    // Atualiza o last_message_id do canal da guilda, se existir
-                    for guild in &mut self.guilds {
-                        for cat in &mut guild.categories {
-                            for ch in &mut cat.channels {
-                                if ch.id == channel_id {
-                                    ch.last_message_id = Some(msg.id.clone());
-                                }
-                            }
+                    let guild_id_for_channel = self.guilds.iter().find(|g| {
+                        g.categories.iter().any(|cat| cat.channels.iter().any(|c| c.id == channel_id))
+                    }).map(|g| g.id.clone());
+                    if let Some(ch) = self.channel_state_mut_by_id(&channel_id) {
+                        if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), ch.last_message_id.as_deref()) {
+                            ch.last_message_id = Some(msg.id.clone());
                         }
+                        if from_current_user {
+                            if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), ch.last_read_message_id.as_deref()) {
+                                ch.last_read_message_id = Some(msg.id.clone());
+                            }
+                            ch.mention_count = 0;
+                            ch.unread = false;
+                        } else if is_selected {
+                            // Visible channel: keep read marker at latest.
+                            if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), ch.last_read_message_id.as_deref()) {
+                                ch.last_read_message_id = Some(msg.id.clone());
+                            }
+                            ch.mention_count = 0;
+                            ch.unread = false;
+                        } else {
+                            ch.mention_count = ch.mention_count.saturating_add(mention_for_me);
+                            ch.unread = crate::protocol::is_message_unread(ch.last_message_id.as_deref(), ch.last_read_message_id.as_deref());
+                        }
+                    }
+                    if let Some(gid) = guild_id_for_channel {
+                        self.recompute_guild_unread(&gid);
+                    }
+                    if is_selected && !from_current_user {
+                        self.mark_channel_read_up_to(&channel_id, &msg.id, false);
                     }
                     // MENSAGEM DE GUILDA NUNCA MODIFICA dm_channels NEM selected_channel_id DE DM!
                 } else {
@@ -321,7 +376,19 @@ impl AppState {
 
                     // 1. Tentar correspondência EXATA com o ID do canal de DM existente
                     if let Some(dm) = self.dm_channels.iter_mut().find(|c| c.id == channel_id) {
-                        dm.last_message_id = Some(msg.id.clone());
+                        if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), dm.last_message_id.as_deref()) {
+                            dm.last_message_id = Some(msg.id.clone());
+                        }
+                        if from_current_user || self.selected_channel_id.as_deref() == Some(&channel_id) {
+                            if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), dm.last_read_message_id.as_deref()) {
+                                dm.last_read_message_id = Some(msg.id.clone());
+                            }
+                            dm.mention_count = 0;
+                            dm.unread = false;
+                        } else {
+                            dm.mention_count = dm.mention_count.saturating_add(mention_for_me);
+                            dm.unread = crate::protocol::is_message_unread(dm.last_message_id.as_deref(), dm.last_read_message_id.as_deref());
+                        }
                         dm_updated = true;
                     } else if let Some(dm) = self.dm_channels.iter_mut().find(|c| {
                         // 2. Apenas se for canal temporário dm-* ainda não resolvido E o destinatário bater com o autor
@@ -329,7 +396,19 @@ impl AppState {
                     }) {
                         let temp_id = dm.id.clone();
                         dm.id = channel_id.clone();
-                        dm.last_message_id = Some(msg.id.clone());
+                        if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), dm.last_message_id.as_deref()) {
+                            dm.last_message_id = Some(msg.id.clone());
+                        }
+                        if from_current_user || self.selected_channel_id.as_deref() == Some(&channel_id) {
+                            if crate::protocol::is_newer_snowflake(Some(msg.id.as_str()), dm.last_read_message_id.as_deref()) {
+                                dm.last_read_message_id = Some(msg.id.clone());
+                            }
+                            dm.mention_count = 0;
+                            dm.unread = false;
+                        } else {
+                            dm.mention_count = dm.mention_count.saturating_add(mention_for_me);
+                            dm.unread = crate::protocol::is_message_unread(dm.last_message_id.as_deref(), dm.last_read_message_id.as_deref());
+                        }
                         dm_updated = true;
 
                         // Se a seleção atual estiver no temporário correspondente, migra para o canal real da DM
@@ -360,6 +439,9 @@ impl AppState {
 
                     if dm_updated {
                         self.sort_dm_channels();
+                        if self.selected_channel_id.as_deref() == Some(&channel_id) && !from_current_user {
+                            self.mark_channel_read_up_to(&channel_id, &msg.id, false);
+                        }
                     }
 
                     // Se a seleção atual estiver em dm-{user_id} e esta DM real corresponde a esse mesmo user_id, migra a seleção
@@ -687,6 +769,7 @@ impl AppState {
                             topic: c.topic,
                             unread: false,
                             mention_count: 0,
+                            last_read_message_id: None,
                             icon_url: c.icon_url,
                             is_pinned,
                             last_message_id: c.last_message_id,
@@ -770,6 +853,7 @@ impl AppState {
                             topic: c.topic,
                             unread: false,
                             mention_count: 0,
+                            last_read_message_id: None,
                             icon_url: c.icon_url,
                             is_pinned: c.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: c.last_message_id,
@@ -836,6 +920,7 @@ impl AppState {
                             topic: channel.topic.clone(),
                             unread: false,
                             mention_count: 0,
+                            last_read_message_id: None,
                             icon_url: channel.icon_url.clone(),
                             is_pinned: channel.is_pinned || self.pinned_dms.contains(&real_id),
                             last_message_id: channel.last_message_id.clone(),
