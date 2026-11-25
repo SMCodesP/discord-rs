@@ -48,6 +48,7 @@ pub struct RootView {
     friends_search_query: String,
     add_friend_state: Option<Entity<InputState>>,
     add_friend_sub: Option<Subscription>,
+    friends_list_state: Option<ListState>,
     guild_nick_state: Option<Entity<InputState>>,
     guild_nick_sub: Option<Subscription>,
     active_modal_open: Option<ActiveModal>,
@@ -299,6 +300,7 @@ impl RootView {
             friends_search_query: String::new(),
             add_friend_state: None,
             add_friend_sub: None,
+            friends_list_state: None,
             guild_nick_state: None,
             guild_nick_sub: None,
             active_modal_open: None,
@@ -580,6 +582,9 @@ impl Render for RootView {
             window,
             cx,
         );
+        if self.friends_list_state.is_none() {
+            self.friends_list_state = Some(ListState::new(0, ListAlignment::Top, px(120.0)));
+        }
         if let Some(ref add_st) = self.add_friend_state {
             sync_add_friend_input(add_st, &app, window, cx);
         }
@@ -845,12 +850,17 @@ impl Render for RootView {
                                     .add_friend_state
                                     .as_ref()
                                     .expect("add_friend_state must be initialized");
+                                let friends_list_state = self
+                                    .friends_list_state
+                                    .as_ref()
+                                    .expect("friends_list_state must be initialized");
                                 render_friends_view(
                                     app_entity.clone(),
                                     state,
                                     search_state,
                                     &self.friends_search_query,
                                     add_friend_state,
+                                    friends_list_state,
                                     window.viewport_size().width.as_f32(),
                                 )
                                 .into_any_element()
@@ -2045,6 +2055,7 @@ fn render_friends_view(
     search_state: &Entity<InputState>,
     search_query: &str,
     add_friend_state: &Entity<InputState>,
+    list_state: &ListState,
     viewport_width: f32,
 ) -> Div {
     super::friends_hub::render_friends_hub_for_width(
@@ -2053,6 +2064,7 @@ fn render_friends_view(
         search_state,
         search_query,
         add_friend_state,
+        list_state,
         viewport_width,
     )
 }
