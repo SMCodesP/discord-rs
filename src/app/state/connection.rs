@@ -20,6 +20,10 @@ impl AppState {
 
         self.is_connecting = true;
         self.is_connected_to_gateway = false;
+        self.is_gateway_reconnecting = false;
+        self.reconnect_attempt = None;
+        self.reconnect_delay_ms = None;
+        self.reconnect_reason = None;
         self.connection_status = "Conectando ao Gateway v10...".to_string();
 
         // O token só é persistido depois de READY, em gateway_events. Assim,
@@ -46,6 +50,10 @@ impl AppState {
     /// Disconnects from live gateway
     pub fn disconnect_gateway(&mut self) {
         self.is_connected_to_gateway = false;
+        self.is_gateway_reconnecting = false;
+        self.reconnect_attempt = None;
+        self.reconnect_delay_ms = None;
+        self.reconnect_reason = None;
         self.auth_token = None;
         self.connection_mode = ConnectionMode::Disconnected("Desconectado".to_string());
         self.connection_status = "Desconectado".to_string();

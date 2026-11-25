@@ -2204,9 +2204,10 @@ async fn run_gateway_loop(
                 }
 
                 let reason = outcome.kind.reason().to_string();
-                let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
 
-                if let GatewayDisconnectKind::Fatal(_) = outcome.kind {
+                if let GatewayDisconnectKind::Fatal(fatal_reason) = outcome.kind {
+                    let reason = fatal_reason.to_string();
+                    let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
                     if let Some(tx) = handshake_tx.take() {
                         let _ = tx.send(Err(reason));
                     }
@@ -2214,6 +2215,7 @@ async fn run_gateway_loop(
                 }
 
                 if handshake_tx.is_some() {
+                    let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
                     if let Some(tx) = handshake_tx.take() {
                         let _ = tx.send(Err(reason));
                     }
@@ -2228,8 +2230,8 @@ async fn run_gateway_loop(
                 log::error!("{}", reason);
                 *outbound_gateway_tx.write().await = None;
                 is_connected.store(false, Ordering::SeqCst);
-                let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
                 if let Some(tx) = handshake_tx.take() {
+                    let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
                     let _ = tx.send(Err(reason));
                     break;
                 }
@@ -2239,14 +2241,15 @@ async fn run_gateway_loop(
                 log::error!("{}", reason);
                 *outbound_gateway_tx.write().await = None;
                 is_connected.store(false, Ordering::SeqCst);
-                let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
                 if let Some(tx) = handshake_tx.take() {
+                    let _ = event_tx.send(TransportEvent::Disconnected(reason.clone()));
                     let _ = tx.send(Err(reason));
                     break;
                 }
             }
         }
 
+        let attempt = reconnect_policy.failures.saturating_add(1);
         let delay = reconnect_policy.next_backoff();
         if reconnect_policy.initial_attempts_exhausted() {
             let reason =
@@ -2255,6 +2258,11 @@ async fn run_gateway_loop(
             let _ = event_tx.send(TransportEvent::Disconnected(reason));
             break;
         }
+        let _ = event_tx.send(TransportEvent::Reconnecting {
+            attempt,
+            delay_ms: delay.as_millis().min(u64::MAX as u128) as u64,
+            reason: "Conexão perdida. Tentando reconectar...".to_string(),
+        });
         log::info!("Próxima reconexão do Gateway em {:?}.", delay);
         tokio::time::sleep(delay).await;
     }

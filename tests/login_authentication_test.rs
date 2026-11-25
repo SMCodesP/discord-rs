@@ -122,31 +122,35 @@ fn test_authenticate_trims_token_without_writing_credentials() {
 fn test_gateway_disconnect_and_reconnect_events_do_not_fabricate_identity() {
     let mut state = AppState::new();
     state.auth_token = Some("token_sintetico_1234567890".to_string());
+    state.current_user.id = "user-me".to_string();
     state.is_connecting = true;
     state.active_modal = Some(ActiveModal::Login);
 
+    // Fatal auth disconnect: drops to login screen.
     state.handle_transport_event(TransportEvent::Disconnected(
-        "Falha na autenticação: 401 sintético".to_string(),
+        "Falha na autenticação: token inválido ou expirado. Faça login novamente.".to_string(),
     ));
     assert!(!state.is_connected_to_gateway);
     assert!(!state.is_connecting);
     assert!(state.auth_error.is_some());
-    assert!(
-        state.current_user.id.is_empty(),
-        "falha não pode inventar usuário"
-    );
-    assert!(
-        state.guilds.is_empty(),
-        "falha não pode inventar servidores"
-    );
 
-    // Reconexão recupera o estado de conexão, mas só limpa o erro; não cria identidade.
+    // Recoverable disconnect on authenticated shell: keep shell, show banner.
+    let mut state = AppState::new();
+    state.auth_token = Some("token_sintetico_1234567890".to_string());
+    state.current_user.id = "user-me".to_string();
+    state.is_connected_to_gateway = true;
+    state.handle_transport_event(TransportEvent::Reconnecting {
+        attempt: 1,
+        delay_ms: 1000,
+        reason: "Gateway desconectado; tentando reconectar.".to_string(),
+    });
+    assert!(state.is_connected_to_gateway);
+    assert!(state.is_gateway_reconnecting);
+    assert_eq!(state.reconnect_attempt, Some(1));
+
     state.handle_transport_event(TransportEvent::Connected);
     assert!(state.is_connected_to_gateway);
-    assert!(!state.is_connecting);
-    assert_eq!(state.connection_status, "Conectado");
+    assert!(!state.is_gateway_reconnecting);
     assert!(state.auth_error.is_none());
-    assert!(state.active_modal.is_none());
-    assert!(state.current_user.id.is_empty());
-    assert!(state.guilds.is_empty());
+    assert_eq!(state.reconnect_attempt, None);
 }

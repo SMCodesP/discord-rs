@@ -135,6 +135,12 @@ pub enum TransportEvent {
     Connected,
     /// Transport disconnected or lost connection.
     Disconnected(String),
+    /// Gateway is reconnecting after a recoverable socket failure.
+    Reconnecting {
+        attempt: u32,
+        delay_ms: u64,
+        reason: String,
+    },
     /// Channels updated for a specific guild (lazy loading / on-demand fetch)
     GuildChannelsUpdated {
         guild_id: String,

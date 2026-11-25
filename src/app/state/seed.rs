@@ -561,10 +561,10 @@ impl AppState {
         });
 
         let is_connecting = has_token;
-        let connection_status = if has_token {
-            "Conectando ao Discord...".to_string()
+        let (connection_status, connection_mode) = if has_token {
+            ("Conectando ao Discord...".to_string(), ConnectionMode::Connecting)
         } else {
-            "Não conectado".to_string()
+            ("Não conectado".to_string(), ConnectionMode::Disconnected("Não conectado".to_string()))
         };
 
         let messages_by_channel = generate_seed_messages();
@@ -612,9 +612,13 @@ impl AppState {
             target_message_id: None,
             typing_tracker: HashMap::new(),
             is_connected_to_gateway: false,
+            is_gateway_reconnecting: false,
+            reconnect_attempt: None,
+            reconnect_delay_ms: None,
+            reconnect_reason: None,
             auth_token: if has_token { Some(stored_token.clone()) } else { None },
             connection_status,
-            connection_mode: ConnectionMode::Mock,
+            connection_mode,
             client_manager: None,
             messages_by_channel,
             active_draft: String::new(),

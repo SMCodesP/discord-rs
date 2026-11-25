@@ -24,6 +24,7 @@ pub enum ConnectionMode {
     Live,
     LiveDiscord(String), // username/tag
     Connecting,
+    Reconnecting { attempt: u32, delay_ms: u64, reason: String },
     Disconnected(String),
 }
 
@@ -251,6 +252,11 @@ impl ClientManager {
                             // reconexão de uma sessão já autenticada) chega à UI.
                             continue;
                         }
+                    }
+                    TransportEvent::Reconnecting { attempt, delay_ms, reason } => {
+                        let mut mode = mode_ref.write().await;
+                        *mode = ConnectionMode::Reconnecting { attempt: *attempt, delay_ms: *delay_ms, reason: reason.clone() };
+                        warn!("Discord Gateway reconectando (tentativa {attempt}): {reason}");
                     }
                     TransportEvent::Disconnected(reason) => {
                         let mut mode = mode_ref.write().await;
