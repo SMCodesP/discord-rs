@@ -72,6 +72,7 @@ pub fn render_keybinds(
                     div()
                         .rounded(px(8.0))
                         .bg(cx.discord().bg_channels)
+                        .child(render_keybind_row("Quick Switcher", &["CTRL", "K"], cx))
                         .child(render_keybind_row("Show Keyboard Shortcuts List", &["CTRL", "/"], cx)),
                 ),
         )

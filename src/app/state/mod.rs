@@ -15,3 +15,5 @@ mod voice;
 pub use app_state::*;
 pub use disk_cache::*;
 pub use models::*;
+mod quick_switcher;
+pub use quick_switcher::*;

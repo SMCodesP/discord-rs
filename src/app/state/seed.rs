@@ -851,6 +851,8 @@ impl AppState {
             profile_modal_tab: ProfileModalTab::AboutMe,
             profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
             voice_states_by_channel: HashMap::new(),
+            quick_switcher: QuickSwitcherState::new(),
+            quick_switcher_inaccessible_channel_ids: std::collections::HashSet::new(),
         };
         state.sync_guild_media();
         state

@@ -2486,7 +2486,15 @@ impl Render for ChatView {
             .on_key_down(move |ev: &KeyDownEvent, window, cx| {
                 let key = ev.keystroke.key.as_str();
                 let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
-                if is_ctrl && ev.keystroke.key.to_lowercase() == "f" {
+                let key_lower = ev.keystroke.key.to_lowercase();
+                if is_ctrl && key_lower == "k" {
+                    app_entity_shortcut.update(cx, |state, cx| {
+                        state.toggle_quick_switcher();
+                        cx.notify();
+                    });
+                    return;
+                }
+                if is_ctrl && key_lower == "f" {
                     app_entity_shortcut.update(cx, |state, cx| {
                         state.toggle_search();
                         cx.notify();
@@ -2495,6 +2503,14 @@ impl Render for ChatView {
                 }
 
                 if key == "escape" || key == "Escape" {
+                    let quick_open = app_keys.read(cx).quick_switcher.open;
+                    if quick_open {
+                        app_keys.update(cx, |s, cx| {
+                            s.close_quick_switcher();
+                            cx.notify();
+                        });
+                        return;
+                    }
                     self_keys.update(cx, |this, cx| {
                         if this.media_picker_open {
                             this.media_picker_open = false;

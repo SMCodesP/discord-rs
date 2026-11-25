@@ -150,6 +150,10 @@ pub struct AppState {
     pub profile_effects_catalog: crate::components::ProfileEffectCatalog,
     /// Active voice states by voice channel ID
     pub voice_states_by_channel: HashMap<String, Vec<VoiceState>>,
+    /// Quick Switcher (Ctrl/Cmd+K) overlay state
+    pub quick_switcher: QuickSwitcherState,
+    /// Channel IDs explicitly inaccessible to current user (used for quick switcher filtering/fixtures).
+    pub quick_switcher_inaccessible_channel_ids: std::collections::HashSet<String>,
 }
 
 pub struct AppStateGlobal(pub gpui::Entity<AppState>);
@@ -301,6 +305,8 @@ impl AppState {
             profile_modal_tab: ProfileModalTab::AboutMe,
             profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
             voice_states_by_channel: HashMap::new(),
+            quick_switcher: QuickSwitcherState::new(),
+            quick_switcher_inaccessible_channel_ids: std::collections::HashSet::new(),
         };
         state.sync_guild_media();
         state
