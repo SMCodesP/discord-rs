@@ -189,6 +189,7 @@ async fn test_capture_processor_vad_hysteresis_and_silence_suppression() {
         Some(spk_tx),
         Arc::clone(&is_muted),
         Arc::clone(&audio_level_bits),
+        Arc::new(AtomicU32::new(1.0f32.to_bits())),
         Arc::clone(&is_speaking),
         Arc::clone(&vad_threshold_bits),
     )
@@ -272,16 +273,22 @@ fn test_audio_mixer_multi_ssrc_and_deafen() {
     let ssrc_a = 1001;
     let ssrc_b = 1002;
 
-    mixer.feed_opus_packet(ssrc_a, &packet_a).expect("Feed SSRC A");
-    mixer.feed_opus_packet(ssrc_b, &packet_b).expect("Feed SSRC B");
+    mixer.feed_opus_packet(ssrc_a, 1, 960, &packet_a).expect("Feed SSRC A #1");
+    mixer.feed_opus_packet(ssrc_b, 1, 960, &packet_b).expect("Feed SSRC B #1");
+    mixer.feed_opus_packet(ssrc_a, 2, 1920, &packet_a).expect("Feed SSRC A #2");
+    mixer.feed_opus_packet(ssrc_b, 2, 1920, &packet_b).expect("Feed SSRC B #2");
 
     assert_eq!(mixer.participant_count(), 2);
-    assert!(mixer.is_participant_speaking(ssrc_a));
-    assert!(mixer.is_participant_speaking(ssrc_b));
-    assert!(mixer.participant_audio_level(ssrc_a) > 0.05);
+
+    // Allow jitter buffer playout deadline (1 frame = 20ms) to elapse before playout decode
+    std::thread::sleep(std::time::Duration::from_millis(25));
 
     let mixed = mixer.pull_mixed_frame(false);
     assert_eq!(mixed.len(), STEREO_FRAME_SAMPLES);
+
+    assert!(mixer.is_participant_speaking(ssrc_a));
+    assert!(mixer.is_participant_speaking(ssrc_b));
+    assert!(mixer.participant_audio_level(ssrc_a) > 0.05);
 
     let energy: f32 = mixed.iter().map(|&x| x * x).sum();
     assert!(energy > 1.0, "Mixed audio energy should be non-zero");

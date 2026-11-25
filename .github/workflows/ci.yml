@@ -13,8 +13,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
-  RUST_MIN_STACK: "67108864"
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld -C codegen-units=64"
+  RUST_MIN_STACK: "134217728"
   DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/discord-rs-test-bus"
 
 jobs:

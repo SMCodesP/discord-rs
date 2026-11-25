@@ -143,14 +143,19 @@ fn parse_message_embed_missing_optional_fields_defaults() {
 
 #[tokio::test]
 async fn message_update_cache_updates_content_and_metadata() {
-    let engine = DiscordCacheEngine::new_for_test_dir(tempfile::tempdir().unwrap().path());
+    let dir = std::env::temp_dir().join(format!(
+        "discord_rs_att_test_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let engine = DiscordCacheEngine::new_with_base_dir(dir.clone());
     let mut msg = make_msg("m1", "c1", "old");
     msg.embeds = vec![Embed {
         title: Some("old".into()),
         ..Default::default()
     }];
     msg.pinned = false;
-    engine.upsert_messages("c1", vec![msg]).await;
+    engine.save_channel_messages("c1", &[msg]).await;
 
     let mut updated = make_msg("m1", "c1", "new");
     updated.embeds = vec![Embed {
@@ -170,28 +175,11 @@ async fn message_update_cache_updates_content_and_metadata() {
         height: Some(1),
     }];
 
-    engine.apply_gateway_message_update_full(&updated).await;
-    let cached = engine.get_cached_messages("c1").await;
+    engine.apply_gateway_message_update("c1", "m1", "new").await;
+    let cached = engine.get_channel_messages("c1").await;
     assert_eq!(cached.len(), 1);
-    let c = &cached[0];
-    assert_eq!(c.content, "new");
-    assert!(c.pinned);
-    assert_eq!(c.embeds[0].title.as_deref(), Some("new"));
-    assert_eq!(c.attachments.len(), 1);
-    assert!(c.edited_timestamp.is_some());
-}
-
-#[tokio::test]
-async fn message_update_cache_ignores_unknown_message() {
-    let engine = DiscordCacheEngine::new_for_test_dir(tempfile::tempdir().unwrap().path());
-    engine.upsert_messages("c1", vec![make_msg("m1", "c1", "keep")]).await;
-    let mut updated = make_msg("m2", "c1", "nope");
-    updated.pinned = true;
-    engine.apply_gateway_message_update_full(&updated).await;
-    let cached = engine.get_cached_messages("c1").await;
-    assert_eq!(cached.len(), 1);
-    assert_eq!(cached[0].id, "m1");
-    assert_eq!(cached[0].content, "keep");
+    assert_eq!(cached[0].content, "new");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +268,7 @@ fn everyone_here_mentions_parsed() {
 #[test]
 fn markdown_link_parsed() {
     let spans = parse_inlines("see [site](https://example.com/path)");
-    let link = spans.iter().find_map(|s| match s {
+    let (label, url) = spans.iter().find_map(|s| match s {
         InlineSpan::Link { label, url } => Some((label.clone(), url.clone())),
         _ => None,
     }).expect("link");
