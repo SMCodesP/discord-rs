@@ -319,7 +319,10 @@ pub fn discord_theme_json_for_palette(
 pub fn palette_for_theme(choice: ThemeChoice) -> colors::DiscordPalette {
     let mut palette = colors::DiscordPalette::dark();
     match choice {
-        ThemeChoice::Dark | ThemeChoice::SyncWithSystem => {}
+        // `Darker` intentionally shares the audited `theme-darker` palette:
+        // the CDP reference used for this project was `theme-dark theme-darker`,
+        // so inventing a separate surface set would not be evidence-based.
+        ThemeChoice::Dark | ThemeChoice::Darker | ThemeChoice::SyncWithSystem => {}
         ThemeChoice::Light => {
             // Discord light theme surfaces/text stops.
             palette.bg_server = rgb(0xe3e5e8);
@@ -370,13 +373,92 @@ pub fn palette_for_theme(choice: ThemeChoice) -> colors::DiscordPalette {
 }
 
 // ============================================================================
+// Account custom colors
+// ============================================================================
+
+/// Parses a Discord custom-theme color (`#rgb`, `#rrggbb` or `#rrggbbaa`)
+/// into the `0xRRGGBBAA` form used by [`gpui::rgba`].
+///
+/// Source of the accepted forms: the `CustomUserThemeSettings.colors` strings
+/// documented in `docs/THEME_PER_ACCOUNT.md` (hex strings such as `#1e1f22`).
+pub fn parse_custom_color_hex(value: &str) -> Option<u32> {
+    let raw = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    let expanded = match raw.len() {
+        3 => {
+            let mut out = String::with_capacity(6);
+            for ch in raw.chars() {
+                out.push(ch);
+                out.push(ch);
+            }
+            out
+        }
+        6 | 8 => raw.to_string(),
+        _ => return None,
+    };
+    let mut with_alpha = expanded;
+    if with_alpha.len() == 6 {
+        with_alpha.push_str("ff");
+    }
+    u32::from_str_radix(&with_alpha, 16).ok()
+}
+
+/// Signature of the valid custom colors, used to skip redundant re-installs.
+fn custom_color_signature(colors: &[String]) -> Vec<u32> {
+    colors
+        .iter()
+        .filter_map(|color| parse_custom_color_hex(color))
+        .collect()
+}
+
+fn scale_rgb(color: Rgba, factor: f32) -> Rgba {
+    Rgba {
+        r: (color.r * factor).clamp(0.0, 1.0),
+        g: (color.g * factor).clamp(0.0, 1.0),
+        b: (color.b * factor).clamp(0.0, 1.0),
+        a: color.a,
+    }
+}
+
+fn with_alpha(color: Rgba, alpha: f32) -> Rgba {
+    Rgba { a: alpha, ..color }
+}
+
+/// Builds the palette for `choice` and applies the account's custom theme
+/// colors captured from `PreloadedUserSettings`.
+///
+/// The protobuf stores up to five gradient stops (`CustomUserThemeSettings.colors`).
+/// This client has no gradient renderer yet, so the **first valid stop drives the
+/// accent triplet** (brand button, links and mention tints). Hover/active are
+/// scaled by the same 0.81/0.68 ratios measured on Discord's dark blurple stops
+/// (`#5865f2` → `#4752c4` → `#3c45a5`); the gradient itself remains a documented
+/// gap rather than a fabricated surface.
+pub fn palette_for_theme_with_custom(
+    choice: ThemeChoice,
+    custom_colors: &[String],
+) -> colors::DiscordPalette {
+    let mut palette = palette_for_theme(choice);
+    let parsed: Vec<Rgba> = custom_colors
+        .iter()
+        .filter_map(|color| parse_custom_color_hex(color).map(rgba))
+        .collect();
+    if let Some(accent) = parsed.first().copied() {
+        palette.blurple = accent;
+        palette.blurple_hover = scale_rgb(accent, 0.81);
+        palette.blurple_active = scale_rgb(accent, 0.68);
+        palette.mention_bg = with_alpha(accent, 0x26 as f32 / 255.0);
+        palette.mention_hover = with_alpha(accent, 0x40 as f32 / 255.0);
+    }
+    palette
+}
+
+// ============================================================================
 // install()
 // ============================================================================
 
 /// Registers the `"Discord"` theme with the given palette.
 ///
 /// Re-registering the same name replaces the previous theme data, so this is
-/// the path used by live Dark/Light/Midnight switching.
+/// the path used by live Dark/Light/Darker/Midnight switching.
 pub fn install_with_palette(cx: &mut App, palette: &colors::DiscordPalette) {
     install_with_palette_and_choice(cx, palette, ThemeChoice::Dark);
 }
@@ -404,35 +486,50 @@ fn install_with_palette_and_choice(
     cx.set_global(DiscordExtras::from_palette(palette));
 }
 
-/// Registers the theme for a concrete Dark/Light/Midnight choice.
-pub fn install_for_theme(cx: &mut App, choice: ThemeChoice) {
-    let palette = palette_for_theme(choice);
-    install_with_palette_and_choice(cx, &palette, choice);
-    cx.set_global(AppliedTheme(choice));
+/// Last theme selection applied to the kit, so observers can avoid re-registering
+/// the exact same palette on every notification. Custom colors are part of the
+/// signature because changing them must repaint even when the theme is the same.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedTheme {
+    pub choice: ThemeChoice,
+    pub custom_colors: Vec<u32>,
 }
-
-/// Last theme choice applied to the kit, so observers can avoid re-registering
-/// the same theme on every notification.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AppliedTheme(pub ThemeChoice);
 
 impl Global for AppliedTheme {}
 
-/// Applies a theme only when it differs from the last applied choice.
+/// Applies a theme choice (without custom colors) only when it changed.
 pub fn apply_theme_choice(cx: &mut App, choice: ThemeChoice) {
-    if cx.try_global::<AppliedTheme>().copied() == Some(AppliedTheme(choice)) {
+    apply_theme(cx, choice, &[]);
+}
+
+/// Applies a theme choice plus the account's custom colors.
+///
+/// Re-registers the `"Discord"` theme in the kit registry and updates the
+/// `Theme` global in place, so the running window repaints with the new colors
+/// without a restart.
+pub fn apply_theme(cx: &mut App, choice: ThemeChoice, custom_colors: &[String]) {
+    let next = AppliedTheme {
+        choice,
+        custom_colors: custom_color_signature(custom_colors),
+    };
+    if cx.try_global::<AppliedTheme>() == Some(&next) {
         return;
     }
-    install_for_theme(cx, choice);
+    let palette = palette_for_theme_with_custom(choice, custom_colors);
+    install_with_palette_and_choice(cx, &palette, choice);
+    cx.set_global(next);
+}
+
+/// Registers the theme for a concrete choice, without account custom colors.
+pub fn install_for_theme(cx: &mut App, choice: ThemeChoice) {
+    apply_theme(cx, choice, &[]);
 }
 
 /// Registers the dark `"Discord"` theme through the kit's official path
 /// (`ThemeRegistry::load_themes_from_str`) with the standard dark palette.
 /// Must be called after `gpui::init(cx)`.
 pub fn install(cx: &mut App) {
-    let palette = colors::DiscordPalette::dark();
-    install_with_palette_and_choice(cx, &palette, ThemeChoice::Dark);
-    cx.set_global(AppliedTheme(ThemeChoice::Dark));
+    apply_theme(cx, ThemeChoice::Dark, &[]);
 }
 
 // ============================================================================

@@ -49,6 +49,17 @@ pub fn render_appearance(
                         ))
                         .child(render_theme_card(
                             app_entity.clone(),
+                            ThemeChoice::Darker,
+                            current_theme,
+                            "Darker",
+                            "",
+                            cx.discord().bg_server,
+                            cx.discord().bg_channels,
+                            cx.discord().text_titles,
+                            cx,
+                        ))
+                        .child(render_theme_card(
+                            app_entity.clone(),
                             ThemeChoice::Light,
                             current_theme,
                             "Claro",
@@ -258,7 +269,7 @@ fn render_theme_card(
         .hover(move |s| s.bg(hover_bg))
         .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
             entity.update(cx, |s, cx| {
-                s.set_theme_choice(theme);
+                s.set_theme_choice(theme, cx);
                 cx.notify();
             });
         })
