@@ -779,8 +779,26 @@ impl DiscordApiClient {
         Ok(stickers)
     }
 
-    /// Fetches official sticker packs from Discord (/sticker-packs?locale=pt-BR) with local fallback
+    /// Fetches official sticker packs from Discord (/sticker-packs?locale=pt-BR).
+    /// A resposta real é persistida em disco; enquanto não houver rede, usa o
+    /// último snapshot válido. Sem snapshot e sem rede a lista fica vazia.
     pub async fn get_sticker_packs(&self) -> Result<Vec<StickerPack>> {
+        self.get_sticker_packs_with_refresh(false).await
+    }
+
+    /// Igual a [`Self::get_sticker_packs`], mas permite forçar uma nova consulta
+    /// ignorando o snapshot local (ex.: atualização manual do catálogo).
+    pub async fn get_sticker_packs_with_refresh(
+        &self,
+        force_refresh: bool,
+    ) -> Result<Vec<StickerPack>> {
+        if !force_refresh {
+            let cached = self.media_cache.get_sticker_packs_cached();
+            if !cached.is_empty() {
+                return Ok(cached);
+            }
+        }
+
         let url = "https://discord.com/api/v9/sticker-packs?locale=pt-BR";
         let req = self.auth_request_url(reqwest::Method::GET, url);
 
@@ -788,32 +806,37 @@ impl DiscordApiClient {
             Ok(resp) => {
                 if resp.status().is_success() {
                     if let Ok(val) = resp.json::<serde_json::Value>().await {
-                        let mut packs = Vec::new();
-                        if let Some(array) = val.get("sticker_packs").and_then(|v| v.as_array()) {
-                            for pack_val in array {
-                                if let Some(pack) = parse_sticker_pack_from_json(pack_val) {
-                                    packs.push(pack);
-                                }
-                            }
-                        }
+                        let packs = MediaCacheManager::parse_sticker_packs_response(&val);
                         if !packs.is_empty() {
+                            if let Err(error) =
+                                self.media_cache.save_sticker_packs_to_disk(&packs)
+                            {
+                                log::warn!(
+                                    "[DiscordApiClient] Falha ao persistir pacotes de figurinhas: {}",
+                                    error
+                                );
+                            }
                             return Ok(packs);
                         }
                     }
                 }
                 log::warn!(
-                    "[DiscordApiClient] get_sticker_packs returned non-success or empty, falling back to local packs"
+                    "[DiscordApiClient] get_sticker_packs returned non-success or empty"
                 );
-                Ok(MediaCacheManager::get_default_sticker_packs())
             }
             Err(e) => {
                 log::warn!(
-                    "[DiscordApiClient] get_sticker_packs failed ({}). Falling back to local packs",
+                    "[DiscordApiClient] get_sticker_packs failed ({}).",
                     e
                 );
-                Ok(MediaCacheManager::get_default_sticker_packs())
             }
         }
+
+        let cached = self.media_cache.get_sticker_packs_cached();
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        Ok(MediaCacheManager::get_default_sticker_packs())
     }
 
     /// Fetches trending GIFs from Discord official API (/gifs/trending?locale=pt-BR&media_format=webm) with Tenor/local fallback
@@ -1376,6 +1399,10 @@ impl DiscordTransport for DiscordApiClient {
 
     async fn get_guild_stickers(&self, guild_id: &str) -> Result<Vec<DiscordSticker>> {
         self.get_guild_stickers(guild_id).await
+    }
+
+    async fn get_sticker_packs(&self) -> Result<Vec<StickerPack>> {
+        self.get_sticker_packs().await
     }
 
     async fn list_channels(&self, guild_id: &str) -> Result<Vec<Channel>> {
@@ -3435,87 +3462,6 @@ fn parse_stickers_from_value_array(
         });
     }
     stickers
-}
-
-fn parse_sticker_pack_from_json(val: &serde_json::Value) -> Option<StickerPack> {
-    let id = val.get("id").and_then(|v| v.as_str())?.to_string();
-    let name = val
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Sticker Pack")
-        .to_string();
-    let sku_id = val
-        .get("sku_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let description = val
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let banner_asset_id = val
-        .get("banner_asset_id")
-        .and_then(|v| v.as_str())
-        .map(ToString::to_string);
-
-    let mut stickers = Vec::new();
-    if let Some(arr) = val.get("stickers").and_then(|v| v.as_array()) {
-        for s in arr {
-            let s_id = s
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let s_name = s
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("sticker")
-                .to_string();
-            let s_desc = s
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string);
-            let s_tags = s
-                .get("tags")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let s_pack_id = s
-                .get("pack_id")
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-                .or_else(|| Some(id.clone()));
-            let fmt_code = s.get("format_type").and_then(|v| v.as_u64()).unwrap_or(1);
-            let format_type = match fmt_code {
-                2 => StickerFormatType::Apng,
-                3 => StickerFormatType::Lottie,
-                4 => StickerFormatType::Gif,
-                _ => StickerFormatType::Png,
-            };
-            let available = s.get("available").and_then(|v| v.as_bool()).unwrap_or(true);
-
-            stickers.push(DiscordSticker {
-                id: s_id,
-                pack_id: s_pack_id,
-                name: s_name,
-                description: s_desc,
-                tags: s_tags,
-                format_type,
-                available,
-                guild_id: None,
-            });
-        }
-    }
-
-    Some(StickerPack {
-        id,
-        name,
-        sku_id,
-        description,
-        stickers,
-        banner_asset_id,
-    })
 }
 
 fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {

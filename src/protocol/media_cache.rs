@@ -1007,6 +1007,31 @@ impl MediaCacheManager {
         Ok(())
     }
 
+    /// Alterna o estado de favorito de forma síncrona (usado pelo controle do picker).
+    /// Retorna `true` quando a figurinha passou a ser favorita.
+    pub fn toggle_favorite_sticker_sync(&self, sticker: &DiscordSticker) -> Result<bool> {
+        let mut list = self
+            .favorite_stickers
+            .try_write()
+            .map_err(|_| anyhow::anyhow!("favorite_stickers lock indisponível"))?;
+        if let Some(position) = list.iter().position(|item| item.id == sticker.id) {
+            list.remove(position);
+            self.save_favorite_stickers_to_disk(&list)?;
+            Ok(false)
+        } else {
+            list.push(sticker.clone());
+            self.save_favorite_stickers_to_disk(&list)?;
+            Ok(true)
+        }
+    }
+
+    /// Indica se uma figurinha está entre as favoritas persistidas.
+    pub fn is_favorite_sticker_sync(&self, sticker_id: &str) -> bool {
+        self.get_favorite_stickers_sync()
+            .iter()
+            .any(|sticker| sticker.id == sticker_id)
+    }
+
     // --- Cache de pacotes oficiais de figurinhas ---
 
     pub fn sticker_packs_path(&self) -> PathBuf {
