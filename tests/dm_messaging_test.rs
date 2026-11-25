@@ -227,7 +227,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         mention_count: 0,
         icon_url: None,
         is_pinned: false,
-        last_message_id: Some("old-dm-msg-1".into()),
+        last_message_id: Some("1000000000000000001".into()),
         last_read_message_id: None,
         is_group_dm: false,
         recipient_ids: vec!["user-bot-dyno".into()],
@@ -305,7 +305,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
     let bot_dm = state.dm_channels.iter().find(|d| d.recipient_ids.contains(&"user-bot-dyno".to_string()));
     assert!(bot_dm.is_some(), "Bot DM must still exist");
     assert_eq!(bot_dm.unwrap().id, bot_dm_id, "Bot DM ID must remain untouched, NOT replaced by guild channel ID!");
-    assert_eq!(bot_dm.unwrap().last_message_id.as_deref(), Some("old-dm-msg-1"), "DM last_message_id must not be modified by guild message");
+    assert_eq!(bot_dm.unwrap().last_message_id.as_deref(), Some("1000000000000000001"), "DM last_message_id must not be modified by guild message");
 
     // B. selected_channel_id must NOT have been hijacked
     assert_eq!(state.selected_channel_id.as_ref(), Some(&bot_dm_id), "selected_channel_id must NOT be redirected to server channel");
@@ -392,7 +392,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
 
     // 5. Finally, test a LEGITIMATE DM message from Bot:
     let bot_real_dm_msg = Message {
-        id: "dm-msg-bot-real".into(),
+        id: "1000000000000000002".into(),
         channel_id: bot_dm_id.clone(),
         guild_id: None,
         author: Author {
@@ -420,7 +420,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
     state.handle_transport_event(TransportEvent::MessageCreate(bot_real_dm_msg));
 
     let bot_dm_after = state.dm_channels.iter().find(|d| d.id == bot_dm_id).unwrap();
-    assert_eq!(bot_dm_after.last_message_id.as_deref(), Some("dm-msg-bot-real"), "Legitimate DM message must update DM last_message_id");
+    assert_eq!(bot_dm_after.last_message_id.as_deref(), Some("1000000000000000002"), "Legitimate DM message must update DM last_message_id");
 }
 
 #[test]

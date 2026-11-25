@@ -178,10 +178,10 @@ fn test_e2e_guild_rail_switching_and_server_selection() {
     let guild_b = create_test_guild("guild-b", "Servidor GPUI", "chan-gpui-general");
     state.guilds = vec![guild_a, guild_b];
 
-    // Select Guild A
+    // Select Guild A (first text-like channel is Announcement #regras after T-076)
     state.select_guild(Some("guild-a".to_string()));
     assert_eq!(state.selected_guild_id.as_deref(), Some("guild-a"));
-    assert_eq!(state.selected_channel_id.as_deref(), Some("chan-rust-general"));
+    assert_eq!(state.selected_channel_id.as_deref(), Some("chan-guild-a-rules"));
 
     // Verify helper accessors
     let selected_guild = state.get_selected_guild().expect("Guild A should be selected");
@@ -191,8 +191,8 @@ fn test_e2e_guild_rail_switching_and_server_selection() {
 
     let (active_guild, active_chan) = state.get_selected_channel().expect("Active channel should exist");
     assert_eq!(active_guild.id, "guild-a");
-    assert_eq!(active_chan.id, "chan-rust-general");
-    assert_eq!(active_chan.name, "geral");
+    assert_eq!(active_chan.id, "chan-guild-a-rules");
+    assert_eq!(active_chan.name, "regras");
 
     // Instant switch to Guild B (categories already cached in memory, zero network request)
     state.select_guild(Some("guild-b".to_string()));

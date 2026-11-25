@@ -90,11 +90,13 @@ fn message_row_renders_selected_and_unselected() {
         MessageRowConfig {
             is_grouped: false,
             role_color: None,
+            is_highlighted: false,
             on_react: None,
             on_reply: None,
             on_more: None,
             on_reaction_click: None,
             on_add_reaction: None,
+            mentions: None,
             is_selected: true,
         },
     );
@@ -105,11 +107,13 @@ fn message_row_renders_selected_and_unselected() {
         MessageRowConfig {
             is_grouped: false,
             role_color: None,
+            is_highlighted: false,
             on_react: None,
             on_reply: None,
             on_more: None,
             on_reaction_click: None,
             on_add_reaction: None,
+            mentions: None,
             is_selected: false,
         },
     );

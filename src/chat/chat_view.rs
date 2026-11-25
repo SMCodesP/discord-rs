@@ -368,7 +368,7 @@ impl ChatView {
             .selected_message_id
             .as_deref()
             .and_then(|id| {
-                let items = build_chat_list_items(messages);
+                let items = build_chat_list_items_with_unread(messages, None);
                 items.iter().position(|item| match item {
                     ChatListItem::Message { message_idx, .. } => {
                         messages.get(*message_idx).map(|m| m.id.as_str()) == Some(id)
