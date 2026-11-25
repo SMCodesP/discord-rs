@@ -1,7 +1,14 @@
 //! Discord RS - Guild Item Component
 //! Server icon in the 72px vertical rail with the measured 40px squircle and
 //! an 8px indicator pill on the left.
-//! Visual source: /tmp/opencode/discord-shell-measurements.md (Discord Desktop).
+//! Visual sources:
+//! - /tmp/opencode/discord-shell-measurements.md (Discord Desktop darker shell)
+//! - docs/PARITY_MASTER_TASKS.md T-071
+//!
+//! The official icon is clipped by a 40x40 SVG squircle mask (curves at
+//! (0,17.4545)->(17.4545,0)). GPUI has no image clip mask here, so rendering
+//! keeps an explicit rounded-rectangle approximation while exposing the
+//! measured squircle contour for tests/comparison.
 
 use gpui::component::tooltip::Tooltip;
 use gpui::prelude::*;
@@ -13,6 +20,89 @@ use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
 use crate::tokens::typography::*;
+
+/// A cubic bezier segment of the guild icon squircle contour.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SquircleCubic {
+    pub from: (f32, f32),
+    pub c1: (f32, f32),
+    pub c2: (f32, f32),
+    pub to: (f32, f32),
+}
+
+/// Returns the measured 40x40 Discord guild icon squircle contour as 4 cubic
+/// bezier segments (one per corner), clockwise from the top-left corner.
+///
+/// Source: /tmp/opencode/discord-shell-measurements.md — SVG mask curves at
+/// (0,17.4545)->(17.4545,0), symmetric across 40x40.
+pub fn guild_icon_squircle_segments(size: f32) -> [SquircleCubic; 4] {
+    let s = size;
+    let c = 17.4545_f32 / 40.0_f32 * s;
+    let k = 8.0_f32 / 40.0_f32 * s; // control handle depth approximation
+    [
+        // top-left: (0,c) -> (c,0)
+        SquircleCubic {
+            from: (0.0, c),
+            c1: (0.0, k),
+            c2: (k, 0.0),
+            to: (c, 0.0),
+        },
+        // top-right: (s-c,0) -> (s,c)
+        SquircleCubic {
+            from: (s - c, 0.0),
+            c1: (s - k, 0.0),
+            c2: (s, k),
+            to: (s, c),
+        },
+        // bottom-right: (s,s-c) -> (s-c,s)
+        SquircleCubic {
+            from: (s, s - c),
+            c1: (s, s - k),
+            c2: (s - k, s),
+            to: (s - c, s),
+        },
+        // bottom-left: (c,s) -> (0,s-c)
+        SquircleCubic {
+            from: (c, s),
+            c1: (k, s),
+            c2: (0.0, s - k),
+            to: (0.0, s - c),
+        },
+    ]
+}
+
+/// Builds a GPUI path for the measured guild icon squircle contour.
+pub fn guild_icon_squircle_path(size: Pixels) -> gpui::Path<Pixels> {
+    let s = f32::from(size);
+    let segs = guild_icon_squircle_segments(s);
+    let mut b = gpui::PathBuilder::fill();
+    b.move_to(point(px(segs[0].from.0), px(segs[0].from.1)));
+    b.cubic_bezier_to(
+        point(px(segs[0].to.0), px(segs[0].to.1)),
+        point(px(segs[0].c1.0), px(segs[0].c1.1)),
+        point(px(segs[0].c2.0), px(segs[0].c2.1)),
+    );
+    b.line_to(point(px(segs[1].from.0), px(segs[1].from.1)));
+    b.cubic_bezier_to(
+        point(px(segs[1].to.0), px(segs[1].to.1)),
+        point(px(segs[1].c1.0), px(segs[1].c1.1)),
+        point(px(segs[1].c2.0), px(segs[1].c2.1)),
+    );
+    b.line_to(point(px(segs[2].from.0), px(segs[2].from.1)));
+    b.cubic_bezier_to(
+        point(px(segs[2].to.0), px(segs[2].to.1)),
+        point(px(segs[2].c1.0), px(segs[2].c1.1)),
+        point(px(segs[2].c2.0), px(segs[2].c2.1)),
+    );
+    b.line_to(point(px(segs[3].from.0), px(segs[3].from.1)));
+    b.cubic_bezier_to(
+        point(px(segs[3].to.0), px(segs[3].to.1)),
+        point(px(segs[3].c1.0), px(segs[3].c1.1)),
+        point(px(segs[3].c2.0), px(segs[3].c2.1)),
+    );
+    b.close();
+    b.build().expect("guild icon squircle path")
+}
 
 /// Server navigation item in the 72px vertical guild rail (icon 40x40px)
 #[derive(IntoElement)]

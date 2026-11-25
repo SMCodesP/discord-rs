@@ -52,6 +52,11 @@ pub const RAW_GUILD_FOLDER_PREVIEW_GAP: f32 = 2.0;
 /// Measured guild selection pill width (8px)
 pub const RAW_GUILD_PILL_WIDTH: f32 = 8.0;
 
+/// Measured guild selection pill left offset from rail edge (-4px).
+/// Source: /tmp/opencode/discord-shell-measurements.md. The rail clips
+/// overflow, so renderers may normalize to 0 while preserving width/radius.
+pub const RAW_GUILD_PILL_LEFT: f32 = -4.0;
+
 /// Unread guild selection pill height (8px)
 pub const RAW_GUILD_PILL_UNREAD_HEIGHT: f32 = 8.0;
 
@@ -66,6 +71,12 @@ pub const RAW_GUILD_SEPARATOR_WIDTH: f32 = 32.0;
 
 /// Guild rail separator height (1px)
 pub const RAW_GUILD_SEPARATOR_HEIGHT: f32 = 1.0;
+
+/// Guild rail separator corner radius (1px)
+pub const RAW_GUILD_SEPARATOR_RADIUS: f32 = 1.0;
+
+/// Guild rail item step/gap between 40px icon wrappers (8px => 48px step)
+pub const RAW_GUILD_ITEM_GAP: f32 = 8.0;
 
 /// Measured Discord Desktop channel row height (32px)
 pub const RAW_CHANNEL_ITEM_HEIGHT: f32 = 32.0;
@@ -229,6 +240,24 @@ pub fn guild_separator_width() -> Pixels {
 #[inline]
 pub fn guild_separator_height() -> Pixels {
     px(RAW_GUILD_SEPARATOR_HEIGHT)
+}
+
+/// Guild separator corner radius (1px)
+#[inline]
+pub fn guild_separator_radius() -> Pixels {
+    px(RAW_GUILD_SEPARATOR_RADIUS)
+}
+
+/// Guild item step gap (8px)
+#[inline]
+pub fn guild_item_gap() -> Pixels {
+    px(RAW_GUILD_ITEM_GAP)
+}
+
+/// Guild pill left offset (-4px measured; clipped by rail)
+#[inline]
+pub fn guild_pill_left() -> Pixels {
+    px(RAW_GUILD_PILL_LEFT)
 }
 
 /// Channel row height (32px)

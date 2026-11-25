@@ -11,6 +11,15 @@ pub use gpui::{rgb, rgba};
 /// Servidor: Server rail / sidebar background (#1e1f22)
 pub const HEX_BG_SERVER: u32 = 0x1e1f22;
 
+/// Guild rail (Darker theme) background. Source: Discord Desktop darker
+/// measurement /tmp/opencode/discord-shell-measurements.md (#0e0b17).
+pub const HEX_BG_GUILD_RAIL_DARKER: u32 = 0x0e0b17;
+
+/// Guild rail strong text/icon color in darker theme. Source: Discord
+/// Desktop darker measurement /tmp/opencode/discord-shell-measurements.md
+/// (#e1e1fe).
+pub const HEX_TEXT_GUILD_RAIL_STRONG_DARKER: u32 = 0xe1e1fe;
+
 /// Canais: Channels sidebar background (#2b2d31)
 pub const HEX_BG_CHANNELS: u32 = 0x2b2d31;
 
@@ -221,6 +230,18 @@ pub const HEX_LEGACY_FEE75C: u32 = 0xfee75c;
 #[inline]
 pub fn bg_server() -> Rgba {
     rgb(HEX_BG_SERVER)
+}
+
+/// Guild rail background for the measured Discord Darker shell (#0e0b17).
+#[inline]
+pub fn bg_guild_rail_darker() -> Rgba {
+    rgb(HEX_BG_GUILD_RAIL_DARKER)
+}
+
+/// Strong guild rail foreground for the measured Discord Darker shell (#e1e1fe).
+#[inline]
+pub fn text_guild_rail_strong_darker() -> Rgba {
+    rgb(HEX_TEXT_GUILD_RAIL_STRONG_DARKER)
 }
 
 /// Canais: Channel sidebar background (#2b2d31)
