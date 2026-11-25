@@ -50,6 +50,10 @@ use crate::protocol::voice_udp::{
     SILENCE_FRAME, VoicePacket, VoiceUdpReceiver, VoiceUdpSocket, VoiceUdpSender,
 };
 
+/// Limite defensivo para mensagens binárias DAVE antes de qualquer parse.
+/// Pacotes MLS legítimos são pequenos (KBs); 1 MiB evita alocações hostis.
+const MAX_DAVE_BINARY_PAYLOAD: usize = 1024 * 1024;
+
 // ============================================================================
 // 1. Ponto de Extensão DAVE (FrameCipher)
 // ============================================================================
@@ -411,7 +415,7 @@ impl AudioBridge {
         let (init_tx, init_rx) = std::sync::mpsc::channel();
         let (command_tx, mut command_rx) = mpsc::channel::<AudioBridgeCommand>(256);
 
-        std::thread::Builder::new()
+        let spawn_result = std::thread::Builder::new()
             .name("discord-audio-engine".into())
             .spawn(move || {
                 let mut engine = factory();
@@ -467,8 +471,10 @@ impl AudioBridge {
                         }
                     }
                 }
-            })
-            .expect("Falha ao iniciar thread dedicada do AudioEngine");
+            });
+        if let Err(err) = spawn_result {
+            log::error!("Falha ao iniciar thread dedicada do AudioEngine: {err}");
+        }
 
         let (outgoing_rx, speaking_rx, (audio_level, input_gain, output_gain)) = init_rx
             .recv()
@@ -917,10 +923,10 @@ impl VoiceSession {
 
     /// Configura um cifrador de quadros customizado (ex.: fallback para testes unitários/offline).
     pub fn with_cipher<C: FrameCipher + 'static>(self, cipher: C) -> Self {
-        *self
-            .frame_cipher
-            .try_lock()
-            .expect("cipher mutex uncontended at build time") = Box::new(cipher);
+        match self.frame_cipher.try_lock() {
+            Ok(mut guard) => *guard = Box::new(cipher),
+            Err(err) => log::error!("Cifrador de quadros não substituído: {err}"),
+        }
         self
     }
 
@@ -1394,22 +1400,16 @@ impl ActiveGeneration {
         Self(Some(generation))
     }
 
+    fn current(&self) -> Option<&MediaGeneration> {
+        self.0.as_ref()
+    }
+
+    fn current_mut(&mut self) -> Option<&mut MediaGeneration> {
+        self.0.as_mut()
+    }
+
     fn take(&mut self) -> Option<MediaGeneration> {
         self.0.take()
-    }
-}
-
-impl std::ops::Deref for ActiveGeneration {
-    type Target = MediaGeneration;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref().expect("geração de mídia ativa ausente")
-    }
-}
-
-impl std::ops::DerefMut for ActiveGeneration {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut().expect("geração de mídia ativa ausente")
     }
 }
 
@@ -1813,6 +1813,14 @@ async fn send_dave_transition_ready(
     gateway.send_text(payload.to_string()).await
 }
 
+fn lock_dave_session<'a>(
+    dave_session: &'a Arc<std::sync::Mutex<VoiceDaveSession>>,
+) -> Result<std::sync::MutexGuard<'a, VoiceDaveSession>> {
+    dave_session
+        .lock()
+        .map_err(|_| anyhow!("Lock envenenado em VoiceDaveSession"))
+}
+
 async fn send_dave_invalid_recovery(
     gateway: &dyn VoiceGatewayTransport,
     dave_session: &Arc<std::sync::Mutex<VoiceDaveSession>>,
@@ -1826,7 +1834,7 @@ async fn send_dave_invalid_recovery(
 
     // O reset já foi feito por handle_announce_commit/handle_welcome. Um novo
     // Key Package é obrigatório no mesmo fluxo de recuperação.
-    let key_package = dave_session.lock().unwrap().create_key_package()?;
+    let key_package = lock_dave_session(dave_session)?.create_key_package()?;
     gateway
         .send_binary(format_client_binary_message(
             DaveOpcode::MlsKeyPackage,
@@ -1840,13 +1848,16 @@ async fn process_dave_binary_message(
     dave_session: &Arc<std::sync::Mutex<VoiceDaveSession>>,
     data: &[u8],
 ) -> Result<()> {
+    if data.len() > MAX_DAVE_BINARY_PAYLOAD {
+        bail!(
+            "Mensagem binária DAVE excede o limite de {} bytes",
+            MAX_DAVE_BINARY_PAYLOAD
+        );
+    }
     let (_seq, opcode, payload) = parse_server_binary_message(data)?;
     match opcode {
         DaveOpcode::MlsExternalSender => {
-            let response = dave_session
-                .lock()
-                .unwrap()
-                .handle_external_sender(payload)?;
+            let response = lock_dave_session(dave_session)?.handle_external_sender(payload)?;
             gateway.send_binary(response).await?;
         }
         DaveOpcode::MlsProposals => {
@@ -1854,10 +1865,7 @@ async fn process_dave_binary_message(
                 bail!("Opcode 27 Proposals sem operation_type");
             }
             let response =
-                dave_session
-                    .lock()
-                    .unwrap()
-                    .handle_proposals(payload[0], &payload[1..], None)?;
+                lock_dave_session(dave_session)?.handle_proposals(payload[0], &payload[1..], None)?;
             if let Some(response) = response {
                 gateway.send_binary(response).await?;
             }
@@ -1867,9 +1875,7 @@ async fn process_dave_binary_message(
                 bail!("Opcode 29 Announce Commit sem transition_id");
             }
             let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
-            let invalid = dave_session
-                .lock()
-                .unwrap()
+            let invalid = lock_dave_session(dave_session)?
                 .handle_announce_commit(transition_id, &payload[2..])?;
             if let Some(invalid) = invalid {
                 send_dave_invalid_recovery(gateway, dave_session, invalid).await?;
@@ -1882,10 +1888,8 @@ async fn process_dave_binary_message(
                 bail!("Opcode 30 Welcome sem transition_id");
             }
             let transition_id = u16::from_be_bytes([payload[0], payload[1]]);
-            let invalid = dave_session
-                .lock()
-                .unwrap()
-                .handle_welcome(transition_id, &payload[2..])?;
+            let invalid =
+                lock_dave_session(dave_session)?.handle_welcome(transition_id, &payload[2..])?;
             if let Some(invalid) = invalid {
                 send_dave_invalid_recovery(gateway, dave_session, invalid).await?;
             } else {
@@ -2074,7 +2078,9 @@ async fn run_voice_session(
         }
     };
     let mut active = ActiveGeneration::new(initial_gen);
-    *active_gateway.lock().await = Some(active.gateway.clone());
+    if let Some(generation) = active.current() {
+        *active_gateway.lock().await = Some(generation.gateway.clone());
+    }
     log::info!(
         "[VoiceSession] Geração {generation_id}: transporte UDP pronto; aguardando readiness de mídia."
     );
@@ -2086,6 +2092,20 @@ async fn run_voice_session(
     let mut close_reason: Option<String> = None;
 
     loop {
+        let (current_id, current_gateway, current_ssrc, current_dave_version) =
+            match active.current() {
+                Some(generation) => (
+                    generation.id,
+                    generation.gateway.clone(),
+                    generation.local_ssrc,
+                    generation.dave_version,
+                ),
+                None => {
+                    close_reason = Some("Geração de mídia ativa ausente".into());
+                    break;
+                }
+            };
+
         let dave_ready = match dave_session.lock() {
             Ok(dave) => dave.is_ready(),
             Err(_) => {
@@ -2096,7 +2116,7 @@ async fn run_voice_session(
         let can_stream = refresh_connection_state(
             &state_tx,
             gateway_resumed,
-            active.dave_version,
+            current_dave_version,
             dave_ready,
             &mut dave_deadline,
         );
@@ -2105,9 +2125,8 @@ async fn run_voice_session(
         // audio is released after Resume or NewSession.
         if can_stream && !speaking_active {
             if vad_active {
-                if let Err(err) = active
-                    .gateway
-                    .set_speaking(true, 0, active.local_ssrc)
+                if let Err(err) = current_gateway
+                    .set_speaking(true, 0, current_ssrc)
                     .await
                 {
                     close_reason = Some(format!("Falha ao reenviar SpeakingStarted: {err:#}"));
@@ -2115,26 +2134,30 @@ async fn run_voice_session(
                 }
                 speaking_active = true;
                 let _ = events_tx.send(VoiceSessionEvent::Speaking {
-                    ssrc: active.local_ssrc,
+                    ssrc: current_ssrc,
                     user_id: Some(config.user_id),
                     is_speaking: true,
                 });
             } else if needs_speaking_stop {
-                if let Err(err) = active
-                    .gateway
-                    .set_speaking(false, 0, active.local_ssrc)
+                if let Err(err) = current_gateway
+                    .set_speaking(false, 0, current_ssrc)
                     .await
                 {
                     close_reason = Some(format!("Falha ao encerrar SpeakingStarted: {err:#}"));
                     break;
                 }
-                if let Err(err) = active.udp_sender.send_silence_frames().await {
-                    log::warn!("[VoiceSession] Falha ao enviar silêncio Opus: {err}");
+                if let Some(generation) = active.current_mut() {
+                    if let Err(err) = generation.udp_sender.send_silence_frames().await {
+                        log::warn!("[VoiceSession] Falha ao enviar silêncio Opus: {err}");
+                    }
+                } else {
+                    close_reason = Some("Geração de mídia ativa ausente".into());
+                    break;
                 }
                 speaking_active = false;
                 needs_speaking_stop = false;
                 let _ = events_tx.send(VoiceSessionEvent::Speaking {
-                    ssrc: active.local_ssrc,
+                    ssrc: current_ssrc,
                     user_id: Some(config.user_id),
                     is_speaking: false,
                 });
@@ -2148,9 +2171,8 @@ async fn run_voice_session(
                 }
                 vad_active = true;
                 if !speaking_active {
-                    if let Err(err) = active
-                        .gateway
-                        .set_speaking(true, 0, active.local_ssrc)
+                    if let Err(err) = current_gateway
+                        .set_speaking(true, 0, current_ssrc)
                         .await
                     {
                         close_reason = Some(format!("Falha ao enviar Opcode 5 inicial: {err:#}"));
@@ -2169,10 +2191,18 @@ async fn run_voice_session(
                         }
                     }
                 };
-                if let Err(err) = active.udp_sender.send_opus_frame(&ciphered_frame).await {
-                    log::warn!("[VoiceSession] Erro ao transmitir quadro RTP: {err}");
-                } else {
-                    sent_packets.fetch_add(1, Ordering::Relaxed);
+                match active.current_mut() {
+                    Some(generation) => {
+                        if let Err(err) = generation.udp_sender.send_opus_frame(&ciphered_frame).await {
+                            log::warn!("[VoiceSession] Erro ao transmitir quadro RTP: {err}");
+                        } else {
+                            sent_packets.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    None => {
+                        close_reason = Some("Geração de mídia ativa ausente".into());
+                        break;
+                    }
                 }
             }
 
@@ -2186,9 +2216,8 @@ async fn run_voice_session(
                 }
                 match event {
                     SpeakingEvent::SpeakingStarted => {
-                        if let Err(err) = active
-                            .gateway
-                            .set_speaking(true, 0, active.local_ssrc)
+                        if let Err(err) = current_gateway
+                            .set_speaking(true, 0, current_ssrc)
                             .await
                         {
                             close_reason = Some(format!("Falha ao anunciar SpeakingStarted: {err:#}"));
@@ -2197,15 +2226,14 @@ async fn run_voice_session(
                         speaking_active = true;
                         needs_speaking_stop = false;
                         let _ = events_tx.send(VoiceSessionEvent::Speaking {
-                            ssrc: active.local_ssrc,
+                            ssrc: current_ssrc,
                             user_id: Some(config.user_id),
                             is_speaking: true,
                         });
                     }
                     SpeakingEvent::SpeakingStopped => {
-                        if let Err(err) = active
-                            .gateway
-                            .set_speaking(false, 0, active.local_ssrc)
+                        if let Err(err) = current_gateway
+                            .set_speaking(false, 0, current_ssrc)
                             .await
                         {
                             close_reason = Some(format!("Falha ao anunciar SpeakingStopped: {err:#}"));
@@ -2213,11 +2241,16 @@ async fn run_voice_session(
                         }
                         speaking_active = false;
                         needs_speaking_stop = false;
-                        if let Err(err) = active.udp_sender.send_silence_frames().await {
-                            log::warn!("[VoiceSession] Falha ao enviar silêncio Opus: {err}");
+                        if let Some(generation) = active.current_mut() {
+                            if let Err(err) = generation.udp_sender.send_silence_frames().await {
+                                log::warn!("[VoiceSession] Falha ao enviar silêncio Opus: {err}");
+                            }
+                        } else {
+                            close_reason = Some("Geração de mídia ativa ausente".into());
+                            break;
                         }
                         let _ = events_tx.send(VoiceSessionEvent::Speaking {
-                            ssrc: active.local_ssrc,
+                            ssrc: current_ssrc,
                             user_id: Some(config.user_id),
                             is_speaking: false,
                         });
@@ -2287,7 +2320,7 @@ async fn run_voice_session(
                     | VoiceGatewayEvent::DaveExecuteTransition(_)
                     | VoiceGatewayEvent::DavePrepareEpoch(_) => {
                         let result = process_dave_gateway_event(
-                            active.gateway.as_ref(),
+                            current_gateway.as_ref(),
                             &dave_session,
                             gw_event,
                         )
@@ -2308,7 +2341,7 @@ async fn run_voice_session(
                     VoiceGatewayEvent::Disconnected { code, reason, decision } => {
                         log::info!(
                             "[VoiceSession] Geração {} desconectada: {reason} (decisão: {decision:?})",
-                            active.id
+                            current_id
                         );
                         let _ = events_tx.send(VoiceSessionEvent::Disconnected {
                             code,
@@ -2331,7 +2364,14 @@ async fn run_voice_session(
                                 // Ready/DAVE/Disconnected events cannot affect
                                 // the replacement generation.
                                 drop(gateway_events_rx);
-                                let old = active.take().expect("geração ativa ausente");
+                                let old = match active.take() {
+                                    Some(old) => old,
+                                    None => {
+                                        close_reason =
+                                            Some("Geração de mídia ativa ausente".into());
+                                        break;
+                                    }
+                                };
                                 let old_gateway = old.gateway.clone();
                                 drop(old);
                                 let _ = old_gateway.disconnect().await;
@@ -2584,5 +2624,65 @@ mod tests {
             serde_json::from_str(&gateway.texts.lock().unwrap()[0]).unwrap();
         assert_eq!(value["op"], 23);
         assert_eq!(value["d"]["transition_id"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_truncated_and_unknown_dave_binary_payloads_are_errors() {
+        let dave = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(100, 200)));
+        dave.lock().unwrap().init_session(1).unwrap();
+        let gateway = RecordingGateway::new();
+
+        let fixtures: &[&[u8]] = &[
+            &[],
+            &[0x00],
+            &[0x00, 0x01],
+            &[0x00, 0x01, 29],
+            &[0x00, 0x01, 29, 0x00],
+            &[0x00, 0x01, 30],
+            &[0x00, 0x01, 27],
+            &[0x00, 0x01, 0xFF],
+        ];
+        for fixture in fixtures {
+            assert!(
+                process_dave_binary_message(&gateway, &dave, fixture)
+                    .await
+                    .is_err(),
+                "fixture {fixture:?} deveria falhar com erro de domínio"
+            );
+        }
+        assert!(gateway.texts.lock().unwrap().is_empty());
+        assert!(gateway.binaries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_oversized_dave_binary_payload_is_rejected_before_parse() {
+        let dave = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(100, 200)));
+        dave.lock().unwrap().init_session(1).unwrap();
+        let gateway = RecordingGateway::new();
+
+        let oversized = vec![0u8; MAX_DAVE_BINARY_PAYLOAD + 1];
+        let err = process_dave_binary_message(&gateway, &dave, &oversized)
+            .await
+            .expect_err("payload acima do limite deve ser recusado");
+        assert!(err.to_string().contains("limite"));
+        assert!(gateway.texts.lock().unwrap().is_empty());
+        assert!(gateway.binaries.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_poisoned_dave_mutex_is_domain_error_not_panic() {
+        let dave = Arc::new(std::sync::Mutex::new(VoiceDaveSession::new(100, 200)));
+        let dave_poison = dave.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = dave_poison.lock().expect("lock recém-criado");
+            panic!("poison intencional para o teste");
+        })
+        .join();
+        let gateway = RecordingGateway::new();
+
+        let result = process_dave_binary_message(&gateway, &dave, &[0x00, 0x01, 25]).await;
+        assert!(result.is_err(), "mutex envenenado deve virar erro de domínio");
+        assert!(gateway.texts.lock().unwrap().is_empty());
+        assert!(gateway.binaries.lock().unwrap().is_empty());
     }
 }

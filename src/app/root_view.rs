@@ -781,11 +781,16 @@ impl Render for RootView {
                         });
                     }
                     ActiveModal::Login | ActiveModal::LoginDiscord => {
-                        let token_state = self.token_modal_state.as_ref().expect("modal token state").clone();
-                        window.open_dialog(cx, move |dialog, window, cx| {
-                            let vh = window.viewport_size().height;
-                            build_login_dialog(dialog, entity.clone(), &token_state, vh, cx)
-                        });
+                        if let Some(token_state) = self.token_modal_state.as_ref().cloned() {
+                            window.open_dialog(cx, move |dialog, window, cx| {
+                                let vh = window.viewport_size().height;
+                                build_login_dialog(dialog, entity.clone(), &token_state, vh, cx)
+                            });
+                        } else {
+                            log::error!(
+                                "Modal de login ativo sem token_modal_state; diálogo não aberto"
+                            );
+                        }
                     }
                     ActiveModal::AddFriendToGroup(channel_id) => {
                         let cid = channel_id.clone();
@@ -802,11 +807,16 @@ impl Render for RootView {
                     }
                     ActiveModal::EditGuildNickname { guild_id } => {
                         let gid = guild_id.clone();
-                        let nick_state = self.guild_nick_state.as_ref().expect("guild nick state").clone();
-                        window.open_dialog(cx, move |dialog, window, cx| {
-                            let vh = window.viewport_size().height;
-                            build_edit_guild_nickname_dialog(dialog, entity.clone(), gid.clone(), &nick_state, vh, cx)
-                        });
+                        if let Some(nick_state) = self.guild_nick_state.as_ref().cloned() {
+                            window.open_dialog(cx, move |dialog, window, cx| {
+                                let vh = window.viewport_size().height;
+                                build_edit_guild_nickname_dialog(dialog, entity.clone(), gid.clone(), &nick_state, vh, cx)
+                            });
+                        } else {
+                            log::error!(
+                                "Modal de apelido ativo sem guild_nick_state; diálogo não aberto"
+                            );
+                        }
                     }
                     ActiveModal::LeaveGuild { guild_id } => {
                         let gid = guild_id.clone();
@@ -966,28 +976,30 @@ impl Render for RootView {
                                     &app_entity,
                                     cx,
                                 );
-                                let search_state = self
-                                    .friends_search_state
-                                    .as_ref()
-                                    .expect("friends_search_state must be initialized");
-                                let add_friend_state = self
-                                    .add_friend_state
-                                    .as_ref()
-                                    .expect("add_friend_state must be initialized");
-                                let friends_list_state = self
-                                    .friends_list_state
-                                    .as_ref()
-                                    .expect("friends_list_state must be initialized");
-                                render_friends_view(
-                                    app_entity.clone(),
-                                    state,
-                                    search_state,
-                                    &self.friends_search_query,
-                                    add_friend_state,
-                                    friends_list_state,
-                                    window.viewport_size().width.as_f32(),
-                                )
-                                .into_any_element()
+                                match (
+                                    self.friends_search_state.as_ref(),
+                                    self.add_friend_state.as_ref(),
+                                    self.friends_list_state.as_ref(),
+                                ) {
+                                    (Some(search_state), Some(add_friend_state), Some(friends_list_state)) => {
+                                        render_friends_view(
+                                            app_entity.clone(),
+                                            state,
+                                            search_state,
+                                            &self.friends_search_query,
+                                            add_friend_state,
+                                            friends_list_state,
+                                            window.viewport_size().width.as_f32(),
+                                        )
+                                        .into_any_element()
+                                    }
+                                    _ => {
+                                        log::error!(
+                                            "Estados de input da Friends View ausentes; usando o chat como fallback"
+                                        );
+                                        self.chat_view.clone().into_any_element()
+                                    }
+                                }
                             } else {
                                 self.spotify_timer = None;
                                 self.chat_view.clone().into_any_element()
@@ -1020,28 +1032,35 @@ impl Render for RootView {
             // =========================================================================
             // USER PROFILE POPOUT OVERLAY (Fase 4)
             // =========================================================================
-            .children(if let Some(ref popout) = state.profile_popout {
-                let entity = app_entity.clone();
-                let popout_state = popout.clone();
-                let catalog = state.profile_effects_catalog.clone();
-                let presence = state.presences_by_user.get(&popout.user_id).cloned();
-                Some(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .child(crate::app::user_profile_popout::render_user_profile_popout(
-                            entity,
-                            &popout_state,
-                            state.profile_anchor,
-                            &catalog,
-                            presence.as_ref(),
-                            self.quick_msg_state.as_ref().expect("quick message state"),
-                        )),
-                )
-            } else {
-                None
+            .children(match (&state.profile_popout, self.quick_msg_state.as_ref()) {
+                (Some(popout), Some(quick_state)) => {
+                    let entity = app_entity.clone();
+                    let popout_state = popout.clone();
+                    let catalog = state.profile_effects_catalog.clone();
+                    let presence = state.presences_by_user.get(&popout.user_id).cloned();
+                    Some(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .child(crate::app::user_profile_popout::render_user_profile_popout(
+                                entity,
+                                &popout_state,
+                                state.profile_anchor,
+                                &catalog,
+                                presence.as_ref(),
+                                quick_state,
+                            )),
+                    )
+                }
+                (Some(_), None) => {
+                    log::error!(
+                        "Popout de perfil ativo sem quick_msg_state; popout não renderizado"
+                    );
+                    None
+                }
+                (None, _) => None,
             })
             .children(if quick_switcher_open_state {
                 self.quick_switcher_state.as_ref().map(|input| {
