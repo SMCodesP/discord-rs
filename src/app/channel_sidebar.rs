@@ -22,6 +22,154 @@ fn icon_speaker_off(size: Pixels, color: impl Into<Hsla>) -> Div {
     icon_headphones_off(size, color)
 }
 
+// ============================================================================
+// Measured Discord Desktop channel-sidebar metrics
+// ============================================================================
+//
+// Source: `/tmp/opencode/discord-shell-measurements.md` as recorded in
+// `docs/PARITY_MASTER_TASKS.md` (T-072):
+// * rail 72px + channel sidebar 272px = 344px total; the 4px resize handle
+//   lives inside the sidebar's right gutter.
+// * channel link 255x32, radius 8px, padding 4px 8px, icon 20px,
+//   label 16px/500/24px.
+// * normal label #8989aa, selected label #e1e1fe, selected background #131316.
+// * user panel 328x58 at x=8 with an 8px bottom margin; user block 153x46,
+//   controls 146x32 with 8px gap and 32x32/r8 buttons.
+
+/// Narrowest channel sidebar the resize interaction allows.
+pub const RAW_CHANNEL_SIDEBAR_MIN_WIDTH: f32 = 220.0;
+
+/// Widest channel sidebar the resize interaction allows.
+pub const RAW_CHANNEL_SIDEBAR_MAX_WIDTH: f32 = 420.0;
+
+/// Width of the draggable divider inside the sidebar's right edge.
+pub const RAW_CHANNEL_SIDEBAR_HANDLE_WIDTH: f32 = 4.0;
+
+/// Measured Discord Desktop channel link height (32px).
+pub const RAW_SIDEBAR_CHANNEL_LINK_HEIGHT: f32 = 32.0;
+
+/// Measured Discord Desktop channel link radius (8px).
+pub const RAW_SIDEBAR_CHANNEL_LINK_RADIUS: f32 = 8.0;
+
+/// Measured user block inside the floating panel (153x46px).
+pub const RAW_USER_PANEL_PROFILE_WIDTH: f32 = 153.0;
+pub const RAW_USER_PANEL_PROFILE_HEIGHT: f32 = 46.0;
+
+/// Measured audio-control cluster inside the floating panel (146x32px, gap 8px).
+pub const RAW_USER_PANEL_CONTROLS_WIDTH: f32 = 146.0;
+pub const RAW_USER_PANEL_CONTROLS_HEIGHT: f32 = 32.0;
+pub const RAW_USER_PANEL_CONTROLS_GAP: f32 = 8.0;
+
+/// Measured normal channel label colour (#8989aa).
+pub const HEX_SIDEBAR_CHANNEL_TEXT: u32 = 0x8989aa;
+/// Measured selected channel label colour (#e1e1fe).
+pub const HEX_SIDEBAR_CHANNEL_SELECTED_TEXT: u32 = 0xe1e1fe;
+/// Measured selected channel background (#131316).
+pub const HEX_SIDEBAR_CHANNEL_SELECTED_BG: u32 = 0x131316;
+
+/// Normal channel label colour from the official measurement.
+#[inline]
+pub fn sidebar_channel_text() -> Rgba {
+    rgb(HEX_SIDEBAR_CHANNEL_TEXT)
+}
+
+/// Selected channel label colour from the official measurement.
+#[inline]
+pub fn sidebar_channel_selected_text() -> Rgba {
+    rgb(HEX_SIDEBAR_CHANNEL_SELECTED_TEXT)
+}
+
+/// Selected channel background from the official measurement.
+#[inline]
+pub fn sidebar_channel_selected_bg() -> Rgba {
+    rgb(HEX_SIDEBAR_CHANNEL_SELECTED_BG)
+}
+
+/// Clamps a requested sidebar width to the range the resize interaction supports.
+#[inline]
+pub fn clamp_channel_sidebar_width(width: f32) -> f32 {
+    width.clamp(
+        RAW_CHANNEL_SIDEBAR_MIN_WIDTH,
+        RAW_CHANNEL_SIDEBAR_MAX_WIDTH,
+    )
+}
+
+/// Total first-column width (rail + channel sidebar) at the default state.
+#[inline]
+pub fn default_channel_sidebar_shell_width() -> f32 {
+    RAW_RAIL_WIDTH + RAW_CHANNEL_SIDEBAR_WIDTH
+}
+
+/// Channel link width for a given sidebar width: sidebar minus the 8px left and
+/// 9px right gutters measured on Discord Desktop (255px at the 272px default).
+#[inline]
+pub fn channel_link_width(sidebar_width: f32) -> f32 {
+    (clamp_channel_sidebar_width(sidebar_width) - RAW_SPACE_4 - 9.0).max(0.0)
+}
+
+/// Floating user-panel width tracks the sidebar so the measured 8px inset on
+/// both sides is preserved while resizing (328px at the 272px default).
+#[inline]
+pub fn user_panel_width_for_sidebar(sidebar_width: f32) -> f32 {
+    (clamp_channel_sidebar_width(sidebar_width) + RAW_RAIL_WIDTH
+        - 2.0 * RAW_USER_PANEL_MARGIN)
+        .max(0.0)
+}
+
+/// Path of the local preference that persists the channel sidebar width.
+pub fn channel_sidebar_width_cache_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|base| base.join("discord-rs").join("channel_sidebar_width"))
+}
+
+/// Loads a persisted sidebar width, clamped to the supported range.
+pub fn load_channel_sidebar_width_from_path(
+    path: &std::path::Path,
+) -> Option<f32> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value = raw.trim().parse::<f32>().ok()?;
+    value.is_finite().then(|| clamp_channel_sidebar_width(value))
+}
+
+/// Persists the sidebar width, writing through a temporary sibling file so a
+/// crash cannot leave a truncated preference behind.
+pub fn save_channel_sidebar_width_to_path(path: &std::path::Path, width: f32) -> std::io::Result<()> {
+    let width = clamp_channel_sidebar_width(width);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, format!("{}\n", width))?;
+    std::fs::rename(tmp, path)
+}
+
+/// Capacity badge text for a voice channel; mirrors what the channel row shows.
+pub fn voice_capacity_badge_text(count: usize, limit: Option<u32>) -> Option<String> {
+    match limit {
+        Some(limit) if limit > 0 => Some(format!("{}/{}", count, limit)),
+        _ if count > 0 => Some(count.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether a voice channel is at or above its configured user limit.
+#[inline]
+pub fn voice_capacity_is_full(count: usize, limit: Option<u32>) -> bool {
+    matches!(limit, Some(limit) if limit > 0 && count >= limit as usize)
+}
+
+/// Payload used by the sidebar resize drag.
+#[derive(Clone, Copy)]
+struct SidebarResizeDrag;
+
+/// Invisible drag proxy; the drag API requires a renderable value.
+struct SidebarResizeGhost;
+
+impl Render for SidebarResizeGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(0.0))
+    }
+}
+
 /// Channel sidebar containing:
 /// - Server header / DM header
 /// - Collapsible categories & channel lists / DM list
@@ -33,6 +181,8 @@ pub struct ChannelSidebar {
     dm_search_state: Option<Entity<InputState>>,
     dm_search_sub: Option<Subscription>,
     dm_search_query: String,
+    width: f32,
+    width_cache_path: Option<std::path::PathBuf>,
 }
 
 impl ChannelSidebar {
@@ -49,12 +199,40 @@ impl ChannelSidebar {
             }
         });
 
+        let width_cache_path = channel_sidebar_width_cache_path();
+        let width = width_cache_path
+            .as_deref()
+            .and_then(load_channel_sidebar_width_from_path)
+            .unwrap_or(RAW_CHANNEL_SIDEBAR_WIDTH);
+
         Self {
             state,
             focus_handle: cx.focus_handle(),
             dm_search_state: None,
             dm_search_sub: None,
             dm_search_query: String::new(),
+            width,
+            width_cache_path,
+        }
+    }
+
+    /// Current sidebar width, including the 4px resize gutter.
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// Applies a resized width and persists it when it changes by at least a
+    /// whole pixel. Called from the resize drag listener.
+    pub fn set_width(&mut self, width: f32) {
+        let clamped = clamp_channel_sidebar_width(width).round();
+        if (self.width - clamped).abs() < 0.5 {
+            return;
+        }
+        self.width = clamped;
+        if let Some(path) = self.width_cache_path.as_deref() {
+            if let Err(error) = save_channel_sidebar_width_to_path(path, clamped) {
+                log::warn!("Falha ao salvar largura da sidebar: {error}");
+            }
         }
     }
 
@@ -90,6 +268,9 @@ impl Render for ChannelSidebar {
         let current_user = state.current_user.clone();
         let is_dm = state.selected_guild_id.is_none();
         let app_entity = self.state.clone();
+        let sidebar_entity = cx.entity().clone();
+        let sidebar_width = self.width;
+        let panel_width = user_panel_width_for_sidebar(sidebar_width);
 
         let header_el = if let Some(ref guild) = selected_guild {
             render_server_header(guild, &app_entity)
@@ -117,7 +298,7 @@ impl Render for ChannelSidebar {
             .relative()
             .flex()
             .flex_col()
-            .w(channel_sidebar_width())
+            .w(px(sidebar_width))
             .h_full()
             .min_h(px(0.0))
             .bg(bg_channels())
@@ -162,9 +343,34 @@ impl Render for ChannelSidebar {
                     // Discord measures 50px of channel-navigation clearance;
                     // the 58px panel floats over the final 16px of that area.
                     .child(div().h(channel_navigation_reserve()))
-                    .child(render_user_panel(&current_user, &app_entity)),
+                    .child(render_user_panel(&current_user, panel_width, &app_entity)),
             )
+            .child(render_resize_handle(sidebar_width, sidebar_entity))
     }
+}
+
+fn render_resize_handle(_sidebar_width: f32, sidebar_entity: Entity<ChannelSidebar>) -> AnyElement {
+    let drag_entity = sidebar_entity.clone();
+    div()
+        .id("channel-sidebar-resize-handle")
+        .absolute()
+        .top_0()
+        .right_0()
+        .h_full()
+        .w(px(RAW_CHANNEL_SIDEBAR_HANDLE_WIDTH))
+        .cursor(CursorStyle::ResizeLeftRight)
+        .hover(|style| style.bg(channel_hover()))
+        .on_drag(SidebarResizeDrag, move |_drag, _offset, _window, cx| {
+            cx.new(|_| SidebarResizeGhost)
+        })
+        .on_drag_move::<SidebarResizeDrag>(move |event, _window, cx| {
+            let requested = event.event.position.x.as_f32() - RAW_RAIL_WIDTH;
+            drag_entity.update(cx, |this, cx| {
+                this.set_width(requested);
+                cx.notify();
+            });
+        })
+        .into_any_element()
 }
 
 // ============================================================================
@@ -244,6 +450,7 @@ fn render_dm_search_header(search_state: &Entity<InputState>) -> AnyElement {
         .flex()
         .flex_row()
         .items_center()
+        .rounded_tl(radius_lg())
         .border_b_1()
         .border_color(border_subtle())
         .child(
@@ -1073,7 +1280,7 @@ fn render_channel_entry(
         .cursor_pointer();
 
     if is_selected {
-        row = row.bg(channel_active());
+        row = row.bg(sidebar_channel_selected_bg());
     } else {
         row = row.hover(|style| style.bg(channel_hover()));
     }
@@ -1086,34 +1293,26 @@ fn render_channel_entry(
                 .w(channel_unread_width())
                 .h(guild_pill_unread_height())
                 .rounded_r(radius_sm())
-                .bg(channels_default()),
+                .bg(sidebar_channel_selected_text()),
         );
     }
 
-    let channel_icon_color = if is_selected {
-        white()
-    } else if is_unread {
-        text_header()
+    let channel_icon_color = if is_selected || is_unread {
+        sidebar_channel_selected_text()
     } else {
-        channels_default()
+        sidebar_channel_text()
     };
 
     let mut channel_name = div()
         .text_size(typography.size)
         .font_weight(typography.weight)
         .line_height(typography.line_height)
-        .text_color(if is_selected {
-            white()
-        } else if is_unread {
-            text_header()
-        } else {
-            channels_default()
-        })
+        .text_color(channel_icon_color)
         .truncate()
         .child(ch_name);
     if !is_selected && !is_unread {
-        channel_name =
-            channel_name.group_hover(group_name.clone(), |style| style.text_color(text_header()));
+        channel_name = channel_name
+            .group_hover(group_name.clone(), |style| style.text_color(sidebar_channel_selected_text()));
     }
 
     row = row
@@ -1137,7 +1336,7 @@ fn render_channel_entry(
                     ch_kind,
                     channel_icon_color,
                     group_name.clone(),
-                    (!is_selected).then_some(text_header()),
+                    (!is_selected).then_some(sidebar_channel_selected_text()),
                 ))
                 .child(channel_name),
         )
@@ -1147,6 +1346,7 @@ fn render_channel_entry(
                 .flex_row()
                 .items_center()
                 .gap(space_2())
+                .flex_shrink_0()
                 .children(capacity_badge)
                 .children(if mention_count > 0 {
                     Some(MentionBadge::new(mention_count).into_any_element())
