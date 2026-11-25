@@ -84,6 +84,11 @@ impl AppState {
                     channel_name: channel_name.to_string(),
                     guild_name: guild_name.to_string(),
                     ping_ms: None,
+                    packet_loss_pct: None,
+                    sent_packets: 0,
+                    recv_packets: 0,
+                    lost_packets: 0,
+                    codec: None,
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
                     is_screen_sharing: false,
@@ -113,6 +118,11 @@ impl AppState {
                     channel_name: channel_name.to_string(),
                     guild_name: guild_name.to_string(),
                     ping_ms: None,
+                    packet_loss_pct: None,
+                    sent_packets: 0,
+                    recv_packets: 0,
+                    lost_packets: 0,
+                    codec: None,
                     is_muted: self.current_user.is_muted,
                     is_deafened: self.current_user.is_deafened,
                     is_screen_sharing: false,
@@ -138,6 +148,11 @@ impl AppState {
             channel_name: channel_name.to_string(),
             guild_name: guild_name.to_string(),
             ping_ms: None,
+            packet_loss_pct: None,
+            sent_packets: 0,
+            recv_packets: 0,
+            lost_packets: 0,
+            codec: None,
             is_muted: self.current_user.is_muted,
             is_deafened: self.current_user.is_deafened,
             is_screen_sharing: false,
@@ -272,6 +287,23 @@ impl AppState {
                 _ => None,
             };
             call.connection_state = session_state;
+            let session = call.voice_session.clone();
+            if let Some(session) = session
+                && matches!(call.connection_state, VoiceSessionState::Connected)
+            {
+                let stats = session.packet_stats();
+                call.sent_packets = stats.sent_packets;
+                call.recv_packets = stats.recv_packets;
+                call.lost_packets = stats.lost_packets;
+                call.packet_loss_pct = stats.packet_loss_pct();
+                call.codec = session.audio_codec().map(str::to_string);
+            } else {
+                call.packet_loss_pct = None;
+                call.sent_packets = 0;
+                call.recv_packets = 0;
+                call.lost_packets = 0;
+                call.codec = None;
+            }
         }
     }
 

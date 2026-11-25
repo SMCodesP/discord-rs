@@ -161,6 +161,18 @@ pub enum VoiceSessionState {
 pub struct VoicePacketStats {
     pub sent_packets: u64,
     pub recv_packets: u64,
+    pub lost_packets: u64,
+}
+
+impl VoicePacketStats {
+    pub fn packet_loss_pct(&self) -> Option<f32> {
+        let expected = self.recv_packets.saturating_add(self.lost_packets);
+        if expected == 0 {
+            None
+        } else {
+            Some(self.lost_packets as f32 / expected as f32 * 100.0)
+        }
+    }
 }
 
 /// Eventos observáveis do ciclo de vida e progresso da sessão de voz.
@@ -786,6 +798,7 @@ pub struct VoiceSession {
     events_tx: broadcast::Sender<VoiceSessionEvent>,
     sent_packets: Arc<AtomicU64>,
     recv_packets: Arc<AtomicU64>,
+    lost_packets: Arc<AtomicU64>,
     gateway_factory: VoiceGatewayFactory,
     session_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
@@ -835,6 +848,7 @@ impl VoiceSession {
         let last_opcode4 = Arc::new(std::sync::RwLock::new(None));
         let sent_packets = Arc::new(AtomicU64::new(0));
         let recv_packets = Arc::new(AtomicU64::new(0));
+        let lost_packets = Arc::new(AtomicU64::new(0));
         let ssrc_to_user = Arc::new(RwLock::new(HashMap::new()));
         let ping_ms = Arc::new(AtomicU32::new(u32::MAX));
         let call_warning = Arc::new(std::sync::RwLock::new(None));
@@ -857,6 +871,7 @@ impl VoiceSession {
             events_tx,
             sent_packets,
             recv_packets,
+            lost_packets,
             gateway_factory: Arc::new(move |cfg| {
                 Arc::new(VoiceGateway::new_with_dave_session(
                     cfg,
@@ -945,7 +960,13 @@ impl VoiceSession {
         VoicePacketStats {
             sent_packets: self.sent_packets.load(Ordering::Relaxed),
             recv_packets: self.recv_packets.load(Ordering::Relaxed),
+            lost_packets: self.lost_packets.load(Ordering::Relaxed),
         }
+    }
+
+    /// Codec de áudio do pipeline RTP ativo. O Discord Voice negocia Opus.
+    pub fn audio_codec(&self) -> Option<&'static str> {
+        self.is_connected().then_some("Opus")
     }
 
     /// Configura uma fábrica customizada para o Voice Gateway (útil para testes unitários/offline).
@@ -1205,6 +1226,7 @@ impl VoiceSession {
         let events_tx = self.events_tx.clone();
         let sent_packets = self.sent_packets.clone();
         let recv_packets = self.recv_packets.clone();
+        let lost_packets = self.lost_packets.clone();
         let gateway_factory = self.gateway_factory.clone();
         let state_tx = self.state_tx.clone();
         let active_gateway = self.active_gateway.clone();
@@ -1224,6 +1246,7 @@ impl VoiceSession {
                 events_tx,
                 sent_packets,
                 recv_packets,
+                lost_packets,
                 gateway_factory,
                 state_tx.clone(),
                 active_gateway.clone(),
@@ -1524,15 +1547,28 @@ async fn request_voice_credentials(
     })
 }
 
+const MAX_REASONABLE_SEQUENCE_GAP: u16 = 1000;
+
+fn rtp_sequence_gap(previous: u16, current: u16) -> u32 {
+    let gap = current.wrapping_sub(previous);
+    if gap > 1 && gap <= MAX_REASONABLE_SEQUENCE_GAP {
+        u32::from(gap - 1)
+    } else {
+        0
+    }
+}
+
 fn spawn_udp_receiver(
     receiver: VoiceUdpReceiver,
     ssrc_to_user: Arc<RwLock<HashMap<u32, u64>>>,
     audio_bridge: Arc<Mutex<AudioBridge>>,
     frame_cipher: Arc<Mutex<Box<dyn FrameCipher>>>,
     recv_packets: Arc<AtomicU64>,
+    lost_packets: Arc<AtomicU64>,
 ) -> (AbortOnDrop<()>, mpsc::Receiver<String>) {
     let (error_tx, error_rx) = mpsc::channel(1);
     let task = tokio::spawn(async move {
+        let mut last_sequence_by_ssrc: HashMap<u32, u16> = HashMap::new();
         loop {
             match receiver.recv_packet().await {
                 Ok(VoicePacket {
@@ -1542,6 +1578,12 @@ fn spawn_udp_receiver(
                     payload,
                 }) => {
                     recv_packets.fetch_add(1, Ordering::Relaxed);
+                    if let Some(previous) = last_sequence_by_ssrc.insert(ssrc, sequence) {
+                        let lost = rtp_sequence_gap(previous, sequence);
+                        if lost > 0 {
+                            lost_packets.fetch_add(u64::from(lost), Ordering::Relaxed);
+                        }
+                    }
 
                     // The SFU's canonical silence packet is the one DAVE
                     // exception that does not require a sender mapping.
@@ -1602,6 +1644,7 @@ async fn establish_media_generation(
     audio_bridge: &Arc<Mutex<AudioBridge>>,
     frame_cipher: &Arc<Mutex<Box<dyn FrameCipher>>>,
     recv_packets: &Arc<AtomicU64>,
+    lost_packets: &Arc<AtomicU64>,
     generation_id: u64,
 ) -> Result<(
     MediaGeneration,
@@ -1711,6 +1754,7 @@ async fn establish_media_generation(
             audio_bridge.clone(),
             frame_cipher.clone(),
             recv_packets.clone(),
+            lost_packets.clone(),
         );
 
         ssrc_to_user
@@ -1960,6 +2004,7 @@ async fn run_voice_session(
     events_tx: broadcast::Sender<VoiceSessionEvent>,
     sent_packets: Arc<AtomicU64>,
     recv_packets: Arc<AtomicU64>,
+    lost_packets: Arc<AtomicU64>,
     gateway_factory: VoiceGatewayFactory,
     state_tx: watch::Sender<VoiceSessionState>,
     active_gateway: Arc<Mutex<Option<Arc<dyn VoiceGatewayTransport>>>>,
@@ -2057,6 +2102,7 @@ async fn run_voice_session(
         &audio_bridge,
         &frame_cipher,
         &recv_packets,
+        &lost_packets,
         generation_id,
     );
     let (initial_gen, mut gateway_events_rx, mut media_error_rx) =
@@ -2417,6 +2463,7 @@ async fn run_voice_session(
                                     &audio_bridge,
                                     &frame_cipher,
                                     &recv_packets,
+                                    &lost_packets,
                                     generation_id,
                                 );
                                 let (generation, events, errors) = match await_handshake_discarding_audio(
