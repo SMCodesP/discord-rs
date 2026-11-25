@@ -1088,6 +1088,7 @@ pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
 pub struct MessageRowConfig {
     pub is_grouped: bool,
     pub role_color: Option<u32>,
+    pub is_highlighted: bool,
     pub on_react: Option<MessageActionCallback>,
     pub on_reply: Option<MessageActionCallback>,
     pub on_more: Option<MessageActionPosCallback>,
@@ -1133,9 +1134,14 @@ pub fn render_message_row_with_reply_and_edit(
         .pl(space_8())
         .pr(space_8())
         .py(px(2.0))
-        .hover(|s| s.bg(bg_chat_hover()))
         .rounded_tr(radius_sm())
         .rounded_br(radius_sm());
+
+    if config.is_highlighted {
+        row = row.bg(with_alpha(HEX_BLURPLE, 0.16));
+    } else {
+        row = row.hover(|s| s.bg(bg_chat_hover()));
+    }
 
     if message.is_pending {
         row = row.opacity(0.5).text_color(text_muted());
@@ -1571,6 +1577,7 @@ fn render_message_list_inner(
             MessageRowConfig {
                 is_grouped,
                 role_color: None,
+                is_highlighted: false,
                 on_react: on_react.clone(),
                 on_reply: on_reply.clone(),
                 on_more: on_more.clone(),
@@ -1821,6 +1828,7 @@ mod tests {
             MessageRowConfig {
                 is_grouped: false,
                 role_color: Some(0),
+                is_highlighted: false,
                 on_react: None,
                 on_reply: None,
                 on_more: None,

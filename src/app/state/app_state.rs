@@ -70,6 +70,12 @@ pub struct AppState {
     pub search_generation: u64,
     /// Target message Snowflake ID to focus/scroll to in chat
     pub target_message_id: Option<String>,
+    /// Channel being targeted by a jump-to-message request.
+    pub jump_target_channel_id: Option<String>,
+    /// Message ID currently highlighted after jump-to-message.
+    pub highlighted_message_id: Option<String>,
+    /// Honest error shown when a search jump cannot resolve the target message.
+    pub jump_error: Option<String>,
     /// Real-time coalesced typing tracker: channel_id -> user_id -> (username, timestamp)
     pub typing_tracker: HashMap<String, HashMap<String, (String, std::time::Instant)>>,
     /// Coalesces burst gateway events (presence/typing) into single UI updates.
@@ -260,6 +266,9 @@ impl AppState {
             search_retry_after: None,
             search_generation: 0,
             target_message_id: None,
+            jump_target_channel_id: None,
+            highlighted_message_id: None,
+            jump_error: None,
             typing_tracker: HashMap::new(),
             event_batcher: crate::protocol::EventBatcher::new(),
             is_connected_to_gateway: false,

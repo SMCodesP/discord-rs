@@ -206,6 +206,7 @@ fn test_render_message_row_with_role_color() {
         MessageRowConfig {
             is_grouped: false,
             role_color: Some(0x2ecc71),
+            is_highlighted: false,
             on_react: None,
             on_reply: None,
             on_more: None,
@@ -221,6 +222,7 @@ fn test_render_message_row_with_role_color() {
         MessageRowConfig {
             is_grouped: false,
             role_color: None,
+            is_highlighted: false,
             on_react: None,
             on_reply: None,
             on_more: None,
