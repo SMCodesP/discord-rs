@@ -677,6 +677,11 @@ impl ChatView {
             crate::domain::message::MessageReference::reply(msg.id.clone())
         });
         let mention_replied_user = self.reply_mention_author;
+        if let Some(reason) = self.state.read(cx).slowmode_block_reason(&channel_id) {
+            self.send_error = Some(reason);
+            cx.notify();
+            return;
+        }
         let temp_id = match self.state.update(cx, |state, _cx| {
             state.begin_message_send_with_reference(&channel_id, &text, reply_reference.clone())
         }) {
@@ -721,6 +726,7 @@ impl ChatView {
                         let _ = cx.update(|cx| {
                             let _ = this_entity.update(cx, |chat, cx| {
                                 chat.state.update(cx, |state, _cx| {
+                                    state.record_slowmode_send(&confirmed.channel_id);
                                     state.confirm_message_send(&temp_id, confirmed);
                                     state.replying_to_message = None;
                                     state.active_draft.clear();
@@ -1266,6 +1272,19 @@ impl ChatView {
                             cx.notify();
                             return;
                         };
+                        let slowmode_blocked = this
+                            .state
+                            .read(cx)
+                            .slowmode_block_reason(&channel_id)
+                            .is_some();
+                        if slowmode_blocked {
+                            this.send_error = this
+                                .state
+                                .read(cx)
+                                .slowmode_block_reason(&channel_id);
+                            cx.notify();
+                            return;
+                        }
                         this.submit_composer_message(channel_id, text, window, cx);
                     }
                 }
@@ -1308,6 +1327,12 @@ impl Render for ChatView {
         } else {
             None
         };
+        let slowmode_channel_id = selected_channel_opt.as_ref().map(|c| c.id.clone());
+        let slowmode_remaining_secs = slowmode_channel_id
+            .as_deref()
+            .map(|cid| app_state.slowmode_remaining_secs(cid))
+            .unwrap_or(0);
+        let composer_disabled_by_slowmode = slowmode_remaining_secs > 0;
         let channel_name = selected_channel_opt
             .as_ref()
             .map(|channel| channel.name.clone())
@@ -3250,6 +3275,7 @@ impl Render for ChatView {
         } else {
             channel_name.clone()
         };
+        let composer_slowmode_secs = slowmode_remaining_secs;
 
         let pending_attachment_preview =
             self.pending_clipboard_attachment
@@ -3332,7 +3358,12 @@ impl Render for ChatView {
                     .channel_name(composer_channel_name)
                     .replying_to(self.replying_to.clone())
                     .editing_message(self.editing_message.clone())
-                    .disabled(self.is_saving_edit || self.is_sending_message)
+                    .disabled(
+                        self.is_saving_edit
+                            || self.is_sending_message
+                            || composer_disabled_by_slowmode,
+                    )
+                    .slowmode_remaining_secs(composer_slowmode_secs)
                     .on_cancel_edit(on_cancel_edit)
                     .on_attachment(on_attachment)
                     .on_paste_image(on_paste_image)

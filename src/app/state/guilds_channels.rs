@@ -5,6 +5,81 @@ use crate::domain::permissions::{
 use crate::protocol::TransportEvent;
 
 impl AppState {
+    /// Monotonic clock for slowmode; injectable for deterministic tests.
+    pub fn slowmode_now(&self) -> std::time::Instant {
+        self.slowmode_now_override.unwrap_or_else(std::time::Instant::now)
+    }
+
+    /// Sets an injectable slowmode clock (tests only).
+    pub fn set_slowmode_now_override(&mut self, now: Option<std::time::Instant>) {
+        self.slowmode_now_override = now;
+    }
+
+    fn channel_rate_limit_per_user(&self, channel_id: &str) -> u32 {
+        if let Some((_, channel)) = self.find_channel(channel_id) {
+            return channel.rate_limit_per_user;
+        }
+        self.dm_channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .map(|channel| channel.rate_limit_per_user)
+            .unwrap_or(0)
+    }
+
+    fn slowmode_bypass_for_channel(&self, channel_id: &str) -> bool {
+        self.effective_channel_permissions(channel_id)
+            .map(permission::can_bypass_slowmode)
+            .unwrap_or(false)
+    }
+
+    /// Remaining slowmode seconds for a channel, rounded up for UI/countdown.
+    pub fn slowmode_remaining_secs(&self, channel_id: &str) -> u32 {
+        let limit = self.channel_rate_limit_per_user(channel_id);
+        if limit == 0 || self.slowmode_bypass_for_channel(channel_id) {
+            return 0;
+        }
+        let Some(deadline) = self.slowmode_next_send_at.get(channel_id).copied() else {
+            return 0;
+        };
+        let now = self.slowmode_now();
+        if deadline <= now {
+            return 0;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let secs = remaining.as_secs();
+        let sub_ms = remaining.subsec_millis();
+        let ceil = if sub_ms > 0 { secs.saturating_add(1) } else { secs };
+        ceil.min(limit as u64) as u32
+    }
+
+    /// Returns slowmode block reason for channel, if any.
+    pub fn slowmode_block_reason(&self, channel_id: &str) -> Option<String> {
+        let remaining = self.slowmode_remaining_secs(channel_id);
+        if remaining == 0 {
+            return None;
+        }
+        Some(format!(
+            "O modo lento está ativado. Você poderá enviar outra mensagem neste canal em {remaining} segundos."
+        ))
+    }
+
+    /// Records a successful send for slowmode cooldown. No-op when bypass/disabled.
+    pub fn record_slowmode_send(&mut self, channel_id: &str) {
+        let limit = self.channel_rate_limit_per_user(channel_id);
+        if limit == 0 || self.slowmode_bypass_for_channel(channel_id) {
+            self.slowmode_next_send_at.remove(channel_id);
+            return;
+        }
+        let deadline = self.slowmode_now() + std::time::Duration::from_secs(limit as u64);
+        self.slowmode_next_send_at.insert(channel_id.to_string(), deadline);
+    }
+
+    /// Clears expired slowmode deadlines (cheap housekeeping).
+    pub fn prune_slowmode_deadlines(&mut self) {
+        let now = self.slowmode_now();
+        self.slowmode_next_send_at.retain(|_, deadline| *deadline > now);
+    }
+
     /// Recomputes the current member's effective permissions for every channel
     /// in `guild`, including category overwrites and communication timeouts.
     pub fn update_guild_permissions(&mut self, guild: &crate::domain::Guild) {

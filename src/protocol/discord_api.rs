@@ -3697,6 +3697,10 @@ fn parse_channel_from_json(
         }
     }
     ch.flags = val.get("flags").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    ch.rate_limit_per_user = val
+        .get("rate_limit_per_user")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
 
     let icon_url: Option<String> = val
         .get("recipients")

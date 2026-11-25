@@ -98,6 +98,7 @@ fn test_app_state_presence_update_and_resolution() {
         default_tag_ids: Vec::new(),
         available_tags: Vec::new(),
         flags: 0,
+        rate_limit_per_user: 0,
     });
 
     let dm = state.dm_channels.first().unwrap();

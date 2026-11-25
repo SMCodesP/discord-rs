@@ -248,6 +248,9 @@ pub struct ChannelItemState {
     pub available_tags: Vec<crate::domain::channel::ForumTag>,
     #[serde(default)]
     pub flags: u32,
+    /// Slowmode delay in seconds (0 = disabled).
+    #[serde(default)]
+    pub rate_limit_per_user: u32,
 }
 
 /// Category grouping in channel sidebar

@@ -208,6 +208,10 @@ pub struct AppState {
     pub quick_switcher: QuickSwitcherState,
     /// Channel IDs explicitly inaccessible to current user (used for quick switcher filtering/fixtures).
     pub quick_switcher_inaccessible_channel_ids: std::collections::HashSet<String>,
+    /// Per-channel slowmode deadline (monotonic). Send is blocked while now < deadline.
+    pub slowmode_next_send_at: HashMap<String, std::time::Instant>,
+    /// Injectable monotonic clock for deterministic slowmode tests.
+    pub slowmode_now_override: Option<std::time::Instant>,
 }
 
 pub struct AppStateGlobal(pub gpui::Entity<AppState>);
@@ -392,6 +396,8 @@ impl AppState {
             channel_permissions: HashMap::new(),
             quick_switcher: QuickSwitcherState::new(),
             quick_switcher_inaccessible_channel_ids: std::collections::HashSet::new(),
+            slowmode_next_send_at: HashMap::new(),
+            slowmode_now_override: None,
         };
         state.sync_guild_media();
         state

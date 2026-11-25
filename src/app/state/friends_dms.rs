@@ -562,6 +562,7 @@ impl AppState {
             recipient_names: vec![username.to_string()],
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
                             ..Default::default()
         };
 
@@ -605,6 +606,7 @@ impl AppState {
             recipient_names,
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
                             ..Default::default()
         };
 
@@ -727,6 +729,7 @@ mod tests {
             recipient_names: vec!["Contato".into()],
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
                             ..Default::default()
         });
 

@@ -306,6 +306,7 @@ impl AppState {
                 recipient_names: Vec::new(),
                 user_limit: None,
                 avatar_decoration_data: None,
+                rate_limit_per_user: 0,
                             ..Default::default()
             },
         );

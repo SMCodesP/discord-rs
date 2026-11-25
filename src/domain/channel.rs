@@ -317,6 +317,9 @@ pub struct Channel {
     /// Forum channel flags bitfield.
     #[serde(default)]
     pub flags: u32,
+    /// Slowmode delay in seconds (0 = disabled). Hydrated from Discord `rate_limit_per_user`.
+    #[serde(default)]
+    pub rate_limit_per_user: u32,
 }
 
 impl Channel {
@@ -343,6 +346,7 @@ impl Channel {
             default_tag_ids: Vec::new(),
             available_tags: Vec::new(),
             flags: 0,
+            rate_limit_per_user: 0,
         }
     }
 
@@ -397,6 +401,11 @@ impl Channel {
         overwrites: Vec<PermissionOverwrite>,
     ) -> Self {
         self.permission_overwrites = overwrites;
+        self
+    }
+
+    pub fn with_rate_limit_per_user(mut self, seconds: u32) -> Self {
+        self.rate_limit_per_user = seconds;
         self
     }
 

@@ -514,6 +514,9 @@ impl AppState {
         if self.client_manager.is_none() {
             return Err("Não conectado ao Discord: cliente não inicializado".to_string());
         }
+        if let Some(reason) = self.slowmode_block_reason(channel_id) {
+            return Err(reason);
+        }
 
         let cid = channel_id.to_string();
         if let Some(ref tel) = self.telemetry {

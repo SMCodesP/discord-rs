@@ -46,6 +46,7 @@ fn state_with_channel(channel_id: &str) -> AppState {
                 default_tag_ids: Vec::new(),
                 available_tags: Vec::new(),
                 flags: 0,
+                rate_limit_per_user: 0,
                 avatar_decoration_data: None,
             }],
         }],

@@ -172,6 +172,7 @@ pub(super) fn organize_channels_into_categories(
             default_tag_ids: c.default_tag_ids,
             available_tags: c.available_tags,
             flags: c.flags,
+            rate_limit_per_user: c.rate_limit_per_user,
         }
     };
 
@@ -224,6 +225,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                         ChannelItemState {
@@ -242,6 +244,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                     ],
@@ -266,6 +269,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                         ChannelItemState {
@@ -284,6 +288,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                         ChannelItemState {
@@ -302,6 +307,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                     ],
@@ -326,6 +332,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                         ChannelItemState {
@@ -344,6 +351,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                     ],
@@ -409,6 +417,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                         ChannelItemState {
@@ -427,6 +436,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            rate_limit_per_user: 0,
                             ..Default::default()
                         },
                     ],
@@ -450,6 +460,7 @@ impl AppState {
                         recipient_names: Vec::new(),
                         user_limit: None,
                         avatar_decoration_data: None,
+                        rate_limit_per_user: 0,
                             ..Default::default()
                     }],
                 },
@@ -619,6 +630,8 @@ impl AppState {
             muted_channels: HashSet::new(),
             guild_nickname_draft: String::new(),
             pending_guild_action: None,
+            slowmode_next_send_at: HashMap::new(),
+            slowmode_now_override: None,
             current_user: CurrentUserProfile {
                 id: "user-me".into(),
                 username: "vanguard_dev".into(),

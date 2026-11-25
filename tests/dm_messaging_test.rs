@@ -189,6 +189,7 @@ fn test_no_hardcoded_ferris_dm_and_clean_state() {
         default_tag_ids: Vec::new(),
         available_tags: Vec::new(),
         flags: 0,
+        rate_limit_per_user: 0,
     });
 
     // Legitimate temporary DM opened by user
@@ -238,6 +239,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         default_tag_ids: Vec::new(),
         available_tags: Vec::new(),
         flags: 0,
+        rate_limit_per_user: 0,
     });
 
     let friend_dm_id = "dm-chan-alice-888".to_string();
@@ -261,6 +263,7 @@ fn test_guild_messages_do_not_leak_into_dms() {
         default_tag_ids: Vec::new(),
         available_tags: Vec::new(),
         flags: 0,
+        rate_limit_per_user: 0,
     });
 
     // Also open a pending temp DM with Carol

@@ -34,6 +34,7 @@ fn mk_guild(id: &str, name: &str, channels: Vec<(&str, &str)>) -> GuildItemState
                     default_tag_ids: Vec::new(),
                     available_tags: Vec::new(),
                     flags: 0,
+                    rate_limit_per_user: 0,
                 })
                 .collect(),
         }],

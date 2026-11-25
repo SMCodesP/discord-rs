@@ -59,6 +59,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                     default_tag_ids: Vec::new(),
                     available_tags: Vec::new(),
                     flags: 0,
+                    rate_limit_per_user: 0,
                 }],
             },
             CategoryItemState {
@@ -84,6 +85,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         default_tag_ids: Vec::new(),
                         available_tags: Vec::new(),
                         flags: 0,
+                        rate_limit_per_user: 0,
                         avatar_decoration_data: None,
                     },
                     ChannelItemState {
@@ -106,6 +108,7 @@ fn create_test_guild(id: &str, name: &str, text_chan_id: &str) -> GuildItemState
                         default_tag_ids: Vec::new(),
                         available_tags: Vec::new(),
                         flags: 0,
+                        rate_limit_per_user: 0,
                     },
                 ],
             },

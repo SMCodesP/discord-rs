@@ -30,6 +30,7 @@ fn channel(id: &str, unread: bool, mentions: u32) -> ChannelItemState {
         default_tag_ids: Vec::new(),
         available_tags: Vec::new(),
         flags: 0,
+        rate_limit_per_user: 0,
     }
 }
 

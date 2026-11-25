@@ -530,6 +530,31 @@ pub fn render_typing_indicator(typing_users: &[String]) -> Div {
         )
 }
 
+fn render_slowmode_indicator(remaining_secs: u32) -> Option<AnyElement> {
+    if remaining_secs == 0 {
+        return None;
+    }
+    let label = format!("{remaining_secs}s");
+    Some(
+        div()
+            .id("chat-slowmode-cooldown")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .ml_auto()
+            .pl(px(8.0))
+            .pr(px(16.0))
+            .py(px(3.0))
+            .rounded_t(px(8.0))
+            .text_size(font_size_xs())
+            .font_weight(WEIGHT_MEDIUM)
+            .text_color(text_muted())
+            .child(label)
+            .into_any_element(),
+    )
+}
+
 // ============================================================================
 // Kit-Based Multi-Line Chat Composer Component
 // ============================================================================
@@ -549,6 +574,7 @@ pub struct ChatComposer {
     typing_users: Vec<String>,
     active_media_tab: Option<MediaPickerTab>,
     disabled: bool,
+    slowmode_remaining_secs: u32,
     on_toggle_mention: Option<EditorActionCallback>,
     on_cancel_reply: Option<EditorActionCallback>,
     on_jump_to_reply: Option<EditorActionCallback>,
@@ -576,6 +602,7 @@ impl ChatComposer {
             typing_users: Vec::new(),
             active_media_tab: None,
             disabled: false,
+            slowmode_remaining_secs: 0,
             on_toggle_mention: None,
             on_cancel_reply: None,
             on_jump_to_reply: None,
@@ -623,6 +650,11 @@ impl ChatComposer {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn slowmode_remaining_secs(mut self, secs: u32) -> Self {
+        self.slowmode_remaining_secs = secs;
         self
     }
 
@@ -741,6 +773,7 @@ impl RenderOnce for ChatComposer {
         } else {
             None
         };
+        let slowmode_indicator = render_slowmode_indicator(self.slowmode_remaining_secs);
 
         let kit_textarea = KitTextarea::new(&self.state)
             .appearance(false)
@@ -775,6 +808,9 @@ impl RenderOnce for ChatComposer {
             .child(sticker_btn)
             .child(emoji_btn);
 
+        if let Some(indicator) = slowmode_indicator {
+            main_input = main_input.child(indicator);
+        }
         if let Some(send) = send_btn {
             main_input = main_input.child(send);
         }
