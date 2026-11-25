@@ -302,6 +302,7 @@ impl AppState {
                 recipient_names: Vec::new(),
                 user_limit: None,
                 avatar_decoration_data: None,
+                            ..Default::default()
             },
         );
         self.select_channel(id.clone());

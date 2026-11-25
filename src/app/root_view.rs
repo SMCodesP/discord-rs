@@ -863,7 +863,7 @@ impl Render for RootView {
         let selected_channel = state.get_selected_channel().map(|(_, ch)| ch.clone());
         let in_voice_channel = selected_channel
             .as_ref()
-            .map(|ch| ch.kind == ChannelKind::Voice)
+            .map(|ch| ch.kind.is_voice_like())
             .unwrap_or(false);
         let show_voice_stage = in_voice_channel
             || state

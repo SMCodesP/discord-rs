@@ -996,7 +996,8 @@ fn render_channel_entry(
     let entity = app_entity.clone();
     let typography = typo_channel_item();
 
-    let is_voice = ch_kind == ChannelKind::Voice;
+    let is_voice = ch_kind.is_voice_like();
+    let is_forum = ch_kind == ChannelKind::Forum;
     let voice_states = if is_voice {
         state.voice_states_for_channel(&ch_id)
     } else {
@@ -1048,6 +1049,21 @@ fn render_channel_entry(
         } else {
             None
         }
+    } else if is_forum {
+        Some(
+            div()
+                .h(px(18.0))
+                .px(px(6.0))
+                .rounded(px(9.0))
+                .bg(bg_user_bar())
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(interactive_normal())
+                .child("Forum"),
+        )
     } else {
         None
     };

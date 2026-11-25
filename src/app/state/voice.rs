@@ -784,6 +784,7 @@ mod tests {
             recipient_names: vec!["Amigo Legal".into()],
             user_limit: None,
             avatar_decoration_data: None,
+                            ..Default::default()
         };
         state.dm_channels.push(dm);
 

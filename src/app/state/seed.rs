@@ -140,14 +140,21 @@ pub(super) fn organize_channels_into_categories(
     channels: Vec<crate::domain::Channel>,
 ) -> Vec<CategoryItemState> {
     let to_item_state = |c: crate::domain::Channel| -> ChannelItemState {
+        let kind = match c.channel_type {
+            ChannelType::Voice => ChannelKind::Voice,
+            ChannelType::Announcement => ChannelKind::Announcement,
+            ChannelType::Forum => ChannelKind::Forum,
+            ChannelType::PublicThread => ChannelKind::PublicThread,
+            ChannelType::PrivateThread => ChannelKind::PrivateThread,
+            ChannelType::AnnouncementThread => ChannelKind::AnnouncementThread,
+            ChannelType::StageVoice => ChannelKind::StageVoice,
+            ChannelType::Directory => ChannelKind::Directory,
+            _ => ChannelKind::Text,
+        };
         ChannelItemState {
             id: c.id,
             name: c.name,
-            kind: match c.channel_type {
-                ChannelType::Voice => ChannelKind::Voice,
-                ChannelType::Announcement => ChannelKind::Announcement,
-                _ => ChannelKind::Text,
-            },
+            kind,
             topic: c.topic,
             unread: false,
             mention_count: 0,
@@ -159,6 +166,10 @@ pub(super) fn organize_channels_into_categories(
             recipient_names: Vec::new(),
             user_limit: c.user_limit,
             avatar_decoration_data: None,
+            thread_metadata: c.thread_metadata,
+            default_tag_ids: c.default_tag_ids,
+            available_tags: c.available_tags,
+            flags: c.flags,
         }
     };
 
@@ -210,6 +221,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                         ChannelItemState {
                             id: "chan-announcements".into(),
@@ -226,6 +238,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -248,6 +261,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                         ChannelItemState {
                             id: "chan-help".into(),
@@ -264,6 +278,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                         ChannelItemState {
                             id: "chan-showcase".into(),
@@ -280,6 +295,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -302,6 +318,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                         ChannelItemState {
                             id: "chan-voice-pair".into(),
@@ -318,6 +335,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -381,6 +399,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                         ChannelItemState {
                             id: "chan-gpui-showcase".into(),
@@ -397,6 +416,7 @@ impl AppState {
                             recipient_names: Vec::new(),
                             user_limit: None,
                             avatar_decoration_data: None,
+                            ..Default::default()
                         },
                     ],
                 },
@@ -418,6 +438,7 @@ impl AppState {
                         recipient_names: Vec::new(),
                         user_limit: None,
                         avatar_decoration_data: None,
+                            ..Default::default()
                     }],
                 },
             ],

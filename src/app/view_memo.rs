@@ -116,7 +116,13 @@ fn channel_kind_rank(kind: &crate::app::state::ChannelKind) -> u8 {
     match kind {
         ChannelKind::Text => 0,
         ChannelKind::Announcement => 1,
-        ChannelKind::Voice => 2,
+        ChannelKind::Forum => 2,
+        ChannelKind::Directory => 3,
+        ChannelKind::AnnouncementThread => 4,
+        ChannelKind::PublicThread => 5,
+        ChannelKind::PrivateThread => 6,
+        ChannelKind::Voice => 7,
+        ChannelKind::StageVoice => 8,
     }
 }
 

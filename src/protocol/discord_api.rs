@@ -3524,10 +3524,12 @@ fn parse_channel_from_json(
         .and_then(|v| v.as_str())
         .or(default_guild_id)
         .map(ToString::to_string);
-    ch.category_id = val
+    let parent_id = val
         .get("parent_id")
         .and_then(|v| v.as_str())
         .map(ToString::to_string);
+    ch.parent_id = parent_id.clone();
+    ch.category_id = parent_id;
     ch.topic = val
         .get("topic")
         .and_then(|v| v.as_str())
@@ -3547,6 +3549,44 @@ fn parse_channel_from_json(
         .or_else(|| val.get("pinned").and_then(|v| v.as_bool()))
         .unwrap_or(false);
     ch.permission_overwrites = parse_permission_overwrites_from_json(val);
+    ch.thread_metadata = parse_thread_metadata_from_json(val);
+    ch.default_tag_ids = val
+        .get("applied_tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ch.default_tag_ids.is_empty() {
+        ch.default_tag_ids = val
+            .get("default_reaction_emoji") // not tags, fallback below
+            .and(None)
+            .unwrap_or_default();
+    }
+    // Forum default auto archive / tag ids from channel payload
+    if let Some(tag_ids) = val.get("default_forum_layout").and_then(|_| None::<Vec<String>>) {
+        ch.default_tag_ids = tag_ids;
+    }
+    // Parse available_tags for forum/media channels
+    if let Some(tags) = val.get("available_tags").and_then(|v| v.as_array()) {
+        ch.available_tags = tags
+            .iter()
+            .filter_map(parse_forum_tag_from_json)
+            .collect();
+    }
+    // applied_tags on thread/forum post are not channel tags; keep available_tags as channel metadata.
+    // Preserve explicit default thread tag ids if present.
+    if let Some(default_tags) = val.get("default_thread_applied_tag_ids").or_else(|| val.get("default_applied_tag_ids")) {
+        if let Some(arr) = default_tags.as_array() {
+            ch.default_tag_ids = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect();
+        }
+    }
+    ch.flags = val.get("flags").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
     let icon_url: Option<String> = val
         .get("recipients")
@@ -3571,6 +3611,45 @@ fn parse_channel_from_json(
     ch.icon_url = icon_url;
 
     Some(ch)
+}
+
+fn parse_thread_metadata_from_json(val: &serde_json::Value) -> Option<crate::domain::channel::ThreadMetadata> {
+    let meta = val.get("thread_metadata")?;
+    Some(crate::domain::channel::ThreadMetadata {
+        archived: meta.get("archived").and_then(|v| v.as_bool()).unwrap_or(false),
+        auto_archive_duration: meta
+            .get("auto_archive_duration")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32),
+        archive_timestamp: meta
+            .get("archive_timestamp")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        locked: meta.get("locked").and_then(|v| v.as_bool()).unwrap_or(false),
+        invitable: meta.get("invitable").and_then(|v| v.as_bool()),
+        create_timestamp: meta
+            .get("create_timestamp")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+    })
+}
+
+fn parse_forum_tag_from_json(val: &serde_json::Value) -> Option<crate::domain::channel::ForumTag> {
+    let id = val.get("id").and_then(|v| v.as_str())?.to_string();
+    Some(crate::domain::channel::ForumTag {
+        id,
+        name: val
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        moderated: val.get("moderated").and_then(|v| v.as_bool()).unwrap_or(false),
+        emoji_id: val.get("emoji_id").and_then(|v| v.as_str()).map(ToString::to_string),
+        emoji_name: val
+            .get("emoji_name")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+    })
 }
 
 fn parse_roles_from_json(guild_val: &serde_json::Value) -> Vec<Role> {
@@ -4440,6 +4519,79 @@ mod avatar_decoration_parsing_tests {
         });
         let msg_bare = parse_message_from_json(&bare).expect("should parse message");
         assert_eq!(msg_bare.author.avatar_decoration_data, None);
+    }
+
+
+    #[test]
+    fn test_parse_channel_preserves_types_10_to_15_and_forum_metadata() {
+        let fixtures = vec![
+            serde_json::json!({
+                "id": "100000000000000010",
+                "guild_id": "900000000000000001",
+                "name": "news-thread",
+                "type": 10,
+                "parent_id": "900000000000000010",
+                "thread_metadata": {"archived": false, "locked": false, "auto_archive_duration": 1440}
+            }),
+            serde_json::json!({
+                "id": "100000000000000011",
+                "guild_id": "900000000000000001",
+                "name": "public-thread",
+                "type": 11,
+                "parent_id": "900000000000000011",
+                "thread_metadata": {"archived": true, "locked": true, "auto_archive_duration": 60}
+            }),
+            serde_json::json!({
+                "id": "100000000000000012",
+                "guild_id": "900000000000000001",
+                "name": "private-thread",
+                "type": 12,
+                "parent_id": "900000000000000012",
+                "thread_metadata": {"archived": false, "invitable": true}
+            }),
+            serde_json::json!({
+                "id": "100000000000000013",
+                "guild_id": "900000000000000001",
+                "name": "stage-room",
+                "type": 13,
+                "parent_id": "900000000000000099",
+                "user_limit": 100
+            }),
+            serde_json::json!({
+                "id": "100000000000000014",
+                "guild_id": "900000000000000001",
+                "name": "directory",
+                "type": 14,
+                "parent_id": "900000000000000099"
+            }),
+            serde_json::json!({
+                "id": "100000000000000015",
+                "guild_id": "900000000000000001",
+                "name": "forum-channel",
+                "type": 15,
+                "parent_id": "900000000000000099",
+                "flags": 16,
+                "available_tags": [
+                    {"id":"910000000000000001","name":"Bug","moderated":false,"emoji_name":"🐛"},
+                    {"id":"910000000000000002","name":"Feature","moderated":true}
+                ],
+                "default_thread_applied_tag_ids":["910000000000000001"]
+            }),
+        ];
+
+        let parsed: Vec<_> = fixtures.iter().map(|f| parse_channel_from_json(f, None).expect("channel parses")).collect();
+        assert_eq!(parsed[0].channel_type, crate::domain::channel::ChannelType::AnnouncementThread);
+        assert_eq!(parsed[1].channel_type, crate::domain::channel::ChannelType::PublicThread);
+        assert_eq!(parsed[2].channel_type, crate::domain::channel::ChannelType::PrivateThread);
+        assert_eq!(parsed[3].channel_type, crate::domain::channel::ChannelType::StageVoice);
+        assert_eq!(parsed[4].channel_type, crate::domain::channel::ChannelType::Directory);
+        assert_eq!(parsed[5].channel_type, crate::domain::channel::ChannelType::Forum);
+        assert_eq!(parsed[0].parent_id.as_deref(), Some("900000000000000010"));
+        assert!(parsed[0].thread_metadata.as_ref().is_some());
+        assert_eq!(parsed[5].flags, 16);
+        assert_eq!(parsed[5].available_tags.len(), 2);
+        assert_eq!(parsed[5].default_tag_ids, vec!["910000000000000001".to_string()]);
+        assert_eq!(parsed[5].available_tags[0].name, "Bug");
     }
 
     #[test]
