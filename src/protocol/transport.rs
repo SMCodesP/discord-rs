@@ -318,6 +318,34 @@ pub trait DiscordTransport: Send + Sync {
     /// Retrieve the most recent messages for a channel.
     async fn get_messages(&self, channel_id: &str, limit: usize) -> anyhow::Result<Vec<Message>>;
 
+    /// Retrieve the page of messages immediately older than `before_id`
+    /// (`GET /channels/{channel_id}/messages?before={before_id}`).
+    ///
+    /// Implementations must return messages in ascending chronological order and
+    /// never include the message identified by `before_id`.
+    async fn get_messages_before(
+        &self,
+        channel_id: &str,
+        before_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let _ = (channel_id, before_id, limit);
+        anyhow::bail!("get_messages_before não implementado no transporte atual")
+    }
+
+    /// Retrieve messages centered around `around_id`
+    /// (`GET /channels/{channel_id}/messages?around={around_id}`), used to
+    /// resolve search/reply jumps to messages that are not loaded yet.
+    async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        around_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let _ = (channel_id, around_id, limit);
+        anyhow::bail!("get_messages_around não implementado no transporte atual")
+    }
+
     /// Post a new chat message to a text channel.
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message>;
 

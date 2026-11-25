@@ -668,6 +668,7 @@ impl AppState {
             connection_mode: ConnectionMode::Mock,
             client_manager: None,
             messages_by_channel,
+            history_pagination: HashMap::new(),
             active_draft: String::new(),
             replying_to_message: None,
             typing_users: Vec::new(),

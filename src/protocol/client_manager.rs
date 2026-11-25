@@ -600,33 +600,74 @@ impl ClientManager {
         let _ = self.event_tx.send(event);
     }
 
+    /// Resolves a temporary `dm-{user_id}` channel to its real channel ID,
+    /// emitting `DmChannelResolved` so the UI can migrate pending rows.
+    async fn resolve_message_channel(&self, channel_id: &str) -> String {
+        if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => {
+                    self.emit_event(TransportEvent::DmChannelResolved {
+                        temp_id: channel_id.to_string(),
+                        channel: ch.clone(),
+                    });
+                    ch.id
+                }
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM em get_messages: {:?}", e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        }
+    }
+
     /// Fetches message history for a channel using the active transport
     pub async fn get_messages(&self, channel_id: &str, limit: usize) -> Result<Vec<Message>> {
-        let real_channel_id =
-            if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
-                let recipient_id = channel_id.trim_start_matches("dm-");
-                match self.create_or_get_dm_channel(recipient_id).await {
-                    Ok(ch) => {
-                        self.emit_event(TransportEvent::DmChannelResolved {
-                            temp_id: channel_id.to_string(),
-                            channel: ch.clone(),
-                        });
-                        ch.id
-                    }
-                    Err(e) => {
-                        log::warn!("Falha ao resolver DM em get_messages: {:?}", e);
-                        channel_id.to_string()
-                    }
-                }
-            } else {
-                channel_id.to_string()
-            };
+        let real_channel_id = self.resolve_message_channel(channel_id).await;
 
         let transport = {
             let lock = self.transport.read().await;
             lock.clone()
         };
         transport.get_messages(&real_channel_id, limit).await
+    }
+
+    /// Fetches the page of messages immediately older than `before_id`.
+    pub async fn get_messages_before(
+        &self,
+        channel_id: &str,
+        before_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let real_channel_id = self.resolve_message_channel(channel_id).await;
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport
+            .get_messages_before(&real_channel_id, before_id, limit)
+            .await
+    }
+
+    /// Fetches messages centered around `around_id` for search/reply jumps.
+    pub async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        around_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let real_channel_id = self.resolve_message_channel(channel_id).await;
+
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport
+            .get_messages_around(&real_channel_id, around_id, limit)
+            .await
     }
 
     /// Lists all available guilds using the active transport
