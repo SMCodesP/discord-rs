@@ -6,16 +6,28 @@
 
 use anyhow::Context;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
+/// Janela oficial de coalescing do `POST /channels/{id}/typing`.
+///
+/// O indicador remoto dura até 10 s; enviar novamente antes disso apenas
+/// consome cota REST sem efeito visual.
+pub const TYPING_COOLDOWN: Duration = Duration::from_secs(10);
+
 /// Gerenciador de Coalescing e Debounce de Ações da Interface.
 #[derive(Clone)]
 pub struct UserActionDebouncer {
-    typing_last_sent: Arc<Mutex<HashMap<String, Instant>>>,
+    typing_last_sent: Arc<StdMutex<HashMap<String, Instant>>>,
     ack_pending: Arc<Mutex<HashMap<String, (String, JoinHandle<()>)>>>,
+}
+
+impl std::fmt::Debug for UserActionDebouncer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserActionDebouncer").finish_non_exhaustive()
+    }
 }
 
 impl Default for UserActionDebouncer {
@@ -27,28 +39,45 @@ impl Default for UserActionDebouncer {
 impl UserActionDebouncer {
     pub fn new() -> Self {
         Self {
-            typing_last_sent: Arc::new(Mutex::new(HashMap::new())),
+            typing_last_sent: Arc::new(StdMutex::new(HashMap::new())),
             ack_pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Avalia se o typing indicator pode ser disparado para o canal.
-    pub async fn should_send_typing(&self, channel_id: &str) -> bool {
-        let mut map = self.typing_last_sent.lock().await;
-        let now = Instant::now();
-        const TYPING_COOLDOWN: Duration = Duration::from_secs(10);
+    pub fn should_send_typing(&self, channel_id: &str) -> bool {
+        self.should_send_typing_at(channel_id, Instant::now())
+    }
+
+    /// Variante determinística com relógio injetado, usada pelos testes e pelo
+    /// editor para não depender do relógio real.
+    pub fn should_send_typing_at(&self, channel_id: &str, now: Instant) -> bool {
+        let mut map = self
+            .typing_last_sent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Evita crescimento ilimitado quando o usuário visita muitos canais.
-        map.retain(|_, last_sent| now.duration_since(*last_sent) < TYPING_COOLDOWN);
+        map.retain(|_, last_sent| now.saturating_duration_since(*last_sent) < TYPING_COOLDOWN);
 
         if let Some(last_time) = map.get(channel_id) {
-            if now.duration_since(*last_time) < TYPING_COOLDOWN {
+            if now.saturating_duration_since(*last_time) < TYPING_COOLDOWN {
                 return false;
             }
         }
 
         map.insert(channel_id.to_string(), now);
         true
+    }
+
+    /// Limpa o estado de coalescing do canal ao enviar a mensagem, permitindo
+    /// que a próxima digitação dispare um novo indicador imediatamente.
+    pub fn reset_typing(&self, channel_id: &str) {
+        let mut map = self
+            .typing_last_sent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        map.remove(channel_id);
     }
 
     /// Agenda ou atualiza o envio coalescido de confirmação de leitura.
@@ -205,12 +234,43 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[tokio::test]
-    async fn test_typing_throttling_10s() {
+    #[test]
+    fn test_typing_throttling_10s() {
         let debouncer = UserActionDebouncer::new();
-        assert!(debouncer.should_send_typing("chan_general").await);
-        assert!(!debouncer.should_send_typing("chan_general").await);
-        assert!(debouncer.should_send_typing("chan_random").await);
+        assert!(debouncer.should_send_typing("chan_general"));
+        assert!(!debouncer.should_send_typing("chan_general"));
+        assert!(debouncer.should_send_typing("chan_random"));
+    }
+
+    #[test]
+    fn typing_request_is_sent_once_per_window_and_stops_after_send() {
+        let debouncer = UserActionDebouncer::new();
+        let t0 = Instant::now();
+        let mut requests = 0;
+
+        // Simula digitação contínua por 30 s em passos de 1 s.
+        for second in 0..30 {
+            if debouncer.should_send_typing_at("chan_synthetic", t0 + Duration::from_secs(second))
+            {
+                requests += 1;
+            }
+        }
+        assert_eq!(requests, 3, "uma requisição a cada janela de 10 s");
+
+        // Envio da mensagem limpa o coalescing. A próxima digitação (nova
+        // mensagem) pode notificar imediatamente, mas continua limitada à janela.
+        debouncer.reset_typing("chan_synthetic");
+        assert!(debouncer.should_send_typing_at(
+            "chan_synthetic",
+            t0 + Duration::from_secs(30)
+        ));
+        assert!(!debouncer.should_send_typing_at(
+            "chan_synthetic",
+            t0 + Duration::from_secs(31)
+        ));
+
+        // Canal diferente tem janela própria.
+        assert!(debouncer.should_send_typing_at("chan_other", t0 + Duration::from_secs(30)));
     }
 
     #[tokio::test]

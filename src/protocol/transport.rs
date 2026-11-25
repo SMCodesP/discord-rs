@@ -301,6 +301,13 @@ pub trait DiscordTransport: Send + Sync {
     /// Post a sticker message to a text channel.
     async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> anyhow::Result<Message>;
 
+    /// Notify a channel that the current user started typing
+    /// (`POST /channels/{channel_id}/typing`).
+    async fn send_typing(&self, channel_id: &str) -> anyhow::Result<()> {
+        let _ = channel_id;
+        anyhow::bail!("send_typing não implementado no transporte atual")
+    }
+
     /// Add an emoji reaction to a message.
     async fn add_reaction(
         &self,
