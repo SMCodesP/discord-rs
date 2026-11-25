@@ -15,6 +15,7 @@ use crate::domain::settings::NitroTier;
 use crate::domain::settings::ServerBoost;
 use crate::domain::settings::Subscription;
 use crate::domain::settings::ThemeChoice;
+use crate::protocol::voice_session::VoiceControlState;
 use crate::protocol::ConnectionMode;
 use crate::protocol::TokenStorage;
 
@@ -614,6 +615,7 @@ impl AppState {
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
+            voice_control: VoiceControlState::default(),
             show_members: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
