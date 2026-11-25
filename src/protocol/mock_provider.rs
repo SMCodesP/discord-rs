@@ -765,6 +765,17 @@ impl DiscordTransport for MockDiscordProvider {
     }
 
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message> {
+        self.send_message_with_reference(channel_id, content, None, true)
+            .await
+    }
+
+    async fn send_message_with_reference(
+        &self,
+        channel_id: &str,
+        content: &str,
+        message_reference: Option<&crate::domain::message::MessageReference>,
+        _mention_replied_user: bool,
+    ) -> anyhow::Result<Message> {
         let mut state = self.state.write().await;
         let id = format!("msg-{}", state.next_message_id);
         state.next_message_id += 1;
@@ -779,6 +790,16 @@ impl DiscordTransport for MockDiscordProvider {
         };
 
         let mut msg = Message::new(id, channel_id, author, content);
+        if let Some(reference) = message_reference.cloned() {
+            let referenced = reference.message_id.as_ref().and_then(|mid| {
+                state
+                    .messages
+                    .get(channel_id)
+                    .and_then(|msgs| msgs.iter().find(|m| &m.id == mid).cloned())
+            });
+            msg.message_reference = Some(reference);
+            msg.referenced_message = referenced.map(Box::new);
+        }
         for guild in &state.guilds {
             if guild.channels.iter().any(|c| c.id == channel_id) {
                 msg.guild_id = Some(guild.id.clone());
@@ -798,7 +819,6 @@ impl DiscordTransport for MockDiscordProvider {
             state.messages.entry("chan-dm-ferris".to_string()).or_default().push(msg.clone());
         }
 
-        // Update channel last_message_id in all guilds
         for guild in &mut state.guilds {
             for chan in &mut guild.channels {
                 if chan.id == channel_id {

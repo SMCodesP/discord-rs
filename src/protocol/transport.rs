@@ -338,6 +338,17 @@ pub trait DiscordTransport: Send + Sync {
     /// Post a new chat message to a text channel.
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message>;
 
+    /// Post a new chat message with optional reply reference and mention control.
+    async fn send_message_with_reference(
+        &self,
+        channel_id: &str,
+        content: &str,
+        _message_reference: Option<&crate::domain::message::MessageReference>,
+        _mention_replied_user: bool,
+    ) -> anyhow::Result<Message> {
+        self.send_message(channel_id, content).await
+    }
+
     /// Post a sticker message to a text channel.
     async fn send_sticker(&self, channel_id: &str, sticker_id: &str) -> anyhow::Result<Message>;
 

@@ -1635,6 +1635,17 @@ impl DiscordTransport for DiscordApiClient {
     }
 
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<Message> {
+        self.send_message_with_reference(channel_id, content, None, true)
+            .await
+    }
+
+    async fn send_message_with_reference(
+        &self,
+        channel_id: &str,
+        content: &str,
+        message_reference: Option<&crate::domain::message::MessageReference>,
+        mention_replied_user: bool,
+    ) -> Result<Message> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");
             match self.create_or_get_dm_channel(recipient_id).await {
@@ -1649,7 +1660,19 @@ impl DiscordTransport for DiscordApiClient {
         };
 
         let path = format!("/channels/{}/messages", resolved_id);
-        let body = json!({ "content": content });
+        let mut body = json!({ "content": content });
+        if let Some(reference) = message_reference {
+            if let Some(message_id) = reference.message_id.as_deref() {
+                body["message_reference"] = json!({
+                    "message_id": message_id,
+                    "fail_if_not_exists": reference.fail_if_not_exists.unwrap_or(false),
+                });
+                body["allowed_mentions"] = json!({
+                    "parse": [],
+                    "replied_user": mention_replied_user,
+                });
+            }
+        }
         let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
         let resp = self.send_request(&path, req).await?;
         let val: serde_json::Value = resp.json().await?;
@@ -3969,6 +3992,40 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
     if let Some(poll_val) = val.get("poll") {
         if !poll_val.is_null() {
             message.poll = crate::chat::polls::parse_poll_from_json(poll_val);
+        }
+    }
+
+    if let Some(reference_val) = val.get("message_reference") {
+        if let (Some(message_id), channel_id, guild_id) = (
+            reference_val
+                .get("message_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            reference_val
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+            reference_val
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string),
+        ) {
+            message.message_reference = Some(crate::domain::message::MessageReference {
+                reference_type: reference_val
+                    .get("type")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u8),
+                message_id: Some(message_id),
+                channel_id,
+                guild_id,
+                fail_if_not_exists: reference_val.get("fail_if_not_exists").and_then(|v| v.as_bool()),
+            });
+        }
+    }
+
+    if let Some(referenced_val) = val.get("referenced_message") {
+        if !referenced_val.is_null() {
+            message.referenced_message = parse_message_from_json(referenced_val).map(Box::new);
         }
     }
 

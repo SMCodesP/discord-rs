@@ -349,6 +349,16 @@ impl AppState {
         channel_id: &str,
         content: &str,
     ) -> Result<String, String> {
+        self.begin_message_send_with_reference(channel_id, content, None)
+    }
+
+    /// Creates a correlated optimistic row for a reply send.
+    pub fn begin_message_send_with_reference(
+        &mut self,
+        channel_id: &str,
+        content: &str,
+        message_reference: Option<crate::domain::message::MessageReference>,
+    ) -> Result<String, String> {
         let trimmed = content.trim();
         if trimmed.is_empty() {
             return Err("Mensagem vazia".to_string());
@@ -379,6 +389,18 @@ impl AppState {
             trimmed,
         )
         .with_pending(true);
+        if let Some(reference) = message_reference.clone() {
+            if let Some(reply_id) = reference.message_id.as_deref() {
+                if let Some(referenced) = self
+                    .messages_by_channel
+                    .get(&cid)
+                    .and_then(|msgs| msgs.iter().find(|m| m.id == reply_id).cloned())
+                {
+                    message.referenced_message = Some(Box::new(referenced));
+                }
+            }
+            message.message_reference = Some(reference);
+        }
         if let Some(guild_id) = &self.selected_guild_id {
             message.guild_id = Some(guild_id.clone());
         }

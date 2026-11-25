@@ -1029,6 +1029,14 @@ fn render_reply_spine() -> AnyElement {
 /// Renders the compact reply reference shown above a message, including the
 /// curved connector used by Discord's Cozy layout.
 pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
+    render_reply_preview_with_jump(reply, role_color, None)
+}
+
+pub fn render_reply_preview_with_jump(
+    reply: &Message,
+    role_color: Option<u32>,
+    on_jump: Option<MessageActionCallback>,
+) -> Div {
     let author_name = reply.author.display_name().to_string();
     let author_color = role_color
         .filter(|color| *color != 0)
@@ -1066,7 +1074,7 @@ pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
         );
     }
 
-    div()
+    let mut container = div()
         .relative()
         .flex()
         .flex_row()
@@ -1077,7 +1085,17 @@ pub fn render_reply_preview(reply: &Message, role_color: Option<u32>) -> Div {
         .mb(space_2())
         .child(render_reply_spine())
         .child(render_reply_avatar(reply))
-        .child(summary)
+        .child(summary);
+
+    if let Some(handler) = on_jump {
+        let message_id = reply.id.clone();
+        container = container.cursor_pointer().on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
+            cx.stop_propagation();
+            handler(&message_id, window, cx);
+        });
+    }
+
+    container
 }
 
 // ============================================================================
@@ -1210,7 +1228,18 @@ pub fn render_message_row_with_reply_and_edit(
     }
 
     if let Some(reply) = reply {
-        content_area = content_area.child(render_reply_preview(reply, config.role_color));
+        let on_jump = Some(Arc::new(|message_id: &str, _window: &mut Window, cx: &mut App| {
+            let state_entity = cx.try_global::<crate::app::state::AppStateGlobal>().map(|g| g.0.clone());
+            if let Some(state_entity) = state_entity {
+                let id = message_id.to_string();
+                state_entity.update(cx, |state, cx| {
+                    state.target_message_id = Some(id);
+                    state.highlighted_message_id = state.target_message_id.clone();
+                    cx.notify();
+                });
+            }
+        }) as MessageActionCallback);
+        content_area = content_area.child(render_reply_preview_with_jump(reply, config.role_color, on_jump));
     }
 
     if !config.is_grouped {

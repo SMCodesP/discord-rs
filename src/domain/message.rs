@@ -197,6 +197,33 @@ impl MessageStickerItem {
     }
 }
 
+/// Reference to another message, used by replies and forwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MessageReference {
+    #[serde(default, rename = "type")]
+    pub reference_type: Option<u8>,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub guild_id: Option<String>,
+    #[serde(default)]
+    pub fail_if_not_exists: Option<bool>,
+}
+
+impl MessageReference {
+    pub fn reply(message_id: impl Into<String>) -> Self {
+        Self {
+            reference_type: Some(0),
+            message_id: Some(message_id.into()),
+            channel_id: None,
+            guild_id: None,
+            fail_if_not_exists: None,
+        }
+    }
+}
+
 /// Core message entity representing a chat message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -235,6 +262,12 @@ pub struct Message {
     /// Whether the message is pending confirmation from the Discord gateway/API.
     #[serde(default)]
     pub is_pending: bool,
+    /// Reference to another message (reply/forward).
+    #[serde(default)]
+    pub message_reference: Option<MessageReference>,
+    /// Resolved referenced message, when provided by API/Gateway.
+    #[serde(default)]
+    pub referenced_message: Option<Box<Message>>,
 }
 
 impl Message {
@@ -259,6 +292,8 @@ impl Message {
             edited_timestamp: None,
             pinned: false,
             is_pending: false,
+            message_reference: None,
+            referenced_message: None,
         }
     }
 
@@ -304,6 +339,16 @@ impl Message {
 
     pub fn with_pending(mut self, pending: bool) -> Self {
         self.is_pending = pending;
+        self
+    }
+
+    pub fn with_message_reference(mut self, reference: MessageReference) -> Self {
+        self.message_reference = Some(reference);
+        self
+    }
+
+    pub fn with_referenced_message(mut self, message: Message) -> Self {
+        self.referenced_message = Some(Box::new(message));
         self
     }
 
