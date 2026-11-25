@@ -3363,6 +3363,7 @@ mod tests {
         );
 
         let invalid = RecentEmojiItem {
+            emoji: "not_a_valid_custom_tag".into(),
             custom_id: None,
             is_custom: true,
             ..recent.clone()

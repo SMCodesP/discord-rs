@@ -17,6 +17,8 @@ fn spotify_timestamp_range(start: i64, end: i64) -> Option<(i64, i64)> {
     };
     let start_ms = normalize(start)?;
     let end_ms = normalize(end)?;
+    chrono::DateTime::from_timestamp_millis(start_ms)?;
+    chrono::DateTime::from_timestamp_millis(end_ms)?;
     if end_ms.checked_sub(start_ms)? <= 0 {
         return None;
     }

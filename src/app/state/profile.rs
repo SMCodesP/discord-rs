@@ -139,31 +139,33 @@ impl AppState {
 
         // Trigger single asynchronous fetch via ClientManager if present
         if let Some(cm) = self.client_manager.clone() {
-            let gid = guild_id.clone();
-            let target_uid = uid.clone();
-            tokio::spawn(async move {
-                match cm
-                    .get_user_profile_with_guild(&target_uid, gid.as_deref())
-                    .await
-                {
-                    Ok(profile) => {
-                        cm.emit_event(
-                            crate::protocol::transport::TransportEvent::UserProfileLoaded {
-                                user_id: target_uid,
-                                profile: Box::new(profile),
-                            },
-                        );
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let gid = guild_id.clone();
+                let target_uid = uid.clone();
+                handle.spawn(async move {
+                    match cm
+                        .get_user_profile_with_guild(&target_uid, gid.as_deref())
+                        .await
+                    {
+                        Ok(profile) => {
+                            cm.emit_event(
+                                crate::protocol::transport::TransportEvent::UserProfileLoaded {
+                                    user_id: target_uid,
+                                    profile: Box::new(profile),
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            cm.emit_event(
+                                crate::protocol::transport::TransportEvent::UserProfileError {
+                                    user_id: target_uid,
+                                    error: err.to_string(),
+                                },
+                            );
+                        }
                     }
-                    Err(err) => {
-                        cm.emit_event(
-                            crate::protocol::transport::TransportEvent::UserProfileError {
-                                user_id: target_uid,
-                                error: err.to_string(),
-                            },
-                        );
-                    }
-                }
-            });
+                });
+            }
         }
     }
 

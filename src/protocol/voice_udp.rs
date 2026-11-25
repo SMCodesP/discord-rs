@@ -951,6 +951,9 @@ mod tests {
                 .send_to(&discovery_response(ssrc), client_addr)
                 .await
                 .unwrap();
+            // Keep the server socket bound briefly so the client's connected UDP socket
+            // does not receive an ICMP Port Unreachable while reading the queued packets.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         });
 
         let parsed = discover_ip(&client, ssrc).await.unwrap();

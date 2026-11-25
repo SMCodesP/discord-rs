@@ -338,7 +338,13 @@ impl SearchQuery {
         // Date facets are inclusive/exclusive in the local matcher. Express the
         // same intersection to the REST API as a half-open Snowflake interval.
         let min_date = self.after.max(self.during);
-        let max_date_exclusive = self.before.min(self.during.and_then(|date| date.succ_opt()));
+        let during_end = self.during.and_then(|date| date.succ_opt());
+        let max_date_exclusive = match (self.before, during_end) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
         if let Some(date) = min_date {
             if let Some(min_id) = snowflake_at_date_start(date) {
                 params.push(("min_id", min_id));

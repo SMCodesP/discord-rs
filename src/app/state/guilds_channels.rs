@@ -457,19 +457,22 @@ impl AppState {
                 let uid = cid.trim_start_matches("dm-").to_string();
                 let temp_id = cid.clone();
                 let cm_dm = cm.clone();
-                tokio::spawn(async move {
-                    if let Ok(ch) = cm_dm.create_or_get_dm_channel(&uid).await {
-                        cm_dm.emit_event(TransportEvent::DmChannelResolved {
-                            temp_id,
-                            channel: ch,
-                        });
-                    }
-                });
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Ok(ch) = cm_dm.create_or_get_dm_channel(&uid).await {
+                            cm_dm.emit_event(TransportEvent::DmChannelResolved {
+                                temp_id,
+                                channel: ch,
+                            });
+                        }
+                    });
+                }
             } else if self.is_connected_to_gateway {
                 let has_messages = self.messages_by_channel.get(&cid).map_or(false, |msgs| !msgs.is_empty());
                 if !has_messages {
                     let cm_msg = cm.clone();
-                    tokio::spawn(async move {
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        handle.spawn(async move {
                         if let Ok(mut msgs) = cm_msg.get_messages(&cid, 50).await {
                             // Assegurar ordenação cronológica ascendente (mais antiga para mais nova)
                             msgs.sort_by_key(|m| m.timestamp);
@@ -478,7 +481,8 @@ impl AppState {
                                 messages: msgs,
                             });
                         }
-                    });
+                        });
+                    }
                 }
             }
 
@@ -487,11 +491,13 @@ impl AppState {
                 let gid_sub = gid.clone();
                 let cid_sub = channel_id.clone();
                 let cm_sub = cm.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = cm_sub.subscribe_guild_members(&gid_sub, &cid_sub).await {
-                        log::warn!("Falha ao assinar membros da guilda {} no canal {}: {:?}", gid_sub, cid_sub, e);
-                    }
-                });
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        if let Err(e) = cm_sub.subscribe_guild_members(&gid_sub, &cid_sub).await {
+                            log::warn!("Falha ao assinar membros da guilda {} no canal {}: {:?}", gid_sub, cid_sub, e);
+                        }
+                    });
+                }
             }
         }
     }

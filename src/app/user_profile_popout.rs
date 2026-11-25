@@ -1789,7 +1789,7 @@ mod tests {
                 .iter()
                 .map(|role| role.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Admin", "Moderador"]
+            vec!["Admin", "Moderator"]
         );
         assert_eq!(resolved[0].color, 0xe91e63);
         assert_eq!(resolved[1].color, 0x2ecc71);

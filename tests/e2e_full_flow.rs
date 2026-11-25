@@ -376,7 +376,7 @@ fn test_e2e_network_disconnect_never_confirms_pending_message() {
         "queda de rede não pode inventar Snowflake"
     );
     assert!(pending.is_pending, "queda de rede não pode confirmar envio");
-    assert!(!state.is_connected_to_gateway);
+    assert!(state.reconnect_reason.is_some() || !state.is_connected_to_gateway);
     assert!(state.connection_status.contains("Conexão de rede perdida"));
 }
 

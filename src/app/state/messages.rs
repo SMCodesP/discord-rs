@@ -66,7 +66,7 @@ fn take_pending_send(temp_id: &str) -> Option<PendingMessageSend> {
         .and_then(|mut sends| sends.remove(temp_id))
 }
 
-fn mark_pending_send_confirmed(temp_id: &str, confirmed_id: &str) {
+pub(crate) fn mark_pending_send_confirmed(temp_id: &str, confirmed_id: &str) {
     if let Ok(mut sends) = PENDING_MESSAGE_SENDS.lock() {
         if let Some(pending) = sends.get_mut(temp_id) {
             pending.confirmed_id = Some(confirmed_id.to_string());

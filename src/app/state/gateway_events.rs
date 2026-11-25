@@ -263,7 +263,11 @@ impl AppState {
                                         || m.author.id == self.current_user.id)
                                     && m.content == msg.content
                             }) {
-                                temp_msgs.remove(pos);
+                                let removed = temp_msgs.remove(pos);
+                                crate::app::state::messages::mark_pending_send_confirmed(
+                                    &removed.id,
+                                    &msg.id,
+                                );
                                 break;
                             }
                         }
@@ -284,6 +288,8 @@ impl AppState {
                             || m.author.id == self.current_user.id)
                         && m.content == msg.content
                 }) {
+                    let temp_id = channel_msgs[pos].id.clone();
+                    crate::app::state::messages::mark_pending_send_confirmed(&temp_id, &msg.id);
                     channel_msgs[pos] = msg.clone();
                 } else if !channel_msgs.iter().any(|m| m.id == msg.id) {
                     channel_msgs.push(msg.clone());

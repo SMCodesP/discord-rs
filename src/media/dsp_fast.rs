@@ -228,9 +228,9 @@ mod tests {
 
     #[test]
     fn i16_f32_roundtrip_is_exact_for_every_value() {
-        let mut as_f32 = vec![0.0f32; i16::MAX as usize + 1];
-        let mut back = vec![0i16; i16::MAX as usize + 1];
         let input: Vec<i16> = (i16::MIN..=i16::MAX).collect();
+        let mut as_f32 = vec![0.0f32; input.len()];
+        let mut back = vec![0i16; input.len()];
 
         assert_eq!(i16_to_f32_into(&input, &mut as_f32), input.len());
         assert_eq!(f32_to_i16_into(&as_f32, &mut back), input.len());

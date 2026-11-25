@@ -445,9 +445,14 @@ impl AudioMixer {
         }
 
         if extended_sequence < participant.next_sequence.expect("playback clock initialized") {
-            participant.stats.late += 1;
-            participant.record_recent_packet(extended_sequence, extended_timestamp);
-            return Ok(());
+            if !participant.is_playing {
+                participant.next_sequence = Some(extended_sequence);
+                participant.next_timestamp = Some(extended_timestamp);
+            } else {
+                participant.stats.late += 1;
+                participant.record_recent_packet(extended_sequence, extended_timestamp);
+                return Ok(());
+            }
         }
 
         if extended_sequence < previous_sequence {
@@ -739,11 +744,17 @@ mod tests {
         }
         assert_eq!(sequence, 65_537);
 
-        let mut timestamp = i64::from(0xFFFF_FFC0u32);
-        for raw in [0xFFFF_FFC0u32, 0, 960, 1_920] {
+        let base_ts = 0xFFFF_FFC0u32;
+        let mut timestamp = i64::from(base_ts);
+        for raw in [
+            base_ts,
+            base_ts.wrapping_add(960),
+            base_ts.wrapping_add(1_920),
+            base_ts.wrapping_add(2_880),
+        ] {
             timestamp = extend_u32(timestamp, raw);
         }
-        assert_eq!(timestamp, i64::from(0xFFFF_FFC0u32) + 3 * 960);
+        assert_eq!(timestamp, i64::from(base_ts) + 3 * 960);
     }
 
     #[test]
