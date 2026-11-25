@@ -2403,7 +2403,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_video_frame_to_render_image_converts_rgba_and_bgra_to_bgra() {
         let rgba = vec![
             10, 20, 30, 255, 40, 50, 60, 128, 70, 80, 90, 0, 100, 110, 120, 255,
@@ -2421,7 +2421,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_video_frame_to_render_image_normalizes_yuv_formats() {
         let cases = [
             (crate::capture::PixelFormat::Yuyv, vec![128; 16]),
@@ -2432,11 +2432,11 @@ mod tests {
             let frame = synthetic_frame(2, 2, format, data, 1);
             let (width, height, bgra) = video_frame_to_bgra(&frame).expect("conversão YUV sintética");
             assert_eq!((width, height), (2, 2));
-            assert_eq!(bgra, vec![128, 128, 128, 255; 4]);
+            assert_eq!(bgra, [128, 128, 128, 255].repeat(4));
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_video_frame_to_render_image_rejects_invalid_frames() {
         let zero = synthetic_frame(0, 2, crate::capture::PixelFormat::Rgba8, vec![], 1);
         assert!(video_frame_to_bgra(&zero).is_err());
@@ -2444,9 +2444,9 @@ mod tests {
         assert!(video_frame_to_bgra(&truncated).is_err());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_preview_frame_coalescing_keeps_only_latest() {
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         for sequence in 1..=3 {
             tx.try_send(synthetic_frame(
                 2,
@@ -2457,11 +2457,12 @@ mod tests {
             ))
             .expect("enviar quadro sintético");
         }
-        let latest = latest_queued_frame(rx).expect("quadro coalescido");
+        let first = rx.try_recv().expect("primeiro quadro");
+        let latest = latest_queued_frame(first, &mut rx);
         assert_eq!(latest.sequence, 3);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_first_real_frame_moves_preview_from_starting_to_live() {
         let mut preview = LocalPreview::new(LocalPreviewSource::Camera, "Câmera sintética");
         assert_eq!(preview.status, LocalPreviewStatus::Starting);
@@ -2472,7 +2473,7 @@ mod tests {
                 2,
                 2,
                 crate::capture::PixelFormat::Rgba8,
-                vec![10, 20, 30, 255; 4],
+                [10, 20, 30, 255].repeat(4),
                 1,
             ))
             .expect("primeiro quadro sintético");
@@ -2480,7 +2481,7 @@ mod tests {
         assert!(preview.frame.is_some());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_preview_failure_clears_frame_and_expanded_state() {
         let mut preview = LocalPreview::new(LocalPreviewSource::Screen, "Tela sintética");
         preview
@@ -2488,7 +2489,7 @@ mod tests {
                 2,
                 2,
                 crate::capture::PixelFormat::Rgba8,
-                vec![10, 20, 30, 255; 4],
+                [10, 20, 30, 255].repeat(4),
                 1,
             ))
             .expect("quadro sintético");
@@ -2500,17 +2501,17 @@ mod tests {
         assert!(!preview.expanded);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_portal_cancellation_clears_preview_without_live_badge() {
         let mut preview = Some(LocalPreview::new(
             LocalPreviewSource::Screen,
             "Tela sintética",
         ));
-        clear_cancelled_preview(&mut preview);
+        clear_local_preview(&mut preview);
         assert!(preview.is_none());
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_local_spotlight_is_separate_from_participant_flags() {
         let participant = VoiceParticipantState {
             id: "100000000000000001".into(),
@@ -2532,7 +2533,7 @@ mod tests {
         assert_eq!(participant, original);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn test_preview_failure_never_changes_broadcast_flags() {
         let mut state = AppState::default();
         state.current_user.id = "100000000000000001".into();

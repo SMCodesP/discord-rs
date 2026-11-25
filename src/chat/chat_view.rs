@@ -153,7 +153,7 @@ fn chat_items_signature(messages: &[Message]) -> u64 {
     for msg in messages {
         msg.id.hash(&mut hasher);
         msg.edited_timestamp.hash(&mut hasher);
-        msg.is_pinned.hash(&mut hasher);
+        msg.pinned.hash(&mut hasher);
         msg.is_pending.hash(&mut hasher);
         msg.reactions.len().hash(&mut hasher);
         for reaction in &msg.reactions {
@@ -1403,7 +1403,7 @@ impl Render for ChatView {
             None
         };
 
-        let is_pins_panel_open = app_state_ref.is_pins_panel_open;
+        let is_pins_panel_open = self.state.read(cx).is_pins_panel_open;
         let pins_panel = if is_pins_panel_open {
             let state = self.state.read(cx);
             Some(render_pinned_messages_panel(
@@ -2869,6 +2869,7 @@ fn render_pinned_messages_panel(
         );
 
     let mut body = div()
+        .id("pinned-messages-scroll")
         .flex_1()
         .min_h(px(0.0))
         .overflow_y_scroll()
@@ -2960,7 +2961,7 @@ fn render_pinned_messages_panel(
                         .child(
                             Avatar::new(msg.author.display_name().to_string())
                                 .size(AvatarSize::Px24)
-                                .opt_src(msg.author.avatar_url.clone())
+                                .opt_src(msg.author.avatar_url())
                                 .opt_decoration(msg.author.avatar_decoration_data.clone())
                                 .cutout_color(bg_channels()),
                         )

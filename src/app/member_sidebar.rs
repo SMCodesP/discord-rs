@@ -490,14 +490,17 @@ fn render_bot_tag() -> AnyElement {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{cached_member_avatar_urls, group_header_text, member_subtitle};
+    use crate::app::state::{AppState, MemberItemState, PresenceStatus};
     use crate::domain::message::{Author, Message};
     use crate::domain::user::{CustomStatus, Presence};
 
     fn member(presence: PresenceStatus) -> MemberItemState {
         MemberItemState {
             id: "member-1".into(),
+            guild_id: Some("guild-1".into()),
             name: "Member".into(),
+            nickname: None,
             avatar_text: "M".into(),
             presence,
             role_group: "ONLINE".into(),

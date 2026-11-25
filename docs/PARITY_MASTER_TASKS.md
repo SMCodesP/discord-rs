@@ -230,13 +230,13 @@
   - **O que falta/corrigir:** cursor `before`, estado `has_more/loading`, deduplicação por ID, preservação de scroll e merge cronológico; suportar `around` para busca.
   - **Critério de pronto:** fixture sintética com 150 mensagens comprova três páginas sem duplicatas, spinner único, preservação da posição e comportamento correto em canal/DM.
 
-- [ ] **T-032** — **P1** — **Chat/Busca** — **Buscar e destacar mensagem ao pular de resultado**
+- [x] **T-032** — **P1** — **Chat/Busca** — **Buscar e destacar mensagem ao pular de resultado**
   - **Arquivos:** `src/app/state/search.rs:296-307`, `src/chat/chat_view.rs:602-612`, `src/app/state/guilds_channels.rs:309-323`, `src/protocol/discord_api.rs:952-966`.
   - **Evidência:** `jump_to_message` apenas troca canal/guilda e grava `target_message_id`. O renderer só chama `scroll_to_reveal_item` se a mensagem já estiver entre as 50 carregadas; não há busca `around` nem destaque visual temporário.
   - **O que falta/corrigir:** resolver canal, buscar janela ao redor do ID, aguardar carregamento, destacar e limpar o destaque; tratar mensagem removida/sem permissão.
   - **Critério de pronto:** teste com resultado fora do cache verifica uma requisição `around`, scroll após chegada dos dados, highlight temporário e erro honesto quando a mensagem não existe.
 
-- [ ] **T-033** — **P1** — **Chat/Header** — **Ligar Notificações, Pins, Inbox e Ajuda**
+- [x] **T-033** — **P1** — **Chat/Header** — **Ligar Notificações, Pins, Inbox e Ajuda**
   - **Arquivos:** `src/app/header_bar.rs:409-485`, `src/protocol/discord_api.rs:3047-3062`, `src/protocol/transport.rs:329-339`.
   - **Evidência:** os quatro botões são renderizados sem `on_click`. Existe PUT/DELETE de pin, mas não há GET da lista de pins nem painel de mensagens fixadas. Inbox/Help/notificações não executam ação.
   - **O que falta/corrigir:** implementar `GET /channels/{id}/pins`, painel com jump/unpin, estados de permissão; ligar inbox/notificações/ajuda a fluxos reais ou remover controles não implementados.
@@ -260,7 +260,7 @@
   - **O que falta/corrigir:** reproduzir com fixture sintética, validar host/caminho/query contra a resposta real, usar `.gif` para `a_`, normalizar `icon` vs `icon_hash` e aplicar fallback visual estável sem imagem quebrada.
   - **Critério de pronto:** teste de regressão cobre ícone estático, animado, ausente e 404; captura com imagem local prova raio/clipping em repouso, hover, selecionado, pasta fechada e aberta; chamada real não emite mais 404.
 
-- [ ] **T-037** — **P2** — **Perfil/Decorações** — **Fechar decoração de avatar em todas as superfícies**
+- [x] **T-037** — **P2** — **Perfil/Decorações** — **Fechar decoração de avatar em todas as superfícies**
   - **Arquivos:** `src/app/friends_hub.rs:563-568`, `src/app/friends_hub.rs:1619-1624`, `src/app/state/models.rs:250-265`, `src/app/state/models.rs:276-322`, `src/app/root_view.rs:1495-1523`, `src/app/root_view.rs:1663-1688`.
   - **Evidência:** `ActiveNowItem` já carrega `avatar_decoration_data`, mas o avatar do card não recebe `.opt_decoration`. `MessageRequestItem` não possui o campo. Os seletores de amigos para DM em grupo criam `Avatar` apenas com nome/tamanho, sem URL, status ou decoração.
   - **O que falta/corrigir:** propagar decoração/URL/status pelo modelo de message request e pelos diálogos de grupo; padronizar todos os pontos de avatar no componente `Avatar`.
@@ -411,13 +411,13 @@
   - **O que falta/corrigir:** endpoints oficiais, inscrição `GUILD_MEMBERS`/threads quando necessário, lista de threads sob o canal pai, header de thread ativa, criação/entrada/saída/arquivamento e reconciliação em tempo real.
   - **Critério de pronto:** testes sintéticos cobrem create/update/delete/list-sync e perda de mensagem; UI cria thread, mostra membros/estado e navega entre pai/thread sem duplicar mensagens.
 
-- [ ] **T-080** — **P1** — **Permissões/UX** — **Calcular permissões reais e ocultar/bloquear ações sem autorização**
+- [x] **T-080** — **P1** — **Permissões/UX** — **Calcular permissões reais e ocultar/bloquear ações sem autorização**
   - **Arquivos:** `src/domain/guild.rs:5-23`, `src/domain/channel.rs:148-191`, `src/app/state/models.rs:147-170`, `src/chat/editor.rs:419`, `src/chat/chat_view.rs:1795-1808`, `src/app/channel_sidebar.rs:546-793`.
   - **Evidência:** só `Role.permissions` é guardado; não há `permissions` do membro atual nem `permission_overwrites` no canal. `ChatComposer` nasce habilitado e a sidebar renderiza todos os canais. No canal oficial inspecionado, o composer exibia “You do not have permission to send messages in this channel”; o RS não tem como reproduzir esse estado.
   - **O que falta/corrigir:** resolver `@everyone` + cargos + overwrites de canal/categoria, com allow/deny; esconder canais sem `VIEW_CHANNEL`, travar composer/ações sem `SEND_MESSAGES`, `ADD_REACTIONS`, `ATTACH_FILES`, `CONNECT`/`SPEAK`.
   - **Critério de pronto:** testes de bitfield cobrem administrador, dono, negação explícita, timeout e overwrite de categoria; UI sintética comprova canal oculto, composer desabilitado e ações removidas antes de qualquer request.
 
-- [ ] **T-081** — **P1** — **Notificações** — **Implementar notificações desktop, sons e badge de unread reais**
+- [x] **T-081** — **P1** — **Notificações** — **Implementar notificações desktop, sons e badge de unread reais**
   - **Arquivos:** `Cargo.toml:6-34`, `src/app/user_settings/notifications.rs:9-174`, `src/app/state/gateway_events.rs:109-224`, `src/app/state/models.rs:57-64`.
   - **Evidência:** Settings só alterna campos locais; não há backend de notificação, som ou badge. `MessageCreate` atualiza histórico/ordenação, mas não emite notificação. O projeto não depende de `notify-rust`/serviço D-Bus de notificações.
   - **O que falta/corrigir:** integração desktop oficial (freedesktop/D-Bus), som real configurável, badge de tarefa/unread, respeito a DND e escopo todas/@menções/nada; agrupar por canal e não notificar mensagem própria.
@@ -435,13 +435,13 @@
   - **O que falta/corregir:** manter `read_state_version`, `last_message_id`, `last_read_message_id` e contagem de menções; ACK ao visualizar; divisor/new badge e botão “Jump to Present” quando afastado do fim.
   - **Critério de pronto:** fixture com 100 mensagens, menções e leitura parcial comprova badges, divisor, ACK uma vez e salto preservando o destino; troca de canal limpa o estado correto.
 
-- [ ] **T-064** — **P1** — **Rede/Reconnect** — **Preservar o shell autenticado e mostrar banner de reconexão**
+- [x] **T-064** — **P1** — **Rede/Reconnect** — **Preservar o shell autenticado e mostrar banner de reconexão**
   - **Arquivos:** `src/protocol/discord_api.rs:1202-1207`, `src/protocol/discord_api.rs:1387-1419`, `src/app/state/gateway_events.rs:275-287`, `src/app/root_view.rs:554-580`.
   - **Evidência:** cada fechamento de socket emite `TransportEvent::Disconnected`, e `RootView` troca imediatamente toda a interface pela tela de login quando `is_connected_to_gateway=false` (`root_view.rs:554-583`). `TransportEvent::Disconnected` zera a conexão e grava `auth_error` (`gateway_events.rs:281-286`), sem estado `Reconnecting`; o loop reconecta em segundo plano, causando perda visual de contexto e cache. No CDP oficial, o banner `.notice_Q02kKo` usa 14px/500/36px, padding lateral `4px 28px`, raio superior esquerdo 8px e `z-index:101`.
   - **O que falta/corrigir:** estados Connecting/Connected/Reconnecting/Offline, manter shell/cache durante retry, banner discreto com tentativa/backoff e recuperação silenciosa após READY/RESUME.
   - **Critério de pronto:** teste de socket sintético cobre Op7, Op9, EOF e falha de DNS; UI permanece na tela atual, mostra banner e volta a conectar sem solicitar token novamente.
 
-- [ ] **T-065** — **P1** — **Performance/UI** — **Remover clones e enumeração de hardware do hot path de render**
+- [x] **T-065** — **P1** — **Performance/UI** — **Remover clones e enumeração de hardware do hot path de render**
   - **Arquivos:** `src/app/guild_rail.rs:28-41`, `src/app/voice_call_panel.rs:122-146`, `src/chat/chat_view.rs:351-391`, `src/chat/chat_view.rs:531-600`, `src/app/friends_hub.rs:898-919`.
   - **Evidência:** `GuildRail::render` clona a árvore inteira de guildas/pastas a cada render (o log inicial carregou 200 guildas); `VoiceCallPanel` cria `MediaDeviceManager` e enumera entrada/saída em todo frame; `ChatView` recria `Arc<Vec<ChatListItem>>`; Friends renderiza todas as linhas sem virtualização.
   - **O que falta/corregir:** borrow/snapshots `Arc`, cache de dispositivos atualizado por evento, virtualização de listas grandes e memoização de métricas de layout.
@@ -471,7 +471,7 @@
   - **O que falta/corrigir:** remover IDs/nomes de demonstração do modelo e da persistência; preservar somente `dm-*` criados após uma ação real do usuário e ainda não resolvidos; investigar por que a blocklist atual não elimina o item no teste.
   - **Critério de pronto:** `cargo test --test dm_messaging_test` passa 6/6; fixture com DM legado, DM temporário real e DM do Gateway comprova remoção/preservação corretas; nenhum ID de demonstração permanece em produção.
 
-- [ ] **T-070** — **P1** — **QA/Captura Visual** — **Tornar o pipeline de screenshots confiável e comparável**
+- [x] **T-070** — **P1** — **QA/Captura Visual** — **Tornar o pipeline de screenshots confiável e comparável**
   - **Arquivos:** `examples/ui_shot.rs:1-20`, `scripts/ui-shot.sh`, `scripts/ui-compare.sh`, `tests/fixtures/ui_shot/`.
   - **Evidência:** o relatório `Explorer-Live` registrou captura oficial totalmente preta e timeout de `Page.captureScreenshot` apesar do DOM visível; `/tmp/discord-ciclo2-oficial-channel.png` e `/tmp/discord-ciclo2-rs-channel.png` estavam em servidores/canais, idiomas, banners, membros e estados de composer diferentes. O harness atual usa fixture offline e `import -window`, sem validar imagem preta, viewport, DPR ou equivalência de estado.
   - **O que falta/corregir:** validar captura não preta/não vazia, registrar viewport/DPR/título/rota sem dados pessoais, exigir mesma fixture/estado nas duas pontas e ter fallback de captura com timeout/log de causa.
@@ -667,7 +667,7 @@
   - **O que falta/corrigir:** modelo de evento/local/canal/horário/recorrência/status, GET/POST/PATCH/DELETE, painel de eventos, notificações e inscrição/interesse via Gateway.
   - **Critério de pronto:** servidor HTTP sintético valida rotas e payloads; UI lista passados/futuros/agora, cria/edita/cancela e mostra erro sem evento otimista falso.
 
-- [ ] **T-109** — **P2** — **Design/Categorias** — **Remover categorias sintéticas e fielmente ordenar/divider canais**
+- [x] **T-109** — **P2** — **Design/Categorias** — **Remover categorias sintéticas e fielmente ordenar/divider canais**
   - **Arquivos:** `src/app/state/seed.rs:131-231`, `src/app/channel_sidebar.rs:546-635`, `src/domain/channel.rs:148-191`, `src/protocol/discord_api.rs:2205-2280`.
   - **Evidência:** `organize_channels_into_categories` cria categorias inventadas “GERAL” e “OUTROS” em produção e usa iteração de `HashMap` para categorias órfãs, tornando a ordem não determinística. O header do RS usa 11px bold/padding 12/4 sem divider medido. O CDP oficial contém `.sectionDivider_u88IQl` com 1px, margens 12px/8px e `.divider_DERYpk` full-width.
   - **O que falta/corrigir:** representar canais sem categoria como grupo real/sem rótulo inventado, ordenação estável por `position`/ID, preservar nomes/vazios e aplicar divider/altura do oficial.

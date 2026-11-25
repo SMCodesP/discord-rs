@@ -374,7 +374,7 @@ mod tests {
         entries.iter().any(|e| e.action() == Some(action))
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn copy_id_only_in_developer_mode() {
         let ctx = ContextMenuContext::new(MenuTargetKind::Guild)
             .permissions(MenuPermissions::all_allowed())
@@ -386,7 +386,7 @@ mod tests {
         assert!(has_action(&entries_dev, MenuAction::CopyGuildId));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn category_management_requires_permission() {
         let base = ContextMenuContext::new(MenuTargetKind::Category)
             .permissions(MenuPermissions::default());
@@ -402,7 +402,7 @@ mod tests {
         assert!(has_action(&allowed, MenuAction::DeleteCategory));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn channel_menu_includes_copy_link_and_manage_actions() {
         let ctx = ContextMenuContext::new(MenuTargetKind::TextChannel)
             .permissions(MenuPermissions {

@@ -209,9 +209,9 @@ async fn test_pillar_3_token_bucket_zero_429_and_user_debouncing() -> anyhow::Re
 
     // --- Sub-teste B: Coalescing de Typing Indicator (10s Cooldown) ---
     let debouncer = UserActionDebouncer::new();
-    assert!(debouncer.should_send_typing("chan_1").await, "First typing event must be allowed");
-    assert!(!debouncer.should_send_typing("chan_1").await, "Rapid typing must be coalesced (suppressed)");
-    assert!(debouncer.should_send_typing("chan_2").await, "Separate channel must have independent throttle");
+    assert!(debouncer.should_send_typing("chan_1"), "First typing event must be allowed");
+    assert!(!debouncer.should_send_typing("chan_1"), "Rapid typing must be coalesced (suppressed)");
+    assert!(debouncer.should_send_typing("chan_2"), "Separate channel must have independent throttle");
 
     // --- Sub-teste C: Debounce de Read Receipts / ACK (2s com Maior Snowflake) ---
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, String)>(10);

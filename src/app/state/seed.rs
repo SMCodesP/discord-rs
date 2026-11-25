@@ -575,7 +575,6 @@ impl AppState {
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
-            voice_control: crate::protocol::voice_session::VoiceControlState::new(false, false),
             show_members: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
@@ -810,6 +809,14 @@ impl AppState {
             profile_modal_tab: ProfileModalTab::AboutMe,
             profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
             voice_states_by_channel: HashMap::new(),
+            is_pins_panel_open: false,
+            pinned_messages: Vec::new(),
+            is_pins_loading: false,
+            pinned_messages_error: None,
+            pinned_messages_channel_id: None,
+            pins_generation: 0,
+            guild_permission_contexts: HashMap::new(),
+            channel_permissions: HashMap::new(),
         };
         state.sync_guild_media();
         state

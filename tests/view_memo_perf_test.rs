@@ -25,7 +25,9 @@ fn channel(id: &str, name: &str, kind: ChannelKind) -> ChannelItemState {
 fn member(id: &str, name: &str, role_group: &str, presence: PresenceStatus) -> MemberItemState {
     MemberItemState {
         id: id.to_string(),
+        guild_id: Some("guild-memo".to_string()),
         name: name.to_string(),
+        nickname: None,
         avatar_text: name.chars().next().unwrap_or('?').to_string(),
         presence,
         role_group: role_group.to_string(),

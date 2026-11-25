@@ -331,7 +331,9 @@ fn test_server_isolation_member_list_cleared_on_guild_switch() {
     state.selected_guild_id = Some("guild-alpha".into());
     state.members.push(discord_rs::app::state::MemberItemState {
         id: "user-alpha-1".into(),
+        guild_id: Some("guild-alpha".into()),
         name: "Alpha User".into(),
+        nickname: None,
         avatar_text: "A".into(),
         presence: PresenceStatus::Online,
         role_group: "STAFF".into(),
@@ -859,7 +861,9 @@ async fn test_guild_members_chunk_preserves_presence_and_activity() {
     // Membro Online com atividade na lista ativa
     let online_member = MemberItemState {
         id: "user-online-1".to_string(),
+        guild_id: Some("guild-chunk-test".to_string()),
         name: "Gamer Pro".to_string(),
+        nickname: None,
         avatar_text: "GP".to_string(),
         presence: PresenceStatus::Online,
         role_group: "ONLINE".to_string(),

@@ -481,7 +481,7 @@ fn render_toolbar(
             });
             if let Some((cm, cid, generation)) = request {
                 let app_weak = pins_entity.downgrade();
-                cx.spawn(|_this, cx: &mut gpui::AsyncApp| {
+                cx.spawn(move |cx: &mut gpui::AsyncApp| {
                     let mut cx = cx.clone();
                     async move {
                         let result = cm
@@ -526,7 +526,7 @@ fn render_toolbar(
 
     // 4. Search bar (Buscar)
     toolbar = toolbar.child(render_search_box(
-        app_entity,
+        app_entity.clone(),
         search_input_st,
         is_search_popover_open,
         state.is_search_open,

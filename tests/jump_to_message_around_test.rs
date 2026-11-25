@@ -85,8 +85,13 @@ impl AroundTransport {
 impl DiscordTransport for AroundTransport {
     async fn connect(&self) -> anyhow::Result<()> { Ok(()) }
     async fn disconnect(&self) -> anyhow::Result<()> { Ok(()) }
-    fn is_connected(&self) -> bool { true }
     fn subscribe_events(&self) -> broadcast::Receiver<TransportEvent> { broadcast::channel(8).1 }
+    async fn get_current_user(&self) -> anyhow::Result<discord_rs::domain::User> {
+        Ok(discord_rs::domain::User::new("u1", "tester"))
+    }
+    async fn get_guild(&self, _guild_id: &str) -> anyhow::Result<Option<discord_rs::domain::Guild>> {
+        Ok(None)
+    }
     async fn list_guilds(&self) -> anyhow::Result<Vec<discord_rs::domain::Guild>> { Ok(vec![]) }
     async fn list_channels(&self, _guild_id: &str) -> anyhow::Result<Vec<discord_rs::domain::Channel>> { Ok(vec![]) }
     async fn list_dm_channels(&self) -> anyhow::Result<Vec<discord_rs::domain::Channel>> { Ok(vec![]) }

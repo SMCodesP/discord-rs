@@ -29,8 +29,13 @@ impl PinsMockTransport {
 impl DiscordTransport for PinsMockTransport {
     async fn connect(&self) -> anyhow::Result<()> { Ok(()) }
     async fn disconnect(&self) -> anyhow::Result<()> { Ok(()) }
-    async fn get_guilds(&self) -> anyhow::Result<Vec<discord_rs::domain::guild::Guild>> { Ok(vec![]) }
-    async fn get_channels(&self, _guild_id: &str) -> anyhow::Result<Vec<Channel>> { Ok(vec![]) }
+    async fn get_current_user(&self) -> anyhow::Result<discord_rs::domain::User> {
+        Ok(discord_rs::domain::User::new("u1", "tester"))
+    }
+    async fn list_guilds(&self) -> anyhow::Result<Vec<discord_rs::domain::guild::Guild>> { Ok(vec![]) }
+    async fn get_guild(&self, _guild_id: &str) -> anyhow::Result<Option<discord_rs::domain::guild::Guild>> { Ok(None) }
+    async fn list_channels(&self, _guild_id: &str) -> anyhow::Result<Vec<Channel>> { Ok(vec![]) }
+    async fn list_dm_channels(&self) -> anyhow::Result<Vec<Channel>> { Ok(vec![]) }
     async fn get_messages(&self, _channel_id: &str, _limit: usize) -> anyhow::Result<Vec<Message>> { Ok(vec![]) }
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message> {
         Ok(Message::new("m-send", channel_id, Author::new("u1", "tester"), content))

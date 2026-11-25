@@ -183,6 +183,7 @@ impl RootView {
             friends_search_state: None,
             friends_search_sub: None,
             friends_search_query: String::new(),
+            friends_list_state: None,
             add_friend_state: None,
             add_friend_sub: None,
             guild_nick_state: None,
@@ -298,9 +299,9 @@ impl RootView {
             friends_search_state: None,
             friends_search_sub: None,
             friends_search_query: String::new(),
+            friends_list_state: None,
             add_friend_state: None,
             add_friend_sub: None,
-            friends_list_state: None,
             guild_nick_state: None,
             guild_nick_sub: None,
             active_modal_open: None,
@@ -2190,7 +2191,7 @@ mod group_dm_avatar_tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn group_dm_picker_rows_propagate_avatar_url_status_and_decoration() {
         let friend = friend(1);
         let row = GroupDmFriendRow::from_friend(&friend);
@@ -2207,7 +2208,7 @@ mod group_dm_avatar_tests {
         assert!(row.show_status, "accepted friends show presence");
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn group_dm_picker_hides_status_for_non_accepted_relationships() {
         let row = GroupDmFriendRow::from_friend(&friend(3));
         assert!(!row.show_status, "pending relationships must not show presence");

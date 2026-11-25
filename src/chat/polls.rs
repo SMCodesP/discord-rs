@@ -446,7 +446,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn vote_percentage_handles_zero_and_rounding() {
         assert_eq!(vote_percentage(0, 0), 0);
         assert_eq!(vote_percentage(1, 3), 33);
@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(vote_percentage(3, 3), 100);
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parse_poll_from_json_reads_official_shape() {
         let value = json!({
             "question": {"text": "Best lang?"},
@@ -484,7 +484,7 @@ mod tests {
         assert_eq!(poll.total_votes(), Some(4));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parse_poll_without_results_has_no_fabricated_percentages() {
         let value = json!({
             "question": {"text": "Pick one"},

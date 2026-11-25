@@ -833,6 +833,7 @@ fn render_friends_list_view(
     state: &AppState,
     search_state: &Entity<InputState>,
     search_query: &str,
+    list_state: &ListState,
 ) -> Div {
     let rows = collect_friend_rows(state, search_query);
     let is_empty = rows.is_empty();
@@ -847,7 +848,7 @@ fn render_friends_list_view(
         .child(if is_empty {
             render_friends_empty(state.friends_tab)
         } else {
-            render_friends_rows(entity, state, rows)
+            render_friends_rows(entity, state, rows, list_state)
         })
 }
 

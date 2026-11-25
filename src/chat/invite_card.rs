@@ -816,7 +816,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn parses_supported_domains() {
         for url in [
             "https://discord.gg/sintetico-abc",
@@ -832,7 +832,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn rejects_foreign_hosts_and_malformed_paths() {
         for url in [
             "https://notdiscord.gg/sintetico",

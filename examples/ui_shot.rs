@@ -587,7 +587,9 @@ fn apply_fixture(f: &ShotFixture) -> AppState {
         .map(|m| MemberItemState {
             avatar_decoration_data: None,
             id: m.id.clone(),
+            guild_id: None,
             name: m.name.clone(),
+            nickname: None,
             avatar_text: m.name.chars().next().unwrap_or('?').to_string(),
             presence: parse_presence(&m.presence),
             role_group: m.role_group.clone(),

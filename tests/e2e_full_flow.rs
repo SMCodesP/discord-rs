@@ -608,7 +608,9 @@ fn test_e2e_stress_high_volume_messages_and_members() {
 
             let member = MemberItemState {
                 id: format!("member-stress-{}", i),
+                guild_id: Some("guild-stress".to_string()),
                 name: format!("Rustacean #{:03}", i),
+                nickname: None,
                 avatar_text: format!("{}", (b'A' + (i % 26) as u8) as char),
                 presence,
                 role_group: role_group.to_string(),
