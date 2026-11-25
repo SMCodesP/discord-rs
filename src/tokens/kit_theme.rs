@@ -27,7 +27,9 @@
 use std::rc::Rc;
 
 use gpui::component::{Theme, ThemeConfig, ThemeRegistry};
-use gpui::{App, Global, Rgba};
+use gpui::{App, Global, Rgba, rgb, rgba};
+
+use crate::domain::settings::ThemeChoice;
 
 use super::colors;
 use super::spacing::{RAW_RADIUS_LG, RAW_RADIUS_MD};
@@ -136,117 +138,143 @@ fn hex8(hex: u32) -> String {
 /// Same string [`install`] passes to `ThemeRegistry::load_themes_from_str`,
 /// exposed separately so tests can exercise the mapping without an `App`.
 pub fn discord_theme_json() -> String {
+    discord_theme_json_for_palette(&colors::DiscordPalette::dark(), ThemeChoice::Dark)
+}
+
+/// Formats an [`Rgba`] as the `#rrggbb` (opaque) or `#rrggbbaa` (alpha) string
+/// the kit theme loader expects.
+fn rgba_hex(color: Rgba) -> String {
+    let r = (color.r.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let g = (color.g.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let b = (color.b.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let a = (color.a.clamp(0.0, 1.0) * 255.0).round() as u32;
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+    }
+}
+
+/// Builds the `ThemeSet` JSON for a concrete palette and theme choice.
+///
+/// Every surface/text color comes from the palette, so switching Dark, Light
+/// or Midnight re-registers the same `"Discord"` theme with the new values.
+pub fn discord_theme_json_for_palette(
+    palette: &colors::DiscordPalette,
+    choice: ThemeChoice,
+) -> String {
+    let color = |c: Rgba| rgba_hex(c);
     let colors = serde_json::json!({
         // --- surfaces / text ---
-        "background": hex6(colors::HEX_BG_CHAT),
-        "foreground": hex6(colors::HEX_TEXT_PRIMARY),
-        "accent.background": hex6(colors::HEX_CHANNEL_HOVER),
-        "accent.foreground": hex6(colors::HEX_WHITE),
-        "accordion.background": hex6(colors::HEX_BG_CHANNELS),
-        "border": hex6(colors::HEX_BORDERS),
+        "background": color(palette.bg_chat),
+        "foreground": color(palette.text_primary),
+        "accent.background": color(palette.channel_hover),
+        "accent.foreground": color(palette.white),
+        "accordion.background": color(palette.bg_channels),
+        "border": color(palette.borders),
         // --- default button (secondary style) ---
-        "button.background": hex6(colors::HEX_BTN_IGNORE),
-        "button.hover.background": hex6(colors::HEX_CHANNEL_ACTIVE),
-        "button.foreground": hex6(colors::HEX_WHITE),
+        "button.background": color(palette.channel_hover),
+        "button.hover.background": color(palette.channel_active),
+        "button.foreground": color(palette.white),
         // --- primary / brand button ---
-        "button.primary.background": hex6(colors::HEX_BLURPLE),
-        "button.primary.active.background": hex6(colors::HEX_BLURPLE_ACTIVE),
-        "button.primary.foreground": hex6(colors::HEX_WHITE),
-        "button.primary.hover.background": hex6(colors::HEX_BLURPLE_HOVER),
+        "button.primary.background": color(palette.blurple),
+        "button.primary.active.background": color(palette.blurple_active),
+        "button.primary.foreground": color(palette.white),
+        "button.primary.hover.background": color(palette.blurple_hover),
         // --- secondary button ---
-        "button.secondary.background": hex6(colors::HEX_CHANNEL_HOVER),
-        "button.secondary.foreground": hex6(colors::HEX_WHITE),
-        "button.secondary.hover.background": hex6(colors::HEX_CHANNEL_ACTIVE),
+        "button.secondary.background": color(palette.channel_hover),
+        "button.secondary.foreground": color(palette.white),
+        "button.secondary.hover.background": color(palette.channel_active),
         // --- success / warning / danger / info buttons ---
-        "button.success.background": hex6(colors::HEX_STATUS_ONLINE),
+        "button.success.background": color(palette.status_online),
         "button.success.active.background": CSS_SUCCESS_ACTIVE,
-        "button.success.foreground": hex6(colors::HEX_WHITE),
+        "button.success.foreground": color(palette.white),
         "button.success.hover.background": CSS_SUCCESS_HOVER,
-        "button.warning.background": hex6(colors::HEX_STATUS_IDLE),
+        "button.warning.background": color(palette.status_ausente),
         "button.warning.active.background": CSS_WARNING_ACTIVE,
-        "button.warning.foreground": hex6(colors::HEX_WHITE),
+        "button.warning.foreground": color(palette.white),
         "button.warning.hover.background": CSS_WARNING_HOVER,
-        "button.danger.background": hex6(colors::HEX_STATUS_DND),
+        "button.danger.background": color(palette.status_dnd),
         "button.danger.active.background": CSS_DANGER_ACTIVE,
-        "button.danger.foreground": hex6(colors::HEX_WHITE),
+        "button.danger.foreground": color(palette.white),
         "button.danger.hover.background": CSS_DANGER_HOVER,
         "button.info.background": CSS_INFO,
         "button.info.active.background": CSS_INFO_ACTIVE,
-        "button.info.foreground": hex6(colors::HEX_WHITE),
+        "button.info.foreground": color(palette.white),
         "button.info.hover.background": CSS_INFO_HOVER,
         // --- status palettes ---
-        "danger.background": hex6(colors::HEX_STATUS_DND),
+        "danger.background": color(palette.status_dnd),
         "danger.active.background": CSS_DANGER_ACTIVE,
-        "danger.foreground": hex6(colors::HEX_WHITE),
+        "danger.foreground": color(palette.white),
         "danger.hover.background": CSS_DANGER_HOVER,
-        "success.background": hex6(colors::HEX_STATUS_ONLINE),
+        "success.background": color(palette.status_online),
         "success.active.background": CSS_SUCCESS_ACTIVE,
-        "success.foreground": hex6(colors::HEX_WHITE),
+        "success.foreground": color(palette.white),
         "success.hover.background": CSS_SUCCESS_HOVER,
-        "warning.background": hex6(colors::HEX_STATUS_IDLE),
+        "warning.background": color(palette.status_ausente),
         "warning.active.background": CSS_WARNING_ACTIVE,
-        "warning.foreground": hex6(colors::HEX_WHITE),
+        "warning.foreground": color(palette.white),
         "warning.hover.background": CSS_WARNING_HOVER,
         "info.background": CSS_INFO,
         "info.active.background": CSS_INFO_ACTIVE,
-        "info.foreground": hex6(colors::HEX_WHITE),
+        "info.foreground": color(palette.white),
         "info.hover.background": CSS_INFO_HOVER,
         // --- brand scales ---
-        "primary.background": hex6(colors::HEX_BLURPLE),
-        "primary.active.background": hex6(colors::HEX_BLURPLE_ACTIVE),
-        "primary.foreground": hex6(colors::HEX_WHITE),
-        "primary.hover.background": hex6(colors::HEX_BLURPLE_HOVER),
-        "secondary.background": hex6(colors::HEX_CHANNEL_HOVER),
-        "secondary.foreground": hex6(colors::HEX_WHITE),
-        "secondary.hover.background": hex6(colors::HEX_CHANNEL_ACTIVE),
-        "muted.background": hex6(colors::HEX_CHANNEL_HOVER),
-        "muted.foreground": hex6(colors::HEX_TEXT_MUTED),
+        "primary.background": color(palette.blurple),
+        "primary.active.background": color(palette.blurple_active),
+        "primary.foreground": color(palette.white),
+        "primary.hover.background": color(palette.blurple_hover),
+        "secondary.background": color(palette.channel_hover),
+        "secondary.foreground": color(palette.white),
+        "secondary.hover.background": color(palette.channel_active),
+        "muted.background": color(palette.channel_hover),
+        "muted.foreground": color(palette.text_muted),
         // --- overlays / popovers ---
-        "popover.background": hex6(colors::HEX_BG_FLOATING),
-        "popover.foreground": hex6(colors::HEX_TEXT_PRIMARY),
-        "overlay": hex8(colors::HEX_MODAL_BACKDROP),
-        "drop_target.background": hex8(colors::HEX_MENTION_BG),
-        "drag.border": hex6(colors::HEX_BLURPLE),
+        "popover.background": color(palette.bg_floating),
+        "popover.foreground": color(palette.text_primary),
+        "overlay": color(palette.modal_backdrop),
+        "drop_target.background": color(palette.mention_bg),
+        "drag.border": color(palette.blurple),
         // --- lists (channel / member rows) ---
-        "list.background": hex6(colors::HEX_BG_CHANNELS),
-        "list.active.background": hex6(colors::HEX_CHANNEL_ACTIVE),
-        "list.even.background": hex6(colors::HEX_BG_CHANNELS),
-        "list.head.background": hex6(colors::HEX_BG_CHANNELS),
-        "list.hover.background": hex6(colors::HEX_CHANNEL_HOVER),
+        "list.background": color(palette.bg_channels),
+        "list.active.background": color(palette.channel_active),
+        "list.even.background": color(palette.bg_channels),
+        "list.head.background": color(palette.bg_channels),
+        "list.hover.background": color(palette.channel_hover),
         // --- inputs / links / selection affordances ---
-        "input.border": hex6(colors::HEX_BORDERS),
+        "input.border": color(palette.borders),
         "link": CSS_LINK,
         "link.active": CSS_LINK,
         "link.hover": CSS_LINK,
-        "progress.bar.background": hex6(colors::HEX_BLURPLE),
-        "ring": hex6(colors::HEX_BLURPLE),
+        "progress.bar.background": color(palette.blurple),
+        "ring": color(palette.blurple),
         // --- scrollbar ---
-        "scrollbar.thumb.background": hex6(colors::HEX_SCROLLBAR_THUMB),
+        "scrollbar.thumb.background": color(palette.scrollbar_thumb),
         // --- sidebars / bars ---
-        "sidebar.background": hex6(colors::HEX_BG_CHANNELS),
-        "sidebar.accent.background": hex6(colors::HEX_CHANNEL_HOVER),
-        "sidebar.accent.foreground": hex6(colors::HEX_TEXT_PRIMARY),
-        "sidebar.foreground": hex6(colors::HEX_TEXT_SECONDARY),
-        "sidebar.primary.background": hex6(colors::HEX_WHITE),
-        "sidebar.primary.foreground": hex6(colors::HEX_BG_SERVER),
-        "status_bar.background": hex6(colors::HEX_BG_USER_BAR),
-        "title_bar.background": hex6(colors::HEX_BG_SERVER),
+        "sidebar.background": color(palette.bg_channels),
+        "sidebar.accent.background": color(palette.channel_hover),
+        "sidebar.accent.foreground": color(palette.text_primary),
+        "sidebar.foreground": color(palette.text_secondary),
+        "sidebar.primary.background": color(palette.white),
+        "sidebar.primary.foreground": color(palette.bg_server),
+        "status_bar.background": color(palette.bg_user_bar),
+        "title_bar.background": color(palette.bg_server),
         // --- tabs (friends filter bar) ---
-        "tab.foreground": hex6(colors::HEX_TEXT_SECONDARY),
-        "tab.active.foreground": hex6(colors::HEX_WHITE),
-        "tab_bar.background": hex6(colors::HEX_BG_CHAT),
+        "tab.foreground": color(palette.text_secondary),
+        "tab.active.foreground": color(palette.white),
+        "tab_bar.background": color(palette.bg_chat),
         // --- base hues for badges / dots ---
-        "base.red": hex6(colors::HEX_STATUS_DND),
+        "base.red": color(palette.status_dnd),
         "base.red.light": CSS_RED_LIGHT,
-        "base.green": hex6(colors::HEX_STATUS_ONLINE),
+        "base.green": color(palette.status_online),
         "base.green.light": CSS_GREEN_LIGHT,
         "base.blue": CSS_LINK,
         "base.blue.light": CSS_BLUE_LIGHT,
-        "base.yellow": hex6(colors::HEX_STATUS_IDLE),
+        "base.yellow": color(palette.status_ausente),
         "base.yellow.light": CSS_WARNING_HOVER,
         // --- switches / sliders ---
         "switch.background": CSS_SWITCH_BG,
-        "switch.thumb.background": CSS_SWITCH_THUMB,
+        "switch.thumb.background": color(palette.white),
         "slider.background": CSS_SLIDER_TRACK,
         // --- charts ---
         "chart.1": CSS_CHART_1,
@@ -258,13 +286,15 @@ pub fn discord_theme_json() -> String {
         "chart.bearish": CSS_CHART_BEARISH,
     });
 
+    let mode = if choice == ThemeChoice::Light { "light" } else { "dark" };
+
     serde_json::json!({
         "name": "Discord",
         "author": "discord-rs",
         "themes": [
             {
                 "name": DISCORD_THEME_NAME,
-                "mode": "dark",
+                "mode": mode,
                 "is_default": false,
                 "font.size": SIZE_BASE,
                 "font.family": FONT_FAMILY_PRIMARY,
@@ -278,13 +308,85 @@ pub fn discord_theme_json() -> String {
     .to_string()
 }
 
+/// Builds the palette for a user-facing theme choice.
+///
+/// Dark is the audited reference palette in [`colors::DiscordPalette::dark`].
+/// Light and Midnight use the base backgrounds documented in
+/// `ThemeChoice::bg_hex` / `docs/SCOPING_USER_SETTINGS_ADVANCED.md` (Light
+/// `#ffffff`, Midnight OLED `#000000`) and the corresponding Discord light
+/// surface/text stops. `SyncWithSystem` has no DBus probe in a headless
+/// process, so it resolves to Dark instead of fabricating a selection.
+pub fn palette_for_theme(choice: ThemeChoice) -> colors::DiscordPalette {
+    let mut palette = colors::DiscordPalette::dark();
+    match choice {
+        ThemeChoice::Dark | ThemeChoice::SyncWithSystem => {}
+        ThemeChoice::Light => {
+            // Discord light theme surfaces/text stops.
+            palette.bg_server = rgb(0xe3e5e8);
+            palette.bg_channels = rgb(0xf2f3f5);
+            palette.bg_chat = rgb(0xffffff);
+            palette.bg_chat_hover = rgb(0xf2f3f5);
+            palette.bg_user_bar = rgb(0xf2f3f5);
+            palette.bg_input = rgb(0xebedef);
+            palette.bg_floating = rgb(0xffffff);
+            palette.text_primary = rgb(0x313338);
+            palette.text_secondary = rgb(0x5c5e66);
+            palette.text_titles = rgb(0x060607);
+            palette.text_muted = rgb(0x80848e);
+            palette.borders = rgb(0xe3e5e8);
+            palette.border_subtle = rgba(0x0000001f);
+            palette.channel_hover = rgb(0xe9eaec);
+            palette.channel_active = rgb(0xe3e5e8);
+            palette.channels_default = rgb(0x5c5e66);
+            palette.interactive_normal = rgb(0x313338);
+            palette.scrollbar_thumb = rgb(0xb5bac1);
+            palette.neutral_67 = rgb(0xdcdee1);
+            palette.mention_foreground = rgb(0x4752c4);
+            palette.reaction_text_default = rgb(0x313338);
+            palette.reaction_text_reacted_default = rgb(0x4752c4);
+            palette.legacy_949ba4 = rgb(0x5c5e66);
+            palette.legacy_282a2e = rgb(0xe9eaec);
+            palette.legacy_3f4147 = rgb(0xe3e5e8);
+        }
+        ThemeChoice::Midnight => {
+            // OLED surfaces: pure black base, raised stops keep Discord's
+            // dark text palette.
+            palette.bg_server = rgb(0x000000);
+            palette.bg_channels = rgb(0x000000);
+            palette.bg_chat = rgb(0x000000);
+            palette.bg_chat_hover = rgb(0x1a1b1e);
+            palette.bg_user_bar = rgb(0x000000);
+            palette.bg_input = rgb(0x111214);
+            palette.bg_floating = rgb(0x111214);
+            palette.borders = rgb(0x1f2023);
+            palette.border_subtle = rgba(0xffffff14);
+            palette.channel_hover = rgb(0x1a1b1e);
+            palette.channel_active = rgb(0x2b2d31);
+            palette.scrollbar_thumb = rgb(0x1a1b1e);
+            palette.neutral_67 = rgb(0x1f2023);
+        }
+    }
+    palette
+}
+
 // ============================================================================
 // install()
 // ============================================================================
 
-/// Registers the dark `"Discord"` theme with the given palette.
+/// Registers the `"Discord"` theme with the given palette.
+///
+/// Re-registering the same name replaces the previous theme data, so this is
+/// the path used by live Dark/Light/Midnight switching.
 pub fn install_with_palette(cx: &mut App, palette: &colors::DiscordPalette) {
-    let json = discord_theme_json();
+    install_with_palette_and_choice(cx, palette, ThemeChoice::Dark);
+}
+
+fn install_with_palette_and_choice(
+    cx: &mut App,
+    palette: &colors::DiscordPalette,
+    choice: ThemeChoice,
+) {
+    let json = discord_theme_json_for_palette(palette, choice);
     ThemeRegistry::global_mut(cx)
         .load_themes_from_str(&json)
         .expect("kit_theme: failed to register the Discord theme");
@@ -302,12 +404,35 @@ pub fn install_with_palette(cx: &mut App, palette: &colors::DiscordPalette) {
     cx.set_global(DiscordExtras::from_palette(palette));
 }
 
+/// Registers the theme for a concrete Dark/Light/Midnight choice.
+pub fn install_for_theme(cx: &mut App, choice: ThemeChoice) {
+    let palette = palette_for_theme(choice);
+    install_with_palette_and_choice(cx, &palette, choice);
+    cx.set_global(AppliedTheme(choice));
+}
+
+/// Last theme choice applied to the kit, so observers can avoid re-registering
+/// the same theme on every notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedTheme(pub ThemeChoice);
+
+impl Global for AppliedTheme {}
+
+/// Applies a theme only when it differs from the last applied choice.
+pub fn apply_theme_choice(cx: &mut App, choice: ThemeChoice) {
+    if cx.try_global::<AppliedTheme>().copied() == Some(AppliedTheme(choice)) {
+        return;
+    }
+    install_for_theme(cx, choice);
+}
+
 /// Registers the dark `"Discord"` theme through the kit's official path
 /// (`ThemeRegistry::load_themes_from_str`) with the standard dark palette.
 /// Must be called after `gpui::init(cx)`.
 pub fn install(cx: &mut App) {
     let palette = colors::DiscordPalette::dark();
-    install_with_palette(cx, &palette);
+    install_with_palette_and_choice(cx, &palette, ThemeChoice::Dark);
+    cx.set_global(AppliedTheme(ThemeChoice::Dark));
 }
 
 // ============================================================================
