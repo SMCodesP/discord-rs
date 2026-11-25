@@ -196,7 +196,10 @@ impl AppState {
     /// Handles Escape key dispatch, closing one level at a time:
     /// Modal -> Popout -> other modals. Returns true if something was closed.
     pub fn handle_escape(&mut self) -> bool {
-        if self.is_profile_modal_open() {
+        if self.status_picker_open {
+            self.close_status_picker();
+            true
+        } else if self.is_profile_modal_open() {
             self.close_user_profile_modal();
             true
         } else if self.profile_popout.is_some() {

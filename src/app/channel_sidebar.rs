@@ -9,9 +9,13 @@ use super::state::{
 };
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::badge::MentionBadge;
-use crate::components::button::IconButton;
+use crate::components::button::{Button, ButtonSize, IconButton};
+use crate::components::status_picker::{
+    CustomStatusDraft, CustomStatusExpiration, UserStatusSelection,
+};
 use crate::components::text_input::TextInput;
 use crate::domain::user::{ActivityType, PresenceStatus};
+use crate::i18n::t;
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
@@ -33,6 +37,11 @@ pub struct ChannelSidebar {
     dm_search_state: Option<Entity<InputState>>,
     dm_search_sub: Option<Subscription>,
     dm_search_query: String,
+    status_text_state: Option<Entity<InputState>>,
+    status_emoji_state: Option<Entity<InputState>>,
+    status_text_sub: Option<Subscription>,
+    status_emoji_sub: Option<Subscription>,
+    status_picker_was_open: bool,
 }
 
 impl ChannelSidebar {
@@ -55,6 +64,11 @@ impl ChannelSidebar {
             dm_search_state: None,
             dm_search_sub: None,
             dm_search_query: String::new(),
+            status_text_state: None,
+            status_emoji_state: None,
+            status_text_sub: None,
+            status_emoji_sub: None,
+            status_picker_was_open: false,
         }
     }
 
@@ -72,17 +86,108 @@ impl ChannelSidebar {
         self.dm_search_state = Some(st);
         self.dm_search_sub = Some(sub);
     }
+
+    fn ensure_status_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.status_text_state.is_some() && self.status_emoji_state.is_some() {
+            return;
+        }
+
+        let text_st = cx.new(|cx| InputState::new(window, cx));
+        let app_text = self.state.clone();
+        let text_sub = cx.subscribe_in(&text_st, window, move |_this, input, event: &InputEvent, _window, cx| {
+            match event {
+                InputEvent::Change => {
+                    let value = input.read(cx).value().to_string();
+                    app_text.update(cx, |state, cx| {
+                        state.set_status_picker_text(value);
+                        cx.notify();
+                    });
+                }
+                InputEvent::PressEnter { .. } => {
+                    app_text.update(cx, |state, cx| {
+                        state.save_status_picker();
+                        cx.notify();
+                    });
+                }
+                _ => {}
+            }
+        });
+
+        let emoji_st = cx.new(|cx| InputState::new(window, cx));
+        let app_emoji = self.state.clone();
+        let emoji_sub = cx.subscribe_in(&emoji_st, window, move |_this, input, event: &InputEvent, _window, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = input.read(cx).value().trim().to_string();
+                let emoji = if value.is_empty() {
+                    None
+                } else {
+                    Some(crate::domain::user::CustomStatusEmoji::unicode(value))
+                };
+                app_emoji.update(cx, |state, cx| {
+                    state.set_status_picker_emoji(emoji);
+                    cx.notify();
+                });
+            }
+        });
+
+        self.status_text_state = Some(text_st);
+        self.status_emoji_state = Some(emoji_st);
+        self.status_text_sub = Some(text_sub);
+        self.status_emoji_sub = Some(emoji_sub);
+    }
 }
 
 impl Render for ChannelSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.ensure_dm_search_input(window, cx);
+        self.ensure_status_inputs(window, cx);
         let dm_search_state = self
             .dm_search_state
             .as_ref()
             .expect("dm_search_state must be initialized")
             .clone();
+        let status_text_state = self
+            .status_text_state
+            .as_ref()
+            .expect("status_text_state must be initialized")
+            .clone();
+        let status_emoji_state = self
+            .status_emoji_state
+            .as_ref()
+            .expect("status_emoji_state must be initialized")
+            .clone();
         let dm_query = self.dm_search_query.clone();
+
+        let (status_picker_open, picker_text, picker_emoji) = {
+            let state = self.state.read(cx);
+            (
+                state.status_picker_open,
+                state
+                    .status_picker_custom_status
+                    .text
+                    .clone()
+                    .unwrap_or_default(),
+                state
+                    .status_picker_custom_status
+                    .emoji
+                    .as_ref()
+                    .map(|emoji| emoji.name.clone())
+                    .unwrap_or_default(),
+            )
+        };
+
+        // Seed the inputs only when the popover opens. While it stays open the
+        // InputState is the source of truth and must not be reset on every frame.
+        if status_picker_open && !self.status_picker_was_open {
+            status_text_state.update(cx, |input, cx| {
+                input.set_value(picker_text, window, cx);
+            });
+            status_emoji_state.update(cx, |input, cx| {
+                input.set_value(picker_emoji, window, cx);
+            });
+        }
+        self.status_picker_was_open = status_picker_open;
+
         let state = self.state.read(cx);
         let selected_guild = state.get_selected_guild().cloned();
         let selected_channel_id = state.selected_channel_id.clone();
@@ -162,7 +267,15 @@ impl Render for ChannelSidebar {
                     // Discord measures 50px of channel-navigation clearance;
                     // the 58px panel floats over the final 16px of that area.
                     .child(div().h(channel_navigation_reserve()))
-                    .child(render_user_panel(&current_user, &app_entity)),
+                    .child(render_user_panel(&current_user, &app_entity))
+                    .children(state.status_picker_open.then(|| {
+                        render_status_picker(
+                            state,
+                            &status_text_state,
+                            &status_emoji_state,
+                            &app_entity,
+                        )
+                    })),
             )
     }
 }
@@ -1310,6 +1423,338 @@ fn render_voice_bar(voice: &ActiveVoiceCall, app_entity: &Entity<AppState>) -> A
         .into_any_element()
 }
 
+fn status_selection_color(status: UserStatusSelection) -> Rgba {
+    match status {
+        UserStatusSelection::Online => status_online(),
+        UserStatusSelection::Idle => status_ausente(),
+        UserStatusSelection::Dnd => status_dnd(),
+        UserStatusSelection::Invisible => status_offline(),
+    }
+}
+
+fn status_selection_label(status: UserStatusSelection) -> &'static str {
+    match status {
+        UserStatusSelection::Online => t("status.online"),
+        UserStatusSelection::Idle => t("status.idle"),
+        UserStatusSelection::Dnd => t("status.dnd"),
+        UserStatusSelection::Invisible => t("status.invisible"),
+    }
+}
+
+fn expiration_label(expiration: CustomStatusExpiration) -> &'static str {
+    match expiration {
+        CustomStatusExpiration::Today => t("status.expire_today"),
+        CustomStatusExpiration::FourHours => "4h",
+        CustomStatusExpiration::OneHour => "1h",
+        CustomStatusExpiration::ThirtyMinutes => "30m",
+        CustomStatusExpiration::Never => t("status.expire_never"),
+    }
+}
+
+fn render_status_picker_row(
+    status: UserStatusSelection,
+    selected: bool,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let entity = app_entity.clone();
+    let background = if selected {
+        channel_hover()
+    } else {
+        transparent()
+    };
+    let mut row = div()
+        .id(SharedString::from(format!("status-picker-option-{}", status.as_gateway_str())))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(10.0))
+        .h(px(38.0))
+        .px(px(8.0))
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .bg(background)
+        .hover(|style| style.bg(channel_hover()))
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            entity.update(cx, |state, cx| {
+                state.apply_status_selection(status);
+                cx.notify();
+            });
+        })
+        .child(
+            div()
+                .w(px(10.0))
+                .h(px(10.0))
+                .rounded_full()
+                .bg(status_selection_color(status))
+                .flex_shrink_0(),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .text_size(px(14.0))
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_header())
+                .child(status_selection_label(status)),
+        );
+
+    row = row.child(if selected {
+        icon_check(px(16.0), interactive_normal()).into_any_element()
+    } else {
+        div().w(px(16.0)).into_any_element()
+    });
+    row.into_any_element()
+}
+
+fn render_status_expiration_choice(
+    expiration: CustomStatusExpiration,
+    selected: bool,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let entity = app_entity.clone();
+    div()
+        .id(SharedString::from(format!(
+            "status-picker-expiration-{:?}",
+            expiration
+        )))
+        .px(px(7.0))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .rounded(radius_sm())
+        .cursor_pointer()
+        .bg(if selected { channel_hover() } else { transparent() })
+        .hover(|style| style.bg(channel_hover()))
+        .text_size(px(12.0))
+        .font_weight(WEIGHT_MEDIUM)
+        .text_color(if selected {
+            text_header()
+        } else {
+            interactive_normal()
+        })
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            entity.update(cx, |state, cx| {
+                state.set_status_picker_expiration(expiration);
+                cx.notify();
+            });
+        })
+        .child(expiration_label(expiration))
+        .into_any_element()
+}
+
+fn render_status_picker_custom_editor(
+    draft: &CustomStatusDraft,
+    text_state: &Entity<InputState>,
+    emoji_state: &Entity<InputState>,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let entity = app_entity.clone();
+    let has_custom = !draft.is_empty();
+    let mut clear_action: Option<AnyElement> = None;
+    if has_custom {
+        clear_action = Some(
+            div()
+                .id("status-picker-clear-custom")
+                .mt(px(2.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .cursor_pointer()
+                .text_size(px(12.0))
+                .text_color(status_danger())
+                .hover(|style| style.text_color(text_header()))
+                .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                    entity.update(cx, |state, cx| {
+                        state.clear_status_picker_custom_status();
+                        cx.notify();
+                    });
+                })
+                .child(t("status.custom_clear"))
+                .into_any_element(),
+        );
+    }
+
+    let mut expiration_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.0))
+        .flex_wrap()
+        .child(
+            div()
+                .mr(px(2.0))
+                .text_size(px(12.0))
+                .text_color(text_muted())
+                .child(t("status.expiration")),
+        );
+    for expiration in CustomStatusExpiration::ALL {
+        expiration_row = expiration_row.child(render_status_expiration_choice(
+            expiration,
+            draft.expiration == expiration,
+            app_entity,
+        ));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(12.0))
+                .font_weight(WEIGHT_MEDIUM)
+                .text_color(text_muted())
+                .child(t("status.custom")),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .gap(px(6.0))
+                .child(
+                    div().w(px(58.0)).child(
+                        TextInput::new("status-picker-emoji-input", emoji_state)
+                            .placeholder("Emoji")
+                            .show_paste(false)
+                            .show_clear(false)
+                            .full_width(true),
+                    ),
+                )
+                .child(
+                    div().flex_1().min_w(px(0.0)).child(
+                        TextInput::new("status-picker-text-input", text_state)
+                            .placeholder(t("status.custom_placeholder"))
+                            .show_paste(false)
+                            .show_clear(false)
+                            .full_width(true),
+                    ),
+                ),
+        )
+        .children(clear_action)
+        .child(expiration_row)
+        .into_any_element()
+}
+
+fn render_status_picker(
+    state: &AppState,
+    text_state: &Entity<InputState>,
+    emoji_state: &Entity<InputState>,
+    app_entity: &Entity<AppState>,
+) -> AnyElement {
+    let current_user = &state.current_user;
+    let draft = state.status_picker_custom_status.clone();
+    let username = current_user.username.clone();
+    let display_name = current_user.display_name.clone();
+    let avatar_url = current_user.avatar_url.clone();
+    let presence: PresenceStatus = current_user.presence.into();
+    let selected = state.status_picker_status;
+    let error = state.status_update_error.clone();
+
+    let mut rows = div().flex().flex_col().gap(px(1.0));
+    for status in UserStatusSelection::ALL {
+        rows = rows.child(render_status_picker_row(
+            status,
+            status == selected,
+            app_entity,
+        ));
+    }
+
+    let save_entity = app_entity.clone();
+    let copy_entity = app_entity.clone();
+    let username_for_copy = username.clone();
+
+    div()
+        .absolute()
+        .left(px(RAW_USER_PANEL_MARGIN))
+        .bottom(px(RAW_USER_PANEL_MARGIN + RAW_USER_BAR_HEIGHT + 8.0))
+        .w(px(300.0))
+        .max_h(px(520.0))
+        .id("status-picker-popover")
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .p(px(8.0))
+        .bg(bg_user_bar())
+        .border_1()
+        .border_color(border_subtle())
+        .rounded(radius_md())
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(4.0))
+                .child(
+                    Avatar::new(display_name)
+                        .size(AvatarSize::Px32)
+                        .opt_src(avatar_url)
+                        .status(presence)
+                        .cutout_color(bg_user_bar()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(WEIGHT_MEDIUM)
+                                .text_color(text_header())
+                                .truncate()
+                                .child(current_user.display_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(interactive_normal())
+                                .truncate()
+                                .child(format!("@{}", username)),
+                        ),
+                ),
+        )
+        .child(rows)
+        .child(div().h(px(1.0)).bg(border_subtle()).my(px(2.0)))
+        .child(render_status_picker_custom_editor(
+            &draft, text_state, emoji_state, app_entity,
+        ))
+        .children(error.map(|error| {
+            div()
+                .text_size(px(12.0))
+                .text_color(status_danger())
+                .child(error)
+                .into_any_element()
+        }))
+        .child(
+            Button::blurple("status-picker-save", t("status.save"))
+                .size(ButtonSize::Sm)
+                .full_width()
+                .on_click(move |_event, _window, cx| {
+                    save_entity.update(cx, |state, cx| {
+                        state.save_status_picker();
+                        cx.notify();
+                    });
+                }),
+        )
+        .child(
+            Button::gray("status-picker-copy-username", "Copiar username")
+                .size(ButtonSize::Sm)
+                .full_width()
+                .on_click(move |_event, _window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(username_for_copy.clone()));
+                    copy_entity.update(cx, |state, cx| {
+                        state.close_status_picker();
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
+}
+
 fn render_user_panel(
     current_user: &CurrentUserProfile,
     app_entity: &Entity<AppState>,
@@ -1364,7 +1809,7 @@ fn render_user_panel(
                     let entity = entity.clone();
                     move |_event, _window, cx| {
                         entity.update(cx, |state, cx| {
-                            state.open_modal(ActiveModal::UserSettings);
+                            state.toggle_status_picker();
                             cx.notify();
                         });
                     }

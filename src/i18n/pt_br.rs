@@ -16,6 +16,15 @@ pub const DICTIONARY: &[(&str, &str)] = &[
     ("status.invisible", "Invisível"),
     ("status.offline", "Offline"),
     ("status.custom", "Definir status personalizado"),
+    ("status.custom_placeholder", "Definir um status personalizado"),
+    ("status.custom_clear", "Limpar status personalizado"),
+    ("status.expiration", "Expira"),
+    ("status.expire_today", "Hoje"),
+    ("status.expire_four_hours", "4 horas"),
+    ("status.expire_one_hour", "1 hora"),
+    ("status.expire_thirty_minutes", "30 minutos"),
+    ("status.expire_never", "Nunca"),
+    ("status.save", "Salvar"),
     ("status.clear", "Limpar status"),
 
     // Barra Lateral de Servidores (Rail)

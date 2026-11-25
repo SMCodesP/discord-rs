@@ -742,6 +742,23 @@ impl ClientManager {
         transport.remove_relationship(user_id).await
     }
 
+    /// Applies a presence/custom-status update through the active transport.
+    /// Both payloads are built from the status picker model; the transport only
+    /// delivers them (Gateway Opcode 3 + PATCH /users/@me/settings).
+    pub async fn update_user_status(
+        &self,
+        gateway_payload: &serde_json::Value,
+        settings_payload: &serde_json::Value,
+    ) -> Result<()> {
+        let transport = {
+            let lock = self.transport.read().await;
+            lock.clone()
+        };
+        transport
+            .update_user_status(gateway_payload, settings_payload)
+            .await
+    }
+
     /// Ring participants in a DM / private channel via POST /channels/{id}/call/ring
     pub async fn ring_call(&self, channel_id: &str, recipients: Option<Vec<String>>) -> Result<()> {
         let transport = {

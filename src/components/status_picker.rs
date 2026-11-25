@@ -151,14 +151,33 @@ impl CustomStatusDraft {
         Self::default()
     }
 
+    /// Rebuilds an editable draft from a confirmed custom status payload.
+    /// Discord does not include the expiration in PRESENCE_UPDATE, so an
+    /// echoed/loaded status always starts with the `Never` preset.
+    pub fn from_custom_status(custom_status: &CustomStatus) -> Self {
+        Self {
+            text: normalize_optional_text(custom_status.text.clone()),
+            emoji: custom_status.emoji.clone(),
+            expiration: CustomStatusExpiration::Never,
+        }
+    }
+
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.text = normalize_optional_text(Some(text.into()));
         self
     }
 
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = normalize_optional_text(Some(text.into()));
+    }
+
     pub fn with_emoji(mut self, emoji: CustomStatusEmoji) -> Self {
         self.emoji = Some(emoji);
         self
+    }
+
+    pub fn set_emoji(&mut self, emoji: Option<CustomStatusEmoji>) {
+        self.emoji = emoji;
     }
 
     pub fn clear_emoji(mut self) -> Self {

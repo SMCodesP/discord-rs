@@ -1,6 +1,6 @@
 use crate::domain::{
-    Activity, Attachment, Author, Category, Channel, Embed, EmbedField, Guild, Message,
-    MessageStickerItem, PresenceStatus, Reaction, Role, User,
+    Activity, Attachment, Author, Category, Channel, CustomStatus, CustomStatusEmoji, Embed,
+    EmbedField, Guild, Message, MessageStickerItem, PresenceStatus, Reaction, Role, User,
 };
 use crate::protocol::media_cache::{DiscordEmoji, DiscordSticker, StickerFormatType};
 use crate::protocol::transport::{DiscordTransport, Relationship, TransportEvent};
@@ -22,6 +22,7 @@ struct MockState {
     recorded_message_edits: Vec<(String, String, String)>,
     recorded_pins: Vec<(String, String)>,
     recorded_typing: Vec<String>,
+    recorded_status_updates: Vec<(serde_json::Value, serde_json::Value)>,
 }
 
 /// Deterministic mock provider simulating Discord guilds, channels, messages, and gateway events.
@@ -461,6 +462,7 @@ impl MockDiscordProvider {
             recorded_message_edits: Vec::new(),
             recorded_pins: Vec::new(),
             recorded_typing: Vec::new(),
+            recorded_status_updates: Vec::new(),
         };
 
         Self {
@@ -487,6 +489,14 @@ impl MockDiscordProvider {
 
     pub async fn recorded_typing(&self) -> Vec<String> {
         self.state.read().await.recorded_typing.clone()
+    }
+
+    /// Returns the exact Gateway Opcode 3 and settings payloads delivered to
+    /// the deterministic transport, in send order.
+    pub async fn recorded_status_updates(
+        &self,
+    ) -> Vec<(serde_json::Value, serde_json::Value)> {
+        self.state.read().await.recorded_status_updates.clone()
     }
 
     /// Simulates receiving an external message from another user in real time.
@@ -535,6 +545,12 @@ impl MockDiscordProvider {
 
     pub async fn get_recorded_typing(&self) -> Vec<String> {
         self.state.read().await.recorded_typing.clone()
+    }
+
+    pub async fn get_recorded_status_updates(
+        &self,
+    ) -> Vec<(serde_json::Value, serde_json::Value)> {
+        self.state.read().await.recorded_status_updates.clone()
     }
 }
 
@@ -982,6 +998,54 @@ impl DiscordTransport for MockDiscordProvider {
         _guild_id: &str,
         _channel_id: &str,
     ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn update_user_status(
+        &self,
+        gateway_payload: &serde_json::Value,
+        settings_payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let mut state = self.state.write().await;
+        state
+            .recorded_status_updates
+            .push((gateway_payload.clone(), settings_payload.clone()));
+
+        let status = match gateway_payload["d"]["status"]
+            .as_str()
+            .unwrap_or("offline")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "online" => PresenceStatus::Online,
+            "idle" => PresenceStatus::Idle,
+            "dnd" => PresenceStatus::DoNotDisturb,
+            _ => PresenceStatus::Offline,
+        };
+        state.current_user.presence = status;
+
+        let custom_json = &settings_payload["custom_status"];
+        let custom_status = if custom_json.is_object() {
+            let text = custom_json["text"].as_str().map(ToString::to_string);
+            let emoji_name = custom_json["emoji_name"].as_str();
+            let emoji = emoji_name.map(|name| CustomStatusEmoji {
+                name: name.to_string(),
+                id: custom_json["emoji_id"].as_str().map(ToString::to_string),
+                animated: custom_json["animated"].as_bool().unwrap_or(false),
+            });
+            Some(CustomStatus { text, emoji })
+        } else {
+            None
+        };
+        state.current_user.custom_status = custom_status.clone();
+
+        let user_id = state.current_user.id.clone();
+        let _ = self.event_sender.send(TransportEvent::PresenceUpdate {
+            user_id,
+            status,
+            activity: None,
+            custom_status,
+        });
         Ok(())
     }
 
