@@ -229,7 +229,7 @@ impl AppState {
         let selected_guild_id = guilds.first().map(|g| g.id.clone());
         let selected_channel_id = guilds.first().and_then(|g| {
             for cat in &g.categories {
-                if let Some(ch) = cat.channels.iter().find(|c| c.kind == ChannelKind::Text) {
+                if let Some(ch) = cat.channels.iter().find(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Directory)) {
                     return Some(ch.id.clone());
                 }
             }

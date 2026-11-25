@@ -200,7 +200,7 @@ impl AppState {
                 } else {
                     // Troca instantânea de servidor! Não faz requisição de rede se categories não estiver vazio
                     for cat in &guild.categories {
-                        if let Some(ch) = cat.channels.iter().find(|c| c.kind == ChannelKind::Text) {
+                        if let Some(ch) = cat.channels.iter().find(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Directory)) {
                             first_text_channel_id = Some(ch.id.clone());
                             break;
                         }
@@ -390,6 +390,12 @@ impl AppState {
             let kind_str = match ch_kind {
                 ChannelKind::Voice => "voice",
                 ChannelKind::Announcement => "announcement",
+                ChannelKind::Forum => "forum",
+                ChannelKind::PublicThread => "public_thread",
+                ChannelKind::PrivateThread => "private_thread",
+                ChannelKind::AnnouncementThread => "announcement_thread",
+                ChannelKind::StageVoice => "stage_voice",
+                ChannelKind::Directory => "directory",
                 ChannelKind::Text => "text",
             };
             let mut meta = std::collections::HashMap::new();
@@ -398,7 +404,7 @@ impl AppState {
             meta.insert("kind".into(), kind_str.into());
 
             let screen = match ch_kind {
-                ChannelKind::Voice => crate::telemetry::ScreenKind::VoiceChannel {
+                ChannelKind::Voice | ChannelKind::StageVoice => crate::telemetry::ScreenKind::VoiceChannel {
                     id: channel_id.clone(),
                     name: ch_name.clone(),
                     guild_id: self.selected_guild_id.clone(),
@@ -408,7 +414,7 @@ impl AppState {
                     name: ch_name.clone(),
                     guild_id: self.selected_guild_id.clone(),
                 },
-                ChannelKind::Text => crate::telemetry::ScreenKind::TextChannel {
+                _ => crate::telemetry::ScreenKind::TextChannel {
                     id: channel_id.clone(),
                     name: ch_name.clone(),
                     guild_id: self.selected_guild_id.clone(),
@@ -425,7 +431,7 @@ impl AppState {
             .unwrap_or_else(|| "Servidor".into());
 
         let voice_to_connect = if let Some((_, channel)) = self.find_channel(&channel_id) {
-            if channel.kind == ChannelKind::Voice {
+            if channel.kind.is_voice_like() {
                 Some((channel.id.clone(), channel.name.clone(), guild_name))
             } else {
                 None

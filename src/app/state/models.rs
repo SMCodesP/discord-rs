@@ -118,19 +118,29 @@ impl SettingsTab {
 }
 
 /// Channel types in sidebar
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChannelKind {
+    #[default]
     Text,
     Voice,
     Announcement,
+    Forum,
+    PublicThread,
+    PrivateThread,
+    AnnouncementThread,
+    StageVoice,
+    Directory,
 }
 
 impl ChannelKind {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Text => "#",
-            Self::Voice => "",
+            Self::Voice | Self::StageVoice => "",
             Self::Announcement => "",
+            Self::Forum => "",
+            Self::PublicThread | Self::PrivateThread | Self::AnnouncementThread => "",
+            Self::Directory => "",
         }
     }
 
@@ -138,14 +148,30 @@ impl ChannelKind {
     pub fn discord_icon(&self) -> crate::tokens::icons::DiscordIcon {
         match self {
             Self::Text => crate::tokens::icons::DiscordIcon::Hash,
-            Self::Voice => crate::tokens::icons::DiscordIcon::Speaker,
+            Self::Voice | Self::StageVoice => crate::tokens::icons::DiscordIcon::Speaker,
             Self::Announcement => crate::tokens::icons::DiscordIcon::Megaphone,
+            Self::Forum => crate::tokens::icons::DiscordIcon::Chat,
+            Self::PublicThread | Self::PrivateThread | Self::AnnouncementThread => {
+                crate::tokens::icons::DiscordIcon::Chat
+            }
+            Self::Directory => crate::tokens::icons::DiscordIcon::Folder,
         }
+    }
+
+    pub fn is_voice_like(&self) -> bool {
+        matches!(self, Self::Voice | Self::StageVoice)
+    }
+
+    pub fn is_thread(&self) -> bool {
+        matches!(
+            self,
+            Self::PublicThread | Self::PrivateThread | Self::AnnouncementThread
+        )
     }
 }
 
 /// Channel representation for sidebar display
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ChannelItemState {
     pub id: String,
     pub name: String,
@@ -169,6 +195,14 @@ pub struct ChannelItemState {
     /// Avatar decoration of the DM recipient (first recipient for group DMs).
     #[serde(default)]
     pub avatar_decoration_data: Option<AvatarDecorationData>,
+    #[serde(default)]
+    pub thread_metadata: Option<crate::domain::channel::ThreadMetadata>,
+    #[serde(default)]
+    pub default_tag_ids: Vec<String>,
+    #[serde(default)]
+    pub available_tags: Vec<crate::domain::channel::ForumTag>,
+    #[serde(default)]
+    pub flags: u32,
 }
 
 /// Category grouping in channel sidebar

@@ -539,7 +539,7 @@ impl AppState {
                     if let Some(guild) = self.guilds.iter().find(|g| g.id == guild_id) {
                         for cat in &guild.categories {
                             if let Some(first_text) =
-                                cat.channels.iter().find(|c| c.kind == ChannelKind::Text)
+                                cat.channels.iter().find(|c| matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Directory))
                             {
                                 self.select_channel(first_text.id.clone());
                                 break;
@@ -695,6 +695,7 @@ impl AppState {
                             recipient_names: c.recipient_names,
                             user_limit: None,
                             avatar_decoration_data,
+                            ..Default::default()
                         }
                     })
                     .collect();
@@ -777,6 +778,7 @@ impl AppState {
                             recipient_names: c.recipient_names,
                             user_limit: None,
                             avatar_decoration_data,
+                            ..Default::default()
                         },
                     );
                 }
@@ -842,6 +844,7 @@ impl AppState {
                             recipient_names: channel.recipient_names.clone(),
                             user_limit: None,
                             avatar_decoration_data,
+                            ..Default::default()
                         },
                     );
                 }
