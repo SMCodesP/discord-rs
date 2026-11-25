@@ -618,6 +618,7 @@ impl AppState {
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,
             collapsed_categories: HashSet::new(),
+            muted_channels: HashSet::new(),
             current_user: CurrentUserProfile {
                 id: "user-me".into(),
                 username: "vanguard_dev".into(),

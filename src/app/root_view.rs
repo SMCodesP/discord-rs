@@ -781,6 +781,7 @@ impl Render for RootView {
                                     search_state,
                                     &self.friends_search_query,
                                     add_friend_state,
+                                    window.viewport_size().width.as_f32(),
                                 )
                                 .into_any_element()
                             } else {
@@ -1796,13 +1797,15 @@ fn render_friends_view(
     search_state: &Entity<InputState>,
     search_query: &str,
     add_friend_state: &Entity<InputState>,
+    viewport_width: f32,
 ) -> Div {
-    super::friends_hub::render_friends_hub(
+    super::friends_hub::render_friends_hub_for_width(
         entity,
         state,
         search_state,
         search_query,
         add_friend_state,
+        viewport_width,
     )
 }
 

@@ -80,12 +80,34 @@ fn friend_status_text(state: &AppState, friend: &FriendItemState) -> String {
 }
 
 /// Main entry point for the Friends Hub ("Amigos") view when on Home.
+/// Keeps the historical signature; the responsive shell calls
+/// [`render_friends_hub_for_width`] with the real viewport width.
 pub fn render_friends_hub(
     entity: Entity<AppState>,
     state: &AppState,
     search_state: &Entity<InputState>,
     search_query: &str,
     add_friend_state: &Entity<InputState>,
+) -> Div {
+    render_friends_hub_for_width(
+        entity,
+        state,
+        search_state,
+        search_query,
+        add_friend_state,
+        f32::INFINITY,
+    )
+}
+
+/// Renders the Friends Hub for a concrete viewport width. Active Now is only
+/// mounted when it has real content and the official breakpoint is satisfied.
+pub fn render_friends_hub_for_width(
+    entity: Entity<AppState>,
+    state: &AppState,
+    search_state: &Entity<InputState>,
+    search_query: &str,
+    add_friend_state: &Entity<InputState>,
+    viewport_width: f32,
 ) -> Div {
     let mut container = div()
         .size_full()
@@ -106,17 +128,27 @@ pub fn render_friends_hub(
         render_friends_list_view(entity.clone(), state, search_state, search_query)
     };
 
-    container.child(
-        div()
-            .flex_1()
-            .w_full()
-            .min_w(px(0.0))
-            .flex()
-            .flex_row()
-            .overflow_hidden()
-            .child(left_column)
-            .child(render_active_now_panel(entity.clone(), state)),
-    )
+    let mut content = div()
+        .flex_1()
+        .w_full()
+        .min_w(px(0.0))
+        .flex()
+        .flex_row()
+        .overflow_hidden()
+        .child(left_column);
+
+    if should_show_active_now(state, viewport_width) {
+        content = content.child(render_active_now_panel(entity.clone(), state));
+    }
+
+    container.child(content)
+}
+
+/// Active Now is hidden when there is no real rich presence and below the
+/// official 1200px breakpoint.
+pub fn should_show_active_now(state: &AppState, viewport_width: f32) -> bool {
+    !state.active_now_items.is_empty()
+        && crate::app::responsive::should_show_active_now(viewport_width)
 }
 
 /// Top navigation header bar (48px): section label + kit tab bar + inbox/help.
@@ -485,17 +517,14 @@ fn render_header_actions(entity: Entity<AppState>, state: &AppState) -> AnyEleme
                 });
             },
         ))
-        // No help surface exists in AppState yet; keep the official affordance
-        // visible without pretending that a click performs an action.
-        .child(
-            div()
-                .w(px(32.0))
-                .h(px(32.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon_help(px(20.0), text_muted())),
-        )
+        .child(render_header_action_button(
+            "friends-help",
+            icon_help(px(20.0), text_muted()).into_any_element(),
+            "Central de Ajuda",
+            move |_ev, _window, cx| {
+                cx.open_url("https://support.discord.com");
+            },
+        ))
         .into_any_element()
 }
 
@@ -1422,7 +1451,7 @@ pub fn render_add_friend_view(
                 .text_color(text_muted())
                 .child("OUTRAS FORMAS DE ADICIONAR AMIGOS"),
         )
-        .child(render_discover_row())
+        .child(render_discover_row(entity))
 }
 
 /// "ADICIONAR AMIGO" title + description (same texts as today).
@@ -1513,8 +1542,13 @@ fn render_send_request_button(
     btn.into_any_element()
 }
 
-/// "Descobrir servidores públicos" row (display-only, as today: no handler).
-fn render_discover_row() -> AnyElement {
+/// Opens the real public server discovery modal.
+pub fn open_server_discovery(state: &mut AppState) {
+    state.open_modal(ActiveModal::ExploreServers);
+}
+
+/// "Descobrir servidores públicos" row opens the real Explore Servers modal.
+fn render_discover_row(entity: Entity<AppState>) -> AnyElement {
     div()
         .w_full()
         .h(px(60.0))
@@ -1524,6 +1558,13 @@ fn render_discover_row() -> AnyElement {
         .border_1()
         .border_color(bg_chat_hover())
         .hover(|s| s.bg(channel_hover()).cursor_pointer())
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_ev, _window, cx| {
+            entity.update(cx, |s, cx| {
+                open_server_discovery(s);
+                cx.notify();
+            });
+        })
         .flex()
         .items_center()
         .justify_between()
