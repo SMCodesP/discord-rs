@@ -211,6 +211,7 @@ fn test_render_message_row_with_role_color() {
             on_more: None,
             on_reaction_click: None,
             on_add_reaction: None,
+            is_selected: false,
         },
     );
     drop(row_colored);
@@ -226,6 +227,7 @@ fn test_render_message_row_with_role_color() {
             on_more: None,
             on_reaction_click: None,
             on_add_reaction: None,
+            is_selected: false,
         },
     );
     drop(row_default);

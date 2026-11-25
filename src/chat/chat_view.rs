@@ -135,6 +135,8 @@ pub struct ChatView {
     pub typing_refresh_task: Option<Task<()>>,
     pub composer_state: Option<Entity<TextareaState>>,
     pub composer_sub: Option<Subscription>,
+    pub selected_message_id: Option<String>,
+    pub show_shortcuts_overlay: bool,
 }
 
 impl ChatView {
@@ -196,6 +198,8 @@ impl ChatView {
             typing_refresh_task: None,
             composer_state: None,
             composer_sub: None,
+            selected_message_id: None,
+            show_shortcuts_overlay: false,
         }
     }
 
@@ -212,6 +216,190 @@ impl ChatView {
 
     pub fn set_typing_users(&mut self, users: Vec<String>) {
         self.typing_users = users;
+    }
+
+    pub fn selected_message<'a>(&self, messages: &'a [Message]) -> Option<&'a Message> {
+        let id = self.selected_message_id.as_deref()?;
+        messages.iter().find(|m| m.id == id)
+    }
+
+    pub fn select_message(&mut self, message_id: Option<String>, cx: &mut Context<Self>) {
+        self.selected_message_id = message_id;
+        cx.notify();
+    }
+
+    pub fn move_message_selection(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let state = self.state.read(cx);
+        let messages = state.get_active_messages();
+        if messages.is_empty() {
+            self.selected_message_id = None;
+            cx.notify();
+            return;
+        }
+        let current_idx = self
+            .selected_message_id
+            .as_deref()
+            .and_then(|id| messages.iter().position(|m| m.id == id));
+        let next_idx = match current_idx {
+            Some(idx) => {
+                let next = idx as i32 + delta;
+                next.clamp(0, messages.len().saturating_sub(1) as i32) as usize
+            }
+            None => {
+                if delta < 0 {
+                    messages.len().saturating_sub(1)
+                } else {
+                    0
+                }
+            }
+        };
+        self.selected_message_id = messages.get(next_idx).map(|m| m.id.clone());
+        if let Some(idx) = self
+            .selected_message_id
+            .as_deref()
+            .and_then(|id| {
+                let items = build_chat_list_items(messages);
+                items.iter().position(|item| match item {
+                    ChatListItem::Message { message_idx, .. } => {
+                        messages.get(*message_idx).map(|m| m.id.as_str()) == Some(id)
+                    }
+                    _ => false,
+                })
+            })
+        {
+            self.list_state.scroll_to_reveal_item(idx);
+        }
+        cx.notify();
+    }
+
+    pub fn edit_selected_message(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let state = self.state.read(cx);
+        let current_user_id = state.current_user.id.clone();
+        let msg = self
+            .selected_message_id
+            .as_deref()
+            .and_then(|id| state.get_active_messages().iter().find(|m| m.id == id))
+            .cloned();
+        if let Some(msg) = msg {
+            if !msg.is_pending && msg.author.id == current_user_id && !msg.content.trim().is_empty() {
+                self.start_editing_message(msg, Some(window), cx);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn delete_selected_message(&mut self, cx: &mut Context<Self>) -> bool {
+        let state = self.state.read(cx);
+        let current_user_id = state.current_user.id.clone();
+        let msg = self
+            .selected_message_id
+            .as_deref()
+            .and_then(|id| state.get_active_messages().iter().find(|m| m.id == id))
+            .cloned();
+        if let Some(msg) = msg {
+            if !msg.is_pending && msg.author.id == current_user_id {
+                self.pending_delete_message = Some(msg);
+                self.is_deleting = false;
+                self.delete_error = None;
+                self.active_context_menu = None;
+                cx.notify();
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn toggle_shortcuts_overlay(&mut self, cx: &mut Context<Self>) {
+        self.show_shortcuts_overlay = !self.show_shortcuts_overlay;
+        cx.notify();
+    }
+
+    fn render_shortcuts_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.show_shortcuts_overlay {
+            return None;
+        }
+        let self_close = cx.entity().clone();
+        let key_pill = |label: &str| {
+            div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .bg(bg_server())
+                .border_1()
+                .border_color(borders())
+                .text_color(text_primary())
+                .font_weight(FontWeight::BOLD)
+                .text_size(font_size_xs())
+                .child(label.to_string())
+        };
+        let row = |action: &str, keys: Vec<AnyElement>| {
+            div()
+                .h(px(40.0))
+                .px(px(12.0))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .border_b_1()
+                .border_color(borders())
+                .child(
+                    div()
+                        .text_color(text_titles())
+                        .text_size(font_size_sm())
+                        .child(action.to_string()),
+                )
+                .child(div().flex().flex_row().items_center().gap(px(4.0)).children(keys))
+        };
+
+        Some(
+            div()
+                .id("keyboard-shortcuts-overlay")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000088))
+                .on_mouse_down(MouseButton::Left, move |_ev, _win, cx| {
+                    self_close.update(cx, |this, cx| {
+                        this.show_shortcuts_overlay = false;
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .w(px(560.0))
+                        .max_w(px(560.0))
+                        .rounded(radius_md())
+                        .bg(bg_floating())
+                        .border_1()
+                        .border_color(borders())
+                        .shadow_xl()
+                        .overflow_hidden()
+                        .on_mouse_down(MouseButton::Left, |_ev, _win, cx| {
+                            cx.stop_propagation();
+                        })
+                        .child(
+                            div()
+                                .px(px(16.0))
+                                .py(px(14.0))
+                                .border_b_1()
+                                .border_color(borders())
+                                .text_color(text_titles())
+                                .font_weight(FontWeight::BOLD)
+                                .text_size(font_size_lg())
+                                .child("Atalhos de Teclado"),
+                        )
+                        .child(row("Buscar", vec![key_pill("CTRL").into_any_element(), key_pill("F").into_any_element()]))
+                        .child(row("Lista de Atalhos", vec![key_pill("CTRL").into_any_element(), key_pill("/").into_any_element()]))
+                        .child(row("Editar Mensagem Selecionada", vec![key_pill("E").into_any_element()]))
+                        .child(row("Excluir Mensagem Selecionada", vec![key_pill("BACKSPACE").into_any_element()]))
+                        .child(row("Navegar Mensagens", vec![key_pill("↑").into_any_element(), key_pill("↓").into_any_element()]))
+                        .child(row("Fechar / Cancelar", vec![key_pill("ESC").into_any_element()])),
+                )
+                .into_any_element(),
+        )
     }
 
     pub fn start_editing_message(
@@ -800,6 +988,8 @@ impl Render for ChatView {
                 self.is_saving_edit = false;
                 self.edit_request_sequence = self.edit_request_sequence.wrapping_add(1);
                 self.typed_text.clear();
+                self.selected_message_id = None;
+                self.show_shortcuts_overlay = false;
             }
             self.list_state.set_follow_mode(FollowMode::Tail);
         }
@@ -1025,6 +1215,7 @@ impl Render for ChatView {
         let on_rx_click_item = on_reaction_click.clone();
         let on_add_rx_item = on_add_reaction.clone();
 
+        let selected_id = self.selected_message_id.clone();
         let virtual_list = list(self.list_state.clone(), move |ix, _window, cx| {
             if ix >= items_arc.len() {
                 return div().into_any_element();
@@ -1062,6 +1253,7 @@ impl Render for ChatView {
                         let mut display_message = msg.clone();
                         let attachments = std::mem::take(&mut display_message.attachments);
                         let embeds = std::mem::take(&mut display_message.embeds);
+                        let is_selected = selected_id.as_deref() == Some(&msg.id);
                         let row = render_message_row(
                             &display_message,
                             MessageRowConfig {
@@ -1072,6 +1264,7 @@ impl Render for ChatView {
                                 on_more: on_more_item.clone(),
                                 on_reaction_click: on_rx_click_item.clone(),
                                 on_add_reaction: on_add_rx_item.clone(),
+                                is_selected,
                             },
                         );
                         if attachments.is_empty() && embeds.is_empty() {
@@ -2417,6 +2610,8 @@ impl Render for ChatView {
             channel_name.clone()
         };
 
+        let shortcuts_overlay = self.render_shortcuts_overlay(cx);
+
         let main_chat_col = div()
             .relative()
             .flex_1()
@@ -2469,7 +2664,8 @@ impl Render for ChatView {
                     .on_jump_to_reply(on_jump_to_reply)
                     .on_send(on_send),
             )
-            .children(media_picker_overlay);
+            .children(media_picker_overlay)
+            .children(shortcuts_overlay);
 
         let app_entity_shortcut = app_entity.clone();
         let self_keys = self_entity.clone();
@@ -2486,7 +2682,11 @@ impl Render for ChatView {
             .on_key_down(move |ev: &KeyDownEvent, window, cx| {
                 let key = ev.keystroke.key.as_str();
                 let is_ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
-                if is_ctrl && ev.keystroke.key.to_lowercase() == "f" {
+                let key_lower = ev.keystroke.key.to_lowercase();
+                let has_shift = ev.keystroke.modifiers.shift;
+                let has_alt = ev.keystroke.modifiers.alt;
+
+                if is_ctrl && !has_shift && !has_alt && key_lower == "f" {
                     app_entity_shortcut.update(cx, |state, cx| {
                         state.toggle_search();
                         cx.notify();
@@ -2494,9 +2694,19 @@ impl Render for ChatView {
                     return;
                 }
 
+                if is_ctrl && !has_shift && !has_alt && (key_lower == "/" || key_lower == "?") {
+                    self_keys.update(cx, |this, cx| {
+                        this.toggle_shortcuts_overlay(cx);
+                    });
+                    return;
+                }
+
                 if key == "escape" || key == "Escape" {
                     self_keys.update(cx, |this, cx| {
-                        if this.media_picker_open {
+                        if this.show_shortcuts_overlay {
+                            this.show_shortcuts_overlay = false;
+                            cx.notify();
+                        } else if this.media_picker_open {
                             this.media_picker_open = false;
                             this.media_picker_react_message_id = None;
                             cx.notify();
@@ -2514,14 +2724,27 @@ impl Render for ChatView {
                         } else if this.active_context_menu.is_some() {
                             this.active_context_menu = None;
                             cx.notify();
+                        } else if this.selected_message_id.is_some() {
+                            this.selected_message_id = None;
+                            cx.notify();
                         }
                     });
                     return;
                 }
 
-                if key == "up" || key == "arrowup" || key == "ArrowUp" {
+                let composer_empty = self_keys.read(cx).typed_text.trim().is_empty();
+                let is_editing = self_keys.read(cx).editing_message.is_some();
+                let has_modal = self_keys.read(cx).show_shortcuts_overlay
+                    || self_keys.read(cx).media_picker_open
+                    || self_keys.read(cx).pending_pin_action.is_some()
+                    || self_keys.read(cx).pending_delete_message.is_some()
+                    || self_keys.read(cx).active_context_menu.is_some();
+
+                if !is_editing && !has_modal && composer_empty && (key == "up" || key == "arrowup" || key == "ArrowUp") {
                     self_keys.update(cx, |this, cx| {
-                        if this.editing_message.is_none() && this.typed_text.trim().is_empty() {
+                        if this.selected_message_id.is_some() {
+                            this.move_message_selection(-1, cx);
+                        } else {
                             let state = app_keys.read(cx);
                             let msgs = state.get_active_messages();
                             if let Some(last_own) = msgs
@@ -2539,6 +2762,30 @@ impl Render for ChatView {
                         }
                     });
                     return;
+                }
+
+                if !is_editing && !has_modal && composer_empty && (key == "down" || key == "arrowdown" || key == "ArrowDown") {
+                    if self_keys.read(cx).selected_message_id.is_some() {
+                        self_keys.update(cx, |this, cx| {
+                            this.move_message_selection(1, cx);
+                        });
+                        return;
+                    }
+                }
+
+                if !is_editing && !has_modal && !is_ctrl && !has_alt {
+                    if key_lower == "e" && composer_empty {
+                        let handled = self_keys.update(cx, |this, cx| this.edit_selected_message(window, cx));
+                        if handled {
+                            return;
+                        }
+                    }
+                    if (key_lower == "backspace" || key_lower == "delete") && composer_empty {
+                        let handled = self_keys.update(cx, |this, cx| this.delete_selected_message(cx));
+                        if handled {
+                            return;
+                        }
+                    }
                 }
             })
             .child(main_chat_col)
