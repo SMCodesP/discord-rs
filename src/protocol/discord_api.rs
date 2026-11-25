@@ -1570,6 +1570,67 @@ impl DiscordTransport for DiscordApiClient {
         Ok(messages)
     }
 
+    async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(e) => {
+                    log::warn!("Falha ao resolver DM para around: {}", e);
+                    channel_id.to_string()
+                }
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let path = format!(
+            "/channels/{}/messages?limit={}&around={}",
+            resolved_id,
+            limit.min(100),
+            message_id
+        );
+        let req = self.auth_request(reqwest::Method::GET, &path);
+        let resp = self.send_request(&path, req).await?;
+        let raw_messages: Vec<serde_json::Value> = resp.json().await?;
+
+        let mut messages = Vec::new();
+        for val in raw_messages.into_iter().rev() {
+            if let Some(author_id) = val
+                .get("author")
+                .and_then(|a| a.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                let guild_id = val.get("guild_id").and_then(|v| v.as_str());
+                if let (Some(gid), Some(member_obj)) = (guild_id, val.get("member")) {
+                    if let Some(roles_arr) = member_obj.get("roles").and_then(|v| v.as_array()) {
+                        let role_ids: Vec<String> = roles_arr
+                            .iter()
+                            .filter_map(|r| r.as_str().map(ToString::to_string))
+                            .collect();
+                        crate::protocol::cache::lazy_guilds::cache_author_roles(
+                            gid, author_id, role_ids,
+                        );
+                    }
+                }
+            }
+            if let Some(msg) = parse_message_from_json(&val) {
+                messages.push(msg);
+            }
+        }
+
+        self.cache_engine
+            .save_channel_messages(&resolved_id, &messages)
+            .await;
+
+        Ok(messages)
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> Result<Message> {
         let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
             let recipient_id = channel_id.trim_start_matches("dm-");

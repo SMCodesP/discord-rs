@@ -135,6 +135,9 @@ pub struct ChatView {
     pub typing_refresh_task: Option<Task<()>>,
     pub composer_state: Option<Entity<TextareaState>>,
     pub composer_sub: Option<Subscription>,
+    pub pending_jump_request: Option<(String, String, u64)>,
+    pub jump_request_seq: u64,
+    pub highlight_clear_task: Option<Task<()>>,
 }
 
 impl ChatView {
@@ -196,6 +199,9 @@ impl ChatView {
             typing_refresh_task: None,
             composer_state: None,
             composer_sub: None,
+            pending_jump_request: None,
+            jump_request_seq: 0,
+            highlight_clear_task: None,
         }
     }
 
@@ -600,6 +606,178 @@ impl ChatView {
                 }
             });
         self.scroll_handler_installed = true;
+    }
+
+    fn schedule_highlight_clear(&mut self, message_id: String, cx: &mut Context<Self>) {
+        let this_entity = cx.entity().clone();
+        self.highlight_clear_task = Some(cx.spawn(move |_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let _ = cx.update(|cx| {
+                    let _ = this_entity.update(cx, |chat, cx| {
+                        let is_same = chat
+                            .state
+                            .read(cx)
+                            .highlighted_message_id
+                            .as_deref()
+                            == Some(message_id.as_str());
+                        if is_same {
+                            chat.state.update(cx, |state, _cx| {
+                                state.clear_message_highlight();
+                            });
+                            cx.notify();
+                        }
+                    });
+                });
+            }
+        }));
+    }
+
+    fn resolve_target_jump(&mut self, cx: &mut Context<Self>) {
+        let (target_id, jump_channel_id, selected_channel_id, client_manager) = {
+            let state = self.state.read(cx);
+            (
+                state.target_message_id.clone(),
+                state.jump_target_channel_id.clone(),
+                state.selected_channel_id.clone(),
+                state.client_manager.clone(),
+            )
+        };
+        let Some(target_id) = target_id else {
+            return;
+        };
+        let Some(channel_id) = jump_channel_id.or(selected_channel_id) else {
+            self.state.update(cx, |state, _cx| {
+                state.target_message_id = None;
+                state.jump_target_channel_id = None;
+                state.set_jump_error(Some(
+                    "Mensagem não encontrada: nenhum canal selecionado.".to_string(),
+                ));
+            });
+            return;
+        };
+
+        let (channel_loaded, message_exists) = {
+            let state = self.state.read(cx);
+            let loaded = state.selected_channel_id.as_deref() == Some(channel_id.as_str());
+            let exists = loaded
+                && state
+                    .get_active_messages()
+                    .iter()
+                    .any(|m| m.id == target_id);
+            (loaded, exists)
+        };
+        if !channel_loaded {
+            return;
+        }
+        if message_exists {
+            self.state.update(cx, |state, _cx| {
+                state.target_message_id = None;
+                state.jump_target_channel_id = None;
+                state.set_jump_error(None);
+                state.highlighted_message_id = Some(target_id.clone());
+            });
+            self.schedule_highlight_clear(target_id, cx);
+            cx.notify();
+            return;
+        }
+
+        if self
+            .pending_jump_request
+            .as_ref()
+            .is_some_and(|(cid, mid, _)| cid == &channel_id && mid == &target_id)
+        {
+            return;
+        }
+
+        let Some(cm) = client_manager else {
+            self.state.update(cx, |state, _cx| {
+                state.target_message_id = None;
+                state.jump_target_channel_id = None;
+                state.set_jump_error(Some(
+                    "Não conectado à API do Discord para carregar a mensagem.".to_string(),
+                ));
+            });
+            return;
+        };
+
+        self.jump_request_seq = self.jump_request_seq.wrapping_add(1);
+        let seq = self.jump_request_seq;
+        self.pending_jump_request = Some((channel_id.clone(), target_id.clone(), seq));
+        self.state.update(cx, |state, _cx| {
+            state.set_jump_error(None);
+        });
+
+        let this_entity = cx.entity().clone();
+        cx.spawn(move |_view, cx: &mut AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let result = cm.get_messages_around(&channel_id, &target_id, 50).await;
+                let _ = cx.update(|cx| {
+                    let _ = this_entity.update(cx, |chat, cx| {
+                        let is_current = chat
+                            .pending_jump_request
+                            .as_ref()
+                            .is_some_and(|(cid, mid, s)| {
+                                *s == seq && cid == &channel_id && mid == &target_id
+                            });
+                        if !is_current {
+                            return;
+                        }
+                        chat.pending_jump_request = None;
+                        match result {
+                            Ok(messages) => {
+                                let found = messages.iter().any(|m| m.id == target_id);
+                                chat.state.update(cx, |state, _cx| {
+                                    state.set_channel_messages(&channel_id, messages);
+                                    if found {
+                                        state.target_message_id = Some(target_id.clone());
+                                        state.set_jump_error(None);
+                                    } else {
+                                        state.target_message_id = None;
+                                        state.jump_target_channel_id = None;
+                                        state.highlighted_message_id = None;
+                                        state.set_jump_error(Some(
+                                            "Mensagem não encontrada ou sem permissão para acessá-la."
+                                                .to_string(),
+                                        ));
+                                    }
+                                });
+                                if found {
+                                    // Next render will scroll/highlight once item exists.
+                                }
+                                cx.notify();
+                            }
+                            Err(err) => {
+                                let msg = err.to_string();
+                                let is_not_found = msg.contains("404")
+                                    || msg.to_lowercase().contains("not found")
+                                    || msg.to_lowercase().contains("unknown message");
+                                let is_forbidden = msg.contains("403")
+                                    || msg.to_lowercase().contains("forbidden")
+                                    || msg.to_lowercase().contains("missing access")
+                                    || msg.to_lowercase().contains("sem permissão");
+                                let user_msg = if is_not_found || is_forbidden {
+                                    "Mensagem não encontrada ou sem permissão para acessá-la."
+                                        .to_string()
+                                } else {
+                                    format!("Falha ao carregar mensagem: {}", msg)
+                                };
+                                chat.state.update(cx, |state, _cx| {
+                                    state.target_message_id = None;
+                                    state.jump_target_channel_id = None;
+                                    state.highlighted_message_id = None;
+                                    state.set_jump_error(Some(user_msg));
+                                });
+                                cx.notify();
+                            }
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
     }
 
     pub fn ensure_composer_state(
@@ -1062,11 +1240,13 @@ impl Render for ChatView {
                         let mut display_message = msg.clone();
                         let attachments = std::mem::take(&mut display_message.attachments);
                         let embeds = std::mem::take(&mut display_message.embeds);
+                        let is_highlighted = state.highlighted_message_id.as_deref() == Some(&msg.id);
                         let row = render_message_row(
                             &display_message,
                             MessageRowConfig {
                                 is_grouped,
                                 role_color: author_role_color,
+                                is_highlighted,
                                 on_react: on_react_item.clone(),
                                 on_reply: on_reply_item.clone(),
                                 on_more: on_more_item.clone(),
@@ -1106,7 +1286,8 @@ impl Render for ChatView {
         })
         .size_full();
 
-        // Handle target message scroll/focus from Search results or reply jump.
+        // Resolve target message jump (fetch around if needed), then scroll/highlight.
+        self.resolve_target_jump(cx);
         let target_message_id = self.state.read(cx).target_message_id.clone();
         if let Some(ref target_id) = target_message_id {
             let target_idx = {
@@ -1124,7 +1305,11 @@ impl Render for ChatView {
                 self.list_state.scroll_to_reveal_item(target_idx);
                 self.state.update(cx, |state, _cx| {
                     state.target_message_id = None;
+                    state.jump_target_channel_id = None;
+                    state.highlighted_message_id = Some(target_id.clone());
+                    state.set_jump_error(None);
                 });
+                self.schedule_highlight_clear(target_id.clone(), cx);
             }
         }
 
@@ -2445,6 +2630,21 @@ impl Render for ChatView {
             .children(pin_error_toast)
             .children(send_error_toast)
             .children(history_error_toast)
+            .children({
+                let err = self.state.read(cx).jump_error.clone();
+                err.and_then(|message| {
+                    let on_dismiss: Option<EditorActionCallback> = Some(Arc::new({
+                        let entity = self_entity.clone();
+                        move |_window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |this, cx| {
+                                this.state.update(cx, |state, _cx| state.set_jump_error(None));
+                                cx.notify();
+                            });
+                        }
+                    }));
+                    render_chat_error_toast(message, None, None, on_dismiss)
+                })
+            })
             // 2. Chat Input Editor Bar
             .child(
                 ChatComposer::new("chat-composer", &composer_state)

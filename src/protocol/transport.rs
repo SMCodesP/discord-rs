@@ -318,6 +318,17 @@ pub trait DiscordTransport: Send + Sync {
     /// Retrieve the most recent messages for a channel.
     async fn get_messages(&self, channel_id: &str, limit: usize) -> anyhow::Result<Vec<Message>>;
 
+    /// Retrieve messages around a target message ID.
+    async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let _ = (channel_id, message_id, limit);
+        anyhow::bail!("get_messages_around not supported on this transport");
+    }
+
     /// Post a new chat message to a text channel.
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message>;
 

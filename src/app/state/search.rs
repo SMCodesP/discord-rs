@@ -295,6 +295,9 @@ impl AppState {
 
     /// Jumps to and highlights a specific message in the chat
     pub fn jump_to_message(&mut self, channel_id: &str, message_id: &str) {
+        self.jump_error = None;
+        self.highlighted_message_id = None;
+        self.jump_target_channel_id = Some(channel_id.to_string());
         if let Some((guild, _)) = self.find_channel(channel_id) {
             let gid = guild.id.clone();
             if self.selected_guild_id.as_deref() != Some(&gid) {
@@ -305,6 +308,16 @@ impl AppState {
             self.select_channel(channel_id.to_string());
         }
         self.target_message_id = Some(message_id.to_string());
+    }
+
+    /// Clears the transient jump highlight.
+    pub fn clear_message_highlight(&mut self) {
+        self.highlighted_message_id = None;
+    }
+
+    /// Records an honest jump error surfaced to the UI.
+    pub fn set_jump_error(&mut self, error: Option<String>) {
+        self.jump_error = error;
     }
 }
 

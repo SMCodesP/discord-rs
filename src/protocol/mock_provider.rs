@@ -732,6 +732,38 @@ impl DiscordTransport for MockDiscordProvider {
         }
     }
 
+    async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let state = self.state.read().await;
+        let msgs = state.messages.get(channel_id).cloned().or_else(|| {
+            if channel_id == "chan-dm-ferris" {
+                state.messages.get("dm-ferris").cloned()
+            } else if channel_id == "dm-ferris" {
+                state.messages.get("chan-dm-ferris").cloned()
+            } else if channel_id == "chan-dm-ana" {
+                state.messages.get("dm-ana").cloned()
+            } else if channel_id == "dm-ana" {
+                state.messages.get("chan-dm-ana").cloned()
+            } else {
+                None
+            }
+        });
+        let Some(list) = msgs else {
+            return Ok(Vec::new());
+        };
+        let Some(idx) = list.iter().position(|m| m.id == message_id) else {
+            anyhow::bail!("message not found");
+        };
+        let half = limit.saturating_sub(1) / 2;
+        let start = idx.saturating_sub(half);
+        let end = (idx + half + 1).min(list.len());
+        Ok(list[start..end].to_vec())
+    }
+
     async fn send_message(&self, channel_id: &str, content: &str) -> anyhow::Result<Message> {
         let mut state = self.state.write().await;
         let id = format!("msg-{}", state.next_message_id);

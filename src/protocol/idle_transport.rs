@@ -90,6 +90,15 @@ impl DiscordTransport for IdleTransport {
         Ok(Vec::new())
     }
 
+    async fn get_messages_around(
+        &self,
+        _channel_id: &str,
+        _message_id: &str,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        Ok(Vec::new())
+    }
+
     async fn send_message(&self, _channel_id: &str, _content: &str) -> anyhow::Result<Message> {
         anyhow::bail!("Não conectado ao Discord")
     }
