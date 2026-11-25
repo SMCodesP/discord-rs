@@ -820,6 +820,7 @@ impl Render for RootView {
                     .overflow_hidden()
                     // Top Header Bar (48px) - shown for chat / voice channels; Friends Hub renders its own unified header bar
                     .children((!(state.selected_guild_id.is_none() && state.selected_channel_id.is_none())).then(|| self.header_bar.clone()))
+                    .children(render_reconnect_banner(state))
                     // Center Content (Voice Panel if in voice channel or active call, Friends View if in Home with no channel selected, else Chat area)
                     .child(
                         div()
@@ -2055,6 +2056,61 @@ fn render_friends_view(
         add_friend_state,
         viewport_width,
     )
+}
+
+fn render_reconnect_banner(state: &AppState) -> Option<AnyElement> {
+    if state.is_gateway_reconnecting {
+        let attempt = state.reconnect_attempt.unwrap_or(1);
+        let detail = state
+            .reconnect_delay_ms
+            .map(|ms| format!("Reconectando... tentativa {attempt} em {ms}ms"))
+            .unwrap_or_else(|| format!("Reconectando... tentativa {attempt}"));
+        return Some(
+            div()
+                .id("gateway-reconnect-banner")
+                .w_full()
+                .h(px(36.0))
+                .min_h(px(36.0))
+                .px(px(28.0))
+                .pl(px(32.0))
+                .flex()
+                .items_center()
+                .bg(status_ausente())
+                .text_color(crate::tokens::colors::white())
+                .text_size(px(14.0))
+                .font_weight(FontWeight(500.0))
+                .child(detail)
+                .into_any_element(),
+        );
+    }
+
+    let reason = state.reconnect_reason.as_deref().or(state.auth_error.as_deref());
+    if let Some(reason) = reason {
+        let msg = if reason.to_lowercase().contains("autent") {
+            "Conexão perdida. Faça login novamente.".to_string()
+        } else {
+            format!("Sem conexão com o Gateway: {reason}")
+        };
+        return Some(
+            div()
+                .id("gateway-offline-banner")
+                .w_full()
+                .h(px(36.0))
+                .min_h(px(36.0))
+                .px(px(28.0))
+                .pl(px(32.0))
+                .flex()
+                .items_center()
+                .bg(status_dnd())
+                .text_color(crate::tokens::colors::white())
+                .text_size(px(14.0))
+                .font_weight(FontWeight(500.0))
+                .child(msg)
+                .into_any_element(),
+        );
+    }
+
+    None
 }
 
 

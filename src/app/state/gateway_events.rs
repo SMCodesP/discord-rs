@@ -105,6 +105,10 @@ impl AppState {
                 self.current_user.avatar_url = avatar_url;
                 self.current_user.avatar_decoration_data = user.avatar_decoration_data;
                 self.is_connected_to_gateway = true;
+                self.is_gateway_reconnecting = false;
+                self.reconnect_attempt = None;
+                self.reconnect_delay_ms = None;
+                self.reconnect_reason = None;
                 self.is_connecting = false;
                 self.connection_mode = ConnectionMode::LiveDiscord(username);
                 self.connection_status = format!("Conectado como @{}", self.current_user.username);
@@ -440,17 +444,68 @@ impl AppState {
             }
             TransportEvent::Connected => {
                 self.is_connected_to_gateway = true;
+                self.is_gateway_reconnecting = false;
+                self.reconnect_attempt = None;
+                self.reconnect_delay_ms = None;
+                self.reconnect_reason = None;
                 self.is_connecting = false;
                 self.connection_status = "Conectado".to_string();
                 self.auth_error = None;
                 self.close_modal();
             }
-            TransportEvent::Disconnected(reason) => {
-                self.is_connected_to_gateway = false;
+            TransportEvent::Reconnecting { attempt, delay_ms, reason } => {
+                let was_authenticated = self.auth_token.is_some() || !self.current_user.id.is_empty();
                 self.is_connecting = false;
-                self.auth_error = Some(reason.clone());
-                self.connection_mode = ConnectionMode::Disconnected(reason.clone());
-                self.connection_status = format!("Desconectado: {}", reason);
+                self.reconnect_attempt = Some(attempt);
+                self.reconnect_delay_ms = Some(delay_ms);
+                self.reconnect_reason = Some(reason.clone());
+                if was_authenticated {
+                    self.is_connected_to_gateway = true;
+                    self.is_gateway_reconnecting = true;
+                    self.connection_mode = ConnectionMode::Reconnecting { attempt, delay_ms, reason: reason.clone() };
+                    self.connection_status = format!("Reconectando (tentativa {})...", attempt);
+                } else {
+                    self.is_connected_to_gateway = false;
+                    self.is_gateway_reconnecting = false;
+                    self.connection_mode = ConnectionMode::Connecting;
+                    self.connection_status = format!("Conectando (tentativa {})...", attempt);
+                }
+            }
+            TransportEvent::Disconnected(reason) => {
+                let was_authenticated = self.auth_token.is_some() || !self.current_user.id.is_empty();
+                let is_auth_fatal = reason.contains("token inválido")
+                    || reason.contains("Faça login novamente")
+                    || reason.contains("4004")
+                    || reason.contains("4010")
+                    || reason.contains("4011")
+                    || reason.contains("4012")
+                    || reason.contains("4013")
+                    || reason.contains("4014");
+                let is_explicit = reason == "Disconnected by client"
+                    || reason == "Desconectado"
+                    || reason == "Mock provider disconnected"
+                    || reason == "ProtocolBridge disconnected";
+                self.is_connecting = false;
+                self.is_gateway_reconnecting = false;
+                self.reconnect_attempt = None;
+                self.reconnect_delay_ms = None;
+                self.reconnect_reason = if was_authenticated && !is_auth_fatal && !is_explicit {
+                    Some(reason.clone())
+                } else {
+                    None
+                };
+                if was_authenticated && !is_auth_fatal && !is_explicit {
+                    // Preserve authenticated shell/cache; show offline banner.
+                    self.is_connected_to_gateway = true;
+                    self.auth_error = Some(reason.clone());
+                    self.connection_mode = ConnectionMode::Disconnected(reason.clone());
+                    self.connection_status = format!("Desconectado: {}", reason);
+                } else {
+                    self.is_connected_to_gateway = false;
+                    self.auth_error = Some(reason.clone());
+                    self.connection_mode = ConnectionMode::Disconnected(reason.clone());
+                    self.connection_status = format!("Desconectado: {}", reason);
+                }
             }
             TransportEvent::VoiceStateUpdate(state) => {
                 self.update_voice_state(state);

@@ -77,6 +77,10 @@ pub struct AppState {
 
     // Real-Time Discord Gateway & Chat State
     pub is_connected_to_gateway: bool,
+    pub is_gateway_reconnecting: bool,
+    pub reconnect_attempt: Option<u32>,
+    pub reconnect_delay_ms: Option<u64>,
+    pub reconnect_reason: Option<String>,
     pub auth_token: Option<String>,
     pub connection_status: String,
     pub connection_mode: ConnectionMode,
@@ -253,6 +257,10 @@ impl AppState {
             typing_tracker: HashMap::new(),
             event_batcher: crate::protocol::EventBatcher::new(),
             is_connected_to_gateway: false,
+            is_gateway_reconnecting: false,
+            reconnect_attempt: None,
+            reconnect_delay_ms: None,
+            reconnect_reason: None,
             auth_token: if has_token { Some(stored_token.clone()) } else { None },
             connection_status,
             connection_mode,
