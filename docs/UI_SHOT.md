@@ -17,23 +17,27 @@ scripts/ui-shot.sh <tela> <saida.png> [LARGURAxALTURA]
 ```
 
 - `<tela>`: Identificador da tela ou sub-estado (corresponde a uma fixture em `tests/fixtures/ui_shot/<tela>.json`).
-- `<saida.png>`: Caminho de saída da imagem. Se for informado apenas um nome de arquivo (sem `/`), o script salva automaticamente fora do repositório em `~/.cache/discord-rs-parity/app/<saida.png>`.
-- `[LARGURAxALTURA]`: Dimensão da janela e do PNG capturado. O padrão obrigatório é `1280x800`.
+- `<saida.png>`: Caminho de saída da imagem. Nome sem `/` vai para `~/.cache/discord-rs-parity/app/`. A saída **nunca** pode ficar dentro do repositório.
+- `[LARGURAxALTURA]`: Dimensão da janela e do PNG capturado. Padrão: `1280x800`.
 
-#### Variáveis de Ambiente Suportadas
+#### Variáveis de Ambiente
 
-- `UI_SHOT_CARGO_LOCK`: Caminho do lock flock para cargo (padrão `/tmp/discord-rs-cargo-B.lock` na worktree correspondente).
-- `UI_SHOT_DISPLAY`: Reutiliza display existente (ex: `:0`) em vez de iniciar um Xvfb privado. **Aviso**: compositores com auto-tiling podem redimensionar a janela e reprovar a validação estrita de tamanho.
-- `UI_SHOT_XVFB_DISPLAY`: Display preferencial do Xvfb (padrão `:99` ou randômico se ocupado).
+- `UI_SHOT_CARGO_LOCK`: lock flock para cargo (padrão `/tmp/discord-rs-cargo-B.lock`).
+- `UI_SHOT_DISPLAY`: reutiliza display existente (ex: `:0`) em vez de Xvfb privado; tiling pode reprovar a checagem de tamanho exato.
+- `UI_SHOT_XVFB_DISPLAY`: display preferencial do Xvfb (padrão `:99`).
+- `UI_SHOT_CAPTURE_TIMEOUT_SECS`: timeout por tentativa de captura (padrão `15`).
+- `UI_SHOT_READY_TIMEOUT_SECS`: espera máxima por primeiro frame não preto (padrão `20`).
 
 #### Como Funciona
 
-1. Compila o binário de captura `examples/ui_shot` (armazenado em `target/debug/examples/ui_shot` da worktree, com suporte a `target` como link simbólico).
-2. Sobe um servidor `Xvfb` privado com dimensões expandidas (+120px) para acomodar a janela sem recorte.
-3. Inicia o app isolado (`XDG_CONFIG_HOME` efêmero, sem variáveis de token) com título de janela exclusivo.
-4. Localiza a janela via `xdotool`, ajusta o tamanho exato e aguarda o primeiro frame desenhado (verificado via desvio padrão de cores `identify -format "%[fx:standard_deviation]"` > 0.02).
-5. Captura a janela com ImageMagick `import -window <id>` e valida que a resolução é rigorosamente a solicitada e que a imagem não está em branco.
-6. Encerra o processo do app e o Xvfb (sem processos órfãos).
+1. Compila `examples/ui_shot` com lock de cargo.
+2. Sobe `Xvfb` privado (ou usa `UI_SHOT_DISPLAY`) com tela maior que a janela.
+3. Inicia o app isolado (`XDG_CONFIG_HOME` efêmero, sem `DISCORD_TOKEN*`, sem `WAYLAND_DISPLAY`) com título único.
+4. Aguarda janela via `xdotool`, força tamanho exato e espera primeiro frame renderizado.
+5. Captura com `import -window <id>` e timeout; em falha usa fallback `xwd -silent -id ... | magick xwd:- ...` com timeout/log de causa.
+6. Valida PNG final: dimensões exatas, arquivo não vazio, `stddev > 0.02` (rejeita imagem preta/vazia/uniforme). Falha explicitamente em timeout/captura preta.
+7. Gera sidecar `<saida>.meta.json` (schema `ui-shot-meta-v1`) com viewport, DPR, título, rota/fixture, tamanho real, stddev, sha256, backend e causa; sem IDs/nomes/conteúdo real.
+8. Encerra app e Xvfb no `EXIT`.
 
 ---
 
@@ -43,22 +47,30 @@ scripts/ui-shot.sh <tela> <saida.png> [LARGURAxALTURA]
 scripts/ui-compare.sh <discord.png> <app.png> <saida.png>
 ```
 
-- `<discord.png>`: Imagem de referência oficial do Discord (geralmente em `~/.cache/discord-rs-parity/discord/`).
-- `<app.png>`: Imagem capturada pelo cliente nativo (gerada pelo `ui-shot.sh`).
-- `<saida.png>`: Caminho de saída da imagem de comparação. O script exige que a saída seja **sempre fora do repositório** (rejeita qualquer caminho interno).
+- `<discord.png>`: referência (ex.: captura oficial).
+- `<app.png>`: captura do app.
+- `<saida.png>`: montagem de comparação; nome sem `/` vai para `~/.cache/discord-rs-parity/app/`. Saída **sempre fora do repositório**.
 
 #### Saída e Métricas
 
-1. Exige que ambas as imagens tenham as mesmas dimensões (ex.: 1280x800).
-2. Executa `compare -metric AE` do ImageMagick para calcular a diferença absoluta de pixels (`AE`) e a porcentagem de pixels divergentes.
-3. Monta horizontalmente uma imagem com as 3 etapas lado a lado:
-   `[Referência Discord] | [Captura discord-rs] | [Diferença (diff)]`
-4. Imprime no terminal a métrica calculada:
+1. Exige dimensões idênticas; falha se qualquer imagem for preta/vazia (`stddev <= 0.02`).
+2. Executa `compare -metric AE` para contar pixels diferentes.
+3. Gera montagem horizontal `[referência] [app] [diff]` e compatibilidade `<prefixo>-lado-a-lado.png` / `<prefixo>-diff.png`.
+4. Gera `<saida>.meta.json` (schema `ui-compare-meta-v1`) com size, AE, percent, sha256/stddev das entradas e artefatos; sem dados pessoais.
+5. Imprime métricas:
    ```
    ui-compare: discord=<discord.png> app=<app.png> size=1280x800
    ui-compare: AE=<pixels> pixels diferentes de 1024000 (<porcentagem>%)
    ui-compare: montagem: <saida.png>
    ```
+
+### `scripts/ui-shot-selftest.sh`
+
+```sh
+scripts/ui-shot-selftest.sh
+```
+
+Teste sintético (sem Chrome/browser): gera par comparável da mesma fixture com checksum/dimensões iguais, valida falha explícita em imagem preta e em timeout de captura, e verifica que metadados não contêm chaves de dados pessoais.
 
 ---
 
@@ -124,3 +136,4 @@ Para garantir testes reproduzíveis e prevenir vazamento de dados ou chamadas de
 - `AppState` é montado via `RootView::with_state` sem instanciar `ClientManager`, sem conexões WebSocket ou spawn assíncrono de auto-login.
 - O tema oficial do kit é instalado na mesma ordem que a aplicação de produção: `gpui::init(cx)` seguido de `discord_rs::tokens::kit_theme::install(cx)`.
 - Timestamps das mensagens são ancorados num horário fixo base (`2026-01-05T12:00:00Z`).
+- Capturas e metadados são gravados fora do repositório; metadados registram apenas viewport/DPR/título/rota/fixture e checksums, sem IDs, nomes, avatares ou conteúdo real.
