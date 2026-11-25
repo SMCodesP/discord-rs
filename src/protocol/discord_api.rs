@@ -1664,6 +1664,32 @@ impl DiscordTransport for DiscordApiClient {
         Ok(())
     }
 
+    async fn ack_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        token: Option<&str>,
+    ) -> Result<()> {
+        let resolved_id = if channel_id.starts_with("dm-") && !channel_id.starts_with("dm-group-") {
+            let recipient_id = channel_id.trim_start_matches("dm-");
+            match self.create_or_get_dm_channel(recipient_id).await {
+                Ok(ch) => ch.id,
+                Err(_) => channel_id.to_string(),
+            }
+        } else {
+            channel_id.to_string()
+        };
+
+        let path = format!("/channels/{}/messages/{}/ack", resolved_id, message_id);
+        let mut body = json!({});
+        if let Some(token) = token {
+            body["token"] = json!(token);
+        }
+        let req = self.auth_request(reqwest::Method::POST, &path).json(&body);
+        self.send_request(&path, req).await?;
+        Ok(())
+    }
+
     async fn delete_message(&self, channel_id: &str, message_id: &str) -> anyhow::Result<()> {
         self.delete_message(channel_id, message_id).await
     }
@@ -2432,10 +2458,12 @@ async fn handle_dispatch(
                 }
             }
 
+            let ready_read_state = data.get("read_state").and_then(|v| serde_json::from_value::<crate::protocol::ReadState>(v.clone()).ok());
             let _ = event_tx.send(TransportEvent::Ready {
                 user,
                 guilds,
                 guild_folders,
+                read_state: ready_read_state,
             });
 
             // Extrair canais de DM (private_channels) do payload READY (resolvendo recipient_ids via data.users)

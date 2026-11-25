@@ -153,6 +153,8 @@ pub struct ChannelItemState {
     pub topic: Option<String>,
     pub unread: bool,
     pub mention_count: u32,
+    #[serde(default)]
+    pub last_read_message_id: Option<String>,
     pub icon_url: Option<String>,
     #[serde(default)]
     pub is_pinned: bool,

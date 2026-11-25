@@ -1356,6 +1356,8 @@ pub enum ChatListItem {
     WelcomeHeader,
     /// Date divider between chat message days
     DateSeparator(NaiveDate),
+    /// Discord unread divider ("NOVAS")
+    UnreadDivider,
     /// Message item holding the index into the channel's messages slice
     Message {
         message_idx: usize,
@@ -1367,7 +1369,15 @@ pub enum ChatListItem {
 
 /// Builds the flattened, virtualizable list of chat items in O(N) time with zero message cloning.
 pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
-    let mut items = Vec::with_capacity(messages.len() + 8);
+    build_chat_list_items_with_unread(messages, None)
+}
+
+/// Builds chat items with an optional explicit first-unread boundary.
+pub fn build_chat_list_items_with_unread(
+    messages: &[Message],
+    first_unread_message_id: Option<&str>,
+) -> Vec<ChatListItem> {
+    let mut items = Vec::with_capacity(messages.len() + 9);
     items.push(ChatListItem::WelcomeHeader);
     let mut last_date: Option<NaiveDate> = None;
     let mut prev_message: Option<&Message> = None;
@@ -1375,14 +1385,17 @@ pub fn build_chat_list_items(messages: &[Message]) -> Vec<ChatListItem> {
     for (idx, msg) in messages.iter().enumerate() {
         let msg_date = msg.timestamp.with_timezone(&Local).date_naive();
 
-        // 1. Date Divider if date has changed
         if last_date.map_or(true, |d| d != msg_date) {
             items.push(ChatListItem::DateSeparator(msg_date));
             last_date = Some(msg_date);
-            prev_message = None; // Reset grouping across dates
+            prev_message = None;
         }
 
-        // 2. Check 5-minute Cozy grouping
+        if first_unread_message_id == Some(msg.id.as_str()) {
+            items.push(ChatListItem::UnreadDivider);
+            prev_message = None;
+        }
+
         let is_grouped = prev_message.map_or(false, |prev| should_group_messages(prev, msg));
         items.push(ChatListItem::Message {
             message_idx: idx,

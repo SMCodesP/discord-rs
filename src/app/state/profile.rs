@@ -292,6 +292,7 @@ impl AppState {
                 topic: None,
                 unread: false,
                 mention_count: 0,
+                last_read_message_id: None,
                 icon_url: None,
                 is_pinned: false,
                 last_message_id: None,

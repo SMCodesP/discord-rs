@@ -223,6 +223,7 @@ fn test_kavatardata_ready_user_decoration_reaches_current_user() {
         user: decorated,
         guilds: Vec::new(),
         guild_folders: Vec::new(),
+        read_state: None,
     });
     let got = state.current_user.avatar_decoration_data.as_ref().expect("current user must carry decoration from READY");
     assert_eq!(got.asset, "a_synth_ready_deco");
@@ -233,6 +234,7 @@ fn test_kavatardata_ready_user_decoration_reaches_current_user() {
         user: plain,
         guilds: Vec::new(),
         guild_folders: Vec::new(),
+        read_state: None,
     });
     assert_eq!(state.current_user.avatar_decoration_data, None);
 }
