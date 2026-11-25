@@ -51,7 +51,11 @@ impl DiscordCacheEngine {
             .unwrap_or_else(|| PathBuf::from(".config"))
             .join("discord-rs")
             .join("cache");
+        Self::new_with_base_dir(base_dir)
+    }
 
+    /// Creates a cache engine rooted at an explicit directory.
+    pub fn new_with_base_dir(base_dir: PathBuf) -> Self {
         let _ = fs::create_dir_all(base_dir.join("guilds"));
         let _ = fs::create_dir_all(base_dir.join("channels"));
         let _ = fs::create_dir_all(base_dir.join("users"));
@@ -78,6 +82,11 @@ impl DiscordCacheEngine {
             metadata: Arc::new(RwLock::new(metadata)),
             memory_messages: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Test helper: create an isolated cache engine in a temporary directory.
+    pub fn new_for_test_dir(base_dir: &Path) -> Self {
+        Self::new_with_base_dir(base_dir.to_path_buf())
     }
 
     pub fn base_dir(&self) -> &Path {

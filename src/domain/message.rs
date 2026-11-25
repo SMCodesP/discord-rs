@@ -93,6 +93,21 @@ impl Attachment {
                     || lower.ends_with(".webp")
             })
     }
+
+    /// Discord marks spoiler attachments by prefixing the filename with `SPOILER_`.
+    pub fn is_spoiler(&self) -> bool {
+        self.filename.starts_with("SPOILER_")
+    }
+
+    /// Filename shown to users; strips a single spoiler prefix when present.
+    pub fn display_filename(&self) -> &str {
+        if self.filename == "SPOILER_" {
+            return &self.filename;
+        }
+        self.filename
+            .strip_prefix("SPOILER_")
+            .unwrap_or(&self.filename)
+    }
 }
 
 /// A reaction applied to a message.

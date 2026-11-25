@@ -3610,6 +3610,38 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                 .map(ToString::to_string);
             let color = e.get("color").and_then(|v| v.as_u64()).map(|c| c as u32);
 
+            let author = e.get("author").and_then(|a| {
+                let name = a.get("name").and_then(|v| v.as_str())?.to_string();
+                Some(crate::domain::message::EmbedAuthor {
+                    name,
+                    url: a
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                    icon_url: a
+                        .get("icon_url")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                })
+            });
+
+            let footer = e.get("footer").and_then(|f| {
+                let text = f.get("text").and_then(|v| v.as_str())?.to_string();
+                Some(crate::domain::message::EmbedFooter {
+                    text,
+                    icon_url: f
+                        .get("icon_url")
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string),
+                })
+            });
+
+            let timestamp = e
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.with_timezone(&chrono::Utc));
+
             let mut fields = Vec::new();
             if let Some(raw_fields) = e.get("fields").and_then(|v| v.as_array()) {
                 for f in raw_fields {
@@ -3632,9 +3664,9 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                 description,
                 url,
                 color,
-                author: None,
+                author,
                 fields,
-                footer: None,
+                footer,
                 image_url: e
                     .get("image")
                     .and_then(|img| img.get("url"))
@@ -3645,7 +3677,7 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
                     .and_then(|th| th.get("url"))
                     .and_then(|v| v.as_str())
                     .map(ToString::to_string),
-                timestamp: None,
+                timestamp,
             });
         }
     }
@@ -3670,7 +3702,20 @@ fn parse_message_from_json(val: &serde_json::Value) -> Option<Message> {
         }
     }
 
+    if let Some(edited) = val.get("edited_timestamp").and_then(|v| v.as_str()) {
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(edited) {
+            message.edited_timestamp = Some(ts.with_timezone(&chrono::Utc));
+        }
+    }
+
     Some(message)
+}
+
+/// Parses a Discord message JSON string into a domain Message.
+/// Exposed for tests and tooling that validate parser behavior.
+pub fn parse_message_from_json_str(input: &str) -> Option<Message> {
+    let val: serde_json::Value = serde_json::from_str(input).ok()?;
+    parse_message_from_json(&val)
 }
 
 fn urlencoding_encode(s: &str) -> String {
