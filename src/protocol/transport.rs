@@ -397,6 +397,12 @@ pub trait DiscordTransport: Send + Sync {
         anyhow::bail!("unpin_message não implementado no transporte atual")
     }
 
+    /// Get pinned messages in a channel (GET /channels/{channel_id}/pins).
+    async fn get_pinned_messages(&self, channel_id: &str) -> anyhow::Result<Vec<Message>> {
+        let _ = channel_id;
+        anyhow::bail!("get_pinned_messages não implementado no transporte atual")
+    }
+
     /// Request guild members for message authors missing from cache (Opcode 8).
     async fn request_guild_members(
         &self,

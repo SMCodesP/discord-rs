@@ -202,6 +202,22 @@ impl AppState {
                 message.pinned = pinned;
             }
         }
+        if self.pinned_messages_channel_id.as_deref() == Some(channel_id) {
+            if pinned {
+                if !self.pinned_messages.iter().any(|m| m.id == message_id) {
+                    if let Some(msg) = self
+                        .messages_by_channel
+                        .get(channel_id)
+                        .and_then(|msgs| msgs.iter().find(|m| m.id == message_id))
+                        .cloned()
+                    {
+                        self.pinned_messages.insert(0, msg);
+                    }
+                }
+            } else {
+                self.pinned_messages.retain(|m| m.id != message_id);
+            }
+        }
     }
 
     /// Toggles the pinned status of a message by ID

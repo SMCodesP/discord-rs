@@ -988,6 +988,17 @@ impl DiscordTransport for MockDiscordProvider {
         anyhow::bail!("Message {} not found in channel {}", message_id, channel_id);
     }
 
+    async fn get_pinned_messages(&self, channel_id: &str) -> anyhow::Result<Vec<Message>> {
+        let state = self.state.read().await;
+        let mut pinned: Vec<Message> = state
+            .messages
+            .get(channel_id)
+            .map(|list| list.iter().filter(|m| m.pinned).cloned().collect())
+            .unwrap_or_default();
+        pinned.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        Ok(pinned)
+    }
+
     async fn request_guild_members(
         &self,
         guild_id: &str,

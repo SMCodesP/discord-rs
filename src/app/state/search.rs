@@ -293,6 +293,75 @@ impl AppState {
         self.search_retry_after = None;
     }
 
+    // ---------------------------------------------------------------------
+    // Pinned messages panel (T-033)
+    // ---------------------------------------------------------------------
+
+    pub fn open_pins_panel(&mut self) {
+        self.is_pins_panel_open = true;
+    }
+
+    pub fn close_pins_panel(&mut self) {
+        self.is_pins_panel_open = false;
+        self.pinned_messages_error = None;
+    }
+
+    pub fn toggle_pins_panel(&mut self) {
+        if self.is_pins_panel_open {
+            self.close_pins_panel();
+        } else {
+            self.open_pins_panel();
+        }
+    }
+
+    pub fn begin_load_pins(
+        &mut self,
+        channel_id: &str,
+    ) -> Option<(crate::protocol::ClientManager, String, u64)> {
+        self.pins_generation += 1;
+        let generation = self.pins_generation;
+        self.is_pins_loading = true;
+        self.pinned_messages_error = None;
+        self.pinned_messages_channel_id = Some(channel_id.to_string());
+        let cm = self.client_manager.as_ref().cloned();
+        match cm {
+            Some(cm) => Some((cm, channel_id.to_string(), generation)),
+            None => {
+                self.is_pins_loading = false;
+                self.pinned_messages.clear();
+                self.pinned_messages_error =
+                    Some("Não conectado à API do Discord".to_string());
+                None
+            }
+        }
+    }
+
+    pub fn finish_load_pins(
+        &mut self,
+        channel_id: &str,
+        generation: u64,
+        result: Result<Vec<crate::domain::message::Message>, String>,
+    ) {
+        if generation != self.pins_generation {
+            return;
+        }
+        if self.pinned_messages_channel_id.as_deref() != Some(channel_id) {
+            return;
+        }
+        self.is_pins_loading = false;
+        match result {
+            Ok(mut messages) => {
+                messages.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+                self.pinned_messages = messages;
+                self.pinned_messages_error = None;
+            }
+            Err(err) => {
+                self.pinned_messages.clear();
+                self.pinned_messages_error = Some(err);
+            }
+        }
+    }
+
     /// Jumps to and highlights a specific message in the chat
     pub fn jump_to_message(&mut self, channel_id: &str, message_id: &str) {
         self.jump_error = None;
