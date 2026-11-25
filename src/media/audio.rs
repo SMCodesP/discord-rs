@@ -96,6 +96,18 @@ impl AudioEngine {
         Arc::clone(&self.device_manager)
     }
 
+    fn read_device_manager(&self) -> std::sync::RwLockReadGuard<'_, MediaDeviceManager> {
+        self.device_manager
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_device_manager(&self) -> std::sync::RwLockWriteGuard<'_, MediaDeviceManager> {
+        self.device_manager
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Access the multi-stream `AudioMixer`.
     pub fn mixer(&self) -> Arc<Mutex<AudioMixer>> {
         Arc::clone(&self.mixer)
@@ -227,7 +239,7 @@ impl AudioEngine {
         }
 
         let (selected_input, selected_output) = {
-            let manager = self.device_manager.read().unwrap();
+            let manager = self.read_device_manager();
             (
                 manager.selected_input_id().map(String::from),
                 manager.selected_output_id().map(String::from),
@@ -244,11 +256,21 @@ impl AudioEngine {
             }
         };
 
+        let capture_processor = match input.processor.take() {
+            Some(processor) => processor,
+            None => {
+                output.worker.stop();
+                drop(output.stream);
+                drop(input);
+                self.stop_session();
+                return Err(AudioError::StreamError(
+                    "Capture processor ausente ao iniciar a sessão".to_string(),
+                ));
+            }
+        };
+
         let capture_worker = match spawn_capture_worker(
-            input
-                .processor
-                .take()
-                .expect("capture processor must be present"),
+            capture_processor,
             Arc::clone(&input.ring),
             Arc::clone(&input.stop),
             input.channels,
@@ -317,11 +339,13 @@ impl AudioEngine {
     pub fn switch_input_device(&mut self, device_id: Option<&str>) -> Result<(), AudioError> {
         if self.is_session_active {
             let mut input = self.build_input_stream(device_id)?;
+            let capture_processor = input.processor.take().ok_or_else(|| {
+                AudioError::StreamError(
+                    "Capture processor ausente ao trocar o microfone".to_string(),
+                )
+            })?;
             let worker = spawn_capture_worker(
-                input
-                    .processor
-                    .take()
-                    .expect("capture processor must be present"),
+                capture_processor,
                 Arc::clone(&input.ring),
                 Arc::clone(&input.stop),
                 input.channels,
@@ -329,10 +353,7 @@ impl AudioEngine {
             .map_err(|err| {
                 AudioError::StreamError(format!("Failed to start capture worker: {err}"))
             })?;
-            if let Err(err) = self
-                .device_manager
-                .write()
-                .unwrap()
+            if let Err(err) = self.write_device_manager()
                 .select_input_device(device_id)
             {
                 input.stop.store(true, Ordering::Release);
@@ -348,9 +369,7 @@ impl AudioEngine {
             self.capture_stop = Some(input.stop);
             self.capture_worker = Some(worker);
         } else {
-            self.device_manager
-                .write()
-                .unwrap()
+            self.write_device_manager()
                 .select_input_device(device_id)?;
         }
         Ok(())
@@ -361,10 +380,7 @@ impl AudioEngine {
     pub fn switch_output_device(&mut self, device_id: Option<&str>) -> Result<(), AudioError> {
         if self.is_session_active {
             let mut output = self.build_output_stream(device_id)?;
-            if let Err(err) = self
-                .device_manager
-                .write()
-                .unwrap()
+            if let Err(err) = self.write_device_manager()
                 .select_output_device(device_id)
             {
                 output.worker.stop();
@@ -378,9 +394,7 @@ impl AudioEngine {
             self.playback_ring = Some(output.ring);
             self.playback_worker = Some(output.worker);
         } else {
-            self.device_manager
-                .write()
-                .unwrap()
+            self.write_device_manager()
                 .select_output_device(device_id)?;
         }
         Ok(())
@@ -390,7 +404,7 @@ impl AudioEngine {
         &self,
         device_id: Option<&str>,
     ) -> Result<InputStreamResources, AudioError> {
-        let manager = self.device_manager.read().unwrap();
+        let manager = self.read_device_manager();
         let device = manager.get_cpal_input_device(device_id)?;
         let device_name = device_id
             .map(String::from)
@@ -521,7 +535,7 @@ impl AudioEngine {
         &self,
         device_id: Option<&str>,
     ) -> Result<OutputStreamResources, AudioError> {
-        let manager = self.device_manager.read().unwrap();
+        let manager = self.read_device_manager();
         let device = manager.get_cpal_output_device(device_id)?;
         let device_name = device_id
             .map(String::from)
@@ -1339,6 +1353,24 @@ mod tests {
         engine.set_output_gain(f32::INFINITY);
         assert_eq!(engine.input_gain(), 1.0);
         assert_eq!(engine.output_gain(), 1.0);
+    }
+
+    #[test]
+    fn poisoned_device_manager_lock_does_not_panic() {
+        let mut engine = AudioEngine::new();
+        let manager = engine.device_manager();
+        let _ = std::thread::spawn(move || {
+            let _guard = manager.write().expect("lock recém-criado");
+            panic!("poison intencional do device manager");
+        })
+        .join();
+
+        engine
+            .switch_input_device(None)
+            .expect("troca de entrada deve recuperar lock envenenado");
+        engine
+            .switch_output_device(None)
+            .expect("troca de saída deve recuperar lock envenenado");
     }
 
     #[test]
