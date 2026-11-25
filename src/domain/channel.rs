@@ -1,6 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
+use super::permissions::PermissionOverwrite;
 use super::user::AvatarDecorationData;
 
 /// Supported Discord channel types.
@@ -188,6 +189,9 @@ pub struct Channel {
     /// User limit for voice channels (0 or None means unlimited).
     #[serde(default)]
     pub user_limit: Option<u32>,
+    /// Role/member permission overwrites for this channel or category.
+    #[serde(default)]
+    pub permission_overwrites: Vec<PermissionOverwrite>,
 }
 
 impl Channel {
@@ -208,6 +212,7 @@ impl Channel {
             recipient_names: Vec::new(),
             recipient_avatar_decorations: Vec::new(),
             user_limit: None,
+            permission_overwrites: Vec::new(),
         }
     }
 
@@ -254,6 +259,14 @@ impl Channel {
 
     pub fn with_user_limit(mut self, limit: Option<u32>) -> Self {
         self.user_limit = limit;
+        self
+    }
+
+    pub fn with_permission_overwrites(
+        mut self,
+        overwrites: Vec<PermissionOverwrite>,
+    ) -> Self {
+        self.permission_overwrites = overwrites;
         self
     }
 

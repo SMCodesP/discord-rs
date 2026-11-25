@@ -98,6 +98,12 @@ pub struct Guild {
     /// List of custom stickers configured in this server.
     #[serde(default)]
     pub stickers: Vec<crate::protocol::media_cache::DiscordSticker>,
+    /// Role IDs assigned to the authenticated user in this guild.
+    #[serde(default)]
+    pub current_user_roles: Vec<String>,
+    /// `communication_disabled_until` for the authenticated user, if present.
+    #[serde(default)]
+    pub current_user_timeout_until: Option<String>,
 }
 
 impl Guild {
@@ -112,7 +118,20 @@ impl Guild {
             roles: Vec::new(),
             emojis: Vec::new(),
             stickers: Vec::new(),
+            current_user_roles: Vec::new(),
+            current_user_timeout_until: None,
         }
+    }
+
+    /// Attaches the authenticated member's role IDs and timeout state.
+    pub fn with_current_user_member(
+        mut self,
+        role_ids: Vec<String>,
+        timeout_until: Option<String>,
+    ) -> Self {
+        self.current_user_roles = role_ids;
+        self.current_user_timeout_until = timeout_until;
+        self
     }
 
     pub fn with_icon(mut self, icon: impl Into<String>) -> Self {

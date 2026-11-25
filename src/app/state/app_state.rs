@@ -150,6 +150,12 @@ pub struct AppState {
     pub profile_effects_catalog: crate::components::ProfileEffectCatalog,
     /// Active voice states by voice channel ID
     pub voice_states_by_channel: HashMap<String, Vec<VoiceState>>,
+    /// Guild-level inputs used to recompute channel permissions for the current user.
+    pub guild_permission_contexts:
+        HashMap<String, crate::domain::permissions::GuildPermissionContext>,
+    /// Effective permissions of the current user keyed by guild channel ID.
+    /// Missing entries (DMs or unknown guilds) default to allowed.
+    pub channel_permissions: HashMap<String, u64>,
 }
 
 pub struct AppStateGlobal(pub gpui::Entity<AppState>);
@@ -301,6 +307,8 @@ impl AppState {
             profile_modal_tab: ProfileModalTab::AboutMe,
             profile_effects_catalog: crate::components::ProfileEffectCatalog::new(),
             voice_states_by_channel: HashMap::new(),
+            guild_permission_contexts: HashMap::new(),
+            channel_permissions: HashMap::new(),
         };
         state.sync_guild_media();
         state
