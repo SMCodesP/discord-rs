@@ -559,6 +559,7 @@ impl AppState {
             recipient_names: vec![username.to_string()],
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
         };
 
         self.dm_channels.insert(0, item);
@@ -600,6 +601,7 @@ impl AppState {
             recipient_names,
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
         };
 
         self.dm_channels.insert(0, item);
@@ -646,6 +648,7 @@ mod tests {
             custom_status: None,
             relationship_type,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
         }
     }
 
@@ -720,6 +723,7 @@ mod tests {
             recipient_names: vec!["Contato".into()],
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
         });
 
         let rows = crate::app::friends_hub::collect_friend_rows(&state, "");

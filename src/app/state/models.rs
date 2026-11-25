@@ -169,6 +169,9 @@ pub struct ChannelItemState {
     /// Avatar decoration of the DM recipient (first recipient for group DMs).
     #[serde(default)]
     pub avatar_decoration_data: Option<AvatarDecorationData>,
+    /// Slowmode delay in seconds (0 = disabled).
+    #[serde(default)]
+    pub rate_limit_per_user: u32,
 }
 
 /// Category grouping in channel sidebar

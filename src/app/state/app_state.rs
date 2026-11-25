@@ -178,6 +178,10 @@ pub struct AppState {
     /// Effective permissions of the current user keyed by guild channel ID.
     /// Missing entries (DMs or unknown guilds) default to allowed.
     pub channel_permissions: HashMap<String, u64>,
+    /// Per-channel slowmode deadline (monotonic). Send is blocked while now < deadline.
+    pub slowmode_next_send_at: HashMap<String, std::time::Instant>,
+    /// Injectable monotonic clock for deterministic slowmode tests.
+    pub slowmode_now_override: Option<std::time::Instant>,
 }
 
 pub struct AppStateGlobal(pub gpui::Entity<AppState>);
@@ -344,6 +348,8 @@ impl AppState {
             voice_states_by_channel: HashMap::new(),
             guild_permission_contexts: HashMap::new(),
             channel_permissions: HashMap::new(),
+            slowmode_next_send_at: HashMap::new(),
+            slowmode_now_override: None,
         };
         state.sync_guild_media();
         state

@@ -681,6 +681,7 @@ impl AppState {
                             recipient_names: c.recipient_names,
                             user_limit: None,
                             avatar_decoration_data,
+                            rate_limit_per_user: c.rate_limit_per_user,
                         }
                     })
                     .collect();
@@ -763,6 +764,7 @@ impl AppState {
                             recipient_names: c.recipient_names,
                             user_limit: None,
                             avatar_decoration_data,
+                            rate_limit_per_user: c.rate_limit_per_user,
                         },
                     );
                 }
@@ -828,6 +830,7 @@ impl AppState {
                             recipient_names: channel.recipient_names.clone(),
                             user_limit: None,
                             avatar_decoration_data,
+                            rate_limit_per_user: channel.rate_limit_per_user,
                         },
                     );
                 }

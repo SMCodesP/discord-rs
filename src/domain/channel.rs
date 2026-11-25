@@ -192,6 +192,9 @@ pub struct Channel {
     /// Role/member permission overwrites for this channel or category.
     #[serde(default)]
     pub permission_overwrites: Vec<PermissionOverwrite>,
+    /// Slowmode delay in seconds (0 = disabled). Hydrated from Discord `rate_limit_per_user`.
+    #[serde(default)]
+    pub rate_limit_per_user: u32,
 }
 
 impl Channel {
@@ -213,6 +216,7 @@ impl Channel {
             recipient_avatar_decorations: Vec::new(),
             user_limit: None,
             permission_overwrites: Vec::new(),
+            rate_limit_per_user: 0,
         }
     }
 
@@ -267,6 +271,11 @@ impl Channel {
         overwrites: Vec<PermissionOverwrite>,
     ) -> Self {
         self.permission_overwrites = overwrites;
+        self
+    }
+
+    pub fn with_rate_limit_per_user(mut self, seconds: u32) -> Self {
+        self.rate_limit_per_user = seconds;
         self
     }
 

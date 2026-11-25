@@ -3547,6 +3547,10 @@ fn parse_channel_from_json(
         .or_else(|| val.get("pinned").and_then(|v| v.as_bool()))
         .unwrap_or(false);
     ch.permission_overwrites = parse_permission_overwrites_from_json(val);
+    ch.rate_limit_per_user = val
+        .get("rate_limit_per_user")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
 
     let icon_url: Option<String> = val
         .get("recipients")

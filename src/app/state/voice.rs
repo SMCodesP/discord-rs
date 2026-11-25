@@ -784,6 +784,7 @@ mod tests {
             recipient_names: vec!["Amigo Legal".into()],
             user_limit: None,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
         };
         state.dm_channels.push(dm);
 
@@ -806,6 +807,7 @@ mod tests {
             custom_status: None,
             relationship_type: 1,
             avatar_decoration_data: None,
+            rate_limit_per_user: 0,
         };
         state.friends.push(friend);
 

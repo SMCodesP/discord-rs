@@ -12,6 +12,9 @@ pub const EMBED_LINKS: u64 = 1 << 14;
 pub const CONNECT: u64 = 1 << 20;
 pub const SPEAK: u64 = 1 << 21;
 pub const ADMINISTRATOR: u64 = 1 << 3;
+pub const MANAGE_CHANNELS: u64 = 1 << 4;
+pub const MANAGE_GUILD: u64 = 1 << 5;
+pub const BYPASS_SLOWMODE: u64 = 1u64 << 52;
 
 // Thread/voice permissions cleared while a member is timed out. Discord rejects
 // timeouts for administrators and the guild owner, so only other members receive
@@ -198,6 +201,12 @@ pub fn can_add_reactions(permissions: u64) -> bool {
 /// Attaching files is implicitly denied when `SEND_MESSAGES` is denied.
 pub fn can_attach_files(permissions: u64) -> bool {
     can_send_messages(permissions) && has_permission(permissions, ATTACH_FILES)
+}
+
+/// Slowmode bypass: ADMINISTRATOR/owner already have all permissions; the dedicated
+/// BYPASS_SLOWMODE bit is also honored when present.
+pub fn can_bypass_slowmode(permissions: u64) -> bool {
+    has_permission(permissions, ADMINISTRATOR) || has_permission(permissions, BYPASS_SLOWMODE)
 }
 
 /// Joining voice requires `VIEW_CHANNEL` and `CONNECT`.
