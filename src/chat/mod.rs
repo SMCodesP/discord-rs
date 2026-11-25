@@ -36,3 +36,6 @@ pub use search::*;
 pub use system_messages::*;
 
 
+
+pub mod markdown_cache;
+pub use markdown_cache::*;

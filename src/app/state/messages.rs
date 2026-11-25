@@ -87,12 +87,17 @@ fn mark_message_send_failed(temp_id: &str, channel_id: &str, content: &str, erro
 }
 
 fn prewarm_message_markdown(message: &Message) {
+    crate::chat::markdown::prewarm_message_markdown_cache(&message.id, &message.content);
     crate::chat::markdown::prewarm_markdown_cache(&message.content);
-    for embed in &message.embeds {
+    for (embed_idx, embed) in message.embeds.iter().enumerate() {
         if let Some(description) = &embed.description {
+            let key = format!("{}:embed:{embed_idx}:desc", message.id);
+            crate::chat::markdown::prewarm_message_markdown_cache(&key, description);
             crate::chat::markdown::prewarm_markdown_cache(description);
         }
-        for field in &embed.fields {
+        for (field_idx, field) in embed.fields.iter().enumerate() {
+            let key = format!("{}:embed:{embed_idx}:field:{field_idx}", message.id);
+            crate::chat::markdown::prewarm_message_markdown_cache(&key, &field.value);
             crate::chat::markdown::prewarm_markdown_cache(&field.value);
         }
     }
