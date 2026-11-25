@@ -224,7 +224,7 @@
   - **O que falta/corrigir:** listar sons padrão e da guilda, tocar preview local, usar o endpoint oficial de envio de soundboard e tratar permissões/erros sem texto substituto.
   - **Critério de pronto:** teste de contrato valida payload de soundboard; UI lista sons reais, toca preview e envia som; nenhuma mensagem textual é criada como fallback.
 
-- [ ] **T-031** — **P1** — **Chat/Histórico** — **Implementar paginação infinita para mensagens antigas**
+- [x] **T-031** — **P1** — **Chat/Histórico** — **Implementar paginação infinita para mensagens antigas**
   - **Arquivos:** `src/app/state/guilds_channels.rs:309-323`, `src/protocol/discord_api.rs:952-1015`, `src/chat/chat_view.rs:382-391`.
   - **Evidência:** ao abrir um canal vazio, o app busca apenas as 50 últimas mensagens e nunca usa `before`. `ChatView` não tem gatilho de topo; qualquer mudança de contagem reseta a lista para o fim. Histórico mais antigo é inacessível.
   - **O que falta/corrigir:** cursor `before`, estado `has_more/loading`, deduplicação por ID, preservação de scroll e merge cronológico; suportar `around` para busca.

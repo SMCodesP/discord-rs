@@ -280,6 +280,7 @@ impl AppState {
     /// Pending sends are preserved until their correlated REST/Gateway message is
     /// present; content matching is only a fallback for legacy pending rows.
     pub fn set_channel_messages(&mut self, channel_id: &str, mut messages: Vec<Message>) {
+        let incoming_len = messages.len();
         for message in &messages {
             prewarm_message_markdown(message);
         }
@@ -317,6 +318,106 @@ impl AppState {
         }
         self.messages_by_channel
             .insert(channel_id.to_string(), messages);
+        self.reset_history_pagination(channel_id, incoming_len);
+    }
+
+    /// Resets cursor pagination after a fresh latest-page snapshot is applied.
+    /// `incoming_len` is the size of the latest page before local/pending rows
+    /// were merged, so a full page means older history may still exist.
+    pub fn reset_history_pagination(&mut self, channel_id: &str, incoming_len: usize) {
+        let oldest_id = self
+            .messages_by_channel
+            .get(channel_id)
+            .and_then(|messages| messages.first())
+            .map(|message| message.id.clone());
+        let pagination = self
+            .history_pagination
+            .entry(channel_id.to_string())
+            .or_default();
+        pagination.oldest_id = oldest_id;
+        pagination.has_more = incoming_len >= HISTORY_PAGE_SIZE;
+        pagination.loading = false;
+        pagination.error = None;
+        pagination.pages_loaded = 0;
+    }
+
+    /// Starts one older-history page request. Returns the `before` cursor, or
+    /// `None` when a request is already in flight or the start was reached.
+    /// The `loading` guard is what keeps the UI spinner single.
+    pub fn begin_history_load(&mut self, channel_id: &str) -> Option<String> {
+        let fallback_cursor = self
+            .messages_by_channel
+            .get(channel_id)
+            .and_then(|messages| messages.first())
+            .map(|message| message.id.clone());
+        let pagination = self
+            .history_pagination
+            .entry(channel_id.to_string())
+            .or_default();
+        if pagination.loading || !pagination.has_more {
+            return None;
+        }
+        if pagination.oldest_id.is_none() {
+            pagination.oldest_id = fallback_cursor;
+        }
+        let cursor = pagination.oldest_id.clone()?;
+        pagination.loading = true;
+        pagination.error = None;
+        Some(cursor)
+    }
+
+    /// Merges one older page and advances the cursor. Returns how many new rows
+    /// were inserted. A short page (or an all-duplicate full page) marks the
+    /// channel as exhausted.
+    pub fn finish_history_load(&mut self, channel_id: &str, page: Vec<Message>) -> usize {
+        let page_len = page.len();
+        let added = self.merge_older_messages(channel_id, page);
+        let oldest_id = self
+            .messages_by_channel
+            .get(channel_id)
+            .and_then(|messages| messages.first())
+            .map(|message| message.id.clone());
+        let pagination = self
+            .history_pagination
+            .entry(channel_id.to_string())
+            .or_default();
+        pagination.oldest_id = oldest_id;
+        pagination.has_more = page_len >= HISTORY_PAGE_SIZE && added > 0;
+        pagination.loading = false;
+        pagination.error = None;
+        if added > 0 {
+            pagination.pages_loaded += 1;
+        }
+        added
+    }
+
+    /// Records a failed page request without losing the cursor or `has_more`.
+    pub fn fail_history_load(&mut self, channel_id: &str, error: String) {
+        let pagination = self
+            .history_pagination
+            .entry(channel_id.to_string())
+            .or_default();
+        pagination.loading = false;
+        pagination.error = Some(error);
+    }
+
+    /// Merges an `around` page used to resolve search/reply jumps. The cursor is
+    /// refreshed so a later top-scroll continues from the newly known oldest row.
+    pub fn merge_history_around(&mut self, channel_id: &str, page: Vec<Message>) -> usize {
+        let added = self.merge_older_messages(channel_id, page);
+        let oldest_id = self
+            .messages_by_channel
+            .get(channel_id)
+            .and_then(|messages| messages.first())
+            .map(|message| message.id.clone());
+        let pagination = self
+            .history_pagination
+            .entry(channel_id.to_string())
+            .or_default();
+        pagination.oldest_id = oldest_id;
+        pagination.loading = false;
+        pagination.error = None;
+        added
     }
 
     /// Merges an older REST page into the current history without duplicating

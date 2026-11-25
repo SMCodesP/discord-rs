@@ -128,6 +128,8 @@ pub struct AppState {
     pub connection_mode: ConnectionMode,
     pub client_manager: Option<ClientManager>,
     pub messages_by_channel: HashMap<String, Vec<Message>>,
+    /// Per-channel cursor state for loading older message history.
+    pub history_pagination: HashMap<String, ChannelHistoryPagination>,
     pub active_draft: String,
     pub replying_to_message: Option<Message>,
     pub typing_users: Vec<String>,
@@ -342,6 +344,7 @@ impl AppState {
             connection_mode,
             client_manager: None,
             messages_by_channel: HashMap::new(),
+            history_pagination: HashMap::new(),
             active_draft: String::new(),
             replying_to_message: None,
             typing_users: Vec::new(),

@@ -3,6 +3,37 @@ use serde::{Deserialize, Serialize};
 use crate::components::status_picker::{CustomStatusDraft, UserStatusSelection};
 use crate::domain::user::AvatarDecorationData;
 
+/// Messages requested per history page. Discord accepts up to 100; 50 keeps the
+/// first paint light while still exposing three pages for a 150-message channel.
+pub const HISTORY_PAGE_SIZE: usize = 50;
+
+/// Cursor pagination state for one channel's older message history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelHistoryPagination {
+    /// Oldest loaded message ID, used as the `before` cursor.
+    pub oldest_id: Option<String>,
+    /// Whether the backend may still have messages older than `oldest_id`.
+    pub has_more: bool,
+    /// True while a page request is in flight (guards against duplicate spinners).
+    pub loading: bool,
+    /// Last pagination error, cleared when a new page starts.
+    pub error: Option<String>,
+    /// Number of non-empty older pages merged into this channel.
+    pub pages_loaded: usize,
+}
+
+impl Default for ChannelHistoryPagination {
+    fn default() -> Self {
+        Self {
+            oldest_id: None,
+            has_more: true,
+            loading: false,
+            error: None,
+            pages_loaded: 0,
+        }
+    }
+}
+
 /// Status presence for users
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PresenceStatus {

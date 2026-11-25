@@ -381,11 +381,11 @@ impl ProtocolBridge {
             .context("Failed to get messages via DiscordApiClient")
     }
 
-    /// Fetches messages around a target message ID for a channel.
-    pub async fn get_messages_around(
+    /// Fetches the page of messages immediately older than `before_id`.
+    pub async fn get_messages_before(
         &self,
         channel_id: &str,
-        message_id: &str,
+        before_id: &str,
         limit: usize,
     ) -> Result<Vec<Message>> {
         let client = {
@@ -397,9 +397,30 @@ impl ProtocolBridge {
         };
 
         client
-            .get_messages_around(channel_id, message_id, limit)
+            .get_messages_before(channel_id, before_id, limit)
             .await
-            .context("Failed to get messages around target via DiscordApiClient")
+            .context("Failed to get older messages via DiscordApiClient")
+    }
+
+    /// Fetches messages centered around `around_id` for search/reply jumps.
+    pub async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        around_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let client = {
+            let guard = self.client.read().await;
+            guard
+                .as_ref()
+                .cloned()
+                .context("Cannot fetch messages: ProtocolBridge is not connected to Discord")?
+        };
+
+        client
+            .get_messages_around(channel_id, around_id, limit)
+            .await
+            .context("Failed to get messages around cursor via DiscordApiClient")
     }
 
     /// Fetches all guilds/servers the authenticated account is a member of.

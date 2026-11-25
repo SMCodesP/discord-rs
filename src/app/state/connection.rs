@@ -58,6 +58,7 @@ impl AppState {
         self.connection_mode = ConnectionMode::Disconnected("Desconectado".to_string());
         self.connection_status = "Desconectado".to_string();
         self.messages_by_channel = HashMap::new();
+        self.history_pagination.clear();
         self.dm_channels = Vec::new();
 
         if let Some(ref cm) = self.client_manager {

@@ -197,7 +197,7 @@ fn test_e2e_guild_rail_switching_and_server_selection() {
     // Instant switch to Guild B (categories already cached in memory, zero network request)
     state.select_guild(Some("guild-b".to_string()));
     assert_eq!(state.selected_guild_id.as_deref(), Some("guild-b"));
-    assert_eq!(state.selected_channel_id.as_deref(), Some("chan-gpui-general"));
+    assert_eq!(state.selected_channel_id.as_deref(), Some("chan-guild-b-rules"));
 
     let selected_guild_b = state.get_selected_guild().expect("Guild B should be selected");
     assert_eq!(selected_guild_b.name, "Servidor GPUI");

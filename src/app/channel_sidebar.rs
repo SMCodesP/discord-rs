@@ -2265,6 +2265,7 @@ fn render_status_picker(
                     Avatar::new(display_name)
                         .size(AvatarSize::Px32)
                         .opt_src(avatar_url)
+                        .opt_decoration(state.current_user.avatar_decoration_data.clone())
                         .status(presence)
                         .cutout_color(bg_user_bar()),
                 )

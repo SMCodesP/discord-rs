@@ -90,10 +90,19 @@ impl DiscordTransport for IdleTransport {
         Ok(Vec::new())
     }
 
+    async fn get_messages_before(
+        &self,
+        _channel_id: &str,
+        _before_id: &str,
+        _limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        Ok(Vec::new())
+    }
+
     async fn get_messages_around(
         &self,
         _channel_id: &str,
-        _message_id: &str,
+        _around_id: &str,
         _limit: usize,
     ) -> anyhow::Result<Vec<Message>> {
         Ok(Vec::new())

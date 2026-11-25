@@ -552,6 +552,29 @@ impl MockDiscordProvider {
     ) -> Vec<(serde_json::Value, serde_json::Value)> {
         self.state.read().await.recorded_status_updates.clone()
     }
+    /// Somente testes: substitui o histórico de um canal por uma fixture sintética
+    /// para exercitar paginação por cursor sem dados reais.
+    #[doc(hidden)]
+    pub async fn seed_messages_for_test(&self, channel_id: &str, messages: Vec<Message>) {
+        let mut state = self.state.write().await;
+        state.messages.insert(channel_id.to_string(), messages);
+    }
+}
+
+fn lookup_messages<'a>(state: &'a MockState, channel_id: &str) -> Option<&'a Vec<Message>> {
+    state.messages.get(channel_id).or_else(|| {
+        if channel_id == "chan-dm-ferris" {
+            state.messages.get("dm-ferris")
+        } else if channel_id == "dm-ferris" {
+            state.messages.get("chan-dm-ferris")
+        } else if channel_id == "chan-dm-ana" {
+            state.messages.get("dm-ana")
+        } else if channel_id == "dm-ana" {
+            state.messages.get("chan-dm-ana")
+        } else {
+            None
+        }
+    })
 }
 
 impl Default for MockDiscordProvider {
@@ -724,20 +747,7 @@ impl DiscordTransport for MockDiscordProvider {
 
     async fn get_messages(&self, channel_id: &str, limit: usize) -> anyhow::Result<Vec<Message>> {
         let state = self.state.read().await;
-        let msgs = state.messages.get(channel_id).cloned().or_else(|| {
-            if channel_id == "chan-dm-ferris" {
-                state.messages.get("dm-ferris").cloned()
-            } else if channel_id == "dm-ferris" {
-                state.messages.get("chan-dm-ferris").cloned()
-            } else if channel_id == "chan-dm-ana" {
-                state.messages.get("dm-ana").cloned()
-            } else if channel_id == "dm-ana" {
-                state.messages.get("chan-dm-ana").cloned()
-            } else {
-                None
-            }
-        });
-        if let Some(list) = msgs {
+        if let Some(list) = lookup_messages(&state, channel_id) {
             let start = if list.len() > limit {
                 list.len() - limit
             } else {
@@ -749,35 +759,43 @@ impl DiscordTransport for MockDiscordProvider {
         }
     }
 
-    async fn get_messages_around(
+    async fn get_messages_before(
         &self,
         channel_id: &str,
-        message_id: &str,
+        before_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<Message>> {
         let state = self.state.read().await;
-        let msgs = state.messages.get(channel_id).cloned().or_else(|| {
-            if channel_id == "chan-dm-ferris" {
-                state.messages.get("dm-ferris").cloned()
-            } else if channel_id == "dm-ferris" {
-                state.messages.get("chan-dm-ferris").cloned()
-            } else if channel_id == "chan-dm-ana" {
-                state.messages.get("dm-ana").cloned()
-            } else if channel_id == "dm-ana" {
-                state.messages.get("chan-dm-ana").cloned()
-            } else {
-                None
-            }
-        });
-        let Some(list) = msgs else {
+        let Some(list) = lookup_messages(&state, channel_id) else {
             return Ok(Vec::new());
         };
-        let Some(idx) = list.iter().position(|m| m.id == message_id) else {
-            anyhow::bail!("message not found");
+        let Some(end) = list.iter().position(|message| message.id == before_id) else {
+            return Ok(Vec::new());
         };
-        let half = limit.saturating_sub(1) / 2;
-        let start = idx.saturating_sub(half);
-        let end = (idx + half + 1).min(list.len());
+        let start = end.saturating_sub(limit.min(100));
+        Ok(list[start..end].to_vec())
+    }
+
+    async fn get_messages_around(
+        &self,
+        channel_id: &str,
+        around_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Message>> {
+        let state = self.state.read().await;
+        let Some(list) = lookup_messages(&state, channel_id) else {
+            return Ok(Vec::new());
+        };
+        let Some(index) = list.iter().position(|message| message.id == around_id) else {
+            return Ok(Vec::new());
+        };
+        let limit = limit.min(100).max(1);
+        let mut start = index.saturating_sub(limit / 2);
+        let mut end = (start + limit).min(list.len());
+        if end - start < limit {
+            start = end.saturating_sub(limit);
+        }
+        end = (start + limit).min(list.len());
         Ok(list[start..end].to_vec())
     }
 
