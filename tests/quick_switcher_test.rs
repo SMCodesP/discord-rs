@@ -64,6 +64,7 @@ fn mk_dm(id: &str, name: &str) -> ChannelItemState {
         default_tag_ids: Vec::new(),
         available_tags: Vec::new(),
         flags: 0,
+        rate_limit_per_user: 0,
     }
 }
 
