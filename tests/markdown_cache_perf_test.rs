@@ -59,8 +59,11 @@ fn lru_eviction_is_o1_and_removes_least_recently_used() {
     assert_eq!(cache.evictions(), 1);
 }
 
+static GLOBAL_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn global_message_cache_hit_avoids_reparse() {
+    let _guard = GLOBAL_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clear_message_markdown_cache();
     let msg_id = "msg-global-perf-1";
     let content = "Cache **O(1)** para `(message_id, content_hash)` com `code` e [link](https://example.com)";
@@ -87,6 +90,7 @@ fn global_message_cache_hit_avoids_reparse() {
 
 #[test]
 fn prewarm_and_render_use_message_cache() {
+    let _guard = GLOBAL_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clear_message_markdown_cache();
     let msg_id = "msg-prewarm-1";
     let content = "Olá **Discord** <:rust:123:> ||spoiler||";
@@ -108,6 +112,7 @@ fn prewarm_and_render_use_message_cache() {
 
 #[test]
 fn cached_lookup_is_fast_under_120fps_budget() {
+    let _guard = GLOBAL_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clear_message_markdown_cache();
     let id = "msg-perf-budget";
     let content = sample_markdown(42);

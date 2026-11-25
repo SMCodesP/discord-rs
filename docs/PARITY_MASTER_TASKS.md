@@ -103,7 +103,7 @@
   - **Escopo**: `src/app/friends_hub.rs`, `src/app/state/friends_dms.rs`, `src/protocol/pinned_dms.rs`.
   - **Foco**: Abas Online/Todos/Pendentes/Bloqueados/Adicionar Amigo, cartões "Ativo Agora" com imagens reais de atividade e barra de progresso Spotify, presença (online/idle/dnd/offline/custom status).
 
-- [ ] **T-014** `[Design-Settings]` — **Paridade visual & funcional: User Settings (todas as abas) + Zero Mocks**
+- [x] **T-014** `[Design-Settings]` — **Paridade visual & funcional: User Settings (todas as abas) + Zero Mocks**
   - **Escopo**: `src/app/user_settings/*`, `src/app/state/settings.rs`, `src/app/state/seed.rs`.
   - **Foco**: Garantir 0 dados fictícios em produção, abas fiéis ao Discord, seleção real de dispositivos de áudio/vídeo em Voz e Vídeo, troca de idioma e tema funcionando.
 
@@ -194,7 +194,7 @@
   - **O que falta/corrigir:** modelo estruturado `{id,name,animated}`; URL CDN correta; chave de reação `name:id`; toggle otimista com rollback e reconciliação Gateway.
   - **Critério de pronto:** testes cobrem unicode, customizado estático e animado, primeira reação, remoção, contador em zero e erro HTTP; snapshot comprova imagem do emoji, não texto.
 
-- [ ] **T-026** — **P1** — **Chat/Mensagens** — **Fechar ciclo de vida do envio otimista**
+- [x] **T-026** — **P1** — **Chat/Mensagens** — **Fechar ciclo de vida do envio otimista**
   - **Arquivos:** `src/app/state/messages.rs:177-212`, `src/app/state/messages.rs:93-118`, `src/app/state/gateway_events.rs:123-156`, `src/chat/message_list.rs:883-907`, `src/protocol/transport.rs:60-75`.
   - **Evidência:** falha no envio só produz `log::warn`; a mensagem `temp-*` permanece `is_pending=true` para sempre. A reconciliação usa conteúdo+autor, podendo substituir a mensagem errada quando duas idênticas são enviadas. Não existe evento de falha de envio nem UI de retry.
   - **O que falta/corrigir:** nonce/client ID temporário, correlação com a resposta REST/Gateway, timeout, estado `failed`, retry e rollback/delete explícito; deduplicação não pode depender apenas do texto.
@@ -212,7 +212,7 @@
   - **O que falta/corrigir:** estado assíncrono de loading/erro/vazio, debounce, cache por query/categoria, chamada real de trending/search, preview animado e envio do URL confirmado.
   - **Critério de pronto:** teste com HTTP sintético valida query, locale, media_format, cache e resposta vazia; teste de UI comprova resultados, preview, seleção e uma única mensagem enviada.
 
-- [ ] **T-029** — **P1** — **Mídia/Stickers** — **Carregar pacotes oficiais e permitir favoritos**
+- [x] **T-029** — **P1** — **Mídia/Stickers** — **Carregar pacotes oficiais e permitir favoritos**
   - **Arquivos:** `src/protocol/discord_api.rs:425-453`, `src/chat/chat_view.rs:834-856`, `src/chat/media_picker.rs:1393-1417`, `src/protocol/media_cache.rs:710-743`.
   - **Evidência:** `get_sticker_packs()` nunca é usado pelo picker; `get_default_sticker_packs()` retorna vazio. A seção “Favoritos” lê o cache, mas nenhum controle chama `add_favorite_sticker`/`remove_favorite_sticker` fora de testes. Só stickers de guilda já carregadas aparecem.
   - **O que falta/corrigir:** buscar `/sticker-packs` sob demanda, cachear, exibir packs, favoritar/desfavoritar por contexto e filtrar `available`/permissões.
@@ -242,7 +242,7 @@
   - **O que falta/corrigir:** implementar `GET /channels/{id}/pins`, painel com jump/unpin, estados de permissão; ligar inbox/notificações/ajuda a fluxos reais ou remover controles não implementados.
   - **Critério de pronto:** testes de API e UI validam lista vazia/cheia, jump, pin/unpin e erro; nenhum botão visível permanece sem handler.
 
-- [ ] **T-034** — **P1** — **UX/Menus** — **Concluir controles inertes e paridade estrutural do Friends Hub**
+- [x] **T-034** — **P1** — **UX/Menus** — **Concluir controles inertes e paridade estrutural do Friends Hub**
   - **Arquivos:** `src/app/channel_sidebar.rs:166-193`, `src/app/channel_sidebar.rs:242-255`, `src/app/channel_sidebar.rs:512-519`, `src/app/channel_sidebar.rs:772-783`, `src/app/member_sidebar.rs:332-343`, `src/app/friends_hub.rs:66-75`, `src/app/friends_hub.rs:298-317`, `src/app/friends_hub.rs:385-402`, `src/app/friends_hub.rs:1316-1327`, `src/app/friends_hub.rs:1465-1508`.
   - **Evidência:** busca de DM, Nitro, Loja, fechar DM, itens do menu de canal, “Mencionar”, ícones do header Friends, menu “Mais” e descobrir servidores não têm ação. “Mensagem” no menu de membro abre perfil, não DM. No oficial desktop 1272×756, `Add Friend` é botão separado à direita e Active Now não aparece sem conteúdo; no RS, Add Friend fica dentro da tab bar e o painel de 360px é sempre montado. Medição CDP adicional em `/tmp/opencode/discord-composer-friends-measurements.md`: header 49px; tabs 32px com item `padding 4px 12px`, margem 8px e r8; `Add Friend` 99.75×32/r8; busca 634.5×40; linha de amigo 61px; avatar 32px/margem 12px; nome 16px/600/20px; subtexto 12px/500/15px; ações 36×36.
   - **O que falta/corrigir:** ligar cada ação ao estado/API correto, adicionar estados pendentes/erro e ajustar layout responsivo do Friends Hub medido no cliente oficial.
@@ -284,7 +284,7 @@
   - **O que falta/corrigir:** implementar OAuth2 Authorization Code + PKCE/QR oficial (e passkey quando viável), manter token de bot apenas em modo explícito de desenvolvimento, persistir somente após sucesso e renovar/limpar com segurança.
   - **Critério de pronto:** fluxo sintético valida state/nonce/PKCE, cancelamento, expiração e troca de código; token inválido não sobrescreve o anterior; screenshots de login seguem dimensões/fonte do oficial e não expõem segredo.
 
-- [ ] **T-041** — **P2** — **Settings/Acessibilidade** — **Aplicar tema, fonte, modo de mensagem e movimento reduzido**
+- [x] **T-041** — **P2** — **Settings/Acessibilidade** — **Aplicar tema, fonte, modo de mensagem e movimento reduzido**
   - **Arquivos:** `src/main.rs:30-33`, `src/tokens/kit_theme.rs:285-310`, `src/app/state/settings.rs:82-110`, `src/app/user_settings/appearance.rs:259-263`, `src/app/user_settings/appearance.rs:385-389`, `src/chat/message_list.rs:1206-1280`, `src/app/user_profile_popout.rs:450-461`, `src/app/user_profile_popout.rs:1007-1019`.
   - **Evidência:** o tema escuro é instalado uma vez na inicialização; setters de tema/fonte/Cozy-Compact/reduced motion só alteram estado. `AccountThemeUpdated` também não reaplica o tema. O popout usa `render_profile_effect_for_user` (sempre animado), enquanto só o modal respeita reduced motion.
   - **O que falta/corrigir:** reaplicar paleta/tipografia do kit, escalar fonte no chat, alternar layout Cozy/Compact, respeitar reduced motion em todo animação e persistir/sincronizar preferências.
@@ -304,7 +304,7 @@
 - [x] **T-044** `[QA-Media]` — **P1** — **QA/Mídia & Chat** — **Suíte dedicada de testes para Anexos, Imagens, Embeds Ricos e Markdown de Mídia**
   - **Concluído em 2026-11-24** (layer `qa-media`, commit `37e8b5a`): adicionou `tests/attachments_embeds_markdown_test.rs` com 28 testes isolados (15 passaram, **13 falharam expondo gaps reais**: spoiler em anexos, schema de embeds, cache `MESSAGE_UPDATE`, timestamps, menções fabricadas/email, links, escapes, code blocks e emoji Unicode jumbo).
 
-- [ ] **T-048** — **P1** — **Chat/Mídia** — **Corrigir 13 gaps reais de Anexos, Embeds e Markdown expostos por `QA-Media`**
+- [x] **T-048** — **P1** — **Chat/Mídia** — **Corrigir 13 gaps reais de Anexos, Embeds e Markdown expostos por `QA-Media`**
   - **Arquivos:** `src/chat/markdown.rs`, `src/chat/message_list.rs`, `src/domain/message.rs`, `src/protocol/discord_api.rs`, `src/app/state/gateway_events.rs`.
   - **Evidência:** `QA-Media` (`commit 37e8b5a`, `tests/attachments_embeds_markdown_test.rs`, 13 falhas reais).
   - **Critério de pronto:** 28/28 testes de `tests/attachments_embeds_markdown_test.rs` passando.
@@ -423,7 +423,7 @@
   - **O que falta/corrigir:** integração desktop oficial (freedesktop/D-Bus), som real configurável, badge de tarefa/unread, respeito a DND e escopo todas/@menções/nada; agrupar por canal e não notificar mensagem própria.
   - **Critério de pronto:** testes com backend injetado validam menção, DM, canal mutado, DND e mensagem própria; teste manual em Linux exibe notificação/som/badge, remove o badge ao ler e o clique na notificação abre/foca o canal correto sem vazar dados pessoais.
 
-- [ ] **T-062** — **P1** — **Chat/Typing** — **Enviar `TYPING_START` e expirar indicadores sem timer ativo**
+- [x] **T-062** — **P1** — **Chat/Typing** — **Enviar `TYPING_START` e expirar indicadores sem timer ativo**
   - **Arquivos:** `src/app/state/messages.rs:405-451`, `src/protocol/rate_limit/coalescing.rs:35-91`, `src/protocol/discord_api.rs:1887-1897`, `src/chat/chat_view.rs:615-621`.
   - **Evidência:** o recebimento é registrado, mas não há `POST /channels/{id}/typing`; `should_send_typing` existe e só é usado em testes. O TTL de 9s é filtrado apenas quando alguém lê o vetor; sem timer, o indicador pode permanecer desenhado até outro render.
   - **O que falta/corregir:** disparar typing no editor com coalescing oficial, limpar no envio e agendar expiração que chame `notify`; resolver nome por membro/amigo/DM sem exibir ID bruto.
@@ -595,7 +595,7 @@
   - **O que falta/corrigir:** LRU por canal e por bytes de mídia, orçamentos configuráveis, pinning do canal ativo/rascunho, evicção segura de AST e métricas de hit/miss/RSS; manter disco como fonte persistente.
   - **Critério de pronto:** teste determinístico com 60 canais/1.000 imagens sintéticas mantém RAM dentro do orçamento e preserva canal ativo/rascunhos; acesso antigo recarrega do disco sem duplicação e vazamento após 10 ciclos de navegação.
 
-- [ ] **T-098** — **P0** — **Voz/Estado** — **Corrigir invariantes mute/deafen e serializar comandos de controle**
+- [x] **T-098** — **P0** — **Voz/Estado** — **Corrigir invariantes mute/deafen e serializar comandos de controle**
   - **Arquivos:** `src/app/state/voice.rs:551-613`, `src/protocol/voice_session.rs:806-831`, `src/app/state/voice.rs:230-264`, `tests/voice_stage_and_parity_test.rs`.
   - **Evidência:** `toggle_deafen(true)` força `is_muted=true`, mas `toggle_deafen(false)` não restaura o mute anterior; `toggle_mute` também permite reativar o microfone enquanto `is_deafened` continua true. Cada comando é enviado em `tokio::spawn` separado (`voice.rs:564-571` e `:594-611`), portanto cliques rápidos podem reordenar `set_muted`/`set_deafened` e divergir do eco do Gateway. Isso contradiz o critério registrado em `T-020`.
   - **O que falta/corrigir:** máquina de estados única para mute/deafen, restaurar mute anterior ao undeafen, impedir unmute enquanto deafened, fila serializada de comandos e rollback/aviso se o Gateway recusar.
@@ -721,7 +721,7 @@
   - **O que falta/corrigir:** exibir guilda/canal, classificar qualidade por métricas reais, popout com RTT/perda/codec quando disponível, controles de câmera/tela/soundboard e retorno ao palco; não exibir controle sem pipeline real.
   - **Critério de pronto:** fixture com RTT/perda sintéticos valida classes e popout; navegar para outro canal mantém a barra e seus controles, e desconectar limpa toda a UI sem estado fantasma.
 
-- [ ] **T-117** — **P1** — **Servidores/Apelido & Saída** — **Editar o próprio apelido por guilda e sair do servidor com confirmação**
+- [x] **T-117** — **P1** — **Servidores/Apelido & Saída** — **Editar o próprio apelido por guilda e sair do servidor com confirmação**
   - **Arquivos:** `src/domain/guild.rs:75-101`, `src/protocol/discord_api.rs:825-900`, `src/protocol/transport.rs:238-297`, `src/app/channel_sidebar.rs:74-163`, `src/app/state/guilds_channels.rs`.
   - **Evidência:** não há `PATCH /guilds/{id}/members/@me`, `DELETE /users/@me/guilds/{id}` nem menu de saída; o locale oficial contém “Change Nickname” e “Leave Server”. O bundle oficial define `SET_GUILD_MEMBER` e `GUILD_LEAVE` (`/tmp/opencode/discord-web-entry.js:23`).
   - **O que falta/corrigir:** menu de perfil do servidor, edição de nick com permissão, confirmação de saída, remoção de guilda/canais/cache após sucesso e seleção do próximo destino.
@@ -841,7 +841,7 @@
 
 ## 5. Frente de Otimização Extrema (Renderização 120 FPS & Algoritmos — Cloud Swarm)
 
-- [ ] **T-126** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização Chat** — **Cache LRU O(1) de Markdown parseado por `(message_id, content_hash)`** (`src/chat/markdown_cache.rs` + `tests/markdown_cache_perf_test.rs`) — elimina re-parsing de Markdown a 120 FPS.
+- [x] **T-126** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Renderização Chat** — **Cache LRU O(1) de Markdown parseado por `(message_id, content_hash)`** (`src/chat/markdown_cache.rs` + `tests/markdown_cache_perf_test.rs`) — elimina re-parsing de Markdown a 120 FPS.
 - [x] **T-127** `[Cloud Swarm: wave6-perf-d]` — **P1** — **Perf/Áudio DSP** — **Fast-path 48 kHz zero-copy, conversor `i16↔f32` auto-SIMD sem alocação e soft-limiter transparente** (`src/media/dsp_fast.rs` + `tests/dsp_perf_test.rs`, PR #23, 11/11 verdes).
 - [x] **T-128** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/Algoritmo Gateway** — **Deserialização tipada direta sem `serde_json::Value` intermediário (`RawValue`)** (`src/protocol/fast_parse.rs` + `tests/gateway_fast_parse_test.rs`).
 - [x] **T-129** `[Cloud Swarm: wave3-swarm-perf-1]` — **P1** — **Perf/I/O Disco** — **Batch/debounced async disk writer atômico para `CacheEngine`** (`src/protocol/cache/batch_writer.rs` + `tests/cache_batch_writer_test.rs`) — elimina `fs::write` a cada mensagem recebida.
