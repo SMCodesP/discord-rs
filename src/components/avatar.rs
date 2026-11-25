@@ -1,5 +1,5 @@
 //! Discord RS - Avatar Component
-//! User avatar with status indicator (online, idle, dnd, offline) in 24, 32, 40, and 80px sizes.
+//! User avatar with status indicator (online, idle, dnd, offline) in 24, 32, 40, 80, and 120px sizes.
 
 use gpui::prelude::*;
 use gpui::*;
@@ -17,8 +17,10 @@ pub enum AvatarSize {
     /// 40x40px - Standard chat message avatar
     #[default]
     Px40,
-    /// 80x80px - User profile modal and popouts
+    /// 80x80px - User profile popouts
     Px80,
+    /// 120x120px - Full user profile modal
+    Px120,
 }
 
 impl AvatarSize {
@@ -29,6 +31,7 @@ impl AvatarSize {
             Self::Px32 => px(32.0),
             Self::Px40 => px(40.0),
             Self::Px80 => px(80.0),
+            Self::Px120 => px(120.0),
         }
     }
 
@@ -39,6 +42,7 @@ impl AvatarSize {
             Self::Px32 => px(10.0),
             Self::Px40 => px(12.0),
             Self::Px80 => px(20.0),
+            Self::Px120 => px(30.0),
         }
     }
 
@@ -49,6 +53,7 @@ impl AvatarSize {
             Self::Px32 => px(2.0),
             Self::Px40 => px(3.0),
             Self::Px80 => px(4.0),
+            Self::Px120 => px(6.0),
         }
     }
 
@@ -69,6 +74,7 @@ impl AvatarSize {
             Self::Px32 => px(13.0),
             Self::Px40 => px(16.0),
             Self::Px80 => px(32.0),
+            Self::Px120 => px(48.0),
         }
     }
 }
@@ -129,7 +135,7 @@ impl Avatar {
         self
     }
 
-    /// Sets avatar size (24, 32, 40, 80px)
+    /// Sets avatar size (24, 32, 40, 80, 120px)
     pub fn size(mut self, size: AvatarSize) -> Self {
         self.size = size;
         self
@@ -429,6 +435,7 @@ mod tests {
         assert_eq!(AvatarSize::Px32.pixels(), px(32.0));
         assert_eq!(AvatarSize::Px40.pixels(), px(40.0));
         assert_eq!(AvatarSize::Px80.pixels(), px(80.0));
+        assert_eq!(AvatarSize::Px120.pixels(), px(120.0));
     }
 
     #[::core::prelude::v1::test]
@@ -438,6 +445,7 @@ mod tests {
             AvatarSize::Px32,
             AvatarSize::Px40,
             AvatarSize::Px80,
+            AvatarSize::Px120,
         ] {
             let avatar = size.pixels().as_f32();
             let decoration = size.decoration_size().as_f32();
