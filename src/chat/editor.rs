@@ -32,6 +32,19 @@ pub type EditorSendCallback =
 pub type EditorActionCallback = Arc<dyn Fn(&mut Window, &mut App) + Send + Sync + 'static>;
 pub type EditorTextChangeCallback =
     Arc<dyn Fn(&str, &mut Window, &mut App) + Send + Sync + 'static>;
+/// Returns true when the paste was consumed (for example, a bitmap), so the
+/// textarea's native text paste must not run.
+pub type EditorPasteCallback =
+    Arc<dyn Fn(&mut Window, &mut App) -> bool + Send + Sync + 'static>;
+
+/// Preview data for a bitmap pasted into the composer but not uploaded yet.
+#[derive(Clone)]
+pub struct ChatAttachmentPreview {
+    pub filename: SharedString,
+    pub details: SharedString,
+    pub image: Arc<Image>,
+    pub on_remove: Option<EditorActionCallback>,
+}
 
 // ============================================================================
 // Subcomponent Helpers (Small Functions Returning AnyElement)
@@ -100,6 +113,64 @@ fn render_reply_close_button(on_cancel_reply: Option<EditorActionCallback>) -> A
     }
 
     btn.into_any_element()
+}
+
+/// Preview card for a pasted bitmap sitting in the composer.
+fn render_pending_attachment(preview: ChatAttachmentPreview) -> AnyElement {
+    let mut remove = div()
+        .size(px(22.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(radius_xs())
+        .cursor_pointer()
+        .hover(|style| style.bg(channel_hover()))
+        .child(icon_close(px(12.0), text_muted()));
+
+    if let Some(handler) = preview.on_remove {
+        remove = remove.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+            handler(window, cx);
+        });
+    }
+
+    div()
+        .mb(space_2())
+        .p(space_2())
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(space_2())
+        .bg(bg_channels())
+        .border_1()
+        .border_color(bg_server())
+        .rounded(radius_md())
+        .child(
+            img(preview.image)
+                .id("chat-pending-image-preview")
+                .max_w(px(96.0))
+                .max_h(px(72.0))
+                .rounded(radius_sm()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .min_w(px(0.0))
+                .child(
+                    div()
+                        .text_size(font_size_sm())
+                        .text_color(text_normal())
+                        .child(preview.filename),
+                )
+                .child(
+                    div()
+                        .text_size(font_size_xs())
+                        .text_color(text_muted())
+                        .child(preview.details),
+                ),
+        )
+        .child(remove)
+        .into_any_element()
 }
 
 /// Plus (+) attachment button using SVG icon and kit tooltip.
@@ -488,6 +559,8 @@ pub struct ChatComposer {
     on_sticker: Option<EditorActionCallback>,
     on_emoji: Option<EditorActionCallback>,
     on_send: Option<EditorSendCallback>,
+    on_paste_image: Option<EditorPasteCallback>,
+    attachment_preview: Option<ChatAttachmentPreview>,
 }
 
 impl ChatComposer {
@@ -513,6 +586,8 @@ impl ChatComposer {
             on_sticker: None,
             on_emoji: None,
             on_send: None,
+            on_paste_image: None,
+            attachment_preview: None,
         }
     }
 
@@ -573,6 +648,16 @@ impl ChatComposer {
 
     pub fn on_send(mut self, handler: Option<EditorSendCallback>) -> Self {
         self.on_send = handler;
+        self
+    }
+
+    pub fn on_paste_image(mut self, handler: Option<EditorPasteCallback>) -> Self {
+        self.on_paste_image = handler;
+        self
+    }
+
+    pub fn attachment_preview(mut self, preview: Option<ChatAttachmentPreview>) -> Self {
+        self.attachment_preview = preview;
         self
     }
 
@@ -640,6 +725,8 @@ impl RenderOnce for ChatComposer {
         };
 
         let attach_btn = render_attach_button(self.on_attachment.clone());
+        let paste_handler = self.on_paste_image.clone();
+        let pending_attachment = self.attachment_preview.clone();
         let gift_btn = render_gift_button();
         let is_gif_active = self.active_media_tab == Some(MediaPickerTab::Gifs);
         let gif_btn = render_gif_button(is_gif_active, self.on_gif.clone());
@@ -704,8 +791,25 @@ impl RenderOnce for ChatComposer {
             container = container.child(banner);
         }
 
+        if let Some(preview) = pending_attachment {
+            container = container.child(render_pending_attachment(preview));
+        }
+
         container = container.child(main_input);
         container = container.child(render_typing_indicator(&self.typing_users));
+
+        if let Some(handler) = paste_handler {
+            container = container.capture_key_down(move |event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.to_ascii_lowercase();
+                let is_ctrl =
+                    event.keystroke.modifiers.control || event.keystroke.modifiers.platform;
+                let is_paste = (is_ctrl && key == "v")
+                    || (event.keystroke.modifiers.shift && key == "insert");
+                if is_paste && handler(window, cx) {
+                    cx.stop_propagation();
+                }
+            });
+        }
 
         container
     }

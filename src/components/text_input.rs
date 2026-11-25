@@ -17,6 +17,7 @@ use gpui::prelude::*;
 use gpui::*;
 use std::sync::Arc;
 
+use crate::platform::clipboard::PlatformClipboard;
 use crate::tokens::colors::{white, *};
 use crate::tokens::icons::*;
 use crate::tokens::spacing::*;
@@ -248,10 +249,8 @@ fn render_paste_button(id: ElementId, state: &Entity<InputState>) -> AnyElement 
         .child(icon_paste(px(14.0), text_muted()))
         .child(div().child("Colar"))
         .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-            if let Some(clipboard) = cx.read_from_clipboard() {
-                if let Some(text) = clipboard.text() {
-                    st.update(cx, |s, cx| s.insert(text, window, cx));
-                }
+            if let Ok(Some(text)) = PlatformClipboard::new(cx).read_text() {
+                st.update(cx, |s, cx| s.insert(text, window, cx));
             }
             let fh = st.read(cx).focus_handle(cx);
             window.focus(&fh, cx);

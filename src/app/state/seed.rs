@@ -1,4 +1,5 @@
 use super::*;
+use crate::voice_session::VoiceControlState;
 use std::collections::{HashMap, HashSet};
 use chrono::{Duration, Utc};
 use crate::domain::channel::ChannelType;
@@ -614,6 +615,7 @@ impl AppState {
             selected_guild_id,
             selected_channel_id,
             active_voice_call: None,
+            voice_control: VoiceControlState::new(false, false),
             show_members: true,
             active_modal: None,
             user_settings_tab: SettingsTab::MyAccount,

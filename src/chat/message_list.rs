@@ -360,6 +360,7 @@ pub struct MessageContextMenuConfig {
     pub on_edit: Option<MessageActionCallback>,
     pub on_reply: Option<MessageActionCallback>,
     pub on_copy_text: Option<MessageActionCallback>,
+    pub on_copy_image: Option<MessageActionCallback>,
     pub on_copy_link: Option<MessageActionCallback>,
     pub on_copy_id: Option<MessageActionCallback>,
     pub on_mark_unread: Option<MessageActionCallback>,
@@ -411,6 +412,13 @@ pub fn build_message_popup_menu(
             let mid = msg_id.clone();
             menu = menu.item(
                 PopupMenuItem::new("Copiar Texto")
+                    .on_click(move |_ev, window, cx| act(&mid, window, cx)),
+            );
+        }
+        if let Some(act) = config.on_copy_image.clone() {
+            let mid = msg_id.clone();
+            menu = menu.item(
+                PopupMenuItem::new("Copiar Imagem")
                     .on_click(move |_ev, window, cx| act(&mid, window, cx)),
             );
         }
@@ -601,7 +609,20 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             config.on_close.clone(),
         ));
 
-    // 5. Copiar Link da Mensagem (se canal/guild conhecidos)
+    // 5. Copiar Imagem (apenas quando a mensagem tem anexo de imagem)
+    if config.on_copy_image.is_some() {
+        menu = menu.child(render_menu_item(
+            "Copiar Imagem",
+            "🖼️",
+            false,
+            config.on_copy_image,
+            None,
+            &config.message_id,
+            config.on_close.clone(),
+        ));
+    }
+
+    // 6. Copiar Link da Mensagem (se canal/guild conhecidos)
     if config.on_copy_link.is_some() {
         menu = menu.child(render_menu_item(
             "Copiar Link da Mensagem",
@@ -614,7 +635,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         ));
     }
 
-    // 6. Marcar como Não Lida (desabilitado até rota existir no backend)
+    // 7. Marcar como Não Lida (desabilitado até rota existir no backend)
     menu = menu.child(render_menu_item(
         "Marcar como Não Lida",
         "✉",
@@ -625,7 +646,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         config.on_close.clone(),
     ));
 
-    // 7. Fixar Mensagem (desabilitado se on_pin for None até rota existir no backend)
+    // 8. Fixar Mensagem (desabilitado se on_pin for None até rota existir no backend)
     menu = menu.child(render_menu_item(
         pin_label,
         "📌",
@@ -636,7 +657,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
         config.on_close.clone(),
     ));
 
-    // 8. Excluir Mensagem (apenas mensagem própria)
+    // 9. Excluir Mensagem (apenas mensagem própria)
     if config.is_own {
         menu = menu
             .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
@@ -651,7 +672,7 @@ pub fn render_message_context_menu(config: MessageContextMenuConfig) -> Div {
             ));
     }
 
-    // 9. Copiar ID da Mensagem
+    // 10. Copiar ID da Mensagem
     menu = menu
         .child(div().h_px().bg(bg_user_bar()).my(px(3.0)))
         .child(render_menu_item(
@@ -1735,6 +1756,7 @@ mod tests {
             on_edit: None,
             on_reply: None,
             on_copy_text: None,
+            on_copy_image: None,
             on_copy_link: None,
             on_copy_id: None,
             on_mark_unread: None,
@@ -1752,6 +1774,7 @@ mod tests {
             on_edit: None,
             on_reply: None,
             on_copy_text: None,
+            on_copy_image: None,
             on_copy_link: None,
             on_copy_id: None,
             on_mark_unread: None,
